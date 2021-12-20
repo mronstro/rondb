@@ -22907,6 +22907,8 @@ Dbtc::fk_readFromChildTable(Signal* signal,
   tcKeyReq->apiConnectPtr = transPtr->i;
   tcKeyReq->senderData = opPtr->i;
 
+  //ndbabort();
+
   // Calculate key length and renumber attribute id:s
   AttributeBuffer::DataBufferPool & pool = c_theAttributeBufferPool;
   LocalAttributeBuffer beforeValues(pool, firedTriggerData->beforeValues);

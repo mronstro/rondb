@@ -5685,7 +5685,11 @@ void Dblqh::execPACKED_SIGNAL(Signal* signal)
   }
 
   Uint32 packedIndex = 0;
+  jam();
+  jamData(Tlength);
+  jamData(Tstep);
   while (Tlength > Tstep) {
+    jam();
     switch (TpackedData[Tstep] >> 28) {
     case ZCOMMIT:
       jam();
@@ -5702,9 +5706,14 @@ void Dblqh::execPACKED_SIGNAL(Signal* signal)
       signal->header.theLength = TcommitLen;
       jamBuffer()->markStartOfPackedSigExec(signal->header.theSignalId,
                                             packedIndex);
+      jam();
       execCOMMIT(signal);
+      jam();
       packedIndex++;
       Tstep += TcommitLen;
+      jamData(packedIndex);
+      jamData(Tstep);
+      jamData(TcommitLen);
       break;
     case ZCOMPLETE:
       jam();
@@ -5807,8 +5816,11 @@ void Dblqh::execPACKED_SIGNAL(Signal* signal)
 #ifdef ERROR_INSERT
     signal->header.theSendersBlockRef = senderBlockRef;
 #endif
+    jam();
   }//while
+  jam();
   ndbrequire(Tlength == Tstep);
+  if(packedIndex > 1) ndbabort();
   return;
 }//Dblqh::execPACKED_SIGNAL()
 
@@ -13349,6 +13361,7 @@ void Dblqh::execCOMMITREQ(Signal* signal)
 void Dblqh::execCOMPLETE(Signal* signal) 
 {
   jamEntryDebug();
+  //ndbabort();
   TcConnectionrecPtr tcConnectptr;
   tcConnectptr.i = signal->theData[0];
   Uint32 transid1 = signal->theData[1];
