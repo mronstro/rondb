@@ -29,6 +29,29 @@
 #include <signaldata/SignalData.hpp>
 #include <signaldata/SignalDataPrint.hpp>
 
+void printHex(FILE * output, const Uint32 * theData, Uint32 len,
+              const char * prefix)
+{
+  int prefixLen = strlen(prefix);
+  fprintf(output, "%s", prefix);
+  int pos = prefixLen;
+  for(Uint32 i = 0; i < len; i++)
+  {
+    if(80 < (pos + 11))
+    {
+      fprintf(output, "\n");
+      for(int j = 0; j < prefixLen; j++)
+      {
+        fprintf(output, " ");
+      }
+      pos = prefixLen;
+    }
+    fprintf(output, " H\'%.8x", theData[i]);
+    pos += 11;
+  }
+  fprintf(output,"\n");
+}
+
 /** 
  * This is the register
  */
