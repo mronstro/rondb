@@ -624,7 +624,10 @@ SignalLoggerManager::printSignalData(FILE * output,
   
   bool ok = false;      // done with printing
   if(printFunction != 0){
-    ok = (* printFunction)(output, signalData, len, sh.theReceiversBlockNumber);
+    ok = (* printFunction)(output, signalData, len,
+                           isApiBlock(sh.theReceiversBlockNumber)
+                           ? sh.theReceiversBlockNumber
+                           : blockToMain(sh.theReceiversBlockNumber));
   }
   if(!ok){
     while(len >= 7){
