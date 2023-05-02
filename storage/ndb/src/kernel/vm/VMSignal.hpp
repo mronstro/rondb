@@ -76,12 +76,9 @@ struct NodeReceiverGroup {
 
 template <unsigned T> struct SignalT
 {
-  Uint32 m_sectionPtrI[3];
+  Uint32 m_sectionPtrI[4];
   SignalHeader header;
-  union {
-    Uint32 theData[T];
-    Uint64 dummyAlign;
-  };
+  Uint32 theData[T];
 
   Uint32 getLength() const { return header.theLength; }
   Uint32 getTrace() const { return header.theTrace; }
@@ -123,12 +120,9 @@ public:
   
 public:
 
-  Uint32 m_sectionPtrI[3];
-  SignalHeader header; // 28 bytes
-  union {
-    Uint32 theData[8192];  // 8192 32-bit words -> 32K Bytes
-    Uint64 dummyAlign;
-  };
+  Uint32 m_sectionPtrI[4];
+  SignalHeader header; // 32 bytes
+  Uint32 theData[8192];  // 8192 32-bit words -> 32K Bytes
   /**
    * A counter used to count extra signals executed as direct signals to ensure we use
    * proper means for how often to send and flush.

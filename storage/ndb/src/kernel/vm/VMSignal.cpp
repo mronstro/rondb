@@ -36,9 +36,8 @@ void
 Signal::garbage_register()
 {
   int i;
-  theData[0] = 0x13579135;
-  header.theLength = 0x13579135;
+  header.theLength = 0x13;
   header.theSendersBlockRef = 0x13579135;
-  for (i = 1; i < 24; i++)
+  for (i = 0; i < 24; i++)
     theData[i] = 0x13579135;
 }

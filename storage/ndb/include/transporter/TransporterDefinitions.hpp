@@ -124,16 +124,15 @@ struct SignalHeader {
   Uint32 theVerId_signalNumber;    // 4 bit ver id - 16 bit gsn
   Uint32 theReceiversBlockNumber;  // Only 16 bit blocknum  
   Uint32 theSendersBlockRef;
-  Uint32 theLength;
   Uint32 theSendersSignalId;
   Uint32 theSignalId;
   Uint32 theThreadSenderSignalId;
+  Uint16 theLength;
   Uint16 theTrace;
   Uint16 theSenderThreadId;
-  Uint16  m_unused;
   Uint8  m_noOfSections;
   Uint8  m_fragmentInfo;
-}; /** 7x4 + 3x2 + 2x1 = 36 Bytes */
+}; /** 6x4 + 2x2 + 4x1 = 32 Bytes */
 
 class NdbOut & operator <<(class NdbOut & out, SignalHeader & sh);
 

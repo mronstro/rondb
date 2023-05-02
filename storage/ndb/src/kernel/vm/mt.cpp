@@ -179,8 +179,9 @@ alignas (NDB_CL) static Uint32 glob_unused[NDB_CL/4];
 
 #define NO_SEND_THREAD (MAX_BLOCK_THREADS + MAX_NDBMT_SEND_THREADS + 1)
 
-/* max signal is 32 words, 9 for signal header and 25 datawords */
-#define MAX_SIGNAL_SIZE 34
+/* max signal is 32 words, 7 for signal header and 25 datawords */
+#define MAX_SIGNAL_SIZE 33
+
 static_assert(((sizeof(SignalHeader) / 4) + 25) == MAX_SIGNAL_SIZE);
 
 #define MIN_SIGNALS_PER_PAGE ((thr_job_buffer::SIZE / MAX_SIGNAL_SIZE) - \
@@ -1399,11 +1400,7 @@ struct thr_tq
 struct thr_send_page
 {
   static const Uint32 PGSIZE = 32768;
-#if SIZEOF_CHARP == 4
-  static const Uint32 HEADER_SIZE = 8;
-#else
   static const Uint32 HEADER_SIZE = 12;
-#endif
 
   static Uint32 max_bytes() {
     return PGSIZE - offsetof(thr_send_page, m_data);
@@ -1437,14 +1434,9 @@ struct thr_send_buffer
 struct thr_send_queue
 {
   unsigned m_write_index;
-#if SIZEOF_CHARP == 8
   unsigned m_unused;
   thr_send_page* m_buffers[7];
   static const unsigned SIZE = 7;
-#else
-  thr_send_page* m_buffers[15];
-  static const unsigned SIZE = 15;
-#endif
 };
 
 struct thr_first_signal
@@ -6974,7 +6966,7 @@ publish_prioa_signal(thr_job_queue *q,
                      struct thr_job_buffer *new_buffer)
 {
   publish_position(write_buffer, write_pos);
-  if (unlikely(write_pos + MAX_SIGNAL_SIZE > thr_job_buffer::SIZE))
+  if (unlikely(write_pos + (MAX_SIGNAL_SIZE + 3) > thr_job_buffer::SIZE))
   {
     // Not room for one more signal
     new_buffer->m_prioa = true;
@@ -7033,10 +7025,8 @@ insert_prioa_signal(thr_job_queue *q,
                                     secPtr);
   write_pos += siglen;
 
-#if SIZEOF_CHARP == 8
   /* Align to 8-byte boundary, to ensure aligned copies. */
   write_pos= (write_pos+1) & ~((Uint32)1);
-#endif
   q->m_current_write_buffer_len = write_pos;
   return publish_prioa_signal(q,
                               write_pos,
@@ -7495,25 +7485,36 @@ execute_signals(thr_data *selfptr,
         read_pos = 0;
         read_end = read_buffer->m_len;
         /* Update thread-local read state. */
+        r->m_read_pos = 0;
         r->m_read_index = q->m_read_index = read_index;
         r->m_read_buffer = read_buffer;
-        r->m_read_pos = read_pos;
         r->m_read_end = read_end;
-        wakeup_all(&selfptr->m_congestion_waiter);
       }
     }
-    /*
-     * These pre-fetching were found using OProfile to reduce cache misses.
-     * (Though on Intel Core 2, they do not give much speedup, as apparently
-     * the hardware prefetcher is already doing a fairly good job).
-     */
-    NDB_PREFETCH_READ (read_buffer->m_data + read_pos + 16);
 
 #ifdef VM_TRACE
     /* Find reading / propagation of junk */
     sig->garbage_register();
 #endif
-    /* Now execute the signal. */
+    /**
+     * Now execute the signal.
+     * Start by reading the Signal header to get:
+     * ------------------------------------------
+     * gsn: Signal number to execute
+     * seccnt: Number of sections in signal
+     * siglen: Short signal length + length of SignalHeader (32B)
+     * bno: Receiving block number
+     * ino: Receiving block instance
+     * block: Block object
+     *
+     * Update the signal id and set it in SignalHeader
+     * Set the watchdog counter
+     *
+     * Finally copy the short data into the Signal object
+     * and write the sectionPtr information into the Signal
+     * object.
+     */
+    Uint32 signalId = selfptr->m_signal_id_counter;
     SignalHeader* s =
       reinterpret_cast<SignalHeader*>(read_buffer->m_data + read_pos);
     Uint32 seccnt = s->m_noOfSections;
@@ -7523,29 +7524,69 @@ execute_signals(thr_data *selfptr,
     assert((s->theLength + seccnt) <= 25);
     assert(seccnt <= 3);
 
+    Uint32 gsn = s->theVerId_signalNumber;
     Uint32 bno = blockToMain(s->theReceiversBlockNumber);
     Uint32 ino = blockToInstance(s->theReceiversBlockNumber);
     SimulatedBlock* block = globalData.mt_getBlock(bno, ino);
-    assert(block != 0);
-
-    Uint32 gsn = s->theVerId_signalNumber;
+    /* Must update original buffer so signal dump will see it. */
+    signalId++;
+    s->theSignalId = signalId;
+    selfptr->m_signal_id_counter = signalId;
     *watchDogCounter = 1 +
       (bno << 8) +
       (gsn << 20);
 
-    /* Must update original buffer so signal dump will see it. */
-    s->theSignalId = selfptr->m_signal_id_counter++;
-    memcpy(&sig->header, s, 4*siglen);
-    for(Uint32 i = 0; i < seccnt; i++)
+    assert(block != 0);
+
+    /**
+     * In 7.4 we introduced the ability for scans in LDM threads to scan
+     * several rows in the same signal execution without issuing a
+     * CONTINUEB signal. This means that we effectively changed the
+     * real-time characteristics of the scheduler. This change ensures
+     * that we behave the same way as in 7.3 and earlier with respect to
+     * how many signals are executed. So the m_extra_signals variable can
+     * be used in the future for other cases where we combine several
+     * signal executions into one signal and thus ensure that we don't
+     * change the scheduler algorithms.
+     *
+     * This variable is incremented every time we decide to execute more
+     * signals without real-time breaks in scans in DBLQH.
+     */
+    sig->m_extra_signals = 0;
+
+    sig->m_send_wakeups = 0;
+    block->jamBuffer()->markStartOfSigExec(signalId);
+
+    static_assert(MAX_SIGNAL_SIZE == 33);
+#define TEST_OPT_MEMCPY 1
+#ifdef TEST_OPT_MEMCPY
+    Uint64 *read_data = (Uint64*)s;
+    Uint64 *write_data = (Uint64*)&sig->header;
+    /* Copy signal header and signal data into signal object */
+    memcpy(write_data, read_data, 64);
+    if (siglen > 8)
     {
-      sig->m_sectionPtrI[i] = read_buffer->m_data[read_pos + siglen + i];
+      read_data += 8;
+      write_data += 8;
+      memcpy(write_data, read_data, 64);
+      if (unlikely(siglen > 32))
+      {
+        Uint64 last_word = read_data[8];
+        write_data[8] = last_word;
+      }
     }
+#else
+    Uint32 *read_data = (Uint32*)s;
+    Uint32 *write_data = (Uint32*)&sig->header;
+    memcpy(write_data, read_data, ((siglen + 1) / 2) * 8);
+#endif
+    memcpy(&sig->m_sectionPtrI[0],
+           &read_buffer->m_data[read_pos + siglen],
+           12);
 
     read_pos += siglen + seccnt;
-#if SIZEOF_CHARP == 8
     /* Handle 8-byte alignment. */
     read_pos = (read_pos + 1) & ~((Uint32)1);
-#endif
 
     /* Update just before execute so signal dump can know how far we are. */
     r->m_read_pos = read_pos;
@@ -7566,40 +7607,47 @@ execute_signals(thr_data *selfptr,
     }
 #endif
 
-    /**
-     * In 7.4 we introduced the ability for scans in LDM threads to scan
-     * several rows in the same signal execution without issuing a
-     * CONTINUEB signal. This means that we effectively changed the
-     * real-time characteristics of the scheduler. This change ensures
-     * that we behave the same way as in 7.3 and earlier with respect to
-     * how many signals are executed. So the m_extra_signals variable can
-     * be used in the future for other cases where we combine several
-     * signal executions into one signal and thus ensure that we don't
-     * change the scheduler algorithms.
-     *
-     * This variable is incremented every time we decide to execute more
-     * signals without real-time breaks in scans in DBLQH.
-     */
-    block->jamBuffer()->markStartOfSigExec(sig->header.theSignalId);
-    sig->m_extra_signals = 0;
-    sig->m_send_wakeups = 0;
 #if defined(USE_INIT_GLOBAL_VARIABLES)
     mt_clear_global_variables(selfptr);
 #endif
+
+    /* The actual execution of the signal */
+    block->executeFunction_async(gsn, sig);
+
+    /**
+     * We have executed the signal, now time to update the following:
+     * extra_signals (See above)
+     * m_exec_thread_signal_id
+     * outstanding_send_wakeups
+     * outstanding_send_wakeups_assist
+     *
+     * The outstanding send wakeups are used to decide if it is time
+     * to perform some sending already now.
+     */
+    Uint32 executed_extra_signals = sig->m_extra_signals;
+    Uint32 send_wakeups = sig->m_send_wakeups;
+    Uint32 outstanding_send_wakeups = selfptr->m_outstanding_send_wakeups;
+    Uint32 outstanding_send_wakeups_assist =
+      selfptr->m_outstanding_send_wakeups_assist;
     Uint32 sender_thr_no = s->theSenderThreadId;
     Uint32 thread_signal_id = s->theThreadSenderSignalId;
-    block->executeFunction_async(gsn, sig);
-    extra_signals += sig->m_extra_signals;
-    selfptr->m_outstanding_send_wakeups += sig->m_send_wakeups;
-    selfptr->m_outstanding_send_wakeups_assist += sig->m_send_wakeups;
+
+    extra_signals += executed_extra_signals;
+    outstanding_send_wakeups +=
+      outstanding_send_wakeups + send_wakeups;
+    selfptr->m_outstanding_send_wakeups = outstanding_send_wakeups;
+    selfptr->m_outstanding_send_wakeups_assist =
+      outstanding_send_wakeups_assist + send_wakeups;
+
+    Uint32 max_send_wakeups = selfptr->m_max_send_wakeups;
+
     if (likely(priob_signal))
     {
       wmb();
       assert(sender_thr_no < NDB_MAX_BLOCK_THREADS);
       selfptr->m_exec_thread_signal_id[sender_thr_no] = thread_signal_id;
     }
-    if (unlikely((selfptr->m_outstanding_send_wakeups >=
-                  selfptr->m_max_send_wakeups)))
+    if (unlikely((outstanding_send_wakeups >= max_send_wakeups)))
     {
       selfptr->m_stat.m_send_wakeups++;
       sendpacked(selfptr, sig);
@@ -9730,7 +9778,8 @@ copy_out_local_buffer(struct thr_data *selfptr,
     assert(next_signal != SIGNAL_RNIL);
     const Uint32 *const signal_buffer = &local_buffer->m_data[next_signal];
     const Uint32 siglen = signal_buffer[1];
-    if (unlikely(write_pos + siglen > thr_job_buffer::SIZE))
+    if (unlikely(write_pos + siglen + (MAX_SIGNAL_SIZE + 3) >
+        thr_job_buffer::SIZE))
     {
       // job_buffer was filled & consumed.
       if (num_signals > 0) {
@@ -10142,10 +10191,8 @@ insert_local_signal(struct thr_data *selfptr,
   Uint32 siglen = copy_signal(buffer_data+2, sh, data, secPtr);
   selfptr->m_stat.m_priob_count++;
   selfptr->m_stat.m_priob_size += siglen;
-#if SIZEOF_CHARP == 8
   /* Align to 8-byte boundary, to ensure aligned copies. */
   siglen = (siglen + 1) & ~((Uint32)1);
-#endif
   buffer_data[1] = siglen;
   local_buffer->m_len = 2 + write_pos + siglen;
   assert(sh->theLength + sh->m_noOfSections <= 25);
@@ -11642,10 +11689,8 @@ FastScheduler::dumpSignalMemoryAndJam(Uint32 thr_no, FILE* out)
     signalSequence[seq_end].prioa = jbs[idx_min].m_jb->m_prioa;
     Uint32 siglen =
       (sizeof(SignalHeader)>>2) + s_min->m_noOfSections + s_min->theLength;
-#if SIZEOF_CHARP == 8
     /* Align to 8-byte boundary, to ensure aligned copies. */
     siglen= (siglen+1) & ~((Uint32)1);
-#endif
     jbs[idx_min].m_pos += siglen;
     if (jbs[idx_min].m_pos >= jbs[idx_min].m_max)
     {
