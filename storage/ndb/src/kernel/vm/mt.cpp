@@ -1480,6 +1480,13 @@ struct alignas(NDB_CL) thr_data
   }
 
   /**
+   * Keep track of the currently active block threads this thread is
+   * executing.
+   */
+  unsigned m_num_active_block_threads;
+  struct thr_data *active_block_threads[MAX_BLOCK_THREADS];
+
+  /**
    * We start with the data structures that are shared globally to
    * ensure that they get the proper cache line alignment
    */
@@ -3686,7 +3693,9 @@ wait_time_tracking(thr_data *selfptr, Uint64 wait_time_in_ns)
 }
 
 static bool check_queues_empty(thr_data *selfptr);
+static bool check_queues_empty_global(thr_data *selfptr);
 static Uint32 scan_time_queues(struct thr_data* selfptr, NDB_TICKS now);
+static Uint32 scan_time_queues_global(struct thr_data* selfptr, NDB_TICKS now);
 static bool do_send(struct thr_data* selfptr,
                     bool must_send,
                     bool assist_send);
@@ -3730,7 +3739,7 @@ check_yield(thr_data *selfptr,
        */
       NdbSpin();
       NdbSpin();
-      if (!check_queues_empty(selfptr))
+      if (!check_queues_empty_global(selfptr))
       {
         /* Found jobs to execute, successful spin */
         cont_flag = false;
@@ -3767,9 +3776,9 @@ check_yield(thr_data *selfptr,
      * messages we also check if we have completed spinning for this
      * time.
      */
-    const Uint32 lagging_timers = scan_time_queues(selfptr, now);
+    const Uint32 lagging_timers = scan_time_queues_global(selfptr, now);
     if (lagging_timers != 0 ||
-        !check_queues_empty(selfptr))
+        !check_queues_empty_global(selfptr))
     {
       /* Found jobs to execute, successful spin */
       cont_flag = false;
@@ -3837,7 +3846,7 @@ check_recv_yield(thr_data *selfptr,
        */
       NdbSpin();
       NdbSpin();
-      if ((!check_queues_empty(selfptr)) ||
+      if ((!check_queues_empty_global(selfptr)) ||
           ((num_events =
             globalTransporterRegistry.pollReceive(0, recvdata)) > 0))
       {
@@ -3868,9 +3877,9 @@ check_recv_yield(thr_data *selfptr,
      * messages we also check if we have completed spinning for this
      * time.
      */
-    const Uint32 lagging_timers = scan_time_queues(selfptr, now);
+    const Uint32 lagging_timers = scan_time_queues_global(selfptr, now);
     if (lagging_timers != 0 ||
-        !check_queues_empty(selfptr))
+        !check_queues_empty_global(selfptr))
     {
       /* Found jobs to execute, successful spin */
       cont_flag = false;
@@ -4924,6 +4933,19 @@ scan_zero_queue(struct thr_data* selfptr)
     require(num_found == cnt);
   }
   tq->m_cnt[2] = 0;
+}
+
+static inline
+Uint32
+scan_time_queues_global(struct thr_data *selfptr, NDB_TICKS now)
+{
+  Uint32 lagging_timerrs = 0;
+  for (Uint32 i = 0; i < selfptr->m_num_active_block_threads; i++)
+  {
+    lagging_timers +=
+      scan_time_queues(selfptr->active_block_threads[i], now);
+  }
+  return lagging_timers;
 }
 
 static inline
@@ -7288,6 +7310,20 @@ check_for_input_from_ndbfs(struct thr_data* thr_ptr, Signal* signal)
   return thr_ptr->m_send_packer.check_reply_from_ndbfs(signal);
 }
 
+static bool
+check_queues_empty_global(thr_data *selfptr)
+{
+  bool empty = true;
+  for (Uint32 i = 0; i < selfptr->m_num_active_block_threads; i++)
+  {
+    if (!check_queues_empty(selfptr->active_block_threads[i]))
+    {
+      empty = false;
+    }
+  }
+  return empty;
+}
+
 /* Check all job queues, return true only if all are empty. */
 static bool
 check_queues_empty(thr_data *selfptr)
@@ -8186,8 +8222,12 @@ mt_finalize_thr_map()
 
 static
 void
-calculate_max_signals_parameters(thr_data *selfptr)
+calculate_max_signals_parameters(thr_data *loc_selfptr)
 {
+  struct thr_data *selfptr;
+  for (Uint32 i = 0; i < loc_selfptr->m_num_active_block_threads; i++)
+  {
+  selfptr = loc_selfptr->active_block_threads[0];
   switch (selfptr->m_sched_responsiveness)
   {
     case 0:
@@ -8226,6 +8266,7 @@ calculate_max_signals_parameters(thr_data *selfptr)
     default:
       assert(false);
   }
+  }
   return;
 }
 
@@ -8244,6 +8285,8 @@ init_thread(thr_data *selfptr)
   selfptr->m_nanos_sleep = 0;
   selfptr->m_buffer_full_nanos_sleep = 0;
   selfptr->m_measured_spintime_ns = 0;
+  selfptr->m_num_active_block_threads = 1;
+  selfptr->active_block_threads[0] = selfptr;
 
   NDB_THREAD_TLS_JAM = &selfptr->m_jam;
   NDB_THREAD_TLS_THREAD= selfptr;
@@ -8932,6 +8975,93 @@ handle_queue_size_stats(struct thr_data *selfptr, NDB_TICKS now)
 }
 
 extern "C"
+bool mt_job_loop_one_selfptr(struct thr_data *selfptr,
+                             Uint32 & send_sum,
+                             Uint32 & flush_sum,
+                             bool & pending_send)
+{
+
+  /**
+   * prefill our thread local send buffers
+   *   up to THR_SEND_BUFFER_PRE_ALLOC (1Mb)
+   *
+   * and if this doesnt work pack buffers before start to execute signals
+   */
+  watchDogCounter = 11;
+  if (!selfptr->m_send_buffer_pool.fill(g_thr_repository->m_mm,
+                                        RG_TRANSPORTER_BUFFERS,
+                                        THR_SEND_BUFFER_PRE_ALLOC,
+                                        selfptr->m_send_instance_no))
+  {
+    try_pack_send_buffers(selfptr);
+  }
+
+  Uint32 sum = run_job_buffers(selfptr,
+                               signal,
+                               send_sum,
+                               flush_sum,
+                               pending_send);
+
+  if (sum)
+  {
+    /**
+     * It is imperative that we flush signals within our node after
+     * each round of execution. This makes sure that the receiver
+     * thread are woken up to do their work which often means that
+     * they will send some signals back to us (e.g. the commit
+     * protocol for updates). Quite often we continue executing one
+     * more loop and while so doing the other threads can return
+     * new signals to us and thus we avoid going back and forth to
+     * sleep too often which otherwise would happen.
+     *
+     * No need to flush however if no signals have been executed since
+     * last flush.
+     *
+     * No need to check for send packed signals if we didn't send
+     * any signals, packed signals are sent as a result of an
+     * executed signal.
+     */
+    sendpacked(selfptr, signal);
+    watchDogCounter = 6;
+    if (flush_sum > 0)
+    {
+      // OJA: Will not yield -> wakeup not needed yet
+      flush_all_local_signals_and_wakeup(selfptr);
+      do_flush(selfptr);
+      flush_sum = 0;
+    }
+  }
+  else
+  {
+    /* No signals processed, prepare to sleep to wait for more */
+    /* About to sleep, _must_ send now. */
+    flush_all_local_signals_and_wakeup(selfptr);
+    pending_send = do_send(selfptr, TRUE, TRUE);
+    send_sum = 0;
+    flush_sum = 0;
+  }
+
+  /**
+   * Scheduler is not allowed to yield until its internal
+   * time has caught up on real time.
+   */
+  if (sum == 0 && lagging_timers == 0)
+  {
+    /**
+     * No more incoming signals to process yet, and we have 
+     * either completed all pending sends, or had no progress
+     * due to full transporters in last do_send(). Wait for
+     * more signals, use a shorter timeout if pending_send.
+     */
+    if (pending_send == false) /* Nothing pending, or no progress made */
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+extern "C"
 void *
 mt_job_thread_main(void *thr_arg)
 {
@@ -8977,144 +9107,81 @@ mt_job_thread_main(void *thr_arg)
   {
     loops++;
 
-    /**
-     * prefill our thread local send buffers
-     *   up to THR_SEND_BUFFER_PRE_ALLOC (1Mb)
-     *
-     * and if this doesn't work pack buffers before start to execute signals
-     */
-    watchDogCounter = 11;
-    if (!selfptr->m_send_buffer_pool.fill(g_thr_repository->m_mm,
-                                          RG_TRANSPORTER_BUFFERS,
-                                          THR_SEND_BUFFER_PRE_ALLOC,
-                                          selfptr->m_send_instance_no))
+    const Uint32 lagging_timers = scan_time_queues_global(selfptr, now);
+    bool continue_executing = false;
+    for (Uint32 i = 0; i < selfptr->m_num_active_block_threads; i++)
     {
-      try_pack_send_buffers(selfptr);
-    }
-
-    watchDogCounter = 2;
-    const Uint32 lagging_timers = scan_time_queues(selfptr, now);
-
-    Uint32 sum = run_job_buffers(selfptr,
-                                 signal,
-                                 send_sum,
-                                 flush_sum,
-                                 pending_send);
-
-    /**
-     * Need to call sendpacked even when no signals have been executed since
-     * it can be used for NDBFS communication.
-     */
-    sendpacked(selfptr, signal);
-    if (sum)
-    {
-      /**
-       * It is imperative that we flush signals within our node after
-       * each round of execution. This makes sure that the receiver
-       * thread are woken up to do their work which often means that
-       * they will send some signals back to us (e.g. the commit
-       * protocol for updates). Quite often we continue executing one
-       * more loop and while so doing the other threads can return
-       * new signals to us and thus we avoid going back and forth to
-       * sleep too often which otherwise would happen.
-       *
-       * No need to flush however if no signals have been executed since
-       * last flush.
-       */
-      watchDogCounter = 6;
-      if (flush_sum > 0)
+      struct thr_data *exec_selfptr = selfptr->active_block_threads[i];
+      if (!mt_job_loop_one_selfptr(exec_selfptr,
+                                   send_sum,
+                                   flush_sum,
+                                   pending_send))
       {
-        // OJA: Will not yield -> wakeup not needed yet
-        flush_all_local_signals_and_wakeup(selfptr);
-        do_flush(selfptr);
-        flush_sum = 0;
+        continue_executing = true;
       }
     }
-    else
-    {
-      /* No signals processed, prepare to sleep to wait for more */
-      /* About to sleep, _must_ send now. */
-      flush_all_local_signals_and_wakeup(selfptr);
-      pending_send = do_send(selfptr, true, true);
-      selfptr->m_outstanding_send_wakeups = 0;
-      send_sum = 0;
-      flush_sum = 0;
-    }
 
-    /**
-     * Scheduler is not allowed to yield until its internal
-     * time has caught up on real time.
-     */
-    if (sum == 0 && lagging_timers == 0)
+    if (!continue_executing)
     {
       /**
-       * No more incoming signals to process yet, and we have
-       * either completed all pending sends, or had no progress
-       * due to full transporters in last do_send(). Wait for
-       * more signals, use a shorter timeout if pending_send.
+       * When min_spin_timer_us > 0 it means we are spinning, if we executed
+       * jobs this time there is no reason to check spin timer and since
+       * we executed at least one signal we are per definition not yet
+       * spinning. Thus we can immediately move to the next loop.
+       * Spinning is performed for a while when sum == 0 AND
+       * min_spin_timer_us > 0. In this case we need to go into check_yield
+       * and initialise spin timer (on first round) and check spin timer
+       * on subsequent loops.
        */
-      if (pending_send == false) /* Nothing pending, or no progress made */
+      Uint32 spin_time_in_ns = 0;
+      update_spin_config(selfptr, min_spin_timer_us);
+      NDB_TICKS before = NdbTick_getCurrentTicks();
+      bool has_spun = (min_spin_timer_us != 0);
+      if (min_spin_timer_us == 0 ||
+          check_yield(selfptr,
+                      min_spin_timer_us,
+                      &spin_time_in_ns,
+                      before))
       {
         /**
-         * When min_spin_timer_us > 0 it means we are spinning, if we executed
-         * jobs this time there is no reason to check spin timer and since
-         * we executed at least one signal we are per definition not yet
-         * spinning. Thus we can immediately move to the next loop.
-         * Spinning is performed for a while when sum == 0 AND
-         * min_spin_timer_us > 0. In this case we need to go into check_yield
-         * and initialise spin timer (on first round) and check spin timer
-         * on subsequent loops.
+         * Sleep, either a short nap if send failed due to send overload,
+         * or a longer sleep if there are no more work waiting.
          */
-        Uint32 spin_time_in_ns = 0;
-        update_spin_config(selfptr, min_spin_timer_us);
-        NDB_TICKS before = NdbTick_getCurrentTicks();
-        bool has_spun = (min_spin_timer_us != 0);
-        if (min_spin_timer_us == 0 ||
-            check_yield(selfptr,
-                        min_spin_timer_us,
-                        &spin_time_in_ns,
-                        before))
+        Uint32 maxwait_in_ns = 1 * 1000 * 1000;
+        if (maxwait_in_ns < spin_time_in_ns)
         {
-          /**
-           * Sleep, either a short nap if send failed due to send overload,
-           * or a longer sleep if there are no more work waiting.
-           */
-          Uint32 maxwait_in_ns =
-            (selfptr->m_node_overload_status >=
-             (OverloadStatus)MEDIUM_LOAD_CONST) ?
-            1 * 1000 * 1000 :
-            10 * 1000 * 1000;
-          if (maxwait_in_ns < spin_time_in_ns)
+          maxwait_in_ns = 0;
+        }
+        else
+        {
+          maxwait_in_ns -= spin_time_in_ns;
+        }
+        selfptr->m_watchdog_counter = 18;
+        const Uint32 used_maxwait_in_ns = maxwait_in_ns;
+        bool waited = yield(&selfptr->m_waiter,
+                            used_maxwait_in_ns,
+                            check_queues_empty_global,
+                            selfptr);
+        if (waited)
+        {
+          waits++;
+          /* Update current time after sleeping */
+          now = NdbTick_getCurrentTicks();
+          selfptr->m_curr_ticks = now;
+          yield_ticks = now;
+          Uint64 nanos_sleep = NdbTick_Elapsed(before, now).nanoSec();
+          selfptr->m_nanos_sleep += nanos_sleep;
+          wait_time_tracking(selfptr, nanos_sleep);
+          selfptr->m_stat.m_wait_cnt += waits;
+          selfptr->m_stat.m_loop_cnt += loops;
+          selfptr->m_read_jbb_state_consumed = true;
+          init_jbb_estimate(selfptr, now);
+          /* Always recalculate how many signals to execute after sleep */
+          waits = loops = 0;
+          for (Uint32 i = 0; i < selfptr->m_num_active_block_threads; i++)
           {
-            maxwait_in_ns = 0;
-          }
-          else
-          {
-            maxwait_in_ns -= spin_time_in_ns;
-          }
-          selfptr->m_watchdog_counter = 18;
-          const Uint32 used_maxwait_in_ns = maxwait_in_ns;
-          bool waited = yield(&selfptr->m_waiter,
-                              used_maxwait_in_ns,
-                              check_queues_empty,
-                              selfptr);
-          if (waited)
-          {
-            waits++;
-            /* Update current time after sleeping */
-            now = NdbTick_getCurrentTicks();
-            selfptr->m_curr_ticks = now;
-            yield_ticks = now;
-            Uint64 nanos_sleep = NdbTick_Elapsed(before, now).nanoSec();
-            selfptr->m_nanos_sleep += nanos_sleep;
-            wait_time_tracking(selfptr, nanos_sleep);
-            selfptr->m_stat.m_wait_cnt += waits;
-            selfptr->m_stat.m_loop_cnt += loops;
-            selfptr->m_read_jbb_state_consumed = true;
-            init_jbb_estimate(selfptr, now);
-            /* Always recalculate how many signals to execute after sleep */
-            waits = loops = 0;
-            if (selfptr->m_thr_no == glob_ndbfs_thr_no)
+            struct thr_data *exec_selfptr = selfptr->active_block_threads[i];
+            if (exec_selfptr->m_thr_no == glob_ndbfs_thr_no)
             {
               /**
                * NDBFS is using thread 0, here we need to call SEND_PACKED
@@ -9123,14 +9190,14 @@ mt_job_thread_main(void *thr_arg)
                * before we discover those messages from NDBFS.
                */
               selfptr->m_watchdog_counter = 17;
-              check_for_input_from_ndbfs(selfptr, signal);
+              check_for_input_from_ndbfs(exec_selfptr, signal);
             }
           }
-          else if (has_spun)
-          {
-            selfptr->m_nanos_sleep += (spin_time_in_ns);
-            wait_time_tracking(selfptr, spin_time_in_ns);
-          }
+        }
+        else if (has_spun)
+        {
+          selfptr->m_nanos_sleep += (spin_time_in_ns);
+          wait_time_tracking(selfptr, spin_time_in_ns);
         }
       }
     }
@@ -9140,17 +9207,22 @@ mt_job_thread_main(void *thr_arg)
      *  - yield() and wait for more JB's to become available.
      *  - continue using the 'extra' signal quota (see RESERVED)
      */
-    if (unlikely(selfptr->m_max_signals_per_jb == 0))  // JB's are full?
+
+    for (Uint32 i = 0; i < selfptr->m_num_active_block_threads; i++)
     {
-      if (handle_full_job_buffers(selfptr,
-                                  send_sum,
-                                  flush_sum))
+      struct thr_data *exec_selfptr = selfptr->active_block_threads[i];
+      if (unlikely(exec_selfptr->m_max_signals_per_jb == 0))  // JB's are full?
       {
-        selfptr->m_stat.m_wait_cnt += waits;
-        selfptr->m_stat.m_loop_cnt += loops;
-        waits = loops = 0;
-        update_rt_config(selfptr, real_time, BlockThread);
-        calculate_max_signals_parameters(selfptr);
+        if (handle_full_job_buffers(exec_selfptr,
+                                    send_sum,
+                                    flush_sum))
+        {
+          exec_selfptr->m_stat.m_wait_cnt += waits;
+          exec_selfptr->m_stat.m_loop_cnt += loops;
+          waits = loops = 0;
+          update_rt_config(exec_selfptr, real_time, BlockThread);
+          calculate_max_signals_parameters(exec_selfptr);
+        }
       }
     }
 
@@ -9162,38 +9234,42 @@ mt_job_thread_main(void *thr_arg)
     now = NdbTick_getCurrentTicks();
     selfptr->m_curr_ticks = now;
 
-    if (is_ldm_thread(selfptr->m_thr_no))
+    if (NdbTick_Elapsed(selfptr->m_jbb_estimate_start, now).microSec() > 400)
     {
-      /**
-       * Queue sizes in LDM and Query threads is part of the load balancing
-       * performed by TC threads and receive threads to schedule committed
-       * read requests to the proper thread based on load indicators.
-       */
-      if (NdbTick_Elapsed(selfptr->m_jbb_estimate_start, now).microSec() > 400)
+      for (Uint32 i = 0; i < selfptr->m_num_active_block_threads; i++)
       {
-        /**
-         * Report queue size to other threads in our data node after executing
-         * for at least 400 microseconds. We will always report idle mode when
-         * we go to sleep, thus the only manner to report higher load is if we
-         * execute without going to sleep for at least 400 microseconds. On top
-         * of that we need to have many jobs queued such that each job only
-         * gets a small portion of the used CPU.
-         *
-         * When CPU isn't fully utilised we use the CPU load measurements that
-         * shows long term behaviour. But if we start up a number of jobs that
-         * constantly execute we will run constantly (e.g. a scan on a very
-         * large table, or a number of complex queries that are evaluated by
-         * the SPJ block constantly. In these cases load can very quickly build
-         * up from an idle or a light load to a very high load in just a few
-         * microseconds.
-         *
-         * The action we perform here is to set a load indicator that all other
-         * threads can see. This means that each change will cause a cache miss
-         * where we will need to fetch the load indicator again. Thus we don't
-         * want to toggle this value frequently since this might cause high
-         * overhead.
-         */
-        handle_queue_size_stats(selfptr, now);
+        struct thr_data *exec_selfptr = selfptr->active_block_threads[i];
+        if (is_ldm_thread(exec_selfptr->m_thr_no))
+        {
+          /**
+           * Queue sizes in LDM and Query threads is part of the load balancing
+           * performed by TC threads and receive threads to schedule committed
+           * read requests to the proper thread based on load indicators.
+           */
+          /**
+           * Report queue size to other threads in our data node after executing
+           * for at least 400 microseconds. We will always report idle mode when
+           * we go to sleep, thus the only manner to report higher load is if we
+           * execute without going to sleep for at least 400 microseconds. On top
+           * of that we need to have many jobs queued such that each job only
+           * gets a small portion of the used CPU.
+           *
+           * When CPU isn't fully utilised we use the CPU load measurements that
+           * shows long term behaviour. But if we start up a number of jobs that
+           * constantly execute we will run constantly (e.g. a scan on a very
+           * large table, or a number of complex queries that are evaluated by
+           * the SPJ block constantly. In these cases load can very quickly build
+           * up from an idle or a light load to a very high load in just a few
+           * microseconds.
+           *
+           * The action we perform here is to set a load indicator that all other
+           * threads can see. This means that each change will cause a cache miss
+           * where we will need to fetch the load indicator again. Thus we don't
+           * want to toggle this value frequently since this might cause high
+           * overhead.
+           */
+          handle_queue_size_stats(exec_selfptr, now);
+        }
       }
     }
     if (loops > maxloops)
@@ -10078,6 +10154,21 @@ flush_all_local_signals_and_wakeup(struct thr_data *selfptr)
   wakeup_pending_signals(selfptr);
 }
 
+static bool
+update_sched_config_global(struct thr_data *selfptr,
+                           bool pending_send,
+                           Uint32 &send_sum,
+                           Uint32 &flush_sum)
+{
+  for (Uint32 i = 0; i < selfptr->m_num_active_block_threads; i++)
+  {
+    update_sched_config(selfptr->active_block_threads[i],
+                        pending_send,
+                        send_sum,
+                        flush_sum);
+  }
+}
+                           
 static
 inline
 void
