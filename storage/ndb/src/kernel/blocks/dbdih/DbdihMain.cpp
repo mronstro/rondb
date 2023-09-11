@@ -111,14 +111,14 @@ static const Uint32 WaitTableStateChangeMillis = 10;
 //#define DEBUG_MULTI_TRP 1
 //#define DEBUG_NODE_STOP 1
 //#define DEBUG_REDO_CONTROL 1
-//#define DEBUG_LCP 1
-//#define DEBUG_LCP_COMP 1
 //#define DEBUG_COPY_ACTIVE 1
 //#define DEBUG_TCGETOPSIZE
 //#define DEBUG_ACTIVE_NODES 1
 //#define DEBUG_NODE_STATUS 1
+//#define DEBUG_LCP 1
+//#define DEBUG_LCP_COMP 1
+//#define DEBUG_USED_LOG_PARTS 1
 #endif
-#define DEBUG_USED_LOG_PARTS 1
 
 #ifdef DEBUG_USED_LOG_PARTS
 #define DEB_USED_LOG_PARTS(arglist) do { g_eventLogger->info arglist ; } while (0)
@@ -137,6 +137,7 @@ static const Uint32 WaitTableStateChangeMillis = 10;
 #else
 #define DEB_ACTIVE_NODES(arglist) do { } while (0)
 #endif
+
 
 #ifdef DEBUG_TCGETOPSIZE
 #define DEB_TCGETOPSIZE(arglist) do { g_eventLogger->info arglist ; } while (0)
@@ -662,12 +663,13 @@ void Dbdih::execCONTINUEB(Signal *signal) {
       return;
     }
     case DihContinueB::ZCHECK_TC_COUNTER:
+    {
       jam();
-#ifndef NO_LCP
       checkTcCounterLab(signal);
-#endif
       return;
-    case DihContinueB::ZCALCULATE_KEEP_GCI: {
+    }
+    case DihContinueB::ZCALCULATE_KEEP_GCI:
+    {
       jam();
       Uint32 tableId = signal->theData[1];
       Uint32 fragId = signal->theData[2];

@@ -102,13 +102,13 @@ static NDB_TICKS startTime;
 //#define DEBUG_LCP_ROW 1
 //#define DEBUG_LCP_DEL 1
 //#define DEBUG_EXTRA_LCP 1
-//#define DEBUG_REDO_CONTROL 1
 //#define DEBUG_REDO_CONTROL_DETAIL 1
 //#define DEBUG_LCP_DD 1
-//#define DEBUG_LCP_STAT 1
-//#define DEBUG_LCP_LAG 1
 //#define DO_TRANSIENT_POOL_STAT 1
 #endif
+#define DEBUG_LCP_LAG 1
+#define DEBUG_REDO_CONTROL 1
+#define DEBUG_LCP_STAT 1
 
 #ifdef DEBUG_END_LCP
 #define DEB_END_LCP(arglist)     \
@@ -502,15 +502,16 @@ void Backup::handle_overflow(Uint64 &overflow_disk_write,
 #endif
     }
   }
-  if (true || curr_disk_write_speed == m_curr_disk_write_speed) {
-    DEB_REDO_CONTROL_DETAIL((
-        "(%u) bytes_written_this_period: %ju kB, "
-        " overflowThisPeriod: %ju kB, "
-        " remainingOverFlow: %ju kB, "
-        " curr_disk_write_speed %ju kB",
-        instance(), uintmax_t{words_written_this_period} / 256,
-        uintmax_t{overflowThisPeriod} / 256, uintmax_t{remainingOverFlow} / 256,
-        uintmax_t{curr_disk_write_speed} / 256));
+  {
+    DEB_REDO_CONTROL_DETAIL(("(%u) bytes_written_this_period: %ju kB, "
+                             " overflowThisPeriod: %ju kB, "
+                             " remainingOverFlow: %ju kB, "
+                             " curr_disk_write_speed %ju kB",
+                             instance(),
+                             uintmax_t{words_written_this_period} / 256,
+                             uintmax_t{overflowThisPeriod} / 256,
+                             uintmax_t{remainingOverFlow} / 256,
+                             uintmax_t{curr_disk_write_speed} / 256));
   }
   words_written_this_period = overflowThisPeriod;
   overflow_disk_write = remainingOverFlow;
@@ -654,15 +655,22 @@ void Backup::monitor_disk_write_speed(const NDB_TICKS curr_time,
    * We keep track of the lag since the start of the LCP and since the
    * start of the previous LCP.
    */
-  Int64 lag = m_lcp_change_rate - ((4 * m_monitor_words_written) -
-                                   (4 * m_backup_monitor_words_written));
+  Uint64 lcp_write_speed = 4 * (m_monitor_words_written -
+                                m_backup_monitor_words_written);
+  Int64 lag = m_lcp_change_rate - lcp_write_speed;
   m_lcp_lag[1] += lag;
+  Uint64 total_lag = m_lcp_lag[0] + m_lcp_lag[1];
+  (void)total_lag;
 
-  DEB_REDO_CONTROL(
-      ("(%u)change_rate: %llu kB, LCP+Backup: %llu kB,"
-       " Backup: %llu kB, lag: %lld kB",
-       instance(), m_lcp_change_rate / 1024, m_monitor_words_written / 256,
-       m_backup_monitor_words_written / 256, lag / 1024));
+  DEB_REDO_CONTROL(("(%u)change_rate: %llu kB, LCP write speed: %llu kB,"
+                    " Backup write speed: %llu kB, lag: %lld kB"
+                    ", total_lag: %llu kB",
+    instance(),
+    m_lcp_change_rate / 1024,
+    lcp_write_speed / 1024,
+    m_backup_monitor_words_written / 256,
+    lag / 1024,
+    total_lag / 1024));
 
   m_monitor_words_written = 0;
   m_backup_monitor_words_written = 0;
@@ -687,24 +695,25 @@ void Backup::debug_report_redo_control(Uint32 cpu_usage) {
     redo_bytes_written *= Uint64(1000);
     redo_bytes_written /= (millis_passed * Uint64(1024));
 
-    /* Report new disk write speed and last seconds achievement on disk */
-    DEB_REDO_CONTROL(
-        ("(%u)Current disk write speed is %llu kB/sec"
-         " and current backup disk write speed is %llu kB/sec"
-         ", last sec REDO write speed %llu kB/sec, "
-         "LCP+Backup write speed %llu kB/sec"
-         ", Backup write speed %llu kB/sec"
-         ", cpu_usage: %u",
-         instance(),
-         ((m_curr_disk_write_speed *
-           CURR_DISK_SPEED_CONVERSION_FACTOR_TO_SECONDS) /
-          Uint64(1024)),
-         ((m_curr_backup_disk_write_speed *
-           CURR_DISK_SPEED_CONVERSION_FACTOR_TO_SECONDS) /
-          Uint64(1024)),
-         redo_bytes_written, backup_lcp_bytes_written, backup_bytes_written,
-         cpu_usage));
-  }
+   /* Report new disk write speed and last seconds achievement on disk */
+   DEB_REDO_CONTROL(("(%u)Current disk write speed is %llu kB/sec"
+                     " and current backup disk write speed is %llu kB/sec"
+                     ", last sec REDO write speed %llu kB/sec, "
+                     "LCP write speed %llu kB/sec"
+                     ", Backup write speed %llu kB/sec"
+                     ", cpu_usage: %u",
+                      instance(),
+                      ((m_curr_disk_write_speed *
+                        CURR_DISK_SPEED_CONVERSION_FACTOR_TO_SECONDS) /
+                       Uint64(1024)),
+                      ((m_curr_backup_disk_write_speed *
+                        CURR_DISK_SPEED_CONVERSION_FACTOR_TO_SECONDS) /
+                       Uint64(1024)),
+                     redo_bytes_written,
+                     (backup_lcp_bytes_written - backup_bytes_written),
+                     backup_bytes_written,
+                     cpu_usage));
+ }
 #else
   (void)cpu_usage;
 #endif
@@ -733,6 +742,22 @@ void Backup::init_lcp_timers(Uint64 redo_written_since_last_call) {
 
 void Backup::lcp_start_point(Signal *signal) {
   /**
+   * m_update_size_lcp_last
+   * ----------------------
+   * This variable contains the total update size since the node started.
+   *
+   * m_update_size_lcp[1]
+   * --------------------
+   * This variable contains the total update size until the last LCP started.
+   *
+   * m_update_size_lcp[0]
+   * --------------------
+   * This variable contains the total update size until the previous LCP started.
+   * Thus current update size minus this value is equal to the update size since
+   * the current LCP cut point.
+   *
+   * Same for m_insert_size_lcp* and m_delete_size_lcp* variables.
+   *
    * A new LCP is starting up, we need to keep track of this to handle
    * REDO control.
    * The start and end points of LCPs currently only come with an
@@ -898,8 +923,8 @@ Uint64 Backup::calculate_change_rate(Uint64 change_size,
      */
     return 0;
   }
-  Uint64 change_size_per_sec = change_size / seconds_since_lcp_cut;
-  return change_size_per_sec;
+  Uint64 checkpoint_size_per_sec = checkpoint_size / seconds_since_lcp_cut;
+  return checkpoint_size_per_sec;
 }
 
 Uint64 Backup::calculate_checkpoint_rate(Uint64 update_size, Uint64 insert_size,
@@ -934,23 +959,27 @@ Uint64 Backup::calculate_checkpoint_rate(Uint64 update_size, Uint64 insert_size,
     change_size /= BackupFormat::NDB_MAX_LCP_PARTS;
     checkpoint_size = all_size + change_size;
   }
-  Uint64 change_rate =
-      calculate_change_rate(checkpoint_size, seconds_since_lcp_cut);
-  DEB_REDO_CONTROL(
-      ("(%u)update_size: %llu MB, insert_size: %llu MB,"
-       " delete_size: %llu MB, checkpoint_size: %llu MB"
-       ", all_parts: %u, total_memory: %llu MB, "
-       "all_size: %llu MB, change_size: %llu MB, "
-       "mod_change_size: %llu MB, "
-       "seconds_since_lcp_cut: %llu",
-       instance(), update_size / (Uint64(1024) * Uint64(1024)),
-       insert_size / (Uint64(1024) * Uint64(1024)),
-       delete_size / (Uint64(1024) * Uint64(1024)),
-       checkpoint_size / (Uint64(1024) * Uint64(1024)), all_parts,
-       total_memory / (Uint64(1024 * Uint64(1024))),
-       all_size / (Uint64(1024) * Uint64(1024)),
-       change_size / (Uint64(1024) * Uint64(1024)),
-       mod_change_size / (Uint64(1024) * Uint64(1024)), seconds_since_lcp_cut));
+  Uint64 change_rate = calculate_change_rate(checkpoint_size,
+                                             seconds_since_lcp_cut);
+  DEB_REDO_CONTROL(("(%u)update_size: %llu kB, insert_size: %llu kB,"
+                    " delete_size: %llu kB, checkpoint_size: %llu kB"
+                    ", all_parts: %u, total_memory: %llu MB, "
+                    "all_size: %llu MB, change_size: %llu kB, "
+                    "mod_change_size: %llu kB, "
+                    "seconds_since_lcp_cut: %llu"
+                    ", change_rate: %llu kB",
+                    instance(),
+                    update_size / (Uint64(1024)),
+                    insert_size / (Uint64(1024)),
+                    delete_size / (Uint64(1024)),
+                    checkpoint_size / (Uint64(1024)),
+                    all_parts,
+                    total_memory / (Uint64(1024 * Uint64(1024))),
+                    all_size / (Uint64(1024) * Uint64(1024)),
+                    change_size / (Uint64(1024)),
+                    mod_change_size / (Uint64(1024)),
+                    seconds_since_lcp_cut,
+                    change_rate / (Uint64(1024))));
   return change_rate;
 }
 
@@ -1144,10 +1173,10 @@ void Backup::set_lcp_timing_factors(Uint64 seconds_since_lcp_cut) {
   if (seconds_since_lcp_cut > low_threshold) {
     jam();
     m_lcp_timing_counter = 2;
-    Uint64 new_timing_factor = Uint64(110);
+    Uint64 new_timing_factor = Uint64(105);
     if (seconds_since_lcp_cut > high_threshold) {
       jam();
-      new_timing_factor = Uint64(120);
+      new_timing_factor = Uint64(110);
     }
     if (new_timing_factor > m_lcp_timing_factor) {
       jam();
@@ -1195,7 +1224,7 @@ void Backup::reset_lcp_timing_factors() {
       m_lcp_timing_factor = Uint64(100);
     } else {
       jam();
-      m_lcp_timing_factor -= Uint64(10);
+      m_lcp_timing_factor -= Uint64(5);
       ndbrequire(m_lcp_timing_factor >= Uint64(100));
     }
   }
@@ -1258,7 +1287,7 @@ void Backup::set_proposed_disk_write_speed(Uint64 current_redo_speed_per_sec,
   /**
    * The proposed disk write speed is not always achieved and we have some
    * level of slowness in responding to this setting, so we increase the
-   * proposed disk write speed by 25% cater for this.
+   * proposed disk write speed by 10% cater for this.
    *
    * There are many reasons why we won't achieve this speed. A few are:
    * 1) Variable completion of LCP execution in the LDMs in the cluster.
@@ -1272,16 +1301,12 @@ void Backup::set_proposed_disk_write_speed(Uint64 current_redo_speed_per_sec,
    * We only perform this increase when the REDO log is a bit used, thus
    * ensuring a much smoother operation in most normal situations.
    */
-  if (m_redo_percentage >= LOW_REDO_USAGE)
-  {
-    if (m_redo_percentage >= MEDIUM_REDO_USAGE)
-    {
-      m_proposed_disk_write_speed *= Uint64(125);
+  if (m_redo_percentage >= LOW_REDO_USAGE) {
+    if (m_redo_percentage >= MEDIUM_REDO_USAGE) {
+      m_proposed_disk_write_speed *= Uint64(115);
       m_proposed_disk_write_speed /= Uint64(100);
-    }
-    else
-    {
-      m_proposed_disk_write_speed *= Uint64(110);
+    } else {
+      m_proposed_disk_write_speed *= Uint64(105);
       m_proposed_disk_write_speed /= Uint64(100);
     }
   }
@@ -1295,16 +1320,16 @@ void Backup::set_proposed_disk_write_speed(Uint64 current_redo_speed_per_sec,
     jam();
     Uint64 factor = current_redo_speed_per_sec * Uint64(100);
     factor /= (mean_redo_speed_per_sec + 1);
-    if (factor > Uint64(120)) {
+    if (factor > Uint64(110)) {
       jam();
-      factor = Uint64(120);
+      factor = Uint64(110);
     }
     /**
-     * Increase the proposed disk write speed by up to 20% if we currently
+     * Increase the proposed disk write speed by up to 10% if we currently
      * generate more REDO logging compared to the mean. This is aiming to
      * cater for sudden increases in write activity to ensure that we start
      * acting quickly on those changes. At the same we put a dent on this
-     * change to 20% increase. This avoids too high fluctuations in the
+     * change to 10% increase. This avoids too high fluctuations in the
      * disk write speed.
      */
     m_proposed_disk_write_speed *= factor;
@@ -1620,24 +1645,28 @@ void Backup::measure_change_speed(Signal *signal,
 
 #ifdef DEBUG_REDO_CONTROL
   Int64 current_lag = m_lcp_lag[0] + m_lcp_lag[1];
-  DEB_REDO_CONTROL(
-      ("(%u)Proposed speed is %llu kB/sec"
-       ", current_redo_speed is %llu kB/sec and"
-       ", mean_redo_speed is %llu kB/sec"
-       ", %s is %llu MB, change_rate is: %llu kB",
-       instance(), (m_proposed_disk_write_speed / Uint64(1024)),
-       (current_redo_speed_per_sec / Uint64(1024)),
-       (mean_redo_speed_per_sec / Uint64(1024)),
-       (current_lag >= 0) ? "lag" : "ahead",
-       (current_lag >= 0) ? (current_lag / (1024 * 1024))
-                          : (-current_lag / (1024 * 1024)),
-       (m_lcp_change_rate / 1024)));
-  DEB_REDO_CONTROL(
-      ("(%u)state: %u, redo_size: %llu MByte, "
-       "redo_percent: %llu, last LCP time in ms: %llu"
-       ", m_lcp_timing_factor: %llu%%",
-       instance(), m_redo_alert_state, redo_size, redo_percentage,
-       m_last_lcp_exec_time_in_ms, m_lcp_timing_factor));
+  DEB_REDO_CONTROL(("(%u)Proposed speed is %llu kB/sec"
+                    ", current_redo_speed is %llu kB/sec and"
+                    ", mean_redo_speed is %llu kB/sec"
+                    ", %s is %llu MB, change_rate is: %llu kB",
+                    instance(),
+                    (m_proposed_disk_write_speed / Uint64(1024)),
+                    (current_redo_speed_per_sec / Uint64(1024)),
+                    (mean_redo_speed_per_sec / Uint64(1024)),
+                    (current_lag >= 0) ? "lag" : "ahead",
+                    (current_lag >= 0) ? (current_lag / (1024 * 1024)) :
+                                         (-current_lag/ (1024 * 1024)),
+                    (m_lcp_change_rate / 1024)));
+  DEB_REDO_CONTROL(("(%u)state: %u, redo_size: %llu MByte, "
+                    "redo_percent: %llu, last LCP time in ms: %llu"
+                    ", m_lcp_timing_factor: %llu%%, millis_since_last: %llu",
+                    instance(),
+                    m_redo_alert_state,
+                    redo_size,
+                    redo_percentage,
+                    m_last_lcp_exec_time_in_ms,
+                    m_lcp_timing_factor,
+                    millis_since_last_call));
 #endif
 }
 
@@ -1727,21 +1756,39 @@ void Backup::calculate_current_speed_bounds(Uint64 &max_speed,
             Uint64(1024))));
     }
     Uint64 proposed_speed = calculate_proposed_disk_write_speed();
+
+    /**
+     * A high CPU load could lead to almost stopping LCPs from progressing
+     * and can also make different threads go at different speeds. To avoid
+     * slowing down too much we never set the current speed to less than
+     * a third of the proposed speed.
+     */
+    Uint64 dynamic_min_speed = proposed_speed / 3;
+    min_speed = MAX(min_speed, dynamic_min_speed);
+
     if (proposed_speed > max_speed) {
       jam();
       ndbrequire(is_redo_control_enabled());
       max_speed = proposed_speed;
-      DEB_REDO_CONTROL(
-          ("(%u)Proposed speed exceeds max_speed, "
-           "new max_speed: %llu kB/sec",
-           instance(),
-           ((max_speed * Uint64(CURR_DISK_SPEED_CONVERSION_FACTOR_TO_SECONDS)) /
-            Uint64(1024))));
+      DEB_REDO_CONTROL(("(%u)Proposed speed exceeds max_speed, "
+                        "new max_speed: %llu kB/sec"
+                        ", min_speed: %llu kB/sec",
+                        instance(),
+                        ((max_speed *
+         Uint64(CURR_DISK_SPEED_CONVERSION_FACTOR_TO_SECONDS)) / Uint64(1024)),
+                        ((min_speed *
+         Uint64(CURR_DISK_SPEED_CONVERSION_FACTOR_TO_SECONDS)) / Uint64(1024))
+                        ));
+    } else {
+      DEB_REDO_CONTROL(("(%u)max_speed set to %llu kB/sec"
+                        ", min_speed: %llu kB/sec",
+                        instance(),
+                        ((max_speed *
+        Uint64(CURR_DISK_SPEED_CONVERSION_FACTOR_TO_SECONDS)) / Uint64(1024)),
+                        ((min_speed *
+         Uint64(CURR_DISK_SPEED_CONVERSION_FACTOR_TO_SECONDS)) / Uint64(1024))
+                        ));
     }
-    DEB_REDO_CONTROL(
-        ("(%u)max_speed set to %llu kB/sec", instance(),
-         ((max_speed * Uint64(CURR_DISK_SPEED_CONVERSION_FACTOR_TO_SECONDS)) /
-          Uint64(1024))));
   }
 
   /**
@@ -1935,9 +1982,9 @@ void Backup::calculate_disk_write_speed(Signal *signal) {
   int adjust_speed_up_low = diff_disk_write_speed / 12;
   int adjust_speed_up_high = diff_disk_write_speed / 3;
   int adjust_speed_down_high = diff_disk_write_speed / 5;
-  int adjust_speed_down_medium = diff_disk_write_speed / 8;
-  int adjust_speed_down_low = diff_disk_write_speed / 12;
-
+  int adjust_speed_down_medium = diff_disk_write_speed / 20;
+  int adjust_speed_down_low = diff_disk_write_speed / 40; 
+  
   jam();
   if (diff_disk_write_speed <= 0 || adjust_speed_up == 0) {
     jam();
@@ -2050,11 +2097,17 @@ void Backup::calculate_disk_write_speed(Signal *signal) {
        * in this state, but we will still slow down checkpoints when
        * CPU become overloaded.
        */
-      if (cpu_usage < 99) {
-        jam();
-        /* 0-98% load, slow down */
+      if (cpu_usage < 95) {
+        /* 0-95% load, speed up */
         adjust_disk_write_speed_up(m_curr_disk_write_speed,
-                                   max_disk_write_speed, adjust_speed_up);
+                                   max_disk_write_speed,
+                                   adjust_speed_up);
+      } else if (cpu_usage < 99) {
+        jam();
+        /* 95-98% load, speed up */
+        adjust_disk_write_speed_up(m_curr_disk_write_speed,
+                                   max_disk_write_speed,
+                                   adjust_speed_up_low);
       } else if (cpu_usage < 100) {
         jam();
         /* 99% load, slow down */
@@ -2090,52 +2143,41 @@ void Backup::calculate_disk_write_speed(Signal *signal) {
                                    max_backup_disk_write_speed,
                                    adjust_speed_up);
       }
-    } else if (cpu_usage < 95) {
+    } else if (cpu_usage < 96) {
       jam();
-    } else if (cpu_usage < 97) {
-      jam();
-      /* 95-96% load, slightly slow down */
-      if (adjust_disk_speed) {
-        slowdowns_due_to_high_cpu++;
-        adjust_disk_write_speed_down(
-            m_curr_disk_write_speed, disk_write_speed_set_to_min,
-            min_disk_write_speed, adjust_speed_down_low);
-      }
-      if (adjust_backup_disk_speed) {
-        slowdown_backups_due_to_high_cpu++;
-        adjust_disk_write_speed_down(
-            m_curr_backup_disk_write_speed, backup_disk_write_speed_set_to_min,
-            min_disk_write_speed, adjust_speed_down_low);
-      }
     } else if (cpu_usage < 99) {
-      jamEntry();
-      /* 97-98% load, slow down */
+      jam();
+      /* 96-98% load, slightly slow down */
       if (adjust_disk_speed) {
         slowdowns_due_to_high_cpu++;
-        adjust_disk_write_speed_down(
-            m_curr_disk_write_speed, disk_write_speed_set_to_min,
-            min_disk_write_speed, adjust_speed_down_medium);
+        adjust_disk_write_speed_down(m_curr_disk_write_speed,
+                                     disk_write_speed_set_to_min,
+                                     min_disk_write_speed,
+                                     adjust_speed_down_low);
       }
       if (adjust_backup_disk_speed) {
         slowdown_backups_due_to_high_cpu++;
-        adjust_disk_write_speed_down(
-            m_curr_backup_disk_write_speed, backup_disk_write_speed_set_to_min,
-            min_disk_write_speed, adjust_speed_down_medium);
+        adjust_disk_write_speed_down(m_curr_backup_disk_write_speed,
+                                     backup_disk_write_speed_set_to_min,
+                                     min_disk_write_speed,
+                                     adjust_speed_down_low);
       }
     } else {
       jamEntry();
       /* 99-100% load, slow down a bit faster */
       if (adjust_disk_speed) {
         slowdowns_due_to_high_cpu++;
-        adjust_disk_write_speed_down(
-            m_curr_disk_write_speed, disk_write_speed_set_to_min,
-            min_disk_write_speed, adjust_speed_down_high);
+        adjust_disk_write_speed_down(m_curr_disk_write_speed,
+                                     disk_write_speed_set_to_min,
+                                     min_disk_write_speed,
+                                     adjust_speed_down_medium);
       }
       if (adjust_backup_disk_speed) {
         slowdown_backups_due_to_high_cpu++;
-        adjust_disk_write_speed_down(
-            m_curr_backup_disk_write_speed, backup_disk_write_speed_set_to_min,
-            min_disk_write_speed, adjust_speed_down_high);
+        adjust_disk_write_speed_down(m_curr_backup_disk_write_speed,
+                                     backup_disk_write_speed_set_to_min,
+                                     min_disk_write_speed,
+                                     adjust_speed_down_medium);
       }
     }
   }

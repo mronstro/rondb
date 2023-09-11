@@ -3634,8 +3634,9 @@ void
 Thrman::execGET_CPU_USAGE_REQ(Signal *signal)
 {
   MeasurementRecord curr_measure;
+  GetCpuUsageReq req = *(GetCpuUsageReq*)signal->getDataPtr();
   GetCpuUsageConf *conf = (GetCpuUsageConf*)signal->getDataPtrSend();
-  if (signal->theData[0] == 0)
+  if (req.requestType == GetCpuUsageReq::PerSecond)
   {
     /**
      * Backup block wants per second measure
@@ -3665,7 +3666,7 @@ Thrman::execGET_CPU_USAGE_REQ(Signal *signal)
       }
     }
   }
-  else if (signal->theData[0] == 1)
+  else if (req.requestType == GetCpuUsageReq::LastMeasure)
   {
     /**
      * LQH block wants the latest CPU measurement

@@ -24085,25 +24085,11 @@ void Dblqh::completeLcpRoundLab(Signal *signal, Uint32 lcpId) {
 void Dblqh::execEND_LCPCONF(Signal *signal) {
   EndLcpConf *conf = (EndLcpConf *)signal->getDataPtr();
   jamEntry();
-
   ndbrequire(clcpCompletedState == LCP_CLOSE_STARTED);
-  BlockReference backupRef = calcInstanceBlockRef(getBACKUP());
-  if (!isNdbMtLqh() && conf->senderRef == backupRef) {
-    /**
-     * ndbd also needs to send to TSMAN (handled by Proxy block in ndbmtd).
-     */
-    jam();
-    Uint32 lcpId = conf->senderData;
-    EndLcpReq *req = (EndLcpReq *)signal->getDataPtr();
-    req->senderData = lcpId;
-    req->senderRef = reference();
-    req->backupPtr = m_backup_ptr;
-    req->backupId = lcpId;
-    sendSignal(TSMAN_REF, GSN_END_LCPREQ, signal, EndLcpReq::SignalLength, JBA);
-    return;
-  }
-  DEB_EMPTY_LCP(
-      ("(%u)END_LCPCONF received LCP %u", instance(), conf->senderData));
+  /* Removed support of ndbd handling */
+  DEB_EMPTY_LCP(("(%u)END_LCPCONF received LCP %u",
+                 instance(),
+                 conf->senderData));
   stopLcpFragWatchdog();
   lcpPtr.i = 0;
   ptrAss(lcpPtr, lcpRecord);
