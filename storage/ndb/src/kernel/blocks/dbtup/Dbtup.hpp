@@ -818,6 +818,10 @@ struct Fragrecord {
       ,
       FS_REORG_COMPLETE_NEW  // An new fragment which is online
     } fragStatus;
+
+    /* Should we use query workers or only LDM threads */
+    bool m_use_query_worker;
+
     Uint32 fragTableId;
     Uint32 fragmentId;
     Uint32 partitionId;
@@ -881,6 +885,7 @@ struct Fragrecord {
   void acquire_frag_page_map_mutex(Fragrecord *fragPtrP,
                                    EmulatedJamBuffer *jamBuf)
   {
+    if (!fragPtrP->m_use_query_worker) return;
     ndbassert(globalData.ndbMtQueryWorkers > 0);
     thrjam(jamBuf);
     ndbrequire(!m_is_in_query_thread);
@@ -889,6 +894,7 @@ struct Fragrecord {
   void release_frag_page_map_mutex(Fragrecord *fragPtrP,
                                    EmulatedJamBuffer *jamBuf)
   {
+    if (!fragPtrP->m_use_query_worker) return;
     ndbassert(globalData.ndbMtQueryWorkers > 0);
     NdbMutex_Unlock(&fragPtrP->tup_frag_page_map_mutex);
     thrjam(jamBuf);
@@ -923,6 +929,7 @@ struct Fragrecord {
                           Uint32 logicalPageId,
                           EmulatedJamBuffer *jamBuf)
   {
+    if (!fragPtrP->m_use_query_worker) return;
     ndbassert(globalData.ndbMtQueryWorkers > 0);
     {
       ndbrequire(!m_is_in_query_thread);
@@ -936,6 +943,7 @@ struct Fragrecord {
                           Uint32 logicalPageId,
                           EmulatedJamBuffer *jamBuf)
   {
+    if (!fragPtrP->m_use_query_worker) return;
     ndbassert(globalData.ndbMtQueryWorkers > 0);
     {
       Uint32 hash = logicalPageId & (NUM_TUP_FRAGMENT_MUTEXES - 1);
@@ -968,6 +976,7 @@ struct Fragrecord {
       thrjamLine(jamBuf, hash);
     }
   }
+  void set_use_query_worker(Uint64 fragptr);
 
 struct Operationrec {
   static constexpr Uint32 TYPE_ID = RT_DBTUP_OPERATION;

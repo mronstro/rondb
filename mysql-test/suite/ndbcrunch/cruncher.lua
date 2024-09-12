@@ -18,6 +18,8 @@ sysbench.cmdline.options = {
       {"Length of blob column (this also changes column c to blob)", 0},
    table_nologging =
       {"Use NOLOGGING when creating table", ""},
+   table_use_query_worker =
+      {"Use USE_QUERY_WORKER when creating table", 1},
 
    -- Options for being compatible with oltp_ scripts
    mysql_storage_engine =
@@ -51,8 +53,16 @@ function create_table(drv, con, table_num)
    end
 
    local tab_comment = "";
-   if sysbench.opt.nologging then
-     tab_comment = "COMMENT='NDB_TABLE=NOLOGGING=1'"
+   if sysbench.opt.table_nologging then
+     if sysbench.opt.table_use_query_worker = 0 then
+       tab_comment = "COMMENT='NDB_TABLE=NOLOGGING=1,USE_QUERY_WORKER=0'"
+     else
+       tab_comment = "COMMENT='NDB_TABLE=NOLOGGING=1'"
+     end
+   else
+     if sysbench.opt.table_use_query_worker = 0 then
+       tab_comment = "COMMENT='NDB_TABLE=USE_QUERY_WORKER=0'"
+     end
    end
 
    print(string.format("Creating table 'crunch%d'...", table_num))

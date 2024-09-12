@@ -137,7 +137,7 @@
 //#define DEBUG_API_FAIL
 //#define DEBUG_STRING_MEMORY 1
 //#define DO_TRANSIENT_POOL_STAT 1
-//#define DEBUG_HASH 1
+#define DEBUG_HASH 1
 //#define DEBUG_QUOTAS_EXTRA 1
 #define DEBUG_QUOTAS 1
 #endif
@@ -1067,10 +1067,14 @@ void Dbdict::packTableIntoPages(SimpleProperties::Writer &w,
         !!(tablePtr.p->m_bits & TableRecord::TR_UseVarSizedDiskData));
   w.add(DictTabInfo::HashFunctionFlag,
         ((tablePtr.p->m_bits & TableRecord::TR_HashFunction) != 0));
+  w.add(DictTabInfo::UseQueryWorkerFlag,
+        ((tablePtr.p->m_bits & TableRecord::TR_UseQueryWorker) != 0));
 
-  DEB_HASH(("1: dict_tab(%u) HashFunctionFlag: %u",
+  DEB_HASH(("1: dict_tab(%u) HashFunctionFlag: %u"
+            ", UseQueryWorkerFlag: %u",
             tablePtr.p->tableId,
-            ((tablePtr.p->m_bits & TableRecord::TR_HashFunction) != 0)));
+            ((tablePtr.p->m_bits & TableRecord::TR_HashFunction) != 0),
+            ((tablePtr.p->m_bits & TableRecord::TR_UseQueryWorker) != 0)));
 
   D("packTableIntoPages: tableId: "
     << tablePtr.p->tableId << " tablePtr.i = " << tablePtr.i
@@ -5488,6 +5492,7 @@ void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
     jam();
     bool support_varsized_diskdata = true;
     bool support_new_hash_function = true;
+    bool support_use_query_worker = true;
     for (Uint32 node = 1; node < MAX_NDB_NODES; node++)
     {
       if (getNodeInfo(node).getType() == NodeInfo::DB)
@@ -5508,6 +5513,13 @@ void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
             jam();
             jamDataDebug(getNodeInfo(node).m_version);
             support_new_hash_function = false;
+            break;
+          }
+          if ((!ndbd_support_use_query_worker(getNodeInfo(node).m_version)))
+          {
+            jam();
+            jamDataDebug(getNodeInfo(node).m_version);
+            support_use_query_worker = false;
             break;
           }
         }
@@ -5533,10 +5545,22 @@ void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
       jam();
       c_tableDesc.UseVarSizedDiskDataFlag = ZFALSE;
     }
+    if (support_use_query_worker &&
+        (c_tableDesc.UseQueryWorkerFlag == 0)) {
+      jam();
+      c_tableDesc.UseQueryWorkerFlag = 0;
+    } else {
+      jam();
+      c_tableDesc.UseQueryWorkerFlag = 1;
+    }
+
     D("CreateTableFromApi: tableName = " << c_tableDesc.TableName
       << " HashFunctionFlag = " << c_tableDesc.HashFunctionFlag);
-    DEB_HASH(("0: dict_tab(%u) HashFunctionFlag: %u",
-            c_tableDesc.TableId, 0));
+    DEB_HASH(("0: dict_tab(%u) HashFunctionFlag: %u"
+              ", UseQueryWorkerFlag: %u",
+            c_tableDesc.TableId,
+            c_tableDesc.HashFunctionFlag,
+            c_tableDesc.UseQueryWorkerFlag));
   }
   [[fallthrough]];
   case DictTabInfo::AlterTableFromAPI:{
@@ -5710,10 +5734,15 @@ void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
   tablePtr.p->m_bits |=
     (c_tableDesc.HashFunctionFlag ?
       TableRecord::TR_HashFunction : 0);
+  tablePtr.p->m_bits |=
+    (c_tableDesc.UseQueryWorkerFlag ?
+      TableRecord::TR_UseQueryWorker : 0);
 
-  DEB_HASH(("2: dict_tab(%u) HashFunctionFlag: %u",
+  DEB_HASH(("2: dict_tab(%u) HashFunctionFlag: %u"
+            ", UseQueryWorkerFlag: %u",
             tablePtr.p->tableId,
-            ((tablePtr.p->m_bits & TableRecord::TR_HashFunction) != 0)));
+            ((tablePtr.p->m_bits & TableRecord::TR_HashFunction) != 0),
+            ((tablePtr.p->m_bits & TableRecord::TR_UseQueryWorker) != 0)));
 
   D("handleTabInfoInit: tableId = "
     << tablePtr.p->tableId << " tabPtr.i = " << tablePtr.i << " tableVersion = "
@@ -7194,8 +7223,10 @@ void Dbdict::createTab_local(Signal *signal, SchemaOpPtr op_ptr,
     ((tabPtr.p->m_bits & TableRecord::TR_UseVarSizedDiskData) == 0) ? 0 : 1;
   req->hashFunctionFlag =
     ((tabPtr.p->m_bits & TableRecord::TR_HashFunction) == 0) ? 0 : 1;
+  req->useQueryWorkerFlag =
+    ((tabPtr.p->m_bits & TableRecord::TR_UseQueryWorker) == 0) ? 0 : 1;
   sendSignal(DBLQH_REF, GSN_CREATE_TAB_REQ, signal,
-             CreateTabReq::NewSignalLengthLDM, JBB);
+             CreateTabReq::SignalLengthLDM, JBB);
 
   /**
    * Create KeyDescriptor
@@ -7760,11 +7791,18 @@ void Dbdict::execTAB_COMMITCONF(Signal *signal) {
     req->hashFunctionFlag =
       (Uint32)(((tabPtr.p->m_bits &
                  TableRecord::TR_HashFunction) == 0) ? 0 : 1);
+
+    req->useQueryWorkerFlag =
+      (Uint32)(((tabPtr.p->m_bits &
+                 TableRecord::TR_UseQueryWorker) == 0) ? 0 : 1);
+
     req->diskBased = tabPtr.p->m_disk_based;
 
-    DEB_HASH(("3: dict_tab(%u) HashFunctionFlag: %u",
+    DEB_HASH(("3: dict_tab(%u) HashFunctionFlag: %u"
+              ", UseQueryWorkerFlag: %u",
               tabPtr.p->tableId,
-              ((tabPtr.p->m_bits & TableRecord::TR_HashFunction) != 0)));
+              ((tabPtr.p->m_bits & TableRecord::TR_HashFunction) != 0),
+              ((tabPtr.p->m_bits & TableRecord::TR_UseQueryWorker) != 0)));
 
     if (!DictTabInfo::isOrderedIndex(tabPtr.p->tableType)) {
       jam();
@@ -8022,15 +8060,22 @@ void Dbdict::execTC_SCHVERCONF(Signal *signal) {
     req->noOfPrimaryKeys = (Uint32)tabPtr.p->noOfPrimkey;
     req->singleUserMode = (Uint32)tabPtr.p->singleUserMode;
     req->userDefinedPartition = (tabPtr.p->fragmentType == DictTabInfo::UserDefined);
+
     req->hashFunctionFlag =
       (Uint32)(((tabPtr.p->m_bits &
                  TableRecord::TR_HashFunction) == 0) ? 0 : 1);
+
+    req->useQueryWorkerFlag =
+      (Uint32)(((tabPtr.p->m_bits &
+                 TableRecord::TR_UseQueryWorker) == 0) ? 0 : 1);
+
     req->diskBased = tabPtr.p->m_disk_based;
 
-    DEB_HASH(("4: dict_tab(%u) HashFunctionFlag: %u",
+    DEB_HASH(("4: dict_tab(%u) HashFunctionFlag: %u"
+              ", UseQueryWorkerFlag: %u",
               tabPtr.p->tableId,
-              ((tabPtr.p->m_bits & TableRecord::TR_HashFunction) != 0)));
-
+              ((tabPtr.p->m_bits & TableRecord::TR_HashFunction) != 0),
+              ((tabPtr.p->m_bits & TableRecord::TR_UseQueryWorker) != 0)));
 
     if (DictTabInfo::isOrderedIndex(tabPtr.p->tableType)) {
       jam();
@@ -9924,7 +9969,6 @@ bool Dbdict::alterTable_subOps(Signal *signal, SchemaOpPtr op_ptr) {
       alterTabPtr.p->m_sub_copy_data = true;
       return true;
     }
-
     if (alterTabPtr.p->m_sub_reorg_complete == false) {
       jam();
       Callback c = {safe_cast(&Dbdict::alterTable_fromReorgTable),
@@ -9936,7 +9980,6 @@ bool Dbdict::alterTable_subOps(Signal *signal, SchemaOpPtr op_ptr) {
       return true;
     }
   }
-
   return false;
 }
 
@@ -10001,9 +10044,16 @@ void Dbdict::alterTable_toReadBackup(Signal *signal, SchemaOpPtr op_ptr,
     bool flag = ((indexPtr.p->m_bits & TableRecord::TR_HashFunction) != 0);
     w.add(DictTabInfo::HashFunctionFlag, (Uint32)flag);
     D("HashFunctionFlag: " << flag);
-    DEB_HASH(("9: dict_tab(%u) HashFunctionFlag: %u",
+  }
+  {
+    bool flag = ((indexPtr.p->m_bits & TableRecord::TR_UseQueryWorker) != 0);
+    w.add(DictTabInfo::UseQueryWorkerFlag, (Uint32)flag);
+    D("UseQueryWorkerFlag: " << flag);
+    DEB_HASH(("9: dict_tab(%u) HashFunctionFlag: %u"
+              ", UseQueryWorkerFlag: %u",
               indexPtr.p->tableId,
-              ((indexPtr.p->m_bits & TableRecord::TR_HashFunction) != 0)));
+              ((indexPtr.p->m_bits & TableRecord::TR_HashFunction) != 0),
+              ((indexPtr.p->m_bits & TableRecord::TR_UseQueryWorker) != 0)));
   }
   /* Toggle read backup flag since this is changed */
   {
@@ -10153,9 +10203,16 @@ void Dbdict::alterTable_toAlterUniqueIndex(Signal *signal, SchemaOpPtr op_ptr,
     bool flag = ((indexPtr.p->m_bits & TableRecord::TR_HashFunction) != 0);
     w.add(DictTabInfo::HashFunctionFlag, (Uint32)flag);
     D("HashFunctionFlag: " << flag);
-    DEB_HASH(("5: dict_tab(%u) HashFunctionFlag: %u",
+  }
+  {
+    bool flag = ((indexPtr.p->m_bits & TableRecord::TR_UseQueryWorker) != 0);
+    w.add(DictTabInfo::UseQueryWorkerFlag, (Uint32)flag);
+    D("UseQueryWorkerFlag: " << flag);
+    DEB_HASH(("5: dict_tab(%u) HashFunctionFlag: %u"
+              ", UseQueryWorkerFlag: %u",
               indexPtr.p->tableId,
-              ((indexPtr.p->m_bits & TableRecord::TR_HashFunction) != 0)));
+              ((indexPtr.p->m_bits & TableRecord::TR_HashFunction) != 0),
+              ((indexPtr.p->m_bits & TableRecord::TR_UseQueryWorker) != 0)));
   }
   {
     bool flag = indexPtr.p->m_bits & TableRecord::TR_FullyReplicated;
@@ -10937,6 +10994,16 @@ void Dbdict::alterTable_commit(Signal *signal, SchemaOpPtr op_ptr) {
       tablePtr.p->m_bits |= save_new;
       newTablePtr.p->m_bits |= save_old;
     }
+    if (AlterTableReq::getUseQueryWorkerFlag(changeMask)) {
+      jam();
+      Uint32 save_old = (tablePtr.p->m_bits & TableRecord::TR_UseQueryWorker);
+      Uint32 save_new =
+        (newTablePtr.p->m_bits & TableRecord::TR_UseQueryWorker);
+      tablePtr.p->m_bits &= (~(TableRecord::TR_UseQueryWorker));
+      newTablePtr.p->m_bits &= (~(TableRecord::TR_UseQueryWorker));
+      tablePtr.p->m_bits |= save_new;
+      newTablePtr.p->m_bits |= save_old;
+    }
   }
 
   /**
@@ -11240,7 +11307,14 @@ void Dbdict::alterTable_contComplete(Signal *signal, SchemaOpPtr op_ptr) {
     alterTable_toCommitComplete(signal, op_ptr,
                                 AlterTabReq::AlterTableSumaFilter);
     return;
+  } else if (AlterTableReq::getUseQueryWorkerFlag(impl_req->changeMask)) {
+    jam();
+    alterTabPtr.p->m_blockNo[0] = DBTC;
+    alterTabPtr.p->m_blockNo[1] = DBSPJ;
+    alterTable_toCommitComplete(signal, op_ptr);
+    return;
   }
+
   D("alterTable_complete no flag set");
   sendTransConf(signal, op_ptr);
 }
@@ -12529,12 +12603,22 @@ void Dbdict::createIndex_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
       jam();
       bits |= TableRecord::TR_UseVarSizedDiskData;
     }
-    DEB_HASH(("6: dict_tab(%u) HashFunctionFlag: %u",
-              impl_req->tableId, tableDesc.HashFunctionFlag));
+
+    DEB_HASH(("6: dict_tab(%u) HashFunctionFlag: %u"
+              ", UseQueryWorkerFlag: %u",
+              impl_req->tableId,
+              tableDesc.HashFunctionFlag,
+              tableDesc.UseQueryWorkerFlag));
+
     if (tableDesc.HashFunctionFlag)
     {
       jam();
       bits |= TableRecord::TR_HashFunction;
+    }
+    if (tableDesc.UseQueryWorkerFlag)
+    {
+      jam();
+      bits |= TableRecord::TR_UseQueryWorker;
     }
     if (tableDesc.ReadBackupFlag)
     {
@@ -12581,7 +12665,8 @@ void Dbdict::createIndex_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
   {
     jam();
     bits &= ~Uint32(TableRecord::TR_HashFunction);
-    DEB_HASH(("Removed HashFunctionFlag from index creation req (%u) since the primary table does not have it.",
+    DEB_HASH(("Removed HashFunctionFlag from index creation req (%u)"
+              " since the primary table does not have it.",
               impl_req->tableId));
   }
   if ((tablePtr.p->m_bits & TableRecord::TR_HashFunction) != 0 &&
@@ -12589,7 +12674,26 @@ void Dbdict::createIndex_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
   {
     jam();
     bits |= TableRecord::TR_HashFunction;
-    DEB_HASH(("Added HashFunctionFlag to index creation req (%u) since the primary table has it.",
+    DEB_HASH(("Added HashFunctionFlag to index creation req (%u)"
+              " since the primary table has it.",
+              impl_req->tableId));
+  }
+  if ((tablePtr.p->m_bits & TableRecord::TR_UseQueryWorker) == 0 &&
+      (bits & TableRecord::TR_UseQueryWorker) != 0)
+  {
+    jam();
+    bits &= ~Uint32(TableRecord::TR_UseQueryWorker);
+    DEB_HASH(("Removed UseQueryWorkerFlag from index creation req (%u)"
+              " since the primary table does not have it.",
+              impl_req->tableId));
+  }
+  if ((tablePtr.p->m_bits & TableRecord::TR_UseQueryWorker) != 0 &&
+      (bits & TableRecord::TR_UseQueryWorker) == 0)
+  {
+    jam();
+    bits |= TableRecord::TR_UseQueryWorker;
+    DEB_HASH(("Added UseQueryWorkerFlag to index creation req (%u)"
+              " since the primary table has it.",
               impl_req->tableId));
   }
 
@@ -12815,6 +12919,14 @@ void Dbdict::createIndex_toCreateTable(Signal *signal, SchemaOpPtr op_ptr) {
     DEB_HASH(("7: dict_tab(%u) HashFunctionFlag: %u",
               createIndexPtr.p->m_request.indexId,
               ((createIndexPtr.p->m_bits & TableRecord::TR_HashFunction) != 0)));
+  }
+  { bool flag =
+    ((createIndexPtr.p->m_bits & TableRecord::TR_UseQueryWorker) != 0);
+    w.add(DictTabInfo::UseQueryWorkerFlag, (Uint32)flag);
+    D("UseQueryWorkerFlag: " << flag);
+    DEB_HASH(("7: dict_tab(%u) UseQueryWorkerFlag: %u",
+      createIndexPtr.p->m_request.indexId,
+      ((createIndexPtr.p->m_bits & TableRecord::TR_UseQueryWorker) != 0)));
   }
   { bool flag = createIndexPtr.p->m_bits & TableRecord::TR_FullyReplicated;
     w.add(DictTabInfo::FullyReplicatedFlag, (Uint32)flag);

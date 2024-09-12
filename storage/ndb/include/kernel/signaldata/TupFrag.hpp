@@ -43,7 +43,7 @@ class TupFragReq {
   friend class Dbtup;
 
  public:
-  static constexpr Uint32 SignalLength = 12;
+  static constexpr Uint32 SignalLength = 13;
 
  private:
   Uint32 userPtr;
@@ -58,6 +58,7 @@ class TupFragReq {
   Uint32 tablespaceid;
   Uint32 changeMask;
   Uint32 partitionId;
+  Uint32 useQueryWorkerFlag;
 };
 
 class TupFragConf {

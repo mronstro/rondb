@@ -523,6 +523,12 @@ void Dbacc::set_tup_fragptr(Uint64 fragptr, Uint64 tup_fragptr)
   fragrecptr.p->tupFragptr = tup_fragptr;
 }
 
+void Dbacc::set_use_query_worker(Uint64 fragptr)
+{
+  ndbrequire(c_fragment_pool.getPtr(fragrecptr, fragptr));
+  fragrecptr.p->m_use_query_worker = true;
+}
+
 /* -------------------------------------------------------------------------*/
 /* -------------------------------------------------------------------------*/
 /* ------------------------------------------------------------------------ */

@@ -479,6 +479,9 @@ struct Fragmentrec {
 //-----------------------------------------------------------------------------
   State fragState;
 
+  /* Should we use query workers or only use LDM threads */
+  bool m_use_query_worker;
+
 //-----------------------------------------------------------------------------
 // elementLength: Length of element in bucket and overflow pages
 // keyLength: Length of key
@@ -685,6 +688,7 @@ public:
   typedef RecordPool64<RWPool64<Fragmentrec> > Fragment_pool;
   Fragment_pool c_fragment_pool;
   void set_tup_fragptr(Uint64 fragptr, Uint64 tup_fragptr);
+  void set_use_query_worker(Uint64 fragptr);
 
   RSS_OP_COUNTER(cnoOfAllocatedFragrec);
   RSS_OP_SNAPSHOT(cnoOfAllocatedFragrec);
@@ -1297,6 +1301,7 @@ public:
                                OperationrecPtr opPtr,
                                Uint32 & inx)
   {
+    if (!fragPtrP->m_use_query_worker) return true;
     inx = 0;
     ndbassert(globalData.ndbMtQueryWorkers > 0);
     {
@@ -1319,6 +1324,7 @@ public:
   void release_frag_mutex_hash(Fragmentrec *fragPtrP,
                                Uint32 inx)
   {
+    if (!fragPtrP->m_use_query_worker) return;
     ndbassert(globalData.ndbMtQueryWorkers > 0);
     {
 #if defined(VM_TRACE) || defined(ERROR_INSERT)
@@ -1335,6 +1341,7 @@ public:
   void acquire_frag_mutex_bucket(Fragmentrec *fragPtrP,
                                  Uint32 bucket)
   {
+    if (!fragPtrP->m_use_query_worker) return;
     ndbassert(globalData.ndbMtQueryWorkers > 0);
     {
       Uint32 inx = bucket & (NUM_ACC_FRAGMENT_MUTEXES - 1);
@@ -1348,6 +1355,7 @@ public:
   }
   void release_frag_mutex_bucket(Fragmentrec *fragPtrP, Uint32 bucket)
   {
+    if (!fragPtrP->m_use_query_worker) return;
     ndbassert(globalData.ndbMtQueryWorkers > 0);
     {
       Uint32 inx = bucket & (NUM_ACC_FRAGMENT_MUTEXES - 1);

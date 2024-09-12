@@ -42,7 +42,7 @@ class AccFragReq {
    */
   friend class Dbacc;
 public:
-  static constexpr Uint32 SignalLength = 13;
+  static constexpr Uint32 SignalLength = 14;
 
  private:
   Uint32 userPtr;
@@ -58,6 +58,7 @@ public:
   Uint32 lhDirBits;
   Uint32 keyLength;
   Uint32 hashFunctionFlag;
+  Uint32 useQueryWorkerFlag;
 };
 
 class AccFragConf {

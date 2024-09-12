@@ -85,6 +85,7 @@ struct AlterTableReq {
 #define PARTITION_BALANCE_SHIFT (13)
 #define READ_BACKUP_SHIFT (14)
 #define MODIFY_ATTR_SHIFT (15)
+#define USE_QUERY_WORKER_SHIFT (16)
 
   /**
    * Getters and setters
@@ -150,6 +151,8 @@ struct AlterTableReq {
   static void setReorgSumaFilterFlag(UintR &changeMask, Uint32 tsFlg);
   static void setPartitionBalanceFlag(UintR &changeMask, Uint32 tsFlg);
   static Uint8 getPartitionBalanceFlag(const UintR &changeMask);
+  static void setUseQueryWorkerFlag(UintR &changeMask, Uint32 tsFlg);
+  static Uint8 getUseQueryWorkerFlag(const UintR &changeMask);
 
   static bool getSubOp(const UintR &changeMask) {
     return getReorgCommitFlag(changeMask) || getReorgCompleteFlag(changeMask) ||
@@ -293,6 +296,15 @@ inline Uint8 AlterTableReq::getPartitionBalanceFlag(const UintR &changeMask) {
 inline void AlterTableReq::setPartitionBalanceFlag(UintR &changeMask,
                                                    Uint32 fctFlag) {
   changeMask |= (fctFlag << PARTITION_BALANCE_SHIFT);
+}
+
+inline Uint8 AlterTableReq::getUseQueryWorkerFlag(const UintR &changeMask) {
+  return (Uint8)((changeMask >> USE_QUERY_WORKER_SHIFT) & 1);
+}
+
+inline void AlterTableReq::setUseQueryWorkerFlag(UintR &changeMask,
+                                                   Uint32 flag) {
+  changeMask |= (flag << USE_QUERY_WORKER_SHIFT);
 }
 
 inline Uint8 AlterTableReq::getReadBackupFlag(const UintR &changeMask) {

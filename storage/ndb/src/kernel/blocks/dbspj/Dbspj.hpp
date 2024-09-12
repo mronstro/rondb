@@ -173,7 +173,14 @@ class Dbspj : public SimulatedBlock {
       ,TR_READ_BACKUP = (1 << 5)
       ,TR_FULLY_REPLICATED = (1 << 6)
       ,TR_HASH_FUNCTION = (1 << 7)
+      ,TR_USE_QUERY_WORKER = (1 << 8)
     };
+    Uint8 get_use_query_worker() const
+      { return (m_flags & TR_USE_QUERY_WORKER) != 0; }
+    void set_use_query_worker(Uint8 f) {
+      f ? m_flags |= (Uint16)TR_USE_QUERY_WORKER :
+          m_flags &= ~(Uint16)TR_USE_QUERY_WORKER;
+    }
     Uint8 get_enabled() const { return (m_flags & TR_ENABLED) != 0; }
     Uint8 get_dropping() const { return (m_flags & TR_DROPPING) != 0; }
     Uint8 get_prepared() const { return (m_flags & TR_PREPARED) != 0; }

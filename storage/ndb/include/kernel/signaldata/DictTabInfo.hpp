@@ -166,6 +166,7 @@ class DictTabInfo {
     UseVarSizedDiskDataFlag = 162,
 
     HashFunctionFlag   = 163,
+    UseQueryWorkerFlag = 164,
 
     TableEnd           = 999,
     
@@ -391,6 +392,7 @@ class DictTabInfo {
 
     Uint32 UseVarSizedDiskDataFlag;
     Uint32 HashFunctionFlag;
+    Uint32 UseQueryWorkerFlag;
 
     Table() {}
     void init();

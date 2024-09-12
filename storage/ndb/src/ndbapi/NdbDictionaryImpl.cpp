@@ -841,6 +841,7 @@ void NdbTableImpl::init() {
   m_extra_row_gci_bits = 0;
   m_extra_row_author_bits = 0;
   m_read_backup = 0;
+  m_use_query_worker = true;
   m_fully_replicated = false;
   m_use_varsized_disk_data = true;
   m_use_new_hash_function = ndbd_support_new_hash_function(NDB_VERSION_D);
@@ -1054,6 +1055,10 @@ bool NdbTableImpl::equal(const NdbTableImpl &obj) const {
     DBUG_RETURN(false);
   }
 
+  if (m_use_query_worker != obj.m_use_query_worker) {
+    DBUG_RETURN(false);
+  }
+
   DBUG_RETURN(true);
 }
 
@@ -1123,12 +1128,15 @@ int NdbTableImpl::assign(const NdbTableImpl &org) {
   m_extra_row_author_bits = org.m_extra_row_author_bits;
   m_read_backup = org.m_read_backup;
   m_fully_replicated = org.m_fully_replicated;
+  m_use_query_worker = org.m_use_query_worker;
   m_use_varsized_disk_data = org.m_use_varsized_disk_data;
   m_use_new_hash_function = org.m_use_new_hash_function;
 
-  DBUG_PRINT("info", ("NdbTableImpl::assign %u, m_use_new_hash_function: %u",
+  DBUG_PRINT("info", ("NdbTableImpl::assign %u, m_use_new_hash_function: %u"
+                      ", m_use_query_worker: %u",
                        m_primaryTableId,
-                       m_use_new_hash_function));
+                       m_use_new_hash_function,
+                       m_use_query_worker));
 
   if (m_index != nullptr) delete m_index;
   m_index = org.m_index;
@@ -2280,6 +2288,7 @@ void NdbIndexImpl::init()
   m_temporary= false;
   m_table= nullptr;
   m_use_new_hash_function = ndbd_support_new_hash_function(NDB_VERSION_D);
+  m_use_query_worker = true;
 }
 
 NdbIndexImpl::~NdbIndexImpl() {
@@ -3671,6 +3680,8 @@ NdbDictInterface::parseTableInfo(NdbTableImpl ** ret,
   impl->m_partitionCount = tableDesc->PartitionCount;
   impl->m_fully_replicated =
     tableDesc->FullyReplicatedFlag == 0 ? false : true;
+  impl->m_use_query_worker =
+    tableDesc->UseQueryWorkerFlag == 0 ? false : true;
   impl->m_use_varsized_disk_data =
     tableDesc->UseVarSizedDiskDataFlag == 0 ? false : true;
   impl->m_use_new_hash_function =
@@ -3679,13 +3690,15 @@ NdbDictInterface::parseTableInfo(NdbTableImpl ** ret,
 
   DBUG_PRINT("info", ("parseTableInfo(%u): m_logging: %u, partitionBalance: %d"
                       " m_read_backup %u, tableVersion: %u"
-                      ", m_use_new_hash_function: %u",
+                      ", m_use_new_hash_function: %u"
+                      ", m_use_query_worker: %u",
                       impl->m_id,
                       impl->m_logging,
                       impl->m_partitionBalance,
                       impl->m_read_backup,
                       impl->m_version,
-                      impl->m_use_new_hash_function));
+                      impl->m_use_new_hash_function,
+                      impl->m_use_query_worker));
 
   impl->m_indexType = (NdbDictionary::Object::Type)getApiConstant(
       tableDesc->TableType, indexTypeMapping,
@@ -4388,6 +4401,16 @@ int NdbDictInterface::compChangeMask(const NdbTableImpl &old_impl,
   } else {
     DBUG_PRINT("info", ("No ReadBackup change, val: %u", impl.m_read_backup));
   }
+  if (impl.m_use_query_worker != old_impl.m_use_query_worker) {
+    /* Change the use query worker flag inplace */
+    DBUG_PRINT("info", ("Set Change UseQueryWorker Flag, old: %u, new: %u",
+                        old_impl.m_use_query_worker,
+                        impl.m_use_query_worker));
+    AlterTableReq::setUseQueryWorkerFlag(change_mask, impl.m_use_query_worker);
+  } else {
+    DBUG_PRINT("info", ("No UseQueryWorker change, val: %u",
+                        impl.m_use_query_worker));
+  }
 
   /*
     Check for new columns.
@@ -4565,6 +4588,7 @@ int NdbDictInterface::serializeTableDesc(NdbTableImpl &impl,
   tmpTab->ExtraRowGCIBits = impl.m_extra_row_gci_bits;
   tmpTab->ExtraRowAuthorBits = impl.m_extra_row_author_bits;
   tmpTab->FullyReplicatedFlag = !!impl.m_fully_replicated;
+  tmpTab->UseQueryWorkerFlag = (impl.m_use_query_worker ? 1 : 0);
   tmpTab->ReadBackupFlag = !!impl.m_read_backup;
   tmpTab->UseVarSizedDiskDataFlag = !!impl.m_use_varsized_disk_data;
   tmpTab->HashFunctionFlag = (impl.m_use_new_hash_function ? 1 : 0);
@@ -4573,9 +4597,12 @@ int NdbDictInterface::serializeTableDesc(NdbTableImpl &impl,
 					   DictTabInfo::AllNodesSmallTable);
   tmpTab->TableVersion = rand();
 
-  DBUG_PRINT("info", ("SerializeTableDesc %s, m_use_new_hash_function/HashFunctionFlag: %u",
+  DBUG_PRINT("info", ("SerializeTableDesc %s, "
+                      "m_use_new_hash_function/HashFunctionFlag: %u"
+                      ", m_use_query_worker/UseQueryWorkerFlag: %u",
                        impl.m_internalName.c_str(),
-                       tmpTab->HashFunctionFlag));
+                       tmpTab->HashFunctionFlag,
+                       tmpTab->UseQueryWorkerFlag));
 
   tmpTab->HashMapObjectId = impl.m_hash_map_id;
   tmpTab->HashMapVersion = impl.m_hash_map_version;
@@ -5222,17 +5249,23 @@ int NdbDictInterface::create_index_obj_from_table(NdbIndexImpl **dst,
   idx->m_temporary = tab->m_temporary;
   // The hash function flag of an index must always match that of the primary
   // table.
-  require(tab->m_use_new_hash_function == prim->m_use_new_hash_function);
-  idx->m_use_new_hash_function = tab->m_use_new_hash_function;
+  tab->m_use_new_hash_function = prim->m_use_new_hash_function;
+  idx->m_use_query_worker = tab->m_use_query_worker;
   DBUG_PRINT("info", ("create_index_obj_from_table id %d name %s, "
                       "tab->m_use_new_hash_function: %u, "
                       "idx->m_use_new_hash_function: %u, "
-                      "prim->m_use_new_hash_function: %u",
+                      "prim->m_use_new_hash_function: %u\n"
+                      "tab->m_use_query_worker: %u, "
+                      "idx->m_use_query_worker: %u, "
+                      "prim->m_use_query_worker: %u",
                        tab->getTableId(),
                        tab->getName(),
                        tab->m_use_new_hash_function,
                        idx->m_use_new_hash_function,
-                       prim->m_use_new_hash_function));
+                       prim->m_use_new_hash_function,
+                       tab->m_use_query_worker,
+                       idx->m_use_query_worker,
+                       prim->m_use_query_worker));
 
   const Uint32 distKeys = prim->m_noOfDistributionKeys;
   Uint32 keyCount = (type == NdbDictionary::Object::UniqueHashIndex)
@@ -5342,6 +5375,30 @@ NdbDictionaryImpl::createIndex(NdbIndexImpl &ix, NdbTableImpl &tab,
                            tab.getName()));
   }
 
+  // At this point, ix.m_use_query_worker is set if and only if the new
+  // hash function is supported. However, the correct value is always the one
+  // that matches the primary table.
+  if (ix.m_use_query_worker && !tab.m_use_query_worker)
+  {
+    ix.m_use_query_worker = false;
+    DBUG_PRINT("info", ("Setting m_use_query_worker to false on index %s, "
+                        "since it is false on the primary table %s.",
+                        ix.getIndexTable()->getName(),
+                        tab.getName()));
+  }
+  if (!ix.m_use_query_worker && tab.m_use_query_worker)
+  {
+    // This really should not happen, but let's do our best to fix it.
+    ix.m_use_query_worker = true;
+    DBUG_PRINT("warning", ("Setting m_use_query_worker to true on index %s, "
+                           "since it is true on the primary table %s. "
+                           "This is UNEXPECTED, as it should already have been "
+                           "set if the UseQueryWorker is supported by this"
+                           " version.",
+                           ix.getIndexTable()->getName(),
+                           tab.getName()));
+  }
+
   return m_receiver.createIndex(ix, tab, offline);
 }
 
@@ -5362,11 +5419,15 @@ int NdbDictInterface::createIndex(const NdbIndexImpl &impl,
   w.add(DictTabInfo::TableLoggedFlag, impl.m_logging);
   w.add(DictTabInfo::TableTemporaryFlag, impl.m_temporary);
   w.add(DictTabInfo::UseVarSizedDiskDataFlag, Uint32(0));
+  w.add(DictTabInfo::UseQueryWorkerFlag,
+        impl.m_use_query_worker ? Uint32(1) : Uint32(0));
   w.add(DictTabInfo::HashFunctionFlag,
         impl.m_use_new_hash_function ? Uint32(1) : Uint32(0));
-  DBUG_PRINT("info", ("createIndex %s, m_use_new_hash_function: %u",
+  DBUG_PRINT("info", ("createIndex %s, m_use_new_hash_function: %u"
+                      ", m_use_query_worker: %u",
                        internalName.c_str(),
-                       impl.m_use_new_hash_function));
+                       impl.m_use_new_hash_function,
+                       impl.m_use_query_worker));
 
   /**
    * DICT ensures that the table gets the same partitioning

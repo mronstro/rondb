@@ -1005,4 +1005,14 @@ ndbd_partial_update_supported(Uint32 v)
   return v >= NDBD_PARTIAL_UPDATE;
 }
 
+#define NDBD_SUPPORT_USE_QUERY_WORKER NDB_MAKE_VERSION(24, 10, 0)
+static
+inline
+bool
+ndbd_support_use_query_worker(Uint32 v)
+{
+  return v >= NDBD_SUPPORT_USE_QUERY_WORKER;
+}
+
+
 #endif

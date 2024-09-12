@@ -306,6 +306,7 @@ class NdbTableImpl : public NdbDictionary::Table, public NdbDictObjectImpl {
   bool m_has_default_values;
   bool m_read_backup;
   bool m_fully_replicated;
+  bool m_use_query_worker;
   bool m_use_varsized_disk_data;
   bool m_use_new_hash_function;
   int m_kvalue;
@@ -425,6 +426,7 @@ class NdbIndexImpl : public NdbDictionary::Index, public NdbDictObjectImpl {
   bool m_logging;
   bool m_temporary;
   bool m_use_new_hash_function;
+  bool m_use_query_worker;
   
   /*
     The m_table member refers to the NDB table object that holds the actual

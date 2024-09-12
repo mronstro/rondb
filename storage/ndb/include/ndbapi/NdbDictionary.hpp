@@ -1249,6 +1249,9 @@ class NdbDictionary {
     void setFullyReplicated(bool val);
     bool getFullyReplicated() const;
 
+    void setUseQueryWorker(bool val);
+    bool getUseQueryWorker() const;
+
     void setRowChecksum(Uint32);
     Uint32 getRowChecksum();
 #endif

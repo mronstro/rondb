@@ -157,6 +157,13 @@
 //#define DEBUG_RATE_SEND 1
 //#define DEBUG_RATE_DETAIL 1
 //#define DEBUG_QUOTAS 1
+#define DEBUG_QUERY_WORKER 1
+#endif
+
+#ifdef DEBUG_QUERY_WORKER
+#define DEB_QUERY_WORKER(arglist) do { g_eventLogger->info arglist ; } while (0)
+#else
+#define DEB_QUERY_WORKER(arglist) do { } while (0)
 #endif
 
 #ifdef DEBUG_RATE_DETAIL
@@ -2612,9 +2619,6 @@ void Dblqh::send_CONTINUEB_all(Signal *signal, Uint32 continueb_case) {
 /* *********************************************************> */
 /*  LQHFRAGREQ: Create new fragments for a table. Sender DICT */
 /* *********************************************************> */
-
-// this unbelievable mess could be replaced by one signal to LQH
-// and execute direct to local DICT to get everything at once
 void Dblqh::execCREATE_TAB_REQ(Signal *signal) {
   CreateTabReq *req = (CreateTabReq *)signal->getDataPtr();
   tabptr.i = req->tableId;
@@ -2633,16 +2637,6 @@ void Dblqh::execCREATE_TAB_REQ(Signal *signal) {
                CreateTabRef::SignalLength, JBB);
     return;
   }
-  if (signal->length() < CreateTabReq::SignalLengthLDM)
-  {
-    jam();
-    req->useVarSizedDiskData = 0;
-  }
-  if (signal->length() < CreateTabReq::NewSignalLengthLDM)
-  {
-    jam();
-    req->hashFunctionFlag = 0;
-  }
 
   DEB_HASH(("(%u) lqh_tab(%u) hashFunctionFlag: %u",
             instance(),
@@ -2650,7 +2644,7 @@ void Dblqh::execCREATE_TAB_REQ(Signal *signal) {
             req->hashFunctionFlag));
   seizeAddfragrec(signal);
   addfragptr.p->m_createTabReq = *req;
-  addfragptr.p->m_createTabReq_len = CreateTabReq::NewSignalLengthLDM;
+  addfragptr.p->m_createTabReq_len = CreateTabReq::SignalLengthLDM;
 
   req = &addfragptr.p->m_createTabReq;
 
@@ -2673,6 +2667,7 @@ void Dblqh::execCREATE_TAB_REQ(Signal *signal) {
                       tabptr.i));
   tabptr.p->m_disk_table= 0;
   tabptr.p->m_use_new_hash_function = (req->hashFunctionFlag != 0);
+  tabptr.p->m_use_query_worker = (req->useQueryWorkerFlag != 0);
 
   if (req->primaryTableId != RNIL)
   {
@@ -2687,8 +2682,12 @@ void Dblqh::execCREATE_TAB_REQ(Signal *signal) {
               primaryTabPtr.p->m_use_new_hash_function));
     ndbrequire(primaryTabPtr.p->m_use_new_hash_function ==
                tabptr.p->m_use_new_hash_function);
+    ndbrequire(primaryTabPtr.p->m_use_query_worker ==
+               tabptr.p->m_use_query_worker);
     tabptr.p->m_use_new_hash_function =
       primaryTabPtr.p->m_use_new_hash_function;
+    tabptr.p->m_use_query_worker =
+      primaryTabPtr.p->m_use_query_worker;
 
   }
   addfragptr.p->addfragStatus = AddFragRecord::WAIT_TUP;
@@ -3188,6 +3187,7 @@ void Dblqh::execLQHFRAGREQ(Signal* signal)
   Uint32 copyType = req->requestInfo & 3;
   bool tempTable = ((req->requestInfo & LqhFragReq::TemporaryTable) != 0);
   initFragrec(signal, tabptr.i, req->fragId, copyType);
+  fragptr.p->m_use_query_worker = tabptr.p->m_use_query_worker;
   fragptr.p->createGci = req->createGci;
   fragptr.p->startGci = req->startGci;
   fragptr.p->newestGci = req->startGci;
@@ -3357,6 +3357,7 @@ void Dblqh::execLQHFRAGREQ(Signal* signal)
     accreq->lhDirBits = addfragptr.p->m_lqhFragReq.lh3PageBits;
     accreq->keyLength = addfragptr.p->m_lqhFragReq.keyLength;
     accreq->hashFunctionFlag = tabptr.p->m_use_new_hash_function;
+    accreq->useQueryWorkerFlag = tabptr.p->m_use_query_worker;
     /* --------------------------------------------------------------------- */
     /* Send ACCFRAGREQ, when confirmation is received send 2 * TUPFRAGREQ to */
     /* create 2 tuple fragments on this node.                                */
@@ -3491,6 +3492,7 @@ void Dblqh::sendAddFragReq(Signal *signal) {
     tupFragReq->minRowsLow = addfragptr.p->m_lqhFragReq.minRowsLow;
     tupFragReq->changeMask = addfragptr.p->m_lqhFragReq.changeMask;
     tupFragReq->partitionId = addfragptr.p->m_lqhFragReq.partitionId;
+    tupFragReq->useQueryWorkerFlag = tabptr.p->m_use_query_worker;
     sendSignal(fragptr.p->tupBlockref, GSN_TUPFRAGREQ, signal,
                TupFragReq::SignalLength, JBB);
     return;
@@ -4831,6 +4833,10 @@ void Dblqh::execALTER_TAB_REQ(Signal *signal) {
   bool locked_table = false;
 
   D("ALTER_TAB_REQ(LQH): requestType: " << requestType);
+  DEB_QUERY_WORKER(("(%u) ALTER_TAB_REQ tab: %u, type: %u",
+                    instance(),
+                    tableId,
+                    requestType));
   Uint32 len = signal->getLength();
   switch (requestType) {
     case AlterTabReq::AlterTablePrepare:
@@ -4847,6 +4853,24 @@ void Dblqh::execALTER_TAB_REQ(Signal *signal) {
       break;
     case AlterTabReq::AlterTableCommit:
       jam();
+      if (AlterTableReq::getUseQueryWorkerFlag(req->changeMask)) {
+        if (!tablePtr.p->m_use_query_worker) {
+          /**
+           * Enabling use of query workers is ok, this means that we
+           * activate all mutexes affected by this. The opposite to
+           * disable query workers will only affect DBTC and DBSPJ
+           * and thus will ensure no one use the query workers, but
+           * the mutexes are still used. It is too complex to ensure
+           * that all query workers are done before we remove the
+           * mutexes, thus we will never disable mutexes once they
+           * have been activated. A node restart will disable them.
+           */
+          jam();
+          DEB_QUERY_WORKER(("(%u) Set UseQueryWorker tab: %u",
+                            instance(), tablePtr.i));
+          set_use_query_worker_fragments(tablePtr.p);
+        }
+      }
       locked_table = true;
       lock_table_exclusive(tablePtr.p);
       if (AlterTableReq::getAddAttrFlag(req->changeMask)) {
@@ -7779,6 +7803,32 @@ Dblqh::Fragrecord *Dblqh::get_fragptr(Uint32 tableId, Uint32 fragId) {
   FragrecordPtr fragPrimPtr;
   ndbrequire(getTableFragmentrec(tableId, fragId, tabPtr, fragPtr));
   return fragPtr.p;
+}
+
+void Dblqh::set_use_query_worker_fragments(Tablerec *tablePtrP) {
+  TablerecPtr tabPtr;
+  if (tablePtrP->primaryTableId != RNIL) {
+    jam();
+    tabPtr.i = tablePtrP->primaryTableId;
+    ptrCheckGuard(tabPtr, ctabrecFileSize, tablerec);
+  } else {
+    jam();
+    tabPtr.p = tablePtrP;
+  }
+  tabPtr.p->m_use_query_worker = true;
+  Uint32 num_fragments_in_array = tabPtr.p->num_fragments_in_array;
+  for (Uint32 i = 0; i < num_fragments_in_array; i++)
+  {
+    if (tabPtr.p->fragrec[i] != RNIL64)
+    {
+      FragrecordPtr fragPtr;
+      fragPtr.i = tabPtr.p->fragrec[i];
+      ndbrequire(c_fragment_pool.getPtr(fragPtr));
+      fragPtr.p->m_use_query_worker = true;
+      c_acc->set_use_query_worker(fragPtr.p->accFragptr);
+      c_tup->set_use_query_worker(fragPtr.p->tupFragptr);
+    }
+  }
 }
 
 void Dblqh::lock_table_exclusive(Tablerec *tablePtrP) {

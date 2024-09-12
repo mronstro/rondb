@@ -8030,6 +8030,7 @@ static const struct NDB_Modifier ndb_table_modifiers[] = {
     {NDB_Modifier::M_BOOL, STRING_WITH_LEN("NOLOGGING"), 0, {0}},
     {NDB_Modifier::M_BOOL, STRING_WITH_LEN("READ_BACKUP"), 0, {0}},
     {NDB_Modifier::M_BOOL, STRING_WITH_LEN("FULLY_REPLICATED"), 0, {0}},
+    {NDB_Modifier::M_BOOL, STRING_WITH_LEN("USE_QUERY_WORKER"), 0, {0}},
     {NDB_Modifier::M_STRING, STRING_WITH_LEN("PARTITION_BALANCE"), 0, {0}},
     {NDB_Modifier::M_BOOL, nullptr, 0, 0, {0}}};
 
@@ -8822,7 +8823,8 @@ enum COMMENT_ITEMS {
   NOLOGGING = 0,
   READ_BACKUP = 1,
   FULLY_REPLICATED = 2,
-  PARTITION_BALANCE = 3
+  PARTITION_BALANCE = 3,
+  USE_QUERY_WORKER = 4
 };
 
 /**
@@ -8845,12 +8847,15 @@ int ha_ndbcluster::get_old_table_comment_items(THD *thd,
   }
   const NDB_Modifier *mod_nologging = table_modifiers.get("NOLOGGING");
   const NDB_Modifier *mod_read_backup = table_modifiers.get("READ_BACKUP");
+  const NDB_Modifier *mod_use_query_worker =
+    table_modifiers.get("USE_QUERY_WORKER");
   const NDB_Modifier *mod_fully_replicated =
       table_modifiers.get("FULLY_REPLICATED");
   const NDB_Modifier *mod_frags = table_modifiers.get("PARTITION_BALANCE");
 
   if (mod_nologging->m_found) comment_items_shown[NOLOGGING] = true;
   if (mod_read_backup->m_found) comment_items_shown[READ_BACKUP] = true;
+  if (mod_use_query_worker->m_found) comment_items_shown[USE_QUERY_WORKER] = true;
   if (mod_fully_replicated->m_found)
     comment_items_shown[FULLY_REPLICATED] = true;
   if (mod_frags->m_found) comment_items_shown[PARTITION_BALANCE] = true;
@@ -8903,6 +8908,8 @@ void ha_ndbcluster::update_comment_info(THD *thd, HA_CREATE_INFO *create_info,
   }
   // Get the comment items from create_info
   const NDB_Modifier *mod_nologging = table_modifiers.get("NOLOGGING");
+  const NDB_Modifier *mod_use_query_worker =
+    table_modifiers.get("USE_QUERY_WORKER");
   const NDB_Modifier *mod_read_backup = table_modifiers.get("READ_BACKUP");
   const NDB_Modifier *mod_fully_replicated =
       table_modifiers.get("FULLY_REPLICATED");
@@ -8911,6 +8918,7 @@ void ha_ndbcluster::update_comment_info(THD *thd, HA_CREATE_INFO *create_info,
   // Get the comment items from the old Ndb table
   bool old_nologging = !ndbtab->getLogging();
   bool old_read_backup = ndbtab->getReadBackupFlag();
+  bool old_use_query_worker = ndbtab->getUseQueryWorker();
   bool old_fully_replicated = ndbtab->getFullyReplicated();
   NdbDictionary::Object::PartitionBalance old_part_bal =
       ndbtab->getPartitionBalance();
@@ -8927,6 +8935,10 @@ void ha_ndbcluster::update_comment_info(THD *thd, HA_CREATE_INFO *create_info,
       (mod_fully_replicated->m_found && mod_fully_replicated->m_val_bool);
   bool new_read_backup =
       (mod_read_backup->m_found && mod_read_backup->m_val_bool);
+  bool new_use_query_worker =
+    mod_use_query_worker->m_found ?
+      mod_use_query_worker->m_val_bool :
+      true;
 
   // Adding fully_replicated without having and adding read_backup,
   // and read_backup is specified in the old comment (thus it cannot
@@ -9002,6 +9014,11 @@ void ha_ndbcluster::update_comment_info(THD *thd, HA_CREATE_INFO *create_info,
     }
   }
 
+  bool add_use_query_worker = false;
+  if (old_use_query_worker != new_use_query_worker) {
+    add_use_query_worker = true;
+  }
+
   bool add_read_backup = false;
   if (!mod_read_backup->m_found) {
     if (old_table_comment[READ_BACKUP]) {
@@ -9055,7 +9072,7 @@ void ha_ndbcluster::update_comment_info(THD *thd, HA_CREATE_INFO *create_info,
   }
 
   if (!(add_nologging || add_read_backup || add_fully_replicated ||
-        add_part_bal)) {
+        add_part_bal || add_use_query_worker)) {
     /* No change of comment is needed. */
     return;
   }
@@ -9289,6 +9306,19 @@ void ha_ndbcluster::append_create_info(String *) {
             4502,
             "Table property is not the same as in comment for "
             "FULLY_REPLICATED property");
+      }
+    }
+
+    const NDB_Modifier *mod_use_query_worker =
+        table_modifiers.get("USE_QUERY_WORKER");
+    if (mod_use_query_worker->m_found) {
+      const bool comment_use_query_worker =
+        mod_use_query_worker->m_val_bool;
+      if (tab->getUseQueryWorker() != comment_use_query_worker) {
+        thd_ndb->push_warning(
+            4502,
+            "Table property is not the same as in comment for "
+            "USE_QUERY_WORKER property");
       }
     }
   }
@@ -9525,6 +9555,8 @@ int ha_ndbcluster::create(const char *path [[maybe_unused]],
         "Syntax error in COMMENT modifier");
   }
   const NDB_Modifier *mod_nologging = table_modifiers.get("NOLOGGING");
+  const NDB_Modifier *mod_use_query_worker =
+    table_modifiers.get("USE_QUERY_WORKER");
   const NDB_Modifier *mod_frags = table_modifiers.get("PARTITION_BALANCE");
   const NDB_Modifier *mod_read_backup = table_modifiers.get("READ_BACKUP");
   const NDB_Modifier *mod_fully_replicated =
@@ -9546,6 +9578,12 @@ int ha_ndbcluster::create(const char *path [[maybe_unused]],
       ndbd_support_read_backup(ndb->getMinDbNodeVersion()) == 0) {
     return create.failed_illegal_create_option(
         "READ_BACKUP not supported by current data node versions");
+  }
+
+  if ((mod_use_query_worker->m_found) &&
+      ndbd_support_use_query_worker(ndb->getMinDbNodeVersion()) == 0) {
+    return create.failed_illegal_create_option(
+        "USE_QUERY_WORKER not supported by current data node versions");
   }
 
   /*
@@ -9650,6 +9688,12 @@ int ha_ndbcluster::create(const char *path [[maybe_unused]],
   if (mod_nologging->m_found) {
     DBUG_PRINT("info", ("tab.setLogging(%u)", (!mod_nologging->m_val_bool)));
     tab.setLogging(!mod_nologging->m_val_bool);
+  }
+
+  if (mod_use_query_worker->m_found) {
+    DBUG_PRINT("info", ("tab.setUseQueryWorker(%u)",
+                       (mod_use_query_worker->m_val_bool)));
+    tab.setUseQueryWorker(mod_use_query_worker->m_val_bool);
   }
 
   {
@@ -15998,6 +16042,8 @@ bool ha_ndbcluster::inplace_parse_comment(NdbDictionary::Table *new_tab,
   const NDB_Modifier *mod_nologging = table_modifiers.get("NOLOGGING");
   const NDB_Modifier *mod_frags = table_modifiers.get("PARTITION_BALANCE");
   const NDB_Modifier *mod_read_backup = table_modifiers.get("READ_BACKUP");
+  const NDB_Modifier *mod_use_query_worker =
+    table_modifiers.get("USE_QUERY_WORKER");
   const NDB_Modifier *mod_fully_replicated =
       table_modifiers.get("FULLY_REPLICATED");
 
@@ -16019,6 +16065,14 @@ bool ha_ndbcluster::inplace_parse_comment(NdbDictionary::Table *new_tab,
       return true;
     }
     new_tab->setLogging(!mod_nologging->m_val_bool);
+  }
+
+  if (mod_use_query_worker->m_found) {
+    if (ndbd_support_use_query_worker(ndb->getMinDbNodeVersion()) == 0) {
+      *reason = "USE_QUERY_WORKER not supported by current data node versions";
+      return true;
+    }
+    new_tab->setUseQueryWorker(mod_use_query_worker->m_val_bool);
   }
 
   if (mod_read_backup->m_found) {

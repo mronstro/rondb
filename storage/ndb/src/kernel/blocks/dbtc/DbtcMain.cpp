@@ -1001,6 +1001,7 @@ void Dbtc::execTC_SCHVERREQ(Signal *signal) {
   tabptr.p->set_prepared(true);
   tabptr.p->set_enabled(false);
   tabptr.p->set_dropping(false);
+  tabptr.p->set_use_query_worker((Uint8)req->useQueryWorkerFlag);
   tabptr.p->noOfKeyAttr = desc->noOfKeyAttr;
   tabptr.p->hasCharAttr = desc->hasCharAttr;
   tabptr.p->noOfDistrKeys = desc->noOfDistrKeys;
@@ -1328,6 +1329,21 @@ void Dbtc::execALTER_TAB_REQ(Signal *signal) {
       }
       tabPtr.p->currentSchemaVersion = newTableVersion;
       break;
+    case AlterTabReq::AlterTableComplete:
+    {
+      if (AlterTableReq::getUseQueryWorkerFlag(req->changeMask)) {
+        if ((tabPtr.p->m_flags & TableRecord::TR_USE_QUERY_WORKER) != 0) {
+          jam();
+          D("Commit clear UseQueryWorkerFlag for table: " << tabPtr.i);
+          tabPtr.p->m_flags &= (~(TableRecord::TR_USE_QUERY_WORKER));
+        } else {
+          jam();
+          D("Commit set UseQueryWorkerFlag for table: " << tabPtr.i);
+          tabPtr.p->m_flags |= TableRecord::TR_USE_QUERY_WORKER;
+        }
+      }
+      break;
+    }
     default:
       ndbabort();
   }
@@ -4565,7 +4581,8 @@ Uint32 Dbtc::check_own_location_domain(Uint16 *nodes, Uint32 end) {
  * This method is executed once all KeyInfo has been obtained for
  * the TcKeyReq signal
  */
-void Dbtc::tckeyreq050Lab(Signal *signal, CacheRecordPtr const cachePtr,
+void Dbtc::tckeyreq050Lab(Signal *signal,
+                          CacheRecordPtr const cachePtr,
                           ApiConnectRecordPtr const apiConnectptr) {
   CacheRecord *const regCachePtr = cachePtr.p;
   UintR tnoOfBackup;
@@ -4618,6 +4635,7 @@ void Dbtc::tckeyreq050Lab(Signal *signal, CacheRecordPtr const cachePtr,
   req->only_readable_nodes = (regTcPtr->operation == ZREAD);
   req->jamBufferPtr = jamBuffer();
 
+  const bool use_query_worker = localTabptr.p->get_use_query_worker();
   if (localTabptr.p->m_flags & TableRecord::TR_FULLY_REPLICATED) {
     if (regTcPtr->operation == ZREAD) {
       /**
@@ -4719,7 +4737,7 @@ void Dbtc::tckeyreq050Lab(Signal *signal, CacheRecordPtr const cachePtr,
 
   regTcPtr->lqhInstanceKey = instanceKey;
   if (likely(Tdata3 != 0)) {
-    regTcPtr->recBlockNo = get_query_block_no(Tdata3);
+    regTcPtr->recBlockNo = get_query_block_no(Tdata3, use_query_worker);
   } else {
     jam();
     /**
@@ -4892,7 +4910,7 @@ void Dbtc::tckeyreq050Lab(Signal *signal, CacheRecordPtr const cachePtr,
         if (Tnode == TownNode) {
           jamDebug();
           regTcPtr->tcNodedata[0] = Tnode;
-          regTcPtr->recBlockNo = get_query_block_no(Tnode);
+          regTcPtr->recBlockNo = get_query_block_no(Tnode, use_query_worker);
           foundOwnNode = true;
         }  // if
       }    // for
@@ -4902,7 +4920,7 @@ void Dbtc::tckeyreq050Lab(Signal *signal, CacheRecordPtr const cachePtr,
         if ((node = check_own_location_domain(&regTcPtr->tcNodedata[0],
                                               tnoOfBackup + 1)) != 0) {
           regTcPtr->tcNodedata[0] = node;
-          regTcPtr->recBlockNo = get_query_block_no(node);
+          regTcPtr->recBlockNo = get_query_block_no(node, use_query_worker);
         }
       }
       if(ERROR_INSERTED(8048) || ERROR_INSERTED(8049))
@@ -4914,7 +4932,7 @@ void Dbtc::tckeyreq050Lab(Signal *signal, CacheRecordPtr const cachePtr,
 	  if (Tnode != TownNode) {
 	    jam();
 	    regTcPtr->tcNodedata[0] = Tnode;
-            regTcPtr->recBlockNo = get_query_block_no(Tnode);
+            regTcPtr->recBlockNo = get_query_block_no(Tnode, use_query_worker);
             g_eventLogger->info("Choosing %d", Tnode);
 	  }//if
 	}//for
@@ -17770,7 +17788,11 @@ bool Dbtc::sendScanFragReq(Signal *signal, ScanRecordPtr scanptr,
         !ScanFragReq::getKeyinfoFlag(req->requestInfo) &&
         ScanFragReq::getNoDiskFlag(req->requestInfo)) {
       Uint32 nodeId = refToNode(ref);
-      Uint32 blockNo = get_query_block_no(nodeId);
+      TableRecordPtr tabPtr;
+      tabPtr.i = scanptr.p->scanTableref;
+      tabPtr.p = &tableRecord[tabPtr.i];
+      const bool use_query_worker = tabPtr.p->get_use_query_worker();
+      Uint32 blockNo = get_query_block_no(nodeId, use_query_worker);
       if (blockNo == V_QUERY) {
         Uint32 instance_no = refToInstance(ref);
         ref = numberToRef(blockNo, instance_no, nodeId);

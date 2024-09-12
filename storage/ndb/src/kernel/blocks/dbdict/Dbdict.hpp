@@ -337,7 +337,8 @@ class Dbdict : public SimulatedBlock {
       TR_ReadBackup   = 0x20,
       TR_FullyReplicated = 0x40,
       TR_UseVarSizedDiskData = 0x80,
-      TR_HashFunction = 0x100
+      TR_HashFunction = 0x100,
+      TR_UseQueryWorker = 0x200
     };
     Uint8 m_extra_row_gci_bits;
     Uint8 m_extra_row_author_bits;

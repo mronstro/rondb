@@ -2162,17 +2162,19 @@ public:
      * these methods to initialise them.
      */
   }
-  Uint32 get_query_block_no(Uint32 nodeId) {
+  Uint32 get_query_block_no(Uint32 nodeId, bool use_query_worker) {
     Uint32 blockNo = DBLQH;
-    Uint32 num_query_threads = getNodeInfo(nodeId).m_query_threads;
-    if (num_query_threads > 0) {
-      /**
-       * There is query threads in the receiving node, this means that we will
-       * send the query to a virtual block with the same instance number in the
-       * same node id. The receiver will figure out how to map this to a
-       * real block number (could be our own node if nodeId = ownNodeId).
-       */
-      blockNo = V_QUERY;
+    if (use_query_worker) {
+      Uint32 num_query_threads = getNodeInfo(nodeId).m_query_threads;
+      if (num_query_threads > 0) {
+        /**
+         * There is query threads in the receiving node, this means that we will
+         * send the query to a virtual block with the same instance number in the
+         * same node id. The receiver will figure out how to map this to a
+         * real block number (could be our own node if nodeId = ownNodeId).
+         */
+        blockNo = V_QUERY;
+      }
     }
     return blockNo;
   }

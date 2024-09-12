@@ -1071,6 +1071,13 @@ bool Dbtup::seize_op_rec(Uint32 userPtr,
   return true;
 }
 
+void Dbtup::set_use_query_worker(Uint64 fragPtrI) {
+  FragrecordPtr fragPtr;
+  fragPtr.i = fragPtrI;
+  ndbrequire(c_fragment_pool.getPtr(fragPtr));
+  fragPtr.p->m_use_query_worker = true;
+}
+
 void Dbtup::releaseFragrec(FragrecordPtr regFragPtr) {
   for (Uint32 i = 0; i < NUM_TUP_FRAGMENT_MUTEXES; i++) {
     NdbMutex_Deinit(&regFragPtr.p->tup_frag_mutex[i]);

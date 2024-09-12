@@ -328,6 +328,7 @@ void Dbspj::execTC_SCHVERREQ(Signal *signal) {
     jam();
     tablePtr.p->m_flags |= TableRecord::TR_HASH_FUNCTION;
   }
+  tablePtr.p->set_use_query_worker((Uint8) req->useQueryWorkerFlag);
 
   DEB_HASH(("(%u) spj_index(%u) hashFunctionFlag: %u",
             instance(),
@@ -532,6 +533,21 @@ void Dbspj::execALTER_TAB_REQ(Signal *signal) {
         }
       }
       break;
+    case AlterTabReq::AlterTableComplete:
+    {
+      if (AlterTableReq::getUseQueryWorkerFlag(req->changeMask)) {
+        if ((tablePtr.p->m_flags & TableRecord::TR_USE_QUERY_WORKER) != 0) {
+          jam();
+          D("Commit clear UseQueryWorkerFlag for table: " << tablePtr.i);
+          tablePtr.p->m_flags &= (~(TableRecord::TR_USE_QUERY_WORKER));
+        } else {
+          jam();
+          D("Commit set UseQueryWorkerFlag for table: " << tablePtr.i);
+          tablePtr.p->m_flags |= TableRecord::TR_USE_QUERY_WORKER;
+        }
+      }
+      break;
+    }
     default:
       ndbabort();
   }
@@ -4454,6 +4470,11 @@ Uint32 Dbspj::lookup_build(Build_context &ctx, Ptr<Request> requestPtr,
     Uint32 transId2 = requestPtr.p->m_transId[1];
     Uint32 savePointId = ctx.m_savepointId;
 
+    TableRecordPtr tablePtr;
+    tablePtr.i = treeNodePtr.p->m_tableOrIndexId;
+    ptrCheckGuard(tablePtr, c_tabrecFilesize, m_tableRecord);
+    const bool use_query_worker = tablePtr.p->get_use_query_worker();
+
     Uint32 treeBits = node->requestInfo;
     Uint32 paramBits = param->requestInfo;
     // g_eventLogger->info("Dbspj::lookup_build() treeBits=%.8x paramBits=%.8x",
@@ -4560,7 +4581,7 @@ Uint32 Dbspj::lookup_build(Build_context &ctx, Ptr<Request> requestPtr,
           numberToRef(DBLQH, instanceNo, getOwnNodeId());
 #else
       treeNodePtr.p->m_send.m_ref =
-          numberToRef(get_query_block_no(getOwnNodeId()),
+          numberToRef(get_query_block_no(getOwnNodeId(), use_query_worker),
                       getInstance(src->tableSchemaVersion & 0xFFFF,
                                   src->fragmentData & 0xFFFF),
                       getOwnNodeId());
@@ -5583,6 +5604,7 @@ Uint32 Dbspj::getNodes(Signal *signal, BuildKeyReq &dst, Uint32 tableId) {
   Uint32 Tdata2 = conf->reqinfo;
   Uint32 nodeId = conf->nodes[0];
   Uint32 instanceKey = conf->instanceKey;
+  const bool use_query_worker = tablePtr.p->get_use_query_worker();
 
   DEBUG("HASH to nodeId:" << nodeId << ", instanceKey:" << instanceKey);
 
@@ -5620,7 +5642,7 @@ Uint32 Dbspj::getNodes(Signal *signal, BuildKeyReq &dst, Uint32 tableId) {
 
   dst.fragId = conf->fragId;
   dst.fragDistKey = (Tdata2 >> 16) & 255;
-  dst.receiverRef = numberToRef(get_query_block_no(nodeId),
+  dst.receiverRef = numberToRef(get_query_block_no(nodeId, use_query_worker),
                                 getInstanceNo(nodeId, instanceKey), nodeId);
 
   return 0;
@@ -5817,6 +5839,7 @@ Uint32 Dbspj::scanFrag_build(Build_context &ctx, Ptr<Request> requestPtr,
       ptrCheckGuard(tablePtr, c_tabrecFilesize, m_tableRecord);
       const bool readBackup =
           (tablePtr.p->m_flags & TableRecord::TR_READ_BACKUP) != 0;
+      const bool use_query_worker = tablePtr.p->get_use_query_worker();
 
       data.m_fragCount = 0;
 
@@ -5836,7 +5859,8 @@ Uint32 Dbspj::scanFrag_build(Build_context &ctx, Ptr<Request> requestPtr,
             Ptr<ScanFragHandle> fragPtr;
             const Uint32 fragId = signal->theData[variableLen++];
             const Uint32 ref =
-                numberToRef(get_query_block_no(getOwnNodeId()),
+                numberToRef(get_query_block_no(getOwnNodeId(),
+                                               use_query_worker),
                             getInstance(req->tableId, fragId), getOwnNodeId());
 
             DEBUG("Scan build, fragId: " << fragId << ", ref: " << ref);
@@ -5863,7 +5887,7 @@ Uint32 Dbspj::scanFrag_build(Build_context &ctx, Ptr<Request> requestPtr,
           data.m_fragCount = 1;
 
           const Uint32 ref = numberToRef(
-              get_query_block_no(getOwnNodeId()),
+              get_query_block_no(getOwnNodeId(), use_query_worker),
               getInstance(req->tableId, req->fragmentNoKeyLen), getOwnNodeId());
 
           if (!ERROR_INSERTED_CLEAR(17004) &&
@@ -6408,8 +6432,9 @@ Uint32 Dbspj::scanFrag_sendDihGetNodesReq(Signal *signal,
             }
           }
         }
+        const bool use_query_worker = tablePtr.p->get_use_query_worker();
         Uint32 instanceNo = getInstanceNo(nodeId, instanceKey);
-        Uint32 blockNo = get_query_block_no(nodeId);
+        Uint32 blockNo = get_query_block_no(nodeId, use_query_worker);
         fragPtr.p->m_ref = numberToRef(blockNo, instanceNo, nodeId);
         fragPtr.p->m_next_ref = fragPtr.p->m_ref;
         /**

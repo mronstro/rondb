@@ -800,6 +800,14 @@ bool NdbDictionary::Table::getFullyReplicated() const {
   return m_impl.m_fully_replicated;
 }
 
+void NdbDictionary::Table::setUseQueryWorker(bool val) {
+  m_impl.m_use_query_worker = val;
+}
+
+bool NdbDictionary::Table::getUseQueryWorker() const {
+  return m_impl.m_use_query_worker;
+}
+
 void NdbDictionary::Table::setRowChecksum(Uint32 val) {
   m_impl.m_row_checksum = val;
 }
