@@ -1641,60 +1641,51 @@ class Dbtc : public SimulatedBlock {
     }
     Uint64 databaseRecord;
     Uint32 currentSchemaVersion;
-    Uint16 m_flags;
     Uint8 tableType;
     Uint8 singleUserMode;
-
-    enum {
-      TR_ENABLED = 1 << 0,
-      TR_DROPPING = 1 << 1,
-      TR_STORED_TABLE = 1 << 2,
-      TR_PREPARED     = 1 << 3
-      ,TR_USER_DEFINED_PARTITIONING = 1 << 4
-      ,TR_READ_BACKUP = (1 << 5)
-      ,TR_FULLY_REPLICATED = (1<<6)
-      ,TR_DELAY_COMMIT = (1 << 7)
-      ,TR_HASH_FUNCTION = (1 << 8)
-      ,TR_USE_QUERY_WORKER = (1 << 9)
-    };
-    Uint8 get_use_query_worker() const
-      { return ((m_flags & TR_USE_QUERY_WORKER) != 0); }
-    void set_use_query_worker(Uint8 f) {
-      f ? m_flags |= (Uint16)TR_USE_QUERY_WORKER :
-         m_flags &= ~(Uint16)TR_USE_QUERY_WORKER;
-    }
-    Uint8 get_enabled() const { return (m_flags & TR_ENABLED) != 0; }
-    Uint8 get_dropping() const { return (m_flags & TR_DROPPING) != 0; }
-    Uint8 get_storedTable() const { return (m_flags & TR_STORED_TABLE) != 0; }
-    Uint8 get_prepared() const { return (m_flags & TR_PREPARED) != 0; }
-    void set_enabled(Uint8 f) {
-      f ? m_flags |= (Uint16)TR_ENABLED : m_flags &= ~(Uint16)TR_ENABLED;
-    }
-    void set_dropping(Uint8 f) {
-      f ? m_flags |= (Uint16)TR_DROPPING : m_flags &= ~(Uint16)TR_DROPPING;
-    }
-    void set_storedTable(Uint8 f) {
-      f ? m_flags |= (Uint16)TR_STORED_TABLE
-        : m_flags &= ~(Uint16)TR_STORED_TABLE;
-    }
-    void set_prepared(Uint8 f) {
-      f ? m_flags |= (Uint16)TR_PREPARED : m_flags &= ~(Uint16)TR_PREPARED;
-    }
-
-    Uint8 get_user_defined_partitioning() const {
-      return (m_flags & TR_USER_DEFINED_PARTITIONING) != 0;
-    }
-
-    void set_user_defined_partitioning(Uint8 f) {
-      f ? m_flags |= (Uint16)TR_USER_DEFINED_PARTITIONING
-        : m_flags &= ~(Uint16)TR_USER_DEFINED_PARTITIONING;
-    }
+    Uint8 m_use_query_worker;
+    Uint8 m_use_new_hash_function;
+    Uint8 m_stored_table;
+    Uint8 m_enabled;
+    Uint8 m_prepared;
+    Uint8 m_dropping;
+    Uint8 m_user_defined_partitioning;
+    Uint8 m_delayed_commit;
+    Uint8 m_read_backup;
+    Uint8 m_fully_replicated;
 
     Uint8 noOfKeyAttr;
     Uint8 hasCharAttr;
     Uint8 noOfDistrKeys;
     Uint8 hasVarKeys;
     Uint8 m_disk_based;
+
+    Uint8 get_use_new_hash_function() const { return m_use_new_hash_function; }
+    void set_use_new_hash_function(Uint8 f) {
+      m_use_new_hash_function = f;
+    }
+    Uint8 get_use_query_worker() const { return m_use_query_worker; }
+    void set_use_query_worker(Uint8 f) { m_use_query_worker = f; }
+    Uint8 get_enabled() const { return m_enabled; }
+    void set_enabled(Uint8 f) { m_enabled = f; }
+    Uint8 get_dropping() const { return m_dropping; }
+    void set_dropping(Uint8 f) { m_dropping = f; }
+    Uint8 get_storedTable() const { return m_stored_table; }
+    void set_storedTable(Uint8 f) { m_stored_table = f; }
+    Uint8 get_prepared() const { return m_prepared; }
+    void set_prepared(Uint8 f) { m_prepared = f; }
+    Uint8 get_user_defined_partitioning() const {
+      return m_user_defined_partitioning; }
+    void set_user_defined_partitioning(Uint8 f) {
+      m_user_defined_partitioning = f;
+    }
+    Uint8 get_delayed_commit() const { return m_delayed_commit; }
+    void set_delayed_commit(Uint8 f) { m_delayed_commit = f; }
+    Uint32 get_read_backup() const { return m_read_backup; }
+    void set_read_backup(Uint8 f) { m_read_backup = f; }
+    Uint32 get_fully_replicated() const { return m_fully_replicated; }
+    void set_fully_replicated(Uint8 f) { m_fully_replicated = f; }
+
 
     bool checkTable(Uint32 schemaVersion) const {
       return !get_dropping() &&
@@ -1965,6 +1956,8 @@ class Dbtc : public SimulatedBlock {
       Uint16 first_batch_size_rows;
       Uint16 batch_size_rows;
     };
+    Uint8 m_use_query_worker;
+
     Uint32 batch_byte_size;
     Uint32 m_scan_block_no;
 

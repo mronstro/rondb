@@ -982,58 +982,37 @@ void Dbtc::execTC_SCHVERREQ(Signal *signal) {
   const TcSchVerReq *req = CAST_CONSTPTR(TcSchVerReq, signal->getDataPtr());
   tabptr.i = req->tableId;
   ptrCheckGuard(tabptr, ctabrecFilesize, tableRecord);
+  tabptr.p->databaseRecord = RNIL64;
   tabptr.p->currentSchemaVersion = req->tableVersion;
-  tabptr.p->m_flags = 0;
-  tabptr.p->set_storedTable((bool)req->tableLogged);
-  BlockReference retRef = req->senderRef;
   tabptr.p->tableType = (Uint8)req->tableType;
+  tabptr.p->singleUserMode = (Uint8)req->singleUserMode;
+  tabptr.p->set_use_query_worker((Uint8)req->useQueryWorkerFlag);
+  tabptr.p->set_use_new_hash_function(req->hashFunctionFlag);
+  tabptr.p->set_storedTable((bool)req->tableLogged);
+  tabptr.p->set_enabled(false);
+  tabptr.p->set_prepared(true);
+  tabptr.p->set_dropping(false);
+  tabptr.p->set_user_defined_partitioning(req->userDefinedPartition);
+  tabptr.p->set_delayed_commit(req->readBackup);
+  tabptr.p->set_read_backup(req->readBackup);
+  tabptr.p->set_fully_replicated(req->fullyReplicated);
+  BlockReference retRef = req->senderRef;
   BlockReference retPtr = req->senderData;
   Uint32 noOfKeyAttr = req->noOfPrimaryKeys;
-  tabptr.p->singleUserMode = (Uint8)req->singleUserMode;
-  Uint32 userDefinedPartitioning = (Uint8)req->userDefinedPartition;
   ndbrequire(noOfKeyAttr <= MAX_ATTRIBUTES_IN_INDEX);
 
   const KeyDescriptor *desc = g_key_descriptor_pool.getPtr(tabptr.i);
   ndbrequire(noOfKeyAttr == desc->noOfKeyAttr);
 
-  ndbrequire(tabptr.p->get_prepared() == false);
-  ndbrequire(tabptr.p->get_enabled() == false);
-  tabptr.p->set_prepared(true);
-  tabptr.p->set_enabled(false);
-  tabptr.p->set_dropping(false);
-  tabptr.p->set_use_query_worker((Uint8)req->useQueryWorkerFlag);
   tabptr.p->noOfKeyAttr = desc->noOfKeyAttr;
   tabptr.p->hasCharAttr = desc->hasCharAttr;
   tabptr.p->noOfDistrKeys = desc->noOfDistrKeys;
   tabptr.p->hasVarKeys = desc->noOfVarKeys > 0;
-  tabptr.p->databaseRecord = RNIL64;
-  tabptr.p->set_user_defined_partitioning(userDefinedPartitioning);
-  if (req->hashFunctionFlag)
-  {
-    jam();
-    tabptr.p->m_flags |= TableRecord::TR_HASH_FUNCTION;
-  }
-
+  tabptr.p->m_disk_based = req->diskBased;
   DEB_HASH(("(%u) tc_tab(%u) hashFunctionFlag: %u",
             instance(),
             tabptr.i,
             req->hashFunctionFlag));
-  if (req->readBackup)
-  {
-    jam();
-    D("Set ReadBackup Flag for table " << tabptr.i);
-    tabptr.p->m_flags |= TableRecord::TR_READ_BACKUP;
-    tabptr.p->m_flags |= TableRecord::TR_DELAY_COMMIT;
-  } else {
-    D("No ReadBackup Flag for table " << tabptr.i);
-  }
-
-  if (req->fullyReplicated) {
-    jam();
-    tabptr.p->m_flags |= TableRecord::TR_FULLY_REPLICATED;
-  }
-
-  tabptr.p->m_disk_based = req->diskBased;
 
   TcSchVerConf *conf = (TcSchVerConf *)signal->getDataPtr();
   conf->senderRef = reference();
@@ -1255,7 +1234,7 @@ void Dbtc::execALTER_TAB_REQ(Signal *signal) {
     case AlterTabReq::AlterTablePrepare:
       jam();
       if (AlterTableReq::getReadBackupFlag(req->changeMask)) {
-        if ((tabPtr.p->m_flags & TableRecord::TR_READ_BACKUP) != 0) {
+        if (tabPtr.p->get_read_backup()) {
           /**
            * Table had Read Backup flag set and is now clearing it.
            * No special handling we simply reset the flags in the
@@ -1292,7 +1271,7 @@ void Dbtc::execALTER_TAB_REQ(Signal *signal) {
            * replicas for reading.
            */
           D("Prepare to set ReadBackup Flag for table: " << tabPtr.i);
-          tabPtr.p->m_flags |= TableRecord::TR_DELAY_COMMIT;
+          tabPtr.p->set_delayed_commit(1);
           scan_for_read_backup(signal, 0, senderData, senderRef);
           return;
         }
@@ -1303,28 +1282,28 @@ void Dbtc::execALTER_TAB_REQ(Signal *signal) {
       tabPtr.p->currentSchemaVersion = tableVersion;
 
       if (AlterTableReq::getReadBackupFlag(req->changeMask)) {
-        if ((tabPtr.p->m_flags & TableRecord::TR_READ_BACKUP) == 0) {
+        if (!tabPtr.p->get_read_backup()) {
           /**
            * We have set the DELAY_COMMIT flag, so need to reset here
            * since ALTER TABLE was reverted.
            */
           D("Revert ReadBackup Flag settings for table " << tabPtr.i);
-          tabPtr.p->m_flags &= (~(TableRecord::TR_DELAY_COMMIT));
+          tabPtr.p->set_delayed_commit(0);
         }
       }
       break;
     case AlterTabReq::AlterTableCommit:
       jam();
       if (AlterTableReq::getReadBackupFlag(req->changeMask)) {
-        if ((tabPtr.p->m_flags & TableRecord::TR_READ_BACKUP) != 0) {
+        if (tabPtr.p->get_read_backup()) {
           jam();
           D("Commit clear ReadBackup Flag for table: " << tabPtr.i);
-          tabPtr.p->m_flags &= (~(TableRecord::TR_DELAY_COMMIT));
-          tabPtr.p->m_flags &= (~(TableRecord::TR_READ_BACKUP));
+          tabPtr.p->set_delayed_commit(0);
+          tabPtr.p->set_read_backup(0);
         } else {
           jam();
           D("Commit set ReadBackup Flag for table: " << tabPtr.i);
-          tabPtr.p->m_flags |= TableRecord::TR_READ_BACKUP;
+          tabPtr.p->set_read_backup(1);
         }
       }
       tabPtr.p->currentSchemaVersion = newTableVersion;
@@ -1332,14 +1311,14 @@ void Dbtc::execALTER_TAB_REQ(Signal *signal) {
     case AlterTabReq::AlterTableComplete:
     {
       if (AlterTableReq::getUseQueryWorkerFlag(req->changeMask)) {
-        if ((tabPtr.p->m_flags & TableRecord::TR_USE_QUERY_WORKER) != 0) {
+        if (tabPtr.p->get_use_query_worker()) {
           jam();
           D("Commit clear UseQueryWorkerFlag for table: " << tabPtr.i);
-          tabPtr.p->m_flags &= (~(TableRecord::TR_USE_QUERY_WORKER));
+          tabPtr.p->set_use_query_worker(0);
         } else {
           jam();
           D("Commit set UseQueryWorkerFlag for table: " << tabPtr.i);
-          tabPtr.p->m_flags |= TableRecord::TR_USE_QUERY_WORKER;
+          tabPtr.p->set_use_query_worker(1);
         }
       }
       break;
@@ -3170,10 +3149,10 @@ void Dbtc::execATTRINFO(Signal *signal) {
 void Dbtc::hash(Signal *signal, CacheRecord *const regCachePtr) {
   UintR *Tdata32;
 
+  const TableRecord* tabPtrP = &tableRecord[regCachePtr->tableref];
   SegmentedSectionPtr keyInfoSection;
   UintR keylen = (UintR)regCachePtr->keylen;
   Uint32 distKey = regCachePtr->distributionKeyIndicator;
-  const TableRecord* tabPtrP = &tableRecord[regCachePtr->tableref];
   
   getSection(keyInfoSection, regCachePtr->keyInfoSectionI);
 
@@ -3182,8 +3161,7 @@ void Dbtc::hash(Signal *signal, CacheRecord *const regCachePtr) {
   /* Copy KeyInfo section from segmented storage into linear storage
    * in signal->theData
    */
-  bool use_new_hash_function =
-    ((tabPtrP->m_flags & TableRecord::TR_HASH_FUNCTION) != 0);
+  bool use_new_hash_function = tabPtrP->get_use_new_hash_function();
   if (keylen <= SectionSegment::DataLength)
   {
     /* No need to copy keyinfo into a linear space */
@@ -4636,7 +4614,7 @@ void Dbtc::tckeyreq050Lab(Signal *signal,
   req->jamBufferPtr = jamBuffer();
 
   const bool use_query_worker = localTabptr.p->get_use_query_worker();
-  if (localTabptr.p->m_flags & TableRecord::TR_FULLY_REPLICATED) {
+  if (localTabptr.p->get_fully_replicated()) {
     if (regTcPtr->operation == ZREAD) {
       /**
        * inform DIH if TreadAny is even relevant...so it does not have to loop
@@ -4753,7 +4731,7 @@ void Dbtc::tckeyreq050Lab(Signal *signal,
   Uint8 Toperation = regTcPtr->operation;
 
   regCachePtr->fragmentDistributionKey = (tnodeinfo >> 16) & 255;
-  Uint32 TreadBackup = (localTabptr.p->m_flags & TableRecord::TR_READ_BACKUP);
+  Uint32 TreadBackup = localTabptr.p->get_read_backup();
   if (Toperation == ZREAD || Toperation == ZREAD_EX) {
     Uint8 TopSimple = regTcPtr->opSimple;
     Uint8 TopDirty = regTcPtr->dirtyOp;
@@ -4988,7 +4966,7 @@ void Dbtc::tckeyreq050Lab(Signal *signal,
     if (regTcPtr->tcNodedata[0] == getOwnNodeId())
       c_counters.clocalWriteCount++;
 
-    if ((localTabptr.p->m_flags & TableRecord::TR_DELAY_COMMIT) != 0) {
+    if (localTabptr.p->get_delayed_commit()) {
       jam();
       /**
        * Set TF_LATE_COMMIT transaction property if INS/UPD/DEL is performed
@@ -15380,7 +15358,6 @@ void Dbtc::execSCAN_TABREQ(Signal *signal) {
     goto SCAN_TAB_error;
   }
 
-  ptrAss(tabptr, tableRecord);
   if ((aiLength == 0) || (!tabptr.p->checkTable(schemaVersion)) ||
       (scanConcurrency == 0) || (cConcScanCount >= cscanrecFileSize)) {
     goto SCAN_error_check;
@@ -15750,6 +15727,7 @@ Uint32 Dbtc::initScanrec(ScanRecordPtr scanptr, const ScanTabReq *scanTabReq,
   const UintR ri = scanTabReq->requestInfo;
   const Uint32 batchSizeRows = ScanTabReq::getScanBatch(ri);
   scanptr.p->scanApiRec = apiConnectPtr;
+  scanptr.p->m_use_query_worker = tabptr.p->get_use_query_worker();
   scanptr.p->scanTableref = tabptr.i;
   scanptr.p->scanSchemaVersion = scanTabReq->tableSchemaVersion;
   scanptr.p->scanNoFrag = 0;
@@ -15961,7 +15939,7 @@ void Dbtc::diFcountReqLab(Signal *signal, ScanRecordPtr scanptr,
   scanptr.p->m_read_any_node =
       (ScanFragReq::getReadCommittedFlag(scanptr.p->scanRequestInfo) ||
        scanptr.p->m_read_committed_base) &&
-      ((tabPtr.p->m_flags & TableRecord::TR_FULLY_REPLICATED) != 0);
+       tabPtr.p->get_fully_replicated();
 
   /*************************************************
    * THE FIRST STEP TO RECEIVE IS SUCCESSFULLY COMPLETED.
@@ -16430,14 +16408,14 @@ bool Dbtc::sendDihGetNodeReq(Signal *signal, ScanRecordPtr scanptr,
   ndbassert(scanFragId == lqhScanFragId ||
             scanptr.p->m_scan_dist_key == lqhScanFragId ||
             distr_key_indicator == 0 ||
-            (tabPtr.p->m_flags & TableRecord::TR_FULLY_REPLICATED));
+            tabPtr.p->get_fully_replicated());
 
   /**
    * This must be false as select count(*) otherwise
    *   can "pass" committing on backup fragments and
    *   get incorrect row count
    *
-   * The table property TR_READ_BACKUP guarantees that all commits will
+   * The table property READ BACKUP guarantees that all commits will
    * release locks on all replicas before reporting the commit to the
    * application. This means that we are safe to also read from backups
    * for committed reads. We avoid doing it for locking reads to avoid
@@ -16448,7 +16426,7 @@ bool Dbtc::sendDihGetNodeReq(Signal *signal, ScanRecordPtr scanptr,
    * more deadlocks than otherwise would happen.
    */
   NodeId primaryNodeId = nodeId;
-  Uint32 TreadBackup = (tabPtr.p->m_flags & TableRecord::TR_READ_BACKUP);
+  Uint32 TreadBackup = tabPtr.p->get_read_backup();
   if (TreadBackup &&
       (ScanFragReq::getReadCommittedFlag(scanptr.p->scanRequestInfo) ||
        scanptr.p->m_read_committed_base)) {
@@ -17787,11 +17765,8 @@ bool Dbtc::sendScanFragReq(Signal *signal, ScanRecordPtr scanptr,
         ScanFragReq::getReadCommittedFlag(req->requestInfo) &&
         !ScanFragReq::getKeyinfoFlag(req->requestInfo) &&
         ScanFragReq::getNoDiskFlag(req->requestInfo)) {
+      const bool use_query_worker = scanP->m_use_query_worker;
       Uint32 nodeId = refToNode(ref);
-      TableRecordPtr tabPtr;
-      tabPtr.i = scanptr.p->scanTableref;
-      tabPtr.p = &tableRecord[tabPtr.i];
-      const bool use_query_worker = tabPtr.p->get_use_query_worker();
       Uint32 blockNo = get_query_block_no(nodeId, use_query_worker);
       if (blockNo == V_QUERY) {
         Uint32 instance_no = refToInstance(ref);
@@ -18238,17 +18213,23 @@ void Dbtc::initTable(Signal *signal) {
   for (tabptr.i = 0; tabptr.i < ctabrecFilesize; tabptr.i++) {
     refresh_watch_dog();
     ptrAss(tabptr, tableRecord);
+    tabptr.p->databaseRecord = RNIL64;
     tabptr.p->currentSchemaVersion = 0;
-    tabptr.p->m_flags = 0;
-    tabptr.p->set_storedTable(true);
     tabptr.p->tableType = 0;
+    tabptr.p->singleUserMode = 0;
+    tabptr.p->set_use_query_worker(true);
+    tabptr.p->set_storedTable(true);
     tabptr.p->set_enabled(false);
     tabptr.p->set_dropping(false);
+    tabptr.p->set_user_defined_partitioning(false);
+    tabptr.p->set_delayed_commit(false);
+    tabptr.p->set_read_backup(false);
+    tabptr.p->set_fully_replicated(false);
     tabptr.p->noOfKeyAttr = 0;
     tabptr.p->hasCharAttr = 0;
     tabptr.p->noOfDistrKeys = 0;
     tabptr.p->hasVarKeys = 0;
-    tabptr.p->databaseRecord = RNIL64;
+    tabptr.p->m_disk_based = false;
   }  // for
 }  // Dbtc::initTable()
 

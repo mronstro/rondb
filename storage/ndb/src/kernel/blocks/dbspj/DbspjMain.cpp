@@ -328,7 +328,8 @@ void Dbspj::execTC_SCHVERREQ(Signal *signal) {
     jam();
     tablePtr.p->m_flags |= TableRecord::TR_HASH_FUNCTION;
   }
-  tablePtr.p->set_use_query_worker((Uint8) req->useQueryWorkerFlag);
+  //tablePtr.p->set_use_query_worker((Uint8) req->useQueryWorkerFlag);
+  tablePtr.p->set_use_query_worker((Uint8)0);
 
   DEB_HASH(("(%u) spj_index(%u) hashFunctionFlag: %u",
             instance(),
