@@ -1133,9 +1133,9 @@ is_main_or_rep_thread(unsigned thr_no)
 static bool
 is_ldm_thread(unsigned thr_no)
 {
-  if (globalData.ndbMtLqhThreads > 0)
+  if (globalData.ndbMtLqhThreadFibers > 0)
   {
-    return (thr_no < globalData.ndbMtLqhThreads);
+    return (thr_no < globalData.ndbMtLqhThreadFibers);
   }
   else
   {
@@ -1151,7 +1151,7 @@ is_tc_thread(unsigned thr_no)
   {
     num_tc_threads = globalData.ndbMtReceiveThreads;
   }
-  unsigned tc_base = globalData.ndbMtLqhThreads;
+  unsigned tc_base = globalData.ndbMtLqhThreadFibers;
   return thr_no >= tc_base &&
          thr_no <  tc_base + num_tc_threads;
 }
@@ -1164,7 +1164,7 @@ is_tc_only_thread(unsigned thr_no)
   {
     return false;
   }
-  unsigned tc_base = globalData.ndbMtLqhThreads;
+  unsigned tc_base = globalData.ndbMtLqhThreadFibers;
   return thr_no >= tc_base &&
          thr_no <  tc_base + num_tc_threads;
 }
@@ -1397,6 +1397,51 @@ struct alignas(NDB_CL) thr_data {
    */
 
   alignas(NDB_CL) unsigned m_thr_no;
+
+  /**
+   * Fiber id of this thr_data structure. Fiber id 0 represents
+   * both a fiber and the thread.
+   * Threads handle:
+   * ---------------
+   * - Wakeup
+   * - Going to sleep
+   * - Spinning
+   * - Assisting send thread
+   * - Handling full job buffer
+   * 
+   * Fibers handle
+   * -------------
+   * Timed signals
+   * Job buffers
+   * Local send buffers
+   * Switching between fibers
+   * Sending packed signals
+   * Flushing local send buffers
+   *
+   * Fiber id 0 representing thread has always m_num_fibers > 0
+   * and the array represents the fibers the thread handles.
+   * In fibers the m_num_fibers == 0 and the m_my_fibers is filled
+   * with nullptr's.
+   *
+   * FiberContext contains the context of the fibers in this thread.
+   * This includes storage of stack state and saved registers.
+   *
+   * The main reason for using fibers is to get work done while
+   * waiting for potential CPU cache misses that could take as much
+   * 500 cycles. A context switch between fibers should be doable
+   * in around 10 cycles. At the same time more fibers means more
+   * pressure on the CPU caches and thus adding fibers is a trade
+   * off that requires careful testing to be verified.
+   *
+   * Since fibers use the m_waiter from the thread we need to use
+   * a pointer to this which is initialised at startup.
+   */
+  unsigned m_fiber_id;
+  unsigned m_num_fibers;
+  tiny_fiber::FiberHandle m_thread_handle;
+  struct thr_data m_my_fibers[MAX_NUM_FIBERS];
+  tiny_fiber::FiberHandle *m_fiber_context[MAX_NUM_FIBERS];
+  struct thr_wait *m_waiter_ptr;
 
   /**
    * Is this a recv thread
@@ -5877,7 +5922,7 @@ static bool do_send(struct thr_data *selfptr, bool must_send,
       must_send = (is_main_thread(thr_no) || is_rep_thread(thr_no));
     }
     if (must_send && assist_send && g_send_threads &&
-        (!is_recv_thread(thr_no) || globalData.ndbMtLqhThreads == 0) &&
+        (!is_recv_thread(thr_no) || globalData.ndbMtLqhThreadFibers == 0) &&
         (selfptr->m_nosend_tmp == 0))
     {
       /**
@@ -6797,6 +6842,7 @@ execute_signals(thr_data *selfptr,
     /* Now execute the signal. */
     SignalHeader *s =
         reinterpret_cast<SignalHeader *>(read_buffer->m_data + read_pos);
+    /* SWITCH_FIBER */
     Uint32 seccnt = s->m_noOfSections;
     Uint32 siglen = (sizeof(*s)>>2) + s->theLength;
 
@@ -7220,7 +7266,7 @@ mt_get_instance_count(Uint32 block)
   case DBTUX:
   case BACKUP:
   case RESTORE:
-    return globalData.ndbMtLqhWorkers;
+    return globalData.ndbMtLqhWorkerFibers;
     break;
   case DBQLQH:
   case DBQACC:
@@ -7230,7 +7276,7 @@ mt_get_instance_count(Uint32 block)
   case QRESTORE:
     return globalData.ndbMtQueryWorkers;
   case PGMAN:
-    return globalData.ndbMtLqhWorkers + 1;
+    return globalData.ndbMtLqhWorkerFibers + 1;
     break;
   case DBTC:
   case DBSPJ:
@@ -7264,10 +7310,10 @@ mt_get_instance_count(Uint32 block)
  */
 void
 mt_add_thr_map(Uint32 block, Uint32 instance) {
-  Uint32 num_lqh_threads = globalData.ndbMtLqhThreads;
+  Uint32 num_lqh_threads = globalData.ndbMtLqhThreadFibers;
   Uint32 num_tc_threads = globalData.ndbMtTcThreads;
   Uint32 thr_no = 0;
-  Uint32 num_lqh_workers = globalData.ndbMtLqhWorkers;
+  Uint32 num_lqh_workers = globalData.ndbMtLqhWorkerFibers;
   bool receive_threads_only = false;
 
   if (num_lqh_threads == 0 &&
@@ -8133,10 +8179,22 @@ extern "C"
 void *
 mt_job_thread_main(void *thr_arg)
 {
+  struct thr_data *selfptr = (struct thr_data *)thr_arg;
+  /**
+   * The following call starts the first fiber in the thread and we will never
+   * return after this call.
+   */
+  tiny_fiber::SwitchFiber(selfptr->thread_handle, selfptr->m_fiber_context[0]);
+  return nullptr;
+}
+
+extern "C"
+void *
+mt_fiber_main(void *fiber_arg)
+{
   unsigned char signal_buf[SIGBUF_SIZE];
   Signal *signal;
 
-  struct thr_data *selfptr = (struct thr_data *)thr_arg;
   init_thread(selfptr);
   selfptr->m_is_recv_thread = false;
   selfptr->m_recvdata = nullptr;
@@ -8184,6 +8242,7 @@ mt_job_thread_main(void *thr_arg)
   Ndb_GetRUsage(&selfptr->m_scan_time_queue_rusage, false);
   init_jbb_estimate(selfptr, now);
 
+  Uint32 fiber_id = selfptr->m_fiber_id
   while (globalData.theRestartFlag != perform_stop) {
     loops++;
 
@@ -8815,6 +8874,8 @@ void mt_getPerformanceTimers(Uint32 self, Uint64 &micros_sleep,
   struct thr_repository *rep = g_thr_repository;
   struct thr_data *selfptr = &rep->m_thread[self];
 
+  require(selfptr->m_fiber_id == 0);
+  assert(selfptr->m_num_fibers > 0);
   /**
    * Internally in mt.cpp sleep time now includes spin time. However
    * to ensure backwards compatibility we report them separate to
@@ -9049,7 +9110,7 @@ static void flush_local_signals(struct thr_data *selfptr, Uint32 dst) {
     if (need_wakeup) {
       // Wakeup immediately
       selfptr->m_wake_threads_mask.clear(dst);
-      wakeup(&dstptr->m_waiter, dstptr);
+      wakeup(dstptr->m_waiter_ptr, dstptr);
     }
     else
     {
@@ -9229,7 +9290,7 @@ static inline void wakeup_pending_signals(thr_data *selfptr) {
        thr_no = selfptr->m_wake_threads_mask.find_next(thr_no + 1)) {
     require(selfptr->m_wake_threads_mask.get(thr_no));
     thr_data *thrptr = &g_thr_repository->m_thread[thr_no];
-    wakeup(&thrptr->m_waiter, thrptr);
+    wakeup(thrptr->m_waiter_ptr, thrptr);
   }
   selfptr->m_wake_threads_mask.clear();
 }
@@ -9298,7 +9359,7 @@ insert_local_signal(struct thr_data *selfptr,
 Uint32
 mt_getMainThrmanInstance()
 {
-  Uint32 recv_base = globalData.ndbMtLqhThreads +
+  Uint32 recv_base = globalData.ndbMtLqhThreadFibers +
                      globalData.ndbMtTcThreads;
   Uint32 main_base = recv_base +
                      globalData.ndbMtReceiveThreads;
@@ -9314,7 +9375,7 @@ mt_getMainThrmanInstance()
 Uint32
 mt_getRepThrmanInstance()
 {
-  Uint32 recv_base = globalData.ndbMtLqhThreads +
+  Uint32 recv_base = globalData.ndbMtLqhThreadFibers +
                      globalData.ndbMtTcThreads;
   Uint32 main_base = recv_base +
                      globalData.ndbMtReceiveThreads;
@@ -9388,7 +9449,7 @@ void sendprioa(Uint32 self, const SignalHeader *s, const uint32 *data,
   unlock(&dstptr->m_jba.m_write_lock);
   if (selfptr != dstptr)
   {
-    wakeup(&(dstptr->m_waiter), dstptr);
+    wakeup(dstptr->m_waiter_ptr, dstptr);
   }
   if (buf_used) selfptr->m_next_buffer = seize_buffer(rep, self, true);
 }
@@ -9543,7 +9604,7 @@ static void sendprioa_STOP_FOR_CRASH(const struct thr_data *selfptr,
      * dump process forever. We will wait at most 3 seconds.
      */
     const NDB_TICKS start_try_wakeup = NdbTick_getCurrentTicks();
-    while (try_wakeup(&(dstptr->m_waiter), dstptr) != 0)
+    while (try_wakeup(dstptr->m_waiter_ptr, dstptr) != 0)
     {
       if (++loop_count >= 10000)
       {
@@ -9677,6 +9738,58 @@ static void thr_init(struct thr_repository *rep, struct thr_data *selfptr,
 #ifdef ERROR_INSERT
   selfptr->m_delayed_prepare = false;
 #endif
+  /**
+   * Initialising Fibers in the thread */
+  if (globalData.theNumFibersPerThread > 0 &&
+      !is_recv_thread(selfptr->m_thr_no))
+  {
+    Uint32 num_fibers = globalData.theNumFibersPerThread;
+    if (is_main_or_rep_thread(selfptr->m_thr_no) ||
+        is_tc_thread(selfptr->m_thr_no))
+    {
+      num_fibers = 1;
+    }
+    Uint32 base_thr_no = selfptr->m_thr_no % globalData.ndbMtLqhThreads;
+    Uint32 thr_no = selfptr->m_thr_no;
+    Uint32 fiber_id = (thr_no - base_thr_no) / globalData.theFibersPerThread;
+    selfptr->m_fiber_id = fiber_id;
+    if (fiber_id == 0) {
+      tiny_thread::FiberHandle thread_handle;
+      thread_handle = tiny_fiber::CreateFiberFromThread();
+        selfptr->m_thread_handle = thread_handle;
+    } else {
+      selfptr->m_thread_handle = nullptr;
+    }
+    tiny_thread::FiberHandle fiber_handle;
+    uint32_t stack_size = uint32_t(2 * 1024 * 1024);
+    CreateFiber(stack_size, mt_fiber_main, &fiber_handle);
+    selfptr->m_fiber_handle = fiber_handle;
+    selfptr->m_num_fibers = num_fibers;
+    struct thr_data* base_selfptr = &rep->m_thread[base_thr_no];
+    selfptr->m_waiter_ptr = &base_selfptr->m_waiter;
+    Uint32 next_thr_no = base_thr_no;
+    for (Uint32 i = 0; i < num_fibers; i++)
+    {
+      struct thr_data* next_selfptr = &rep->m_thread[next_thr_no];
+      selfptr->m_my_fibers[i] = next_selfptr;
+      selfptr->m_fiber_context[i] = nullptr;
+      next_thr_no += num_fibers;
+    }
+  } else {
+    selfptr->m_fiber_id = 0;
+    selfptr->m_num_fibers = 0;
+  }
+}
+
+static void
+init_fiber_context(struct thr_data *selfptr, unsigned thr_no) {
+  Uint32 num_fibers = globalData.theFibersPerThread;
+  Uint32 next_thr_no = thr_no;
+  for (Uint32 i = 0; i < num_fibers; i++) {
+    struct thr_data* next_selfptr = &rep->m_thread[next_thr_no];
+    selfptr->m_fiber_context[i] = next_selfptr->m_fiber_handle;
+    next_thr_no += num_fibers;
+  }
 }
 
 static void receive_lock_init(Uint32 recv_thread_id, thr_repository *rep) {
@@ -9721,6 +9834,10 @@ rep_init(struct thr_repository* rep, unsigned int cnt, Ndbd_mem_manager *mm)
   for (unsigned int i = 0; i < cnt; i++) {
     thr_init(rep, &rep->m_thread[i], cnt, i);
   }
+  for (unsigned int i = 0; i < globalData.ndbMtLqhThreads; i++)
+  {
+    init_fiber_context(&rep->m_thread[i], i);
+  }
 
   rep->stopped_threads = 0;
 
@@ -9747,7 +9864,7 @@ static Uint32
 get_total_number_of_block_threads(void)
 {
   return (globalData.ndbMtMainThreads +
-          globalData.ndbMtLqhThreads +
+          globalData.ndbMtLqhThreadFibers +
           globalData.ndbMtTcThreads +
           globalData.ndbMtReceiveThreads);
 }
@@ -9909,7 +10026,8 @@ ThreadConfig::init_crash_mutex()
  * constructor time the global memory manager is not available.
  */
 void ThreadConfig::init() {
-  Uint32 num_lqh_threads = globalData.ndbMtLqhThreads;
+  Uint32 num_lqh_threads = globalData.ndbMtLqhThreadFibers;
+                
   Uint32 num_tc_threads = globalData.ndbMtTcThreads;
   Uint32 num_recv_threads = globalData.ndbMtReceiveThreads;
 
@@ -10808,7 +10926,7 @@ Uint32 mt_get_addressable_threads(const Uint32 my_thr_no,
 void mt_wakeup(class SimulatedBlock *block) {
   Uint32 thr_no = block->getThreadId();
   struct thr_data *thrptr = &g_thr_repository->m_thread[thr_no];
-  wakeup(&thrptr->m_waiter, thrptr);
+  wakeup(thrptr->m_waiter_ptr, thrptr);
 }
 
 #ifdef VM_TRACE

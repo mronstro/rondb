@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2003, 2024, Oracle and/or its affiliates.
-   Copyright (c) 2021, 2023, Hopsworks and/or its affiliates.
+   Copyright (c) 2021, 2024, Hopsworks and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -92,7 +92,9 @@ struct GlobalData {
   bool       isNdbMt;    // ndbd multithreaded, no workers
   bool       isNdbMtLqh; // ndbd multithreaded, LQH workers
   bool       thePrintFlag;
-  Uint32     ndbMtLqhWorkers;
+  Uint32     ndbMtLqhWorkerThreads;
+  Uint32     ndbMtLqhWorkerFibers;
+  Uint32     ndbMtLqhThreadFibers;
   Uint32     ndbMtLqhThreads;
   Uint32     ndbMtTcWorkers;
   Uint32     ndbMtTcThreads;
@@ -126,6 +128,8 @@ struct GlobalData {
   Uint32     theMaxNoOfTables;
   Uint32     theMaxNoOfOrderedIndexes;
   Uint32     theMaxNoOfUniqueHashIndexes;
+
+  Uint32     theNumberOfFibersPerThread;
 
   bool       theGracefulShutdownFlag;
   bool       theUseOnlyIPv4Flag;
