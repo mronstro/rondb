@@ -282,14 +282,14 @@ void Thrman::execREAD_CONFIG_REQ(Signal *signal) {
   m_spin_time_change_count = 0;
   Uint32 thr_no = instance() - 1;
   getThreadName(&m_thread_name[0]);
-  if (globalData.ndbMtLqhThreads > 0)
+  if (globalData.ndbMtLqhThreadFibers > 0)
   {
-    if (thr_no < globalData.ndbMtLqhThreads)
+    if (thr_no < globalData.ndbMtLqhThreadFibers)
       m_ldm_thread = true;
-    else if (thr_no < (globalData.ndbMtLqhThreads +
+    else if (thr_no < (globalData.ndbMtLqhThreadFibers +
                        globalData.ndbMtTcThreads))
       m_tc_thread = true;
-    else if (thr_no < globalData.ndbMtLqhThreads +
+    else if (thr_no < globalData.ndbMtLqhThreadFibers +
                       globalData.ndbMtTcThreads +
                       globalData.ndbMtReceiveThreads)
       m_recv_thread = true;

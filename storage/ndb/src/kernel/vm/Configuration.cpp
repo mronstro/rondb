@@ -328,7 +328,7 @@ static char *get_and_validate_path(ndb_mgm_configuration_iterator &iter,
 Uint32
 Configuration::get_num_threads()
 {
-  Uint32 num_ldm_threads = globalData.ndbMtLqhThreads;
+  Uint32 num_ldm_threads = globalData.ndbMtLqhThreadFibers;
   Uint32 num_tc_threads = globalData.ndbMtTcThreads;
   Uint32 num_main_threads = globalData.ndbMtMainThreads;
   Uint32 num_recv_threads = globalData.ndbMtReceiveThreads;
@@ -1579,8 +1579,9 @@ Configuration::getSharedLdmInstance(Uint32 instance)
   if (instance == 0 ||
       instance > globalData.ndbMtLqhWorkers)
     return 0;
-  return m_thr_config.get_shared_ldm_instance(instance,
-                                              globalData.ndbMtLqhThreads);
+  return m_thr_config.get_shared_ldm_instance(
+    instance,
+    globalData.ndbMtLqhThreadFibers);
 }
 
 void
@@ -1897,6 +1898,9 @@ Configuration::setupConfiguration()
 
     globalData.ndbMtLqhWorkers = ldm_workers;
     globalData.ndbMtLqhThreads = ldm_threads;
+    globalData.ndbMtLqhThreadFibers =
+      globalData.ndbMtLqhThreads *
+      globalData.theNumberOfFibersPerThread;
     /**
      * Each block thread will have one Query worker, thus no more
      * any need for recover threads.

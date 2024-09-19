@@ -590,7 +590,7 @@ class alignas(NDB_CL) SimulatedBlock
 
   Uint32 getFirstReceiveThreadId()
   {
-    return globalData.ndbMtLqhThreads +
+    return globalData.ndbMtLqhThreadFibers +
            globalData.ndbMtTcThreads;
   }
 

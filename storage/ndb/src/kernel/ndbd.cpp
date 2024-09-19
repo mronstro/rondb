@@ -607,11 +607,13 @@ static int get_multithreaded_config(EmulatorData &ed) {
   Uint32 threadcount = conf.getThreadCount();
   g_eventLogger->info("NDBMT: MaxNoOfExecutionThreads=%u", threadcount);
 
-  g_eventLogger->info("NDBMT: ldm_threads=%u ldm_workers=%u"
+  g_eventLogger->info("NDBMT: ldm_threads=%u ldm_fibers=%u ldm_workers=%u"
                       " query_workers=%u\n"
                       " tc_threads=%u tc_workers=%u"
                       " send=%u receive=%u main_threads=%u",
-                      globalData.ndbMtLqhThreads, globalData.ndbMtLqhWorkers,
+                      globalData.ndbMtLqhThreads,
+                      globalData.ndbMtLqhThreadFibers,
+                      globalData.ndbMtLqhWorkers,
                       globalData.ndbMtQueryWorkers,
                       globalData.ndbMtTcThreads, globalData.ndbMtTcWorkers,
                       globalData.ndbMtSendThreads, globalData.ndbMtReceiveThreads,

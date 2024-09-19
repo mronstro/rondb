@@ -2260,16 +2260,16 @@ Ndbd_mem_manager::init_memory_pools()
    */
   glob_mem_manager = this;
   unsigned int num_threads =
-    globalData.ndbMtLqhThreads +
+    globalData.ndbMtLqhThreadFibers +
     globalData.ndbMtReceiveThreads + 
     globalData.ndbMtMainThreads +
     globalData.ndbMtTcThreads;
   init_lc_ndbd_memory_pool(
-                           (unsigned int)RG_COUNT,    // Number of memory regions
-                           (unsigned int)num_threads, // Number of pools to use for malloc/free
-                           (unsigned int)globalData.ndbMtReceiveThreads,
-                           ndb_malloc_backend,
-                           ndb_free_backend);
+    (unsigned int)RG_COUNT,    // Number of memory regions
+    (unsigned int)num_threads, // Number of pools to use for malloc/free
+    (unsigned int)globalData.ndbMtReceiveThreads,
+    ndb_malloc_backend,
+    ndb_free_backend);
 }
 
 template class Vector<InitChunk>;

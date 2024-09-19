@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2003, 2026, Oracle and/or its affiliates.
-   Copyright (c) 2021, 2025, Hopsworks and/or its affiliates.
+   Copyright (c) 2021, 2026, Hopsworks and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -90,7 +90,9 @@ struct GlobalData {
   Uint32     activateSendPacked;
 
   bool       thePrintFlag;
+  Uint32     ndbMtLqhWorkerThreads;
   Uint32     ndbMtLqhWorkers;
+  Uint32     ndbMtLqhThreadFibers;
   Uint32     ndbMtLqhThreads;
   Uint32     ndbMtTcWorkers;
   Uint32     ndbMtTcThreads;
@@ -128,6 +130,8 @@ struct GlobalData {
   Uint32     theMaxSendDelay;
 
   bool       theUseTcInSameRRGroup;
+  Uint32     theNumberOfFibersPerThread;
+
   bool       theGracefulShutdownFlag;
   bool       theUseOnlyIPv4Flag;
   bool       theUseContainerMemoryFlag;
@@ -151,8 +155,11 @@ struct GlobalData {
     theRestartFlag = perform_start;
     theStopFlag = false;
     thePrintFlag = false;
+    ndbMtLqhWorkerThreads = 0;
     ndbMtLqhWorkers = 0;
+    ndbMtLqhThreadFibers = 0;
     ndbMtLqhThreads = 0;
+    theNumberOfFibersPerThread = 1;
     ndbMtTcWorkers = 0;
     ndbMtTcThreads = 0;
     ndbMtQueryWorkers = 0;
@@ -217,7 +224,7 @@ struct GlobalData {
   Uint32 *getWatchDogPtr();
 
   Uint32 getBlockThreads() const {
-    return ndbMtLqhThreads +
+    return ndbMtLqhThreadFibers +
            ndbMtTcThreads +
            ndbMtMainThreads +
            ndbMtReceiveThreads;
