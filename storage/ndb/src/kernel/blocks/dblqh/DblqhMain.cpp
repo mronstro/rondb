@@ -8770,7 +8770,7 @@ void Dblqh::execLQHKEYREQ(Signal *signal) {
       }
       else
       {
-        jam();
+        jamDebug();
         /**
          * We are performing a non-dirty operation in a Query thread, this means
          * that we need to acquire an operation record from the LDM block owning
@@ -9115,7 +9115,7 @@ void Dblqh::execLQHKEYREQ(Signal *signal) {
      * Only allowed use case for no primary key is DELETE by ROWID.
      * This is used by COPY Fragment and Restore fragment.
      */
-    if (refToMain(senderRef) == DBSPJ) {
+    if (unlikely(refToMain(senderRef) == DBSPJ)) {
       jam();
       ndbassert(!LqhKeyReq::getNrCopyFlag(Treqinfo));
       /* Reply with NO_TUPLE_FOUND */
@@ -9154,12 +9154,13 @@ void Dblqh::execLQHKEYREQ(Signal *signal) {
   regTcPtr->gci_lo = LqhKeyReq::getGCIFlag(Treqinfo) ? ~Uint32(0) : 0;
   nextPos += LqhKeyReq::getGCIFlag(Treqinfo);
 
+#ifdef VM_TRACE
   if (LqhKeyReq::getRowidFlag(Treqinfo)) {
     ndbassert(refToMain(senderRef) != DBTC);
   } else if (op == ZINSERT) {
     ndbassert(refToMain(senderRef) == DBTC);
   }
-
+#endif
   if (unlikely((LqhKeyReq::FixedSignalLength + nextPos + TreclenAiLqhkey) !=
                signal->length())) {
     g_eventLogger->info("nextPos: %u, TreclenAiLqhkey: %u, siglen: %u", nextPos,
@@ -9324,10 +9325,8 @@ void Dblqh::execLQHKEYREQ(Signal *signal) {
       useStat.m_fragCopyRowsIns++;
     
     useStat.m_fragBytesCopied+= (signal->length() << 2);
-  }
-  else if (!m_is_in_query_thread &&
-           refToMain(senderRef) != getRESTORE())
-  {
+  } else if (!m_is_in_query_thread &&
+             refToMain(senderRef) != getRESTORE()) {
     Fragrecord::UsageStat& useStat = fragptr.p->m_useStat;
     /**
      * Don't count for NR fragcopy, just 'normal' operation.
@@ -9379,7 +9378,7 @@ void Dblqh::execLQHKEYREQ(Signal *signal) {
   Uint8 TcopyType = fragptr.p->fragCopy;
   LogPartRecord *logPart = fragptr.p->m_log_part_ptr_p;
   tfragDistKey = fragptr.p->fragDistributionKey;
-  if (fragptr.p->fragStatus == Fragrecord::ACTIVE_CREATION) {
+  if (unlikely(fragptr.p->fragStatus == Fragrecord::ACTIVE_CREATION)) {
     jam();
     /**
      * Starting node in active creation mode, we set activeCreat to
@@ -9806,7 +9805,7 @@ void Dblqh::prepareContinueAfterBlockedLab(
      *    refCount to be 0 (usually happen immediately). After this we
      *    complete the close of the scan request.
      */
-    jam();
+    jamDebug();
     Uint32 ttcScanOp = KeyInfo20::getScanOp(regTcPtr->tcScanInfo);
     scanptr.i = RNIL;
     if (m_is_query_block)
@@ -9837,7 +9836,7 @@ void Dblqh::prepareContinueAfterBlockedLab(
        *
        * Thus only NDB API users will get access to the query threads.
        */
-      jam();
+      jamDebug();
       if (m_is_query_block)
       {
         m_curr_lqh->unlock_take_over_hash();
@@ -9850,7 +9849,7 @@ void Dblqh::prepareContinueAfterBlockedLab(
                                                       true);
     if (unlikely(regTcPtr->accOpPtr == RNIL))
     {
-      jam();
+      jamDebug();
       if (m_is_query_block)
       {
         m_curr_lqh->unlock_take_over_hash();
@@ -9921,7 +9920,7 @@ void Dblqh::prepareContinueAfterBlockedLab(
     }
     else
     {
-      jam();
+      jamDebug();
       /**
        * Delete by ROWID from RESTORE
        */
@@ -9940,7 +9939,7 @@ void Dblqh::prepareContinueAfterBlockedLab(
      * need to be careful with all variants of how we deal with syncing
      * this starting fragment with the live fragment.
      */
-    jam();
+    jamDebug();
     ndbassert(!m_is_query_block);
     ndbrequire(!regTcPtr->indTakeOver);
     regTcPtr->totSendlenAi = regTcPtr->totReclenAi;
@@ -9953,7 +9952,7 @@ void Dblqh::prepareContinueAfterBlockedLab(
      * but to the other nodes we will act as if we have applied the
      * changes.
      */
-    jam();
+    jamDebug();
     ndbassert(!m_is_query_block);
     ndbrequire(!regTcPtr->indTakeOver);
     ndbassert(activeCreat == Fragrecord::AC_IGNORED);
@@ -9974,7 +9973,7 @@ void Dblqh::exec_acckeyreq(Signal *signal, TcConnectionrecPtr regTcPtr) {
   /*  ACCKEYREQ < */
   /* ************ */
   prefetch_op_record_3((Uint32 *)regTcPtr.p->accConnectPtrP);
-  jam();
+  jamDebug();
   {
     Uint32 taccreq = 0;
     taccreq = AccKeyReq::setOperation(taccreq, regTcPtr.p->operation);
@@ -10011,7 +10010,7 @@ void Dblqh::exec_acckeyreq(Signal *signal, TcConnectionrecPtr regTcPtr) {
   m_tc_connect_ptr = regTcPtr;
   if ((regTcPtr.p->indTakeOver == ZTRUE) && m_is_query_block)
   {
-    jam();
+    jamDebug();
     scanptr.p->m_takeOverRefCount--;
     mb();
   }
@@ -10047,7 +10046,7 @@ void Dblqh::exec_acckeyreq(Signal *signal, TcConnectionrecPtr regTcPtr) {
 }  // Dblqh::prepareContinueAfterBlockedLab()
 
 void Dblqh::handle_nr_copy(Signal *signal, Ptr<TcConnectionrec> regTcPtr) {
-  jam();
+  jamDebug();
   Uint64 fragPtr = fragptr.p->tupFragptr;
   Uint32 op = regTcPtr.p->operation;
 
@@ -10061,7 +10060,7 @@ void Dblqh::handle_nr_copy(Signal *signal, Ptr<TcConnectionrec> regTcPtr) {
      * needed to make the fragment durable, but from the point of
      * view of executing LQHKEYREQ we're a normal fragment now.
      */
-    jam();
+    jamDebug();
     if (TRACENR_FLAG) TRACENR(" Waiting for COPY_ACTIVEREQ" << endl);
     ndbassert(!LqhKeyReq::getNrCopyFlag(regTcPtr.p->reqinfo));
     regTcPtr.p->activeCreat = Fragrecord::AC_NORMAL;
@@ -11093,7 +11092,7 @@ Dblqh::handlePendingAbort(Signal *signal, TcConnectionrec *regTcPtr)
 /*  ACCKEYCONF  > */
 /* ************>> */
 void Dblqh::execACCKEYCONF(Signal *signal) {
-  jamEntry();
+  jamEntryDebug();
   ndbassert(!m_is_query_block);
   if (ERROR_INSERTED(5095)) {
     jam();
@@ -11147,9 +11146,8 @@ void Dblqh::execACCKEYCONF(Signal *signal) {
    * execABORT since we could have outstanding signals waiting to
    * be executed.
    */
-  if (regTcPtr->transactionState != TcConnectionrec::WAIT_ACC)
-  {
-    jam();
+  if (unlikely(regTcPtr->transactionState != TcConnectionrec::WAIT_ACC)) {
+    jamDebug();
     /**
      * The only possible state to be here is in the state
      * WAIT_ACC_ABORT. This cannot happen due to interactions from
@@ -11165,9 +11163,7 @@ void Dblqh::execACCKEYCONF(Signal *signal) {
                  TcConnectionrec::WAIT_ACC_ABORT);
     handlePendingAbort(signal, regTcPtr);
     return;
-  }
-  else if (unlikely(c_acc->checkOpPendingAbort(regTcPtr->accConnectrec)))
-  {
+  } else if (unlikely(c_acc->checkOpPendingAbort(regTcPtr->accConnectrec))) {
     jam();
     /**
      * We got the lock on the row and when we got the lock everything was
@@ -11180,9 +11176,7 @@ void Dblqh::execACCKEYCONF(Signal *signal) {
     regTcPtr->abortState = TcConnectionrec::ABORT_FROM_LQH;
     handlePendingAbort(signal, regTcPtr);
     return;
-  }
-  else
-  {
+  } else {
     /**
      * The normal path in the code, we got the lock and can now proceed
      * with the operation.
@@ -11212,15 +11206,15 @@ void Dblqh::continueACCKEYCONF(Signal *signal, Uint32 localKey1,
     Uint32 op = signal->theData[1];
     Uint32 requestInfo = regTcPtr->reqinfo;
     if (likely(op == ZINSERT || op == ZUPDATE)) {
-      jam();
+      jamDebug();
       regTcPtr->operation = op;
     } else {
-      jam();
+      jamDebug();
       warningEvent("Converting %d to ZUPDATE", op);
       op = regTcPtr->operation = ZUPDATE;
     }
     if (regTcPtr->seqNoReplica == 0) {
-      jam();
+      jamDebug();
       requestInfo &=
           ~(LqhKeyReq::RI_OPERATION_MASK << LqhKeyReq::RI_OPERATION_SHIFT);
       LqhKeyReq::setOperation(requestInfo, op);
@@ -11381,32 +11375,27 @@ Dblqh::acckeyconf_load_diskpage_callback(Signal* signal,
   FragrecordPtr fragPtr = fragptr;
   TcConnectionrec *const regTcPtr = tcConnectptr.p;
   TcConnectionrec::TransactionState state = regTcPtr->transactionState;
-  if (likely(page_id > 0 && state == TcConnectionrec::WAIT_TUP))
-  {
+  if (likely(page_id > 0 && state == TcConnectionrec::WAIT_TUP)) {
 
     /**
      * We have returned from a real-time break, we need to set
      * up the proper pointers for a key execution.
      */
-    jam();
+    jamDebug();
     c_tup->prepareTUPKEYREQ(regTcPtr->m_row_id.m_page_no,
                             regTcPtr->m_row_id.m_page_idx,
                             fragPtr.p->tupFragptr);
     acckeyconf_tupkeyreq(signal, regTcPtr, fragPtr.p,
 			 regTcPtr->m_row_id.m_page_no,
 			 regTcPtr->m_row_id.m_page_idx);
-  }
-  else if (state != TcConnectionrec::WAIT_TUP)
-  {
+  } else if (state != TcConnectionrec::WAIT_TUP) {
     jam();
     ndbrequire(state == TcConnectionrec::WAIT_TUP_TO_ABORT);
     TupKeyRef * ref = (TupKeyRef *)signal->getDataPtr();
     ref->userRef= callbackData;
     ref->errorCode= page_id;
     execTUPKEYREF(signal);
-  }
-  else
-  {
+  } else {
     jam();
     TupKeyRef * ref = (TupKeyRef *)signal->getDataPtr();
     ref->userRef= callbackData;
@@ -11476,7 +11465,7 @@ void Dblqh::tupkeyConfLab(Signal* signal,
    * propagate
    */
   if (unlikely(activeCreat == Fragrecord::AC_NR_COPY)) {
-    jam();
+    jamDebug();
     ndbrequire(regTcPtr->m_nr_delete.m_cnt);
     regTcPtr->m_nr_delete.m_cnt--;
     if (regTcPtr->m_nr_delete.m_cnt) {
@@ -24084,6 +24073,7 @@ void Dblqh::completeLcpRoundLab(Signal *signal, Uint32 lcpId) {
 
 void Dblqh::execEND_LCPCONF(Signal *signal) {
   EndLcpConf *conf = (EndLcpConf *)signal->getDataPtr();
+  (void)conf;
   jamEntry();
   ndbrequire(clcpCompletedState == LCP_CLOSE_STARTED);
   /* Removed support of ndbd handling */

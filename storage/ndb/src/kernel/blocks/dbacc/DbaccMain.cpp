@@ -1464,7 +1464,7 @@ void Dbacc::execACCKEYREQ(Signal *signal, Uint32 opPtrI,
       {
 	if(unlikely(op == ZWRITE))
 	{
-	  jam();
+	  jamDebug();
 	  opbits &= ~(Uint32)Operationrec::OP_MASK;
 	  opbits |= (op = ZUPDATE);
 	  operationRecPtr.p->m_op_bits = opbits; // store to get correct ACCKEYCONF
@@ -1547,12 +1547,12 @@ void Dbacc::execACCKEYREQ(Signal *signal, Uint32 opPtrI,
       }
       else
       {
-        jam();
+        jamDebug();
         accIsLockedLab(signal, lockOwnerPtr, hash);
         return;
       }//if
     case ZINSERT:
-      jam();
+      jamDebug();
       ndbassert(!m_is_in_query_thread);
       insertExistElemLab(signal, lockOwnerPtr, hash);
       return;
@@ -1569,7 +1569,7 @@ void Dbacc::execACCKEYREQ(Signal *signal, Uint32 opPtrI,
       opbits |= (op = ZINSERT);
       [[fallthrough]];
     case ZINSERT:
-      jam();
+      jamDebug();
       ndbassert(!m_is_in_query_thread);
       opbits |= Operationrec::OP_INSERT_IS_DONE;
       opbits |= Operationrec::OP_STATE_RUNNING;
@@ -1691,8 +1691,7 @@ Dbacc::execACCKEY_ORD(Signal* signal,
   lastOp.i = opPtrI;
   lastOp.p = opPtrP;
   
-  if (likely(lastOp.p->m_op_bits == Operationrec::OP_EXECUTED_DIRTY_READ))
-  {
+  if (likely(lastOp.p->m_op_bits == Operationrec::OP_EXECUTED_DIRTY_READ)) {
     jamDebug();
     /**
      * Committed reads are not present in any Lock Queue list and is
@@ -1700,9 +1699,7 @@ Dbacc::execACCKEY_ORD(Signal* signal,
      */
     lastOp.p->m_op_bits = Operationrec::OP_INITIAL;
     return;
-  }
-  else
-  {
+  } else {
     fragrecptr.i = lastOp.p->fragptr;
     ndbrequire(c_fragment_pool.getPtr(fragrecptr));
     Uint32 hash = 0;
@@ -1726,8 +1723,7 @@ Dbacc::execACCKEY_ORD(Signal* signal,
      */
     Uint32 opbits = lastOp.p->m_op_bits;
     Uint32 opstate = opbits & Operationrec::OP_STATE_MASK;
-    if (likely(opstate == Operationrec::OP_STATE_RUNNING))
-    {
+    if (likely(opstate == Operationrec::OP_STATE_RUNNING)) {
       jamDebug();
       opbits |= Operationrec::OP_STATE_EXECUTED;
       lastOp.p->m_op_bits = opbits;
@@ -4199,8 +4195,7 @@ Uint32 Dbacc::readTablePk(Uint32 localkey1, Uint32 localkey2, Uint32 eh,
     invalid_local_key = false;
     ret = c_tup->accReadPk(localkey1, localkey2, keys, xfrm);
   }
-  if (ret == (-ZTUPLE_DELETED_ERROR))
-  {
+  if (unlikely(ret == (-ZTUPLE_DELETED_ERROR))) {
     jam();
     /**
      * We can come here in two cases:
@@ -4416,7 +4411,7 @@ Uint32 Dbacc::getElement(const AccKeyReq *signal, OperationrecPtr &lockOwnerPtr,
               }
             }
           } else {
-            jam();
+            jamDebug();
             found = (localkey.m_page_no == Tkeydata[0] &&
                      Uint32(localkey.m_page_idx) == Tkeydata[1]);
           }

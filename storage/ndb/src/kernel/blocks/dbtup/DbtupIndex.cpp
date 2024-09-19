@@ -308,7 +308,7 @@ int Dbtup::tuxReadPk(Uint32 *fragPtrP_input, Uint32 *tablePtrP_input,
    * mutex to protect the read.
    */
   if (unlikely(req_struct.m_tuple_ptr->m_header_bits & Tuple_header::ALLOC)) {
-    jam();
+    jamDebug();
     OperationrecPtr opPtr;
     opPtr.i = req_struct.m_tuple_ptr->m_operation_ptr_i;
     /**
@@ -331,7 +331,7 @@ int Dbtup::tuxReadPk(Uint32 *fragPtrP_input, Uint32 *tablePtrP_input,
                           xfrmFlag);
   // done
   if (unlikely(ret < 0)) {
-    jam();
+    jamDebug();
     return ret;
   }
   if (likely(tablePtrP->m_bits & Tablerec::TR_RowGCI)) {

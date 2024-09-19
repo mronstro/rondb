@@ -912,7 +912,7 @@ void Backup::calculate_seconds_since_lcp_cut(Uint64 &seconds_since_lcp_cut) {
       NdbTick_Elapsed(m_lcp_current_cut_point, now).seconds();
 }
 
-Uint64 Backup::calculate_change_rate(Uint64 change_size,
+Uint64 Backup::calculate_change_rate(Uint64 checkpoint_size,
                                      Uint64 &seconds_since_lcp_cut) {
   if (seconds_since_lcp_cut < 2) {
     jam();

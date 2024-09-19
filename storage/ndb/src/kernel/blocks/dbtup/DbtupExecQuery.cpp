@@ -1603,7 +1603,7 @@ bool Dbtup::execTUPKEYREQ(Signal* signal,
   if (prepareActiveOpList(operPtr, &req_struct)) {
     m_base_header_bits = tuple_ptr->m_header_bits;
     if (Roptype == ZINSERT) {
-      jam();
+      jamDebug();
     do_insert:
       Local_key accminupdate;
       Local_key *accminupdateptr = &accminupdate;
@@ -1614,7 +1614,7 @@ bool Dbtup::execTUPKEYREQ(Signal* signal,
       }
 
       if (tuple_ptr != nullptr) {
-        jam();
+        jamDebug();
         acquire_frag_mutex(regFragPtr, pageid, jamBuffer());
         /**
          * Updates of checksum needs to be protected during non-initial
@@ -1688,7 +1688,7 @@ bool Dbtup::execTUPKEYREQ(Signal* signal,
          * in the handleInsertReq method. The insert operation
          * is made visible through the call to execACCMINUPDATE later.
          */
-        jam();
+        jamDebug();
       }
       terrorCode = 0;
       checkImmediateTriggersAfterInsert(&req_struct, regOperPtr, regTabPtr,
@@ -1696,7 +1696,7 @@ bool Dbtup::execTUPKEYREQ(Signal* signal,
 
       if (likely(terrorCode == 0)) {
         if (!regTabPtr->tuxCustomTriggers.isEmpty()) {
-          jam();
+          jamDebug();
           /**
            * Ensure that no concurrent scans happens while I am
            * updating the TUX indexes.
@@ -1811,11 +1811,11 @@ bool Dbtup::execTUPKEYREQ(Signal* signal,
       }
 
       if (!regTabPtr->tuxCustomTriggers.isEmpty()) {
-        jam();
+        jamDebug();
         c_lqh->upgrade_to_write_key_frag_access();
         if (unlikely(executeTuxUpdateTriggers(signal, regOperPtr, regFragPtr,
                                               regTabPtr) != 0)) {
-          jam();
+          jamDebug();
           /*
            * See insert case.
            */
@@ -1830,7 +1830,7 @@ bool Dbtup::execTUPKEYREQ(Signal* signal,
       returnTUPKEYCONF(signal, &req_struct, regOperPtr, TRANS_STARTED);
       return true;
     } else if (Roptype == ZDELETE) {
-      jam();
+      jamDebug();
       req_struct.log_size = 0;
       if (unlikely(handleDeleteReq(signal, regOperPtr, regFragPtr, regTabPtr,
                                    &req_struct, disk_page != RNIL) == -1)) {
@@ -1891,10 +1891,10 @@ bool Dbtup::execTUPKEYREQ(Signal* signal,
         return false;
       }
       if (tuple_ptr) {
-        jam();
+        jamDebug();
         insertActiveOpList(operPtr, &req_struct, tuple_ptr);
       } else {
-        jam();
+        jamDebug();
         operPtr.p->op_struct.bit_field.in_active_list = true;
       }
 #if defined(VM_TRACE) || defined(ERROR_INSERT)
@@ -2105,7 +2105,7 @@ int Dbtup::handleUpdateReq(Signal* signal,
     tup_version = org->get_tuple_version();
     clear_change_mask_info(regTabPtr, change_mask_ptr);
   } else {
-    jam();
+    jamDebug();
     Operationrec* prevOp= req_struct->prevOpPtr.p;
     tup_version= prevOp->op_struct.bit_field.tupVersion;
     Uint32 * rawptr = get_copy_tuple_raw(&prevOp->m_copy_tuple_location);
@@ -2139,7 +2139,7 @@ int Dbtup::handleUpdateReq(Signal* signal,
     jamDebug();
     expand_tuple(req_struct, sizes, org, regTabPtr, disk);
     if (disk && operPtrP->m_undo_buffer_space == 0) {
-      jam();
+      jamDebug();
       operPtrP->op_struct.bit_field.m_wait_log_buffer = 1;
       operPtrP->op_struct.bit_field.m_load_diskpage_on_commit = 1;
       operPtrP->m_undo_buffer_space= 
@@ -2602,7 +2602,7 @@ Dbtup::prepare_initial_insert(KeyReqStruct *req_struct,
       {
         const Uint32 num_dynvar= regTabPtr->m_attributes[ind].m_no_of_dyn_var;
         const Uint32 num_dynfix= regTabPtr->m_attributes[ind].m_no_of_dyn_fix;
-        jam();
+        jamDebug();
         /* Prepare empty dynamic part. */
         dst->m_dyn_data_ptr= (char *)ptr;
         dst->m_dyn_offset_arr_ptr= req_struct->var_pos_array[ind]+2*num_vars;
@@ -2698,7 +2698,7 @@ int Dbtup::handleInsertReq(Signal* signal,
 
     if(unlikely(!prevOp->is_first_operation()))
     {
-      jam();
+      jamDebug();
       org = get_copy_tuple(&prevOp->m_copy_tuple_location);
     } else {
       jamDebug();
@@ -2794,7 +2794,7 @@ int Dbtup::handleInsertReq(Signal* signal,
     }
   }
   if (unlikely(req_struct->interpreted_exec)) {
-    jam();
+    jamDebug();
 
     req_struct->m_write_log_memory_in_update = true;
     req_struct->log_size = 0;
@@ -2803,7 +2803,7 @@ int Dbtup::handleInsertReq(Signal* signal,
     const Uint32 RinitReadLen = cinBuffer[0];
     const Uint32 RexecRegionLen = cinBuffer[1];
     const Uint32 RfinalUpdateLen = cinBuffer[2];
-    jamData(RfinalUpdateLen);
+    jamDataDebug(RfinalUpdateLen);
     // const Uint32 RfinalRLen= cinBuffer[3];
     // const Uint32 RsubLen= cinBuffer[4];
 
@@ -2850,7 +2850,7 @@ int Dbtup::handleInsertReq(Signal* signal,
 
   if (req_struct->m_is_lcp)
   {
-    jam();
+    jamDebug();
     sizes[2 + MM] = req_struct->m_lcp_varpart_len;
   } else if (regTabPtr->need_shrink()) {
     jamDebug();
@@ -2890,7 +2890,7 @@ int Dbtup::handleInsertReq(Signal* signal,
 
       if (!varalloc)
       {
-        jam();
+        jamDebug();
         ptr= alloc_fix_rec(
             jamBuffer(),
             &terrorCode,
@@ -2901,7 +2901,7 @@ int Dbtup::handleInsertReq(Signal* signal,
       } 
       else 
       {
-        jam();
+        jamDebug();
         regOperPtr.p->m_tuple_location.m_file_no= sizes[2+MM];
         ptr= alloc_var_row(
             signal,
@@ -2927,7 +2927,7 @@ int Dbtup::handleInsertReq(Signal* signal,
 
       if (!varalloc)
       {
-        jam();
+        jamDebug();
         ptr= alloc_fix_rowid(&terrorCode,
             regFragPtr,
             regTabPtr,
@@ -2936,7 +2936,7 @@ int Dbtup::handleInsertReq(Signal* signal,
       } 
       else 
       {
-        jam();
+        jamDebug();
         regOperPtr.p->m_tuple_location.m_file_no= sizes[2+MM];
         ptr= alloc_var_row(
             signal,
@@ -2999,7 +2999,7 @@ int Dbtup::handleInsertReq(Signal* signal,
       old_header_keep;
     if ((regTabPtr->m_bits & Tablerec::TR_UseVarSizedDiskData) != 0)
     {
-      jam();
+      jamDebug();
       if (disk_insert)
       {
         jam();
@@ -3233,7 +3233,7 @@ int Dbtup::handleDeleteReq(Signal* signal,
 
   // delete must set but not increment tupVersion
   if (unlikely(!regOperPtr->is_first_operation())) {
-    jam();
+    jamDebug();
     Operationrec *prevOp = req_struct->prevOpPtr.p;
     regOperPtr->op_struct.bit_field.tupVersion =
         prevOp->op_struct.bit_field.tupVersion;
@@ -3271,7 +3271,7 @@ int Dbtup::handleDeleteReq(Signal* signal,
   set_change_mask_info(regTabPtr, get_change_mask_ptr(regTabPtr, dst));
 
   if (disk && regOperPtr->m_undo_buffer_space == 0) {
-    jam();
+    jamDebug();
     ndbrequire(!(copy_bits & Tuple_header::DISK_ALLOC));
     regOperPtr->op_struct.bit_field.m_wait_log_buffer = 1;
     regOperPtr->op_struct.bit_field.m_load_diskpage_on_commit = 1;
@@ -3395,11 +3395,11 @@ Dbtup::handleRefreshReq(Signal* signal,
    */
   Uint32 refresh_case;
   if (likely(regOperPtr.p->is_first_operation())) {
-    jam();
+    jamDebug();
     if (Local_key::isInvalid(req_struct->frag_page_id,
           regOperPtr.p->m_tuple_location.m_page_idx))
     {
-      jam();
+      jamDebug();
       refresh_case = Operationrec::RF_SINGLE_NOT_EXIST;
       /**
        * This is refresh of non-existing tuple...
@@ -3443,7 +3443,7 @@ Dbtup::handleRefreshReq(Signal* signal,
     {
       refresh_case = Operationrec::RF_SINGLE_EXIST;
       // g_eventLogger->info("case 2");
-      jam();
+      jamDebug();
 
       Tuple_header *origTuple = req_struct->m_tuple_ptr;
       Uint32 tup_version_save = origTuple->get_tuple_version();
@@ -3486,7 +3486,7 @@ Dbtup::handleRefreshReq(Signal* signal,
     }
   } else {
     /* Not first operation on tuple in transaction */
-    jam();
+    jamDebug();
 
     Uint32 tup_version_save =
         req_struct->prevOpPtr.p->op_struct.bit_field.tupVersion;
@@ -3496,7 +3496,7 @@ Dbtup::handleRefreshReq(Signal* signal,
     int res;
     if (req_struct->prevOpPtr.p->op_type == ZDELETE) {
       refresh_case = Operationrec::RF_MULTI_NOT_EXIST;
-      jam();
+      jamDebug();
       /**
        * We don't need ...in this scenario
        * - default values
@@ -3525,7 +3525,7 @@ Dbtup::handleRefreshReq(Signal* signal,
       }
       regOperPtr.p->op_type = ZREFRESH;
     } else {
-      jam();
+      jamDebug();
       refresh_case = Operationrec::RF_MULTI_EXIST;
       /**
        * This is multi-update + INSERT/UPDATE + REFRESH
@@ -6905,8 +6905,7 @@ Dbtup::validate_page(TablerecPtr regTabPtr, Var_page* p)
   if(mm_vars == 0)
     return;
   
-  for(Uint32 F= 0; F < MAX_FRAG_PER_LQH; F++)
-  {
+  for(Uint32 F= 0; F < MAX_FRAG_PER_LQH; F++) {
     FragrecordPtr fragPtr;
 
     fragPtr.i = c_lqh->m_ldm_instance_used->getNextTupFragrec(regTabPtr.i, F);
@@ -6914,21 +6913,17 @@ Dbtup::validate_page(TablerecPtr regTabPtr, Var_page* p)
       continue;
 
     ndbrequire(c_fragment_pool.getPtr(fragPtr));
-    for(Uint32 P= 0; P<fragPtr.p->noOfPages; P++)
-    {
+    for(Uint32 P= 0; P<fragPtr.p->noOfPages; P++) {
       Uint32 real= getRealpid(fragPtr.p, P);
       Var_page* page= (Var_page*)c_page_pool.getPtr(real);
 
-      for(Uint32 i=1; i<page->high_index; i++)
-      {
+      for(Uint32 i=1; i<page->high_index; i++) {
 	Uint32 idx= page->get_index_word(i);
 	Uint32 len = (idx & Var_page::LEN_MASK) >> Var_page::LEN_SHIFT;
-	if(!(idx & Var_page::FREE) && !(idx & Var_page::CHAIN))
-	{
+	if(!(idx & Var_page::FREE) && !(idx & Var_page::CHAIN)) {
 	  Tuple_header *ptr= (Tuple_header*)page->get_ptr(i);
 	  Uint32 *part= ptr->get_end_of_fix_part_ptr(regTabPtr.p);
-	  if(! (ptr->m_header_bits & Tuple_header::COPY_TUPLE))
-	  {
+	  if(! (ptr->m_header_bits & Tuple_header::COPY_TUPLE)) {
 	    ndbrequire(len == fix_sz + 1);
             Local_key tmp;
             Var_part_ref *vpart = reinterpret_cast<Var_part_ref *>(part);
@@ -6950,18 +6945,14 @@ Dbtup::validate_page(TablerecPtr regTabPtr, Var_page* p)
             operPtr.i = ptr->m_operation_ptr_i;
 	    ndbrequire(m_curr_tup->c_operation_pool.getValidPtr(operPtr));
 	  }
-	} 
-	else if(!(idx & Var_page::FREE))
-	{
+	} else if(!(idx & Var_page::FREE)) {
 	  /**
 	   * Chain
 	   */
 	  Uint32 *part= page->get_ptr(i);
 	  Uint32 sz= ((mm_vars + 1) << 1) + (((Uint16*)part)[mm_vars]);
 	  ndbrequire(len >= ((sz + 3) >> 2));
-	} 
-	else 
-	{
+	} else {
 	  
 	}
       }
@@ -7000,12 +6991,12 @@ Dbtup::handle_size_change_after_update(Signal *signal,
     jamDataDebug(ind);
     if(sizes[2+ind] == sizes[ind])
     {
-      jam();
+      jamDebug();
       continue;
     }
     else if(sizes[2+ind] < sizes[ind])
     {
-      jam();
+      jamDebug();
       continue;
     }
     jam();
@@ -7376,8 +7367,7 @@ Dbtup::handle_size_change_after_update(Signal *signal,
              */
             ndbrequire(regOperPtr->m_undo_buffer_space > 0);
             jamDataDebug(regOperPtr->m_undo_buffer_space);
-            if (regOperPtr->m_uncommitted_used_space > 0)
-            {
+            if (regOperPtr->m_uncommitted_used_space > 0) {
               /**
                * We have allocated space on the original row page.
                * We need to release this extra memory already now.
@@ -7394,7 +7384,7 @@ Dbtup::handle_size_change_after_update(Signal *signal,
                * row if we commit whatever type of operations happens
                * after this.
                */
-              jam();
+              jamDebug();
               Int32 overflow_space = -regOperPtr->m_uncommitted_used_space;
               ndbrequire(diskPagePtr.p->m_restart_seq == globalData.m_restart_seq);
               disk_page_dirty_header(signal,
@@ -7496,7 +7486,7 @@ Dbtup::handle_size_change_after_update(Signal *signal,
 
     if(needed <= alloc)
     {
-      jam();
+      jamDebug();
       continue;
     }
     /**
@@ -7853,7 +7843,7 @@ Dbtup::nr_delete(Signal* signal, Uint32 senderData,
   Tuple_header *ptr = (Tuple_header *)get_ptr(&pagePtr, &tmp, tablePtr.p);
 
   if (!tablePtr.p->tuxCustomTriggers.isEmpty()) {
-    jam();
+    jamDebug();
     TuxMaintReq *req = (TuxMaintReq *)signal->getDataPtrSend();
     req->tableId = fragPtr.p->fragTableId;
     req->fragId = fragPtr.p->fragmentId;
@@ -7883,7 +7873,7 @@ Dbtup::nr_delete(Signal* signal, Uint32 senderData,
      * that the LCP becomes a consistent LCP based on what was there at the
      * start of the LCP.
      */
-    jam();
+    jamDebug();
     ScanOpPtr scanOp;
     scanOp.i = lcpScan_ptr_i;
     ndbrequire(c_scanOpPool.getValidPtr(scanOp));
@@ -7952,15 +7942,15 @@ Dbtup::nr_delete(Signal* signal, Uint32 senderData,
    */
   if (tablePtr.p->m_attributes[MM].m_no_of_varsize +
       tablePtr.p->m_attributes[MM].m_no_of_dynamic) {
-    jam();
+    jamDebug();
     free_var_rec(fragPtr.p, tablePtr.p, &tmp, pagePtr);
   } else {
-    jam();
+    jamDebug();
     free_fix_rec(fragPtr.p, tablePtr.p, &tmp, (Fix_page*)pagePtr.p);
   }
 
   if (tablePtr.p->m_no_of_disk_attributes) {
-    jam();
+    jamDebug();
     Ptr<GlobalPage> diskPagePtr;
     int res;
     Uint32 sz;
@@ -8025,7 +8015,7 @@ Dbtup::nr_delete(Signal* signal, Uint32 senderData,
       }
       else
       {
-        jam();
+        jamDebug();
         page_idx = disk.m_page_idx;
         entry_len = ((Var_page*)diskPagePtr.p)->get_entry_len(page_idx);
         size_len = (sizeof(Dbtup::Disk_undo::Update_Free) >> 2);
@@ -8076,8 +8066,8 @@ void Dbtup::nr_delete_page_callback(Signal *signal, Uint32 userpointer,
   PagePtr pagePtr((Tup_page*)gpage.p, gpage.i);
   Dblqh::Nr_op_info op;
   op.m_ptr_i = userpointer;
-  jam();
-  jamData(userpointer);
+  jamDebug();
+  jamDataDebug(userpointer);
   op.m_disk_ref.m_page_no = pagePtr.p->m_page_no;
   op.m_disk_ref.m_file_no = pagePtr.p->m_file_no;
   c_lqh->get_nr_op_info(&op, page_id);
@@ -8118,13 +8108,13 @@ void Dbtup::nr_delete_page_callback(Signal *signal, Uint32 userpointer,
   }
   switch (res) {
     case 0:
-      jam();
+      jamDebug();
       return;
     case -1:
       ndbrequire("NOT YET IMPLEMENTED" == 0);
       break;
   }
-  jam();
+  jamDebug();
   disk_page_free(signal, tablePtr.p, fragPtr.p, &op.m_disk_ref, pagePtr,
                  op.m_gci_hi, &op.m_row_id, sz);
 
@@ -8161,7 +8151,7 @@ void Dbtup::nr_delete_log_buffer_callback(Signal *signal, Uint32 userpointer,
   }
   else
   {
-    jam();
+    jamDebug();
     Uint32 page_idx = op.m_disk_ref.m_page_idx;
     Uint32 entry_len = ((Var_page*)pagePtr.p)->get_entry_len(page_idx);
     sz = (sizeof(Dbtup::Disk_undo::Update_Free) >> 2) +
