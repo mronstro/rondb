@@ -31,9 +31,12 @@ EN_Status copy_str_to_buffer(const std::string_view &src,
                              Uint32 offset) {
   if (dst == nullptr) {
     EN_Status status{};
-    status.http_code = static_cast<HTTP_CODE>(drogon::HttpStatusCode::k400BadRequest);
+    status.http_code =
+      static_cast<HTTP_CODE>(drogon::HttpStatusCode::k400BadRequest);
     status.retValue  = 0;
-    strncpy(status.message, "Destination buffer pointer is null", EN_STATUS_MSG_LEN - 1);
+    strncpy(status.message,
+            "Destination buffer pointer is null",
+            EN_STATUS_MSG_LEN - 1);
     status.message[EN_STATUS_MSG_LEN - 1] = '\0';
     return status;
   }
@@ -43,10 +46,14 @@ EN_Status copy_str_to_buffer(const std::string_view &src,
   return EN_Status(offset + src_length + 1);
 }
 
-EN_Status copy_ndb_str_to_buffer(std::vector<char> &src, void *dst, Uint32 offset) {
+EN_Status copy_ndb_str_to_buffer(std::vector<char> &src,
+                                 void *dst,
+                                 Uint32 offset) {
   if (dst == nullptr) {
-    return EN_Status(static_cast<HTTP_CODE>(drogon::HttpStatusCode::k400BadRequest), 0,
-                     "Destination buffer pointer is null");
+    return EN_Status(static_cast<HTTP_CODE>(
+      drogon::HttpStatusCode::k400BadRequest),
+      0,
+      "Destination buffer pointer is null");
   }
 
   // Remove quotation marks from string, if it's a quoted string
@@ -55,9 +62,10 @@ EN_Status copy_ndb_str_to_buffer(std::vector<char> &src, void *dst, Uint32 offse
     RS_Status status = Unquote(src);
     if (status.http_code != SUCCESS) {
       std::string msg =
-        "Failed to unquote string. Error message: " + std::string(status.message);
-      return EN_Status(static_cast<HTTP_CODE>(drogon::HttpStatusCode::k400BadRequest), 0,
-                       msg.c_str());
+        "Failed to unquote string. Error message: " +
+        std::string(status.message);
+      return EN_Status(static_cast<HTTP_CODE>(
+        drogon::HttpStatusCode::k400BadRequest), 0, msg.c_str());
     }
   }
 
@@ -65,11 +73,13 @@ EN_Status copy_ndb_str_to_buffer(std::vector<char> &src, void *dst, Uint32 offse
 
   // Write immutable length of the string
   static const Uint32 MAX_BYTE_VALUE = 256;
-  static_cast<char *>(dst)[offset] = static_cast<char>(src_length % MAX_BYTE_VALUE);
-  static_cast<char *>(dst)[offset + 1] = static_cast<char>(src_length / MAX_BYTE_VALUE);
+  static_cast<char *>(dst)[offset] =
+    static_cast<char>(src_length % MAX_BYTE_VALUE);
+  static_cast<char *>(dst)[offset + 1] =
+    static_cast<char>(src_length / MAX_BYTE_VALUE);
   offset += 2;
 
-  static_cast<char *>(dst)[offset]     = 0;
+  static_cast<char *>(dst)[offset] = 0;
   static_cast<char *>(dst)[offset + 1] = 0;
   offset += 2;
 
@@ -82,7 +92,8 @@ EN_Status copy_ndb_str_to_buffer(std::vector<char> &src, void *dst, Uint32 offse
 
 std::vector<char> string_to_byte_array(std::string str) {
   std::vector<char> byte_array;
-  byte_array.assign(std::make_move_iterator(str.begin()), std::make_move_iterator(str.end()));
+  byte_array.assign(std::make_move_iterator(str.begin()),
+                    std::make_move_iterator(str.end()));
   return byte_array;
 }
 
@@ -108,9 +119,9 @@ Uint32 data_return_type(std::string_view drt) {
 /*
 For both JSON and gRPC we need a way of letting the client know the datatype.
 
-In JSON, strings are generally represented by using quotes (for numbers they are omitted).
-For gRPC, we fixed our datatype to strings. So we pretend to have a JSON setup and also add
-quotes when we are actually dealing with strings.
+In JSON, strings are generally represented by using quotes (for numbers they are
+omitted).  For gRPC, we fixed our datatype to strings. So we pretend to have a
+JSON setup and also add quotes when we are actually dealing with strings.
 
 Since binary data is encoded as base64 strings, we also add quotes for these.
 */
@@ -131,15 +142,24 @@ void printCharArray(const char *array, size_t length) {
 void printReqBuffer(const RS_Buffer *reqBuff) {
   char *reqData = reqBuff->buffer;
   std::cout << "Request buffer: " << std::endl;
-  std::cout << "OP Type: " << std::hex << "0x" << ((Uint32 *)reqData)[0] << std::endl;
-  std::cout << "Capacity: " << std::hex << "0x" << ((Uint32 *)reqData)[1] << std::endl;
-  std::cout << "Length: " << std::hex << "0x" << ((Uint32 *)reqData)[2] << std::endl;
-  std::cout << "Flags: " << std::hex << "0x" << ((Uint32 *)reqData)[3] << std::endl;
-  std::cout << "DB Idx: " << std::hex << "0x" << ((Uint32 *)reqData)[4] << std::endl;
-  std::cout << "Table Idx: " << std::hex << "0x" << ((Uint32 *)reqData)[5] << std::endl;
-  std::cout << "PK Cols Idx: " << std::hex << "0x" << ((Uint32 *)reqData)[6] << std::endl;
-  std::cout << "Read Cols Idx: " << std::hex << "0x" << ((Uint32 *)reqData)[7] << std::endl;
-  std::cout << "OP ID Idx: " << std::hex << "0x" << ((Uint32 *)reqData)[8] << std::endl;
+  std::cout << "OP Type: " << std::hex << "0x"
+            << ((Uint32 *)reqData)[0] << std::endl;
+  std::cout << "Capacity: " << std::hex << "0x"
+            << ((Uint32 *)reqData)[1] << std::endl;
+  std::cout << "Length: " << std::hex << "0x"
+            << ((Uint32 *)reqData)[2] << std::endl;
+  std::cout << "Flags: " << std::hex << "0x"
+            << ((Uint32 *)reqData)[3] << std::endl;
+  std::cout << "DB Idx: " << std::hex << "0x"
+            << ((Uint32 *)reqData)[4] << std::endl;
+  std::cout << "Table Idx: " << std::hex << "0x"
+            << ((Uint32 *)reqData)[5] << std::endl;
+  std::cout << "PK Cols Idx: " << std::hex << "0x"
+            << ((Uint32 *)reqData)[6] << std::endl;
+  std::cout << "Read Cols Idx: " << std::hex << "0x"
+            << ((Uint32 *)reqData)[7] << std::endl;
+  std::cout << "OP ID Idx: " << std::hex << "0x"
+            << ((Uint32 *)reqData)[8] << std::endl;
   std::cout << "DB: ";
   Uint32 dbIdx = ((Uint32 *)reqData)[4];
   std::cout << (char *)((UintPtr)reqData + dbIdx) << std::endl;
@@ -149,10 +169,13 @@ void printReqBuffer(const RS_Buffer *reqBuff) {
   Uint32 pkColsIdx = ((Uint32 *)reqData)[6];
   std::cout << "PK Cols Count: " << std::hex << "0x"
             << *((Uint32 *)((UintPtr)reqData + pkColsIdx)) << std::endl;
-  for (Uint32 i = 0; i < *reinterpret_cast<Uint32 *>(reqData + pkColsIdx); i++) {
+  for (Uint32 i = 0;
+              i < *reinterpret_cast<Uint32 *>(reqData + pkColsIdx);
+              i++) {
     int step = (i + 1) * ADDRESS_SIZE;
     std::cout << "KV pair " << i << " Idx: " << std::hex << "0x"
-              << *((Uint32 *)((UintPtr)reqData + pkColsIdx + step)) << std::endl;
+              << *((Uint32 *)((UintPtr)reqData + pkColsIdx + step))
+              << std::endl;
     Uint32 kvPairIdx = *((Uint32 *)((UintPtr)reqData + pkColsIdx + step));
     Uint32 keyIdx = ((Uint32 *)reqData)[kvPairIdx / ADDRESS_SIZE];
     std::cout << "Key idx: " << std::hex << "0x" << keyIdx << std::endl;
@@ -163,21 +186,26 @@ void printReqBuffer(const RS_Buffer *reqBuff) {
     std::cout << "Size " << i + 1 << ": ";
     std::cout << *((Uint16 *)((UintPtr)reqData + valueIdx)) << std::endl;
     std::cout << "Value " << i + 1 << ": ";
-    std::cout << (char *)((UintPtr)reqData + valueIdx + ADDRESS_SIZE) << std::endl;
+    std::cout << (char *)((UintPtr)reqData + valueIdx + ADDRESS_SIZE)
+              << std::endl;
   }
   Uint32 readColsIdx = ((Uint32 *)reqData)[7];
   std::cout << "Read Cols Count: " << std::hex << "0x"
             << *((Uint32 *)((UintPtr)reqData + readColsIdx)) << std::endl;
   for (Uint32 i = 0;
-       i < *reinterpret_cast<Uint32 *>(reinterpret_cast<UintPtr>(reqData) + readColsIdx); i++) {
+       i < *reinterpret_cast<Uint32 *>(
+         reinterpret_cast<UintPtr>(reqData) + readColsIdx);
+       i++) {
     int step = (i + 1) * ADDRESS_SIZE;
     std::cout << "Read Col " << i << " Idx: " << std::hex << "0x"
-              << *((Uint32 *)((UintPtr)reqData + readColsIdx + step)) << std::endl;
+              << *((Uint32 *)((UintPtr)reqData + readColsIdx + step))
+              << std::endl;
     Uint32 readColIdx = *((Uint32 *)((UintPtr)reqData + readColsIdx + step));
     Uint32 returnType = ((Uint32 *)reqData)[readColIdx / ADDRESS_SIZE];
     std::cout << "Return type: " << std::hex << "0x" << returnType << std::endl;
     std::cout << "Col " << i + 1 << ": ";
-    std::cout << (char *)((UintPtr)reqData + readColIdx + ADDRESS_SIZE) << std::endl;
+    std::cout << (char *)((UintPtr)reqData + readColIdx + ADDRESS_SIZE)
+              << std::endl;
   }
   Uint32 opIDIdx = ((Uint32 *)reqData)[8];
   std::cout << "Op ID: ";
@@ -276,11 +304,11 @@ std::tuple<int, int> decode_rune_in_string(const std::string &s) {
   return std::make_tuple(rune, size);
 }
 
-const int RuneError    = 0xFFFD;
-const int rune1Max     = 0x7F;
-const int rune2Max     = 0x7FF;
-const int rune3Max     = 0xFFFF;
-const int MaxRune      = 0x10FFFF;
+const int RuneError = 0xFFFD;
+const int rune1Max = 0x7F;
+const int rune2Max = 0x7FF;
+const int rune3Max = 0xFFFF;
+const int MaxRune = 0x10FFFF;
 const int surrogateMin = 0xD800;
 const int surrogateMax = 0xDFFF;
 
