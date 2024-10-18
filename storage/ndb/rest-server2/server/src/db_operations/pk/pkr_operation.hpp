@@ -31,6 +31,39 @@
 #include <unordered_map>
 #include <vector>
 #include <NdbApi.hpp>
+#include <ArenaMalloc.hpp>
+
+struct KeyOperation {
+  Uint32 m_num_pk_columns;
+  Uint32 m_num_read_columns;
+  Uint32 m_num_table_columns;
+  Uint8 *m_bitmap_read_columns;
+  Uint8 *m_row;
+  NdbOperation *m_ndbOperation;
+  const NdbDictionary::Table *m_tableDict;
+  const NdbDictionary::Column **m_pkColumns;
+  const NdbDictionary::Column **m_readColumns;
+  const NdbRecord *m_ndb_record;
+  PKRRequest m_req;
+  PKRResponse m_resp;
+};
+
+class BatchKeyOperations {
+ private:
+  Uint32 numOperations;
+  NdbTransaction *ndbTransaction;
+  Ndb *ndb_object;
+  bool isBatch;
+  struct KeyOperation *key_ops;
+ public:
+   BatchKeyOperations();
+   ~BatchKeyOperations() = delete;
+   RS_Status init_batch_operations(ArenaMalloc*,
+                                   Uint32,
+                                   RS_Buffer *reqBuffer,
+                                   RS_Buffer *respBuffer,
+                                   Ndb *ndb_object);
+};
 
 typedef struct SubOpTuple {
   PKRRequest *pkRequest;

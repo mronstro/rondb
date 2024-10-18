@@ -39,6 +39,161 @@
 #include <utility>
 #include <my_base.h>
 #include <storage/ndb/include/ndbapi/NdbDictionary.hpp>
+#include <kernel/ndb_limits.h>
+#include <ArenaMalloc.hpp>
+
+BatchKeyOperations::BatchKeyOperations() {
+}
+
+RS_Status
+BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
+                                          Uint32 numOps,
+                                          RS_Buffer *reqBuffer,
+                                          RS_Buffer *respBuffer,
+                                          Ndb *ndb_object) {
+  RS_Status status = RS_OK;
+  bool success = false;
+  isBatch = true;
+  if (numOps == 1) {
+    isBatch = false;
+  }
+  key_ops = (KeyOperation*)amalloc->alloc_bytes(
+    sizeof(KeyOperation) * numOps, 8);
+  if (unlikely(key_ops == nullptr)) {
+    RS_Status error = RS_SERVER_ERROR(ERROR_067);
+    return error;
+  }
+  for (Uint32 i = 0; i < numOps; i++) {
+    PKRRequest *req = new (&key_ops[i].m_req) PKRRequest(&reqBuffer[i]);
+    PKRResponse *resp = new (&key_ops[i].m_resp) PKRResponse(&respBuffer[i]);
+    (void)resp; //TODO
+    if (unlikely(ndb_object->setCatalogName(req->DB()) != 0)) {
+      status = RS_CLIENT_404_WITH_MSG_ERROR(
+        ERROR_011 + std::string(" Database: ") +
+        std::string(req->DB()) + " Table: " + req->Table());
+      req->MarkInvalidOp(status);
+      continue;
+    }
+    const NdbDictionary::Dictionary *dict = ndb_object->getDictionary();
+    const NdbDictionary::Table *tableDict = dict->getTable(req->Table());
+    if (tableDict == nullptr) {
+      status = RS_CLIENT_404_WITH_MSG_ERROR(
+        ERROR_011 + std::string(" Database: ") +
+        std::string(req->DB()) + " Table: " + req->Table());
+      req->MarkInvalidOp(status);
+      continue;
+    }
+    key_ops[i].m_tableDict = tableDict;
+    Uint32 numPrimaryKeys = (Uint32)tableDict->getNoOfPrimaryKeys();
+    Uint32 numColumns = (Uint32)tableDict->getNoOfColumns();
+    Uint32 numReadColumns = req->ReadColumnsCount();
+    const NdbRecord *ndb_record = tableDict->getDefaultRecord();
+    key_ops[i].m_ndb_record = ndb_record;
+    key_ops[i].m_num_pk_columns = numPrimaryKeys;
+    key_ops[i].m_num_table_columns = numColumns;
+    key_ops[i].m_num_read_columns = numReadColumns;
+    if (unlikely(numPrimaryKeys != req->PKColumnsCount())) {
+      status =
+        RS_CLIENT_ERROR(
+        ERROR_013 + std::string(" Expecting: ") +
+        std::to_string(numPrimaryKeys) +
+        " Got: " + std::to_string(req->PKColumnsCount()));
+      req->MarkInvalidOp(status);
+      continue;
+    }
+    if (unlikely(numColumns < req->ReadColumnsCount())) {
+      status = RS_CLIENT_ERROR(ERROR_068);
+      req->MarkInvalidOp(status);
+      continue;
+    }
+    Uint32 num_bitmap_words = (numColumns + 31) / 32;
+    Uint32 num_bitmap_bytes = 4 * num_bitmap_words;
+    Uint8* bitmap_words = (Uint8*)amalloc->alloc_bytes(num_bitmap_bytes, 4);
+    key_ops[i].m_bitmap_read_columns = bitmap_words;
+    Uint32 row_len = NdbDictionary::getRecordRowLength(ndb_record);
+    Uint8* row = (Uint8*)amalloc->alloc_bytes(row_len, 8);
+    key_ops[i].m_row = row;
+    const NdbDictionary::Column **pkCols = (const NdbDictionary::Column**)
+      amalloc->alloc_bytes(numPrimaryKeys * sizeof(NdbDictionary::Column*), 8);
+    key_ops[i].m_pkColumns = pkCols;
+    const NdbDictionary::Column **readCols = (const NdbDictionary::Column**)
+      amalloc->alloc_bytes(numReadColumns * sizeof(NdbDictionary::Column*), 8);
+    key_ops[i].m_readColumns = readCols;
+    if (bitmap_words == nullptr ||
+        pkCols == nullptr ||
+        readCols == nullptr ||
+        row == nullptr) {
+      status = RS_SERVER_ERROR(ERROR_067);
+      return status;
+    }
+    Uint32 pk_bitmap_words[MAX_ATTRIBUTES_IN_TABLE/32];
+    memset(bitmap_words, 0, num_bitmap_bytes);
+    memset(pk_bitmap_words, 0, num_bitmap_bytes);
+    bool failed = false;
+    Uint32 j = 0;
+    for (; j < numPrimaryKeys; j++) {
+      const NdbDictionary::Column *pk_col =
+        tableDict->getColumn(req->PKName(j));
+      if (pk_col == nullptr || !pk_col->getPrimaryKey()) {
+        failed = true;
+        break;
+      }
+      Uint32 col_id = pk_col->getColumnNo();
+      Uint32 col_word = col_id / 32;
+      Uint32 col_bit = col_id & 31;
+      Uint32 col_bit_value = (pk_bitmap_words[col_word] >> col_bit) & 1;
+      if (col_bit_value != 0) {
+        failed = true;
+      }
+      Uint32 word = pk_bitmap_words[col_word];
+      Uint32 bit_value = 1 << col_bit;
+      word |= bit_value;
+      pk_bitmap_words[col_word] = word;
+      key_ops[i].m_pkColumns[j] = pk_col;
+    }
+    if (unlikely(failed)) {
+      status = RS_CLIENT_ERROR(
+        ERROR_014 + std::string(req->PKName(j)));
+      req->MarkInvalidOp(status);
+      continue;
+    }
+    j = 0;
+    for (; j < numReadColumns; j++) {
+      const NdbDictionary::Column *read_col =
+        tableDict->getColumn(req->ReadColumnName(j));
+      if (read_col == nullptr) {
+        failed = true;
+        break;
+      }
+      Uint32 col_id = read_col->getColumnNo();
+      Uint32 col_word = col_id / 32;
+      Uint32 col_bit = col_id & 31;
+      Uint32 col_bit_value = (bitmap_words[col_word] >> col_bit) & 1;
+      if (col_bit_value != 0) {
+        failed = true;
+        break;
+      }
+      Uint32 word = bitmap_words[col_word];
+      Uint32 bit_value = 1 << col_bit;
+      word |= bit_value;
+      bitmap_words[col_word] = word;
+      key_ops[i].m_readColumns[j] = read_col;
+    }
+    if (unlikely(failed)) {
+      status = RS_CLIENT_ERROR(
+        ERROR_037 + std::string(req->ReadColumnName(j)));
+      status = RS_CLIENT_ERROR(ERROR_037);
+      req->MarkInvalidOp(status);
+      continue;
+    }
+    // At least one operation is successfully initialised
+    success = true;
+  }
+  if (success) {
+    return RS_OK;
+  }
+  return status;
+}
 
 PKROperation::PKROperation(RS_Buffer *reqBuff,
                            RS_Buffer *respBuff,

@@ -37,7 +37,7 @@ extern "C" {
 #define ERROR_011 "Database/Table does not exist."
 #define ERROR_012 "Column does not exist."
 #define ERROR_013 "Wrong number of primary-key columns."
-#define ERROR_014 "Wrong primay-key column."
+#define ERROR_014 "Wrong primay-key column. "
 #define ERROR_015 "Wrong data type."
 #define ERROR_016 "Response buffer overflow."
 #define ERROR_017 "Hash indexes on float and double; and indexes on Blob types are not supported."
@@ -60,7 +60,7 @@ extern "C" {
 #define ERROR_034 "Programming error. RonDB connection has been shutdown. Use Init() fn."
 #define ERROR_035 "RonDB connection and object pool is not initialized."
 #define ERROR_036 "RonDB reconnection already in progress."
-#define ERROR_037 "Failed to read column."
+#define ERROR_037 "Failed to read column. "
 #ifdef __cplusplus
 constexpr char ERROR_038[]                          = "identifier is empty";
 constexpr int ERROR_CODE_EMPTY_IDENTIFIER           = 38;
@@ -120,6 +120,10 @@ constexpr char ERROR_065[]                    = "RonSQL temporary error";
 constexpr int ERROR_CODE_RONSQL_TEMPORARY     = 65;
 constexpr char ERROR_066[]                    = "RonSQL general error";
 constexpr int ERROR_CODE_RONSQL_PERMANENT     = 66;
+constexpr char ERROR_067[]                    = "Memory allocation failure";
+constexpr int ERROR_CODE_MALLOC_FAILURE     = 67;
+constexpr char ERROR_068[]                    = "Read more columns than table has";
+constexpr int ERROR_CODE_TOO_MANY_COLUMNS   = 68;
 #endif
 
 #ifdef __cplusplus
