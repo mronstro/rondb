@@ -60,15 +60,24 @@ class BatchKeyOperations {
  public:
    BatchKeyOperations();
    ~BatchKeyOperations() = delete;
+   RS_Status perform_operation(ArenaMalloc*,
+                               Uint32 numOps,
+                               RS_Buffer *reqBuffer,
+                               RS_Buffer *respBuffer,
+                               Ndb *ndb_object);
    RS_Status init_batch_operations(ArenaMalloc*,
                                    Uint32,
                                    RS_Buffer *reqBuffer,
                                    RS_Buffer *respBuffer,
                                    Ndb *ndb_object);
+   RS_Status setup_transaction();
    RS_Status setup_read_operation();
+   RS_Status execute();
    RS_Status create_response();
    RS_Status append_op_recs(Uint32);
-   RS_Status execute();
+   void close_transaction();
+   RS_Status abort();
+   RS_Status handle_ndb_error(RS_Status);
 };
 
 typedef struct SubOpTuple {

@@ -72,7 +72,7 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
   for (Uint32 i = 0; i < numOps; i++) {
     PKRRequest *req = new (&key_ops[i].m_req) PKRRequest(&reqBuffer[i]);
     PKRResponse *resp = new (&key_ops[i].m_resp) PKRResponse(&respBuffer[i]);
-    (void)resp; //TODO
+    (void)resp;
     if (unlikely(ndb_object->setCatalogName(req->DB()) != 0)) {
       status = RS_CLIENT_404_WITH_MSG_ERROR(
         ERROR_011 + std::string(" Database: ") +
@@ -201,76 +201,11 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
   return status;
 }
 
-PKROperation::PKROperation(RS_Buffer *reqBuff,
-                           RS_Buffer *respBuff,
-                           Ndb *ndbObject) {
-  SubOpTuple pkOpTuple = SubOpTuple{};
-  pkOpTuple.pkRequest = new PKRRequest(reqBuff);
-  pkOpTuple.pkResponse = new PKRResponse(respBuff);
-  pkOpTuple.ndbOperation = nullptr;
-  pkOpTuple.tableDict = nullptr;
-  pkOpTuple.primaryKeysCols = nullptr;
-  pkOpTuple.primaryKeySizes = nullptr;
-  this->subOpTuples.push_back(pkOpTuple);
-  this->ndbObject = ndbObject;
-  this->noOps = 1;
-  this->isBatch = false;
-}
-
-PKROperation::PKROperation(Uint32 noOps,
-                           RS_Buffer *reqBuffs,
-                           RS_Buffer *respBuffs,
-                           Ndb *ndbObject) {
-  for (Uint32 i = 0; i < noOps; i++) {
-    SubOpTuple pkOpTuple = SubOpTuple{};
-    pkOpTuple.pkRequest = new PKRRequest(&reqBuffs[i]);
-    pkOpTuple.pkResponse = new PKRResponse(&respBuffs[i]);
-    pkOpTuple.ndbOperation = nullptr;
-    pkOpTuple.tableDict = nullptr;
-    pkOpTuple.primaryKeysCols = nullptr;
-    pkOpTuple.primaryKeySizes = nullptr;
-    this->subOpTuples.push_back(pkOpTuple);
-  }
-  this->ndbObject = ndbObject;
-  this->noOps     = noOps;
-  this->isBatch   = true;
-}
-
-PKROperation::~PKROperation() {
-  for (size_t subOpIdx = 0; subOpIdx < subOpTuples.size(); subOpIdx++) {
-    SubOpTuple subOp = subOpTuples[subOpIdx];
-    int pkColsCount = subOp.pkRequest->PKColumnsCount();
-    if (subOp.primaryKeysCols != nullptr) {
-      for (int pkPtrIdx = 0; pkPtrIdx < pkColsCount; pkPtrIdx++) {
-        if (subOp.primaryKeysCols[pkPtrIdx] == nullptr) {
-          break;
-        } else {
-          free(subOp.primaryKeysCols[pkPtrIdx]);
-        }
-      }
-      free(subOp.primaryKeysCols);
-    }
-    if (subOp.primaryKeySizes != nullptr) {
-      free(subOp.primaryKeySizes);
-    }
-    // clear the ColRec Vector
-    subOp.recs.clear();
-    delete subOp.pkRequest;
-    delete subOp.pkResponse;
-  }
-}
-
-/**
- * start a transaction
- *
- * @return status
- */
-
-RS_Status PKROperation::SetupTransaction() {
-  const NdbDictionary::Table *table_dict = subOpTuples[0].tableDict;
-  transaction = ndbObject->startTransaction(table_dict);
-  if (unlikely(transaction == nullptr)) {
-    return RS_RONDB_SERVER_ERROR(ndbObject->getNdbError(), ERROR_005);
+RS_Status BatchKeyOperations::setup_transaction() {
+  const NdbDictionary::Table *table_dict = key_ops[0].m_tableDict;
+  ndbTransaction = ndb_object->startTransaction(table_dict);
+  if (unlikely(ndbTransaction == nullptr)) {
+    return RS_RONDB_SERVER_ERROR(ndb_object->getNdbError(), ERROR_005);
   }
   return RS_OK;
 }
@@ -326,128 +261,6 @@ start:
 RS_Status BatchKeyOperations::execute() {
   if (unlikely(ndbTransaction->execute(NdbTransaction::NoCommit) != 0)) {
     return RS_RONDB_SERVER_ERROR(ndbTransaction->getNdbError(), ERROR_009);
-  }
-  return RS_OK;
-}
-
-/**
- * Set up read operation
- *
- * @return status
- */
-RS_Status PKROperation::SetupReadOperation() {
-
-start:
-  for (size_t opIdx = 0; opIdx < noOps; opIdx++) {
-    // this sub operation can not be processed
-    if (unlikely(subOpTuples[opIdx].pkRequest->IsInvalidOp())) {
-      continue;
-    }
-    PKRRequest *req = subOpTuples[opIdx].pkRequest;
-    const NdbDictionary::Table *tableDict = subOpTuples[opIdx].tableDict;
-    std::vector<std::shared_ptr<ColRec>> *recs = &subOpTuples[opIdx].recs;
-    // cleaned by destructor
-    Int8 **primaryKeysCols =
-      (Int8 **)malloc(req->PKColumnsCount() * sizeof(Int8 *));
-    Uint32 *primaryKeySizes =
-      (Uint32 *)malloc(req->PKColumnsCount() * sizeof(Uint32));
-    memset(primaryKeysCols, 0, req->PKColumnsCount() * sizeof(Int8 *));
-    memset(primaryKeySizes, 0, req->PKColumnsCount() * sizeof(Uint32));
-    subOpTuples[opIdx].primaryKeysCols = primaryKeysCols;
-    subOpTuples[opIdx].primaryKeySizes = primaryKeySizes;
-    for (Uint32 colIdx = 0; colIdx < req->PKColumnsCount(); colIdx++) {
-      RS_Status status =
-        SetOperationPKCol(tableDict->getColumn(req->PKName(colIdx)),
-                          req,
-                          colIdx,
-                          &primaryKeysCols[colIdx],
-                          &primaryKeySizes[colIdx]);
-      if (status.http_code != SUCCESS) {
-        if (isBatch) {
-          subOpTuples[opIdx].pkRequest->MarkInvalidOp(status);
-          goto start;
-        } else {
-          return status;
-        }
-      }
-    }
-    NdbOperation *operation = transaction->getNdbOperation(tableDict);
-    if (unlikely(operation == nullptr)) {
-      return RS_RONDB_SERVER_ERROR(transaction->getNdbError(), ERROR_007);
-    }
-    subOpTuples[opIdx].ndbOperation = operation;
-    if (unlikely(operation->readTuple(NdbOperation::LM_CommittedRead) != 0)) {
-      return RS_SERVER_ERROR(ERROR_022);
-    }
-    for (Uint32 colIdx = 0; colIdx < req->PKColumnsCount(); colIdx++) {
-      int retVal =
-        operation->equal(req->PKName(colIdx),
-        (char *)primaryKeysCols[colIdx],
-        primaryKeySizes[colIdx]);
-      if (unlikely(retVal != 0)) {
-        return RS_SERVER_ERROR(ERROR_023);
-      }
-    }
-    if (req->ReadColumnsCount() > 0) {
-      for (Uint32 i = 0; i < req->ReadColumnsCount(); i++) {
-        RS_Status status = GetColValue(tableDict,
-                                       operation,
-                                       req->ReadColumnName(i),
-                                       recs);
-        if (unlikely(status.http_code != SUCCESS)) {
-          return status;
-        }
-      }
-    } else {
-      std::unordered_map<std::string,
-                         const NdbDictionary::Column *> *nonPKCols =
-        &subOpTuples[opIdx].allNonPKCols;
-      std::unordered_map<std::string,
-                         const NdbDictionary::Column *>::const_iterator it =
-        nonPKCols->begin();
-      while (it != nonPKCols->end()) {
-        RS_Status status = GetColValue(tableDict,
-                                       operation,
-                                       it->first.c_str(),
-                                       recs);
-        if (unlikely(status.http_code != SUCCESS)) {
-          return status;
-        }
-        it++;
-      }
-    }
-  }
-  return RS_OK;
-}
-
-RS_Status PKROperation::GetColValue(const NdbDictionary::Table *tableDict,
-                                    NdbOperation *ndbOperation,
-                                    const char *colName,
-                                    std::vector<std::shared_ptr<ColRec>> *recs) {
-  NdbBlob *blob = nullptr;
-  NdbRecAttr *ndbRecAttr = nullptr;
-  if (tableDict->getColumn(colName)->getType() == NdbDictionary::Column::Blob ||
-      tableDict->getColumn(colName)->getType() == NdbDictionary::Column::Text) {
-    blob = ndbOperation->getBlobHandle(colName);
-    // failed to read blob column
-    if (unlikely(blob == nullptr)) {
-      return RS_SERVER_ERROR(
-        ERROR_037 + std::string(" Column: ") + std::string(colName));
-    }
-  }
-  ndbRecAttr = ndbOperation->getValue(colName, nullptr);
-  if (unlikely(ndbRecAttr == nullptr)) {
-    return RS_SERVER_ERROR(
-      ERROR_037 + std::string(" Column: ") + std::string(colName));
-  }
-  auto colRec = std::make_shared<ColRec>(ndbRecAttr, blob);
-  recs->push_back(colRec);
-  return RS_OK;
-}
-
-RS_Status PKROperation::Execute() {
-  if (unlikely(transaction->execute(NdbTransaction::NoCommit) != 0)) {
-    return RS_RONDB_SERVER_ERROR(transaction->getNdbError(), ERROR_009);
   }
   return RS_OK;
 }
@@ -849,6 +662,284 @@ RS_Status KeyOperation::write_col_to_resp(Uint32 colIdx,
   return RS_SERVER_ERROR(
     ERROR_028 + std::string(" Column: ") + std::string(col_name) +
     " Type: " + std::to_string(col->getType()));
+}
+
+void BatchKeyOperations::close_transaction() {
+  ndb_object->closeTransaction(ndbTransaction);
+}
+
+RS_Status BatchKeyOperations::perform_operation(
+  ArenaMalloc *amalloc,
+  Uint32 numOperations,
+  RS_Buffer *reqBuffer,
+  RS_Buffer *respBuffer,
+  Ndb *ndb_object) {
+
+  RS_Status status = init_batch_operations(
+    amalloc,
+    numOperations,
+    reqBuffer,
+    respBuffer,
+    ndb_object);
+  if (unlikely(status.http_code != SUCCESS)) {
+    handle_ndb_error(status);
+    return status;
+  }
+  status = setup_transaction();
+  if (unlikely(status.http_code != SUCCESS)) {
+    handle_ndb_error(status);
+    return status;
+  }
+  status = setup_read_operation();
+  if (unlikely(status.http_code != SUCCESS)) {
+    handle_ndb_error(status);
+    return status;
+  }
+  status = execute();
+  if (unlikely(status.http_code != SUCCESS)) {
+    handle_ndb_error(status);
+    return status;
+  }
+  status = create_response();
+  if (unlikely(status.http_code != SUCCESS)) {
+    handle_ndb_error(status);
+    return status;
+  }
+  close_transaction();
+  return RS_OK;
+}
+
+RS_Status BatchKeyOperations::abort() {
+  if (likely(ndbTransaction != nullptr)) {
+    NdbTransaction::CommitStatusType status = ndbTransaction->commitStatus();
+    if (status == NdbTransaction::CommitStatusType::Started) {
+      ndbTransaction->execute(NdbTransaction::Rollback);
+    }
+    ndb_object->closeTransaction(ndbTransaction);
+  }
+  return RS_OK;
+}
+
+RS_Status BatchKeyOperations::handle_ndb_error(RS_Status status) {
+  // schema errors
+  if (UnloadSchema(status)) {
+    // no idea which sub-operation threw the error
+    // unload all tables used in this operation
+    std::list<std::tuple<std::string, std::string>> tables;
+    std::unordered_map<std::string, bool> tablesMap;
+    for (Uint32 i = 0; i < numOperations; i++) {
+      PKRRequest *req = &key_ops[i].m_req;
+      if (req->IsInvalidOp()) {
+        const char *db = req->DB();
+        const char *table = req->Table();
+        std::string key(std::string(db) + "|" + std::string(table));
+        if (tablesMap.count(key) == 0) {
+          tables.push_back(std::make_tuple(std::string(db),
+                           std::string(table)));
+          tablesMap[key] = true;
+        }
+      }
+    }
+    HandleSchemaErrors(ndb_object, status, tables);
+  }
+  abort();
+  return RS_OK;
+}
+
+PKROperation::PKROperation(RS_Buffer *reqBuff,
+                           RS_Buffer *respBuff,
+                           Ndb *ndbObject) {
+  SubOpTuple pkOpTuple = SubOpTuple{};
+  pkOpTuple.pkRequest = new PKRRequest(reqBuff);
+  pkOpTuple.pkResponse = new PKRResponse(respBuff);
+  pkOpTuple.ndbOperation = nullptr;
+  pkOpTuple.tableDict = nullptr;
+  pkOpTuple.primaryKeysCols = nullptr;
+  pkOpTuple.primaryKeySizes = nullptr;
+  this->subOpTuples.push_back(pkOpTuple);
+  this->ndbObject = ndbObject;
+  this->noOps = 1;
+  this->isBatch = false;
+}
+
+PKROperation::PKROperation(Uint32 noOps,
+                           RS_Buffer *reqBuffs,
+                           RS_Buffer *respBuffs,
+                           Ndb *ndbObject) {
+  for (Uint32 i = 0; i < noOps; i++) {
+    SubOpTuple pkOpTuple = SubOpTuple{};
+    pkOpTuple.pkRequest = new PKRRequest(&reqBuffs[i]);
+    pkOpTuple.pkResponse = new PKRResponse(&respBuffs[i]);
+    pkOpTuple.ndbOperation = nullptr;
+    pkOpTuple.tableDict = nullptr;
+    pkOpTuple.primaryKeysCols = nullptr;
+    pkOpTuple.primaryKeySizes = nullptr;
+    this->subOpTuples.push_back(pkOpTuple);
+  }
+  this->ndbObject = ndbObject;
+  this->noOps     = noOps;
+  this->isBatch   = true;
+}
+
+PKROperation::~PKROperation() {
+  for (size_t subOpIdx = 0; subOpIdx < subOpTuples.size(); subOpIdx++) {
+    SubOpTuple subOp = subOpTuples[subOpIdx];
+    int pkColsCount = subOp.pkRequest->PKColumnsCount();
+    if (subOp.primaryKeysCols != nullptr) {
+      for (int pkPtrIdx = 0; pkPtrIdx < pkColsCount; pkPtrIdx++) {
+        if (subOp.primaryKeysCols[pkPtrIdx] == nullptr) {
+          break;
+        } else {
+          free(subOp.primaryKeysCols[pkPtrIdx]);
+        }
+      }
+      free(subOp.primaryKeysCols);
+    }
+    if (subOp.primaryKeySizes != nullptr) {
+      free(subOp.primaryKeySizes);
+    }
+    // clear the ColRec Vector
+    subOp.recs.clear();
+    delete subOp.pkRequest;
+    delete subOp.pkResponse;
+  }
+}
+
+/**
+ * start a transaction
+ *
+ * @return status
+ */
+
+RS_Status PKROperation::SetupTransaction() {
+  const NdbDictionary::Table *table_dict = subOpTuples[0].tableDict;
+  transaction = ndbObject->startTransaction(table_dict);
+  if (unlikely(transaction == nullptr)) {
+    return RS_RONDB_SERVER_ERROR(ndbObject->getNdbError(), ERROR_005);
+  }
+  return RS_OK;
+}
+
+/**
+ * Set up read operation
+ *
+ * @return status
+ */
+RS_Status PKROperation::SetupReadOperation() {
+
+start:
+  for (size_t opIdx = 0; opIdx < noOps; opIdx++) {
+    // this sub operation can not be processed
+    if (unlikely(subOpTuples[opIdx].pkRequest->IsInvalidOp())) {
+      continue;
+    }
+    PKRRequest *req = subOpTuples[opIdx].pkRequest;
+    const NdbDictionary::Table *tableDict = subOpTuples[opIdx].tableDict;
+    std::vector<std::shared_ptr<ColRec>> *recs = &subOpTuples[opIdx].recs;
+    // cleaned by destructor
+    Int8 **primaryKeysCols =
+      (Int8 **)malloc(req->PKColumnsCount() * sizeof(Int8 *));
+    Uint32 *primaryKeySizes =
+      (Uint32 *)malloc(req->PKColumnsCount() * sizeof(Uint32));
+    memset(primaryKeysCols, 0, req->PKColumnsCount() * sizeof(Int8 *));
+    memset(primaryKeySizes, 0, req->PKColumnsCount() * sizeof(Uint32));
+    subOpTuples[opIdx].primaryKeysCols = primaryKeysCols;
+    subOpTuples[opIdx].primaryKeySizes = primaryKeySizes;
+    for (Uint32 colIdx = 0; colIdx < req->PKColumnsCount(); colIdx++) {
+      RS_Status status =
+        SetOperationPKCol(tableDict->getColumn(req->PKName(colIdx)),
+                          req,
+                          colIdx,
+                          &primaryKeysCols[colIdx],
+                          &primaryKeySizes[colIdx]);
+      if (status.http_code != SUCCESS) {
+        if (isBatch) {
+          subOpTuples[opIdx].pkRequest->MarkInvalidOp(status);
+          goto start;
+        } else {
+          return status;
+        }
+      }
+    }
+    NdbOperation *operation = transaction->getNdbOperation(tableDict);
+    if (unlikely(operation == nullptr)) {
+      return RS_RONDB_SERVER_ERROR(transaction->getNdbError(), ERROR_007);
+    }
+    subOpTuples[opIdx].ndbOperation = operation;
+    if (unlikely(operation->readTuple(NdbOperation::LM_CommittedRead) != 0)) {
+      return RS_SERVER_ERROR(ERROR_022);
+    }
+    for (Uint32 colIdx = 0; colIdx < req->PKColumnsCount(); colIdx++) {
+      int retVal =
+        operation->equal(req->PKName(colIdx),
+        (char *)primaryKeysCols[colIdx],
+        primaryKeySizes[colIdx]);
+      if (unlikely(retVal != 0)) {
+        return RS_SERVER_ERROR(ERROR_023);
+      }
+    }
+    if (req->ReadColumnsCount() > 0) {
+      for (Uint32 i = 0; i < req->ReadColumnsCount(); i++) {
+        RS_Status status = GetColValue(tableDict,
+                                       operation,
+                                       req->ReadColumnName(i),
+                                       recs);
+        if (unlikely(status.http_code != SUCCESS)) {
+          return status;
+        }
+      }
+    } else {
+      std::unordered_map<std::string,
+                         const NdbDictionary::Column *> *nonPKCols =
+        &subOpTuples[opIdx].allNonPKCols;
+      std::unordered_map<std::string,
+                         const NdbDictionary::Column *>::const_iterator it =
+        nonPKCols->begin();
+      while (it != nonPKCols->end()) {
+        RS_Status status = GetColValue(tableDict,
+                                       operation,
+                                       it->first.c_str(),
+                                       recs);
+        if (unlikely(status.http_code != SUCCESS)) {
+          return status;
+        }
+        it++;
+      }
+    }
+  }
+  return RS_OK;
+}
+
+RS_Status PKROperation::GetColValue(const NdbDictionary::Table *tableDict,
+                                    NdbOperation *ndbOperation,
+                                    const char *colName,
+                                    std::vector<std::shared_ptr<ColRec>> *recs) {
+  NdbBlob *blob = nullptr;
+  NdbRecAttr *ndbRecAttr = nullptr;
+  if (tableDict->getColumn(colName)->getType() == NdbDictionary::Column::Blob ||
+      tableDict->getColumn(colName)->getType() == NdbDictionary::Column::Text) {
+    blob = ndbOperation->getBlobHandle(colName);
+    // failed to read blob column
+    if (unlikely(blob == nullptr)) {
+      return RS_SERVER_ERROR(
+        ERROR_037 + std::string(" Column: ") + std::string(colName));
+    }
+  }
+  ndbRecAttr = ndbOperation->getValue(colName, nullptr);
+  if (unlikely(ndbRecAttr == nullptr)) {
+    return RS_SERVER_ERROR(
+      ERROR_037 + std::string(" Column: ") + std::string(colName));
+  }
+  auto colRec = std::make_shared<ColRec>(ndbRecAttr, blob);
+  recs->push_back(colRec);
+  return RS_OK;
+}
+
+RS_Status PKROperation::Execute() {
+  if (unlikely(transaction->execute(NdbTransaction::NoCommit) != 0)) {
+    return RS_RONDB_SERVER_ERROR(transaction->getNdbError(), ERROR_009);
+  }
+  return RS_OK;
 }
 
 RS_Status PKROperation::CreateResponse() {
