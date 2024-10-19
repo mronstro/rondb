@@ -41,6 +41,22 @@ typedef struct ColRec {
  * Set up read operation
  * @param col information of column that we're querying
  * @param request the incoming request from the REST API server
+ * @param row The row allocated for primary key and result
+ * @param ndb_record The Ndb Record Specification
+ * @param colIdx Column id
+ * @return the REST API status of performing the operation
+ *
+ * @return status
+ */
+RS_Status set_operation_pk_col(const NdbDictionary::Column *col,
+                               PKRRequest *request,
+                               Uint8 *row,
+                               const NdbRecord *ndb_record,
+                               Uint32 colIdx);
+/**
+ * Set up read operation
+ * @param col information of column that we're querying
+ * @param request the incoming request from the REST API server
  * @param colIdx Column id
  * @param primaryKeyCol [out] Primary key column
  * @param primaryKeySize [out] Primary key size
@@ -48,6 +64,7 @@ typedef struct ColRec {
  *
  * @return status
  */
+
 RS_Status SetOperationPKCol(const NdbDictionary::Column *col,
                             PKRRequest *request,
                             Uint32 colIdx,

@@ -39,7 +39,7 @@ struct KeyOperation {
   Uint32 m_num_table_columns;
   Uint8 *m_bitmap_read_columns;
   Uint8 *m_row;
-  NdbOperation *m_ndbOperation;
+  const NdbOperation *m_ndbOperation;
   const NdbDictionary::Table *m_tableDict;
   const NdbDictionary::Column **m_pkColumns;
   const NdbDictionary::Column **m_readColumns;

@@ -737,13 +737,12 @@ RS_Status SetOperationPKCol(const NdbDictionary::Column *col,
 RS_Status set_operation_pk_col(const NdbDictionary::Column *col,
                                PKRRequest *request,
                                Uint8 *row,
-                               NdbDictionary *dict,
                                const NdbRecord *ndb_record,
                                Uint32 colIdx) {
   RS_Status error = RS_OK;
   Uint32 col_id = col->getColumnNo();
   Uint32 offset;
-  bool ret = dict->getOffset(ndb_record, col_id, offset);
+  bool ret = NdbDictionary::getOffset(ndb_record, col_id, offset);
   require(ret);
   Uint8* primaryKeyCol = row + offset;
 

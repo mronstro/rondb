@@ -274,6 +274,54 @@ RS_Status PKROperation::SetupTransaction() {
  *
  * @return status
  */
+RS_Status BatchKeyOperations::setup_read_operation() {
+
+start:
+  for (size_t opIdx = 0; opIdx < numOperations; opIdx++) {
+    // this sub operation can not be processed
+    PKRRequest *req = &key_ops[opIdx].m_req;
+    if (unlikely(req->IsInvalidOp())) {
+      continue;
+    }
+    Uint32 numPrimaryKeys = key_ops[opIdx].m_num_pk_columns;
+    for (Uint32 colIdx = 0; colIdx < numPrimaryKeys; colIdx++) {
+      RS_Status status =
+        set_operation_pk_col(key_ops[opIdx].m_pkColumns[colIdx],
+                             req,
+                             key_ops[opIdx].m_row,
+                             key_ops[opIdx].m_ndb_record,
+                             colIdx);
+      if (status.http_code != SUCCESS) {
+        if (isBatch) {
+          req->MarkInvalidOp(status);
+          goto start;
+        } else {
+          return status;
+        }
+      }
+    }
+    const NdbOperation *operation = ndbTransaction->readTuple(
+      key_ops[opIdx].m_ndb_record,
+      (const char*)key_ops[opIdx].m_row,
+      key_ops[opIdx].m_ndb_record,
+      (char*)key_ops[opIdx].m_row,
+      NdbOperation::LM_CommittedRead,
+      key_ops[opIdx].m_bitmap_read_columns,
+      nullptr,
+      0);
+    if (unlikely(operation == nullptr)) {
+      return RS_RONDB_SERVER_ERROR(ndbTransaction->getNdbError(), ERROR_007);
+    }
+    key_ops[opIdx].m_ndbOperation = operation;
+  }
+  return RS_OK;
+}
+
+/**
+ * Set up read operation
+ *
+ * @return status
+ */
 RS_Status PKROperation::SetupReadOperation() {
 
 start:
