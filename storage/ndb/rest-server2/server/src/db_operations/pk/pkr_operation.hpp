@@ -46,6 +46,8 @@ struct KeyOperation {
   const NdbRecord *m_ndb_record;
   PKRRequest m_req;
   PKRResponse m_resp;
+  RS_Status append_op_recs(PKRResponse *resp);
+  RS_Status write_col_to_resp(Uint32 colIdx, PKRResponse *resp);
 };
 
 class BatchKeyOperations {
@@ -64,6 +66,8 @@ class BatchKeyOperations {
                                    RS_Buffer *respBuffer,
                                    Ndb *ndb_object);
    RS_Status setup_read_operation();
+   RS_Status create_response();
+   RS_Status append_op_recs(Uint32);
    RS_Status execute();
 };
 

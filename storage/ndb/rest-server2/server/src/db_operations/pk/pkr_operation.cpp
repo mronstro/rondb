@@ -31,6 +31,7 @@
 #include "src/status.hpp"
 #include "src/mystring.hpp"
 #include "my_compiler.h"
+#include "src/rdrs_dal.h"
 
 #include <memory>
 #include <mysql_time.h>
@@ -41,6 +42,11 @@
 #include <storage/ndb/include/ndbapi/NdbDictionary.hpp>
 #include <kernel/ndb_limits.h>
 #include <ArenaMalloc.hpp>
+#include <util/require.h>
+#include "my_byteorder.h"
+#include <decimal_utils.hpp>
+#include <my_time.h>
+#include <libbase64.h>
 
 BatchKeyOperations::BatchKeyOperations() {
 }
@@ -444,6 +450,405 @@ RS_Status PKROperation::Execute() {
     return RS_RONDB_SERVER_ERROR(transaction->getNdbError(), ERROR_009);
   }
   return RS_OK;
+}
+
+RS_Status BatchKeyOperations::create_response() {
+  bool found = true;
+  for (size_t i = 0; i < numOperations; i++) {
+    PKRRequest *req = &key_ops[i].m_req;
+    PKRResponse *resp = &key_ops[i].m_resp;
+    const NdbOperation *op = key_ops[i].m_ndbOperation;
+    resp->SetDB(req->DB());
+    resp->SetTable(req->Table());
+    resp->SetOperationID(req->OperationId());
+    resp->SetNoOfColumns(key_ops[i].m_num_read_columns);
+    if (unlikely(req->IsInvalidOp())) {
+      resp->SetStatus(req->GetError().http_code, req->GetError().message);
+      resp->Close();
+      continue;
+    }
+    found = true;
+    if (likely(op->getNdbError().classification == NdbError::NoError)) {
+      resp->SetStatus(SUCCESS, "OK");
+    } else if (op->getNdbError().classification == NdbError::NoDataFound) {
+      found = false;
+      resp->SetStatus(NOT_FOUND, "NOT Found");
+    } else {      
+      //  immediately fail the entire batch
+      resp->SetStatus(SERVER_ERROR, op->getNdbError().message);
+      resp->Close();
+      return RS_RONDB_SERVER_ERROR(
+        op->getNdbError(), std::string("SubOperation ") +
+        std::string(req->OperationId()) +
+        std::string(" failed"));
+    }
+    if (likely(found)) {
+      // iterate over all columns
+      RS_Status ret = key_ops[i].append_op_recs(resp);
+      if (ret.http_code != SUCCESS) {
+        return ret;
+      }
+    }
+    resp->Close();
+  }
+  if (unlikely(!found && !isBatch)) {
+    return RS_CLIENT_404_ERROR();
+  }
+  return RS_OK;
+}
+
+RS_Status KeyOperation::append_op_recs(PKRResponse *resp) {
+  for (Uint32 colIdx = 0; colIdx < m_num_read_columns; colIdx++) {
+    RS_Status ret = write_col_to_resp(colIdx, resp);
+    if (ret.http_code != SUCCESS) {
+      return ret;
+    }
+  }
+  return RS_OK;
+}
+
+static inline void my_unpack_date(MYSQL_TIME *l_time, const void *d) {
+  uchar b[4];
+  memcpy(b, d, 3);
+  b[3] = 0;
+  uint w = (uint)uint3korr(b);
+  l_time->day = (w & 31);
+  w >>= 5;
+  l_time->month = (w & 15);
+  w >>= 4;
+  l_time->year = w;
+  l_time->time_type = MYSQL_TIMESTAMP_DATE;
+}
+
+RS_Status KeyOperation::write_col_to_resp(Uint32 colIdx,
+                                          PKRResponse *response) {
+  const NdbDictionary::Column *col = m_readColumns[colIdx];
+  const NdbRecord *ndb_record = m_ndb_record;
+  const char *col_name = col->getName();
+  Uint32 col_id = col->getColumnNo();
+  Uint8 *row = m_row;
+  {
+    Uint32 null_byte_offset;
+    Uint32 null_bit_in_byte;
+    bool null_value = NdbDictionary::getNullBitOffset(
+      ndb_record, col_id, null_byte_offset, null_bit_in_byte);
+    if (null_value) {
+      Uint8 null_byte = row[null_byte_offset];
+      Uint8 null_bit_value = (null_byte >> null_bit_in_byte) & 1;
+      if (null_bit_value) {
+        return response->SetColumnDataNull(m_req.ReadColumnName(colIdx));
+       }
+    }
+  }
+  Uint32 offset;
+  bool ret = NdbDictionary::getOffset(ndb_record, col_id, offset);
+  require(ret);
+  Uint8 *col_ptr = row + offset;
+  switch (col->getType()) {
+  case NdbDictionary::Column::Undefined: {
+    ///< 4 bytes + 0-3 fraction
+    return RS_CLIENT_ERROR(ERROR_018 + std::string(" Column: ") +
+      std::string(col_name));
+  }
+  case NdbDictionary::Column::Tinyint: {
+    ///< 8 bit. 1 byte signed integer, can be used in array
+    return response->Append_i8(col_name, *(Int8*)col_ptr);
+  }
+  case NdbDictionary::Column::Tinyunsigned: {
+    ///< 8 bit. 1 byte unsigned integer, can be used in array
+    return response->Append_iu8(col_name, *(Uint8*)col_ptr);
+  }
+  case NdbDictionary::Column::Smallint: {
+    ///< 16 bit. 2 byte signed integer, can be used in array
+    return response->Append_i16(col_name, *(Int16*)col_ptr);
+  }
+  case NdbDictionary::Column::Smallunsigned: {
+    ///< 16 bit. 2 byte unsigned integer, can be used in array
+    return response->Append_iu16(col_name, *(Uint16*)col_ptr);
+  }
+  case NdbDictionary::Column::Mediumint: {
+    ///< 24 bit. 3 byte signed integer, can be used in array
+    return response->Append_i24(col_name, sint3korr(col_ptr));
+  }
+  case NdbDictionary::Column::Mediumunsigned: {
+    ///< 24 bit. 3 byte unsigned integer, can be used in array
+    return response->Append_iu24(col_name, uint3korr(col_ptr));
+  }
+  case NdbDictionary::Column::Int: {
+    ///< 32 bit. 4 byte signed integer, can be used in array
+    return response->Append_i32(col_name, *(Int32*)col_ptr);
+  }
+  case NdbDictionary::Column::Unsigned: {
+    ///< 32 bit. 4 byte unsigned integer, can be used in array
+    return response->Append_iu32(col_name, *(Uint32*)col_ptr);
+  }
+  case NdbDictionary::Column::Bigint: {
+    ///< 64 bit. 8 byte signed integer, can be used in array
+    return response->Append_i64(col_name, *(Int64*)col_ptr);
+  }
+  case NdbDictionary::Column::Bigunsigned: {
+    ///< 64 Bit. 8 byte signed integer, can be used in array
+    return response->Append_iu64(col_name, *(Uint64*)col_ptr);
+  }
+  case NdbDictionary::Column::Float: {
+    ///< 32-bit float. 4 bytes float, can be used in array
+    return response->Append_f32(col_name, *(float*)col_ptr);
+  }
+  case NdbDictionary::Column::Double: {
+    ///< 64-bit float. 8 byte float, can be used in array
+    return response->Append_d64(col_name, *(double*)col_ptr);
+  }
+  case NdbDictionary::Column::Olddecimal: {
+    ///< MySQL < 5.0 signed decimal,  Precision, Scale
+    return RS_SERVER_ERROR(
+      ERROR_028 + std::string(" Column: ") + std::string(col_name) +
+      " Type: " + std::to_string(col->getType()));
+  }
+  case NdbDictionary::Column::Olddecimalunsigned: {
+    ///< MySQL < 5.0 signed decimal,  Precision, Scale
+    return RS_SERVER_ERROR(
+      ERROR_028 + std::string(" Column: ") + std::string(col_name) +
+      " Type: " + std::to_string(col->getType()));
+  }
+  case NdbDictionary::Column::Decimal:
+    ///< MySQL >= 5.0 signed decimal,  Precision, Scale
+    [[fallthrough]];
+  case NdbDictionary::Column::Decimalunsigned: {
+    char decStr[DECIMAL_MAX_STR_LEN_IN_BYTES];
+    int precision = col->getPrecision();
+    int scale = col->getScale();
+    void *bin = (void*)col_ptr;
+    int binLen = col->getLength();
+    decimal_bin2str(bin,
+                    binLen,
+                    precision,
+                    scale,
+                    decStr,
+                    DECIMAL_MAX_STR_LEN_IN_BYTES);
+    return response->Append_string(col_name, std::string(decStr),
+                                   RDRS_FLOAT_DATATYPE);
+  }
+  case NdbDictionary::Column::Char:
+    ///< Len. A fixed array of 1-byte chars
+    [[fallthrough]];
+  case NdbDictionary::Column::Varchar:
+    ///< Length bytes: 1, Max: 255
+    [[fallthrough]];
+  case NdbDictionary::Column::Longvarchar: {
+    ///< Length bytes: 2, little-endian
+    const char *dataStart = nullptr;
+    const NdbDictionary::Column::ArrayType arrayType =
+      col->getArrayType();
+    Uint32 attrBytes = col->getLength();
+    switch (arrayType) {
+    case NdbDictionary::Column::ArrayTypeFixed:
+      /**
+       *  No prefix length is stored in aRef. Data starts from aRef's first byte
+       *  data might be padded with blank or null bytes to fill the whole column
+       */
+      dataStart = (const char*)col_ptr;
+      break;
+    case NdbDictionary::Column::ArrayTypeShortVar:
+      /**
+       * First byte of aRef has the length of data stored
+       *  Data starts from second byte of aRef
+       */
+      dataStart = (const char*)(col_ptr + 1);
+      attrBytes = static_cast<Uint8>(col_ptr[0]);
+      break;
+    case NdbDictionary::Column::ArrayTypeMediumVar:
+      /**
+       * First two bytes of aRef has the length of data stored
+       * Data starts from third byte of aRef
+       */
+      dataStart = (const char*)(col_ptr + 2);
+      attrBytes = static_cast<Uint8>(col_ptr[1]) * 256 +
+                  static_cast<Uint8>(col_ptr[0]);
+      break;
+    default:
+      return RS_CLIENT_ERROR(ERROR_019);
+    }
+    return response->Append_char(col_name,
+                                 dataStart,
+                                 attrBytes,
+                                 col->getCharset());
+  }
+  case NdbDictionary::Column::Binary:
+    [[fallthrough]];
+  case NdbDictionary::Column::Varbinary:
+    ///< Length bytes: 1, Max: 255
+    [[fallthrough]];
+  case NdbDictionary::Column::Longvarbinary: {
+    ///< Length bytes: 2, little-endian
+    const char *dataStart = nullptr;
+    const NdbDictionary::Column::ArrayType arrayType =
+      col->getArrayType();
+    Uint32 attrBytes = col->getLength();
+    switch (arrayType) {
+    case NdbDictionary::Column::ArrayTypeFixed:
+      /**
+       *  No prefix length is stored in aRef. Data starts from aRef's first byte
+       *  data might be padded with blank or null bytes to fill the whole column
+       */
+      dataStart = (const char*)col_ptr;
+      break;
+    case NdbDictionary::Column::ArrayTypeShortVar:
+      /**
+       * First byte of aRef has the length of data stored
+       *  Data starts from second byte of aRef
+       */
+      dataStart = (const char*)(col_ptr + 1);
+      attrBytes = static_cast<Uint8>(col_ptr[0]);
+      break;
+    case NdbDictionary::Column::ArrayTypeMediumVar:
+      /**
+       * First two bytes of aRef has the length of data stored
+       * Data starts from third byte of aRef
+       */
+      dataStart = (const char*)(col_ptr + 2);
+      attrBytes = static_cast<Uint8>(col_ptr[1]) * 256 +
+                  static_cast<Uint8>(col_ptr[0]);
+      break;
+    default:
+      return RS_CLIENT_ERROR(ERROR_019);
+    }
+    if (attrBytes > MAX_TUPLE_SIZE_IN_BYTES) {
+      // TODO error code
+    }
+    char buffer[MAX_TUPLE_SIZE_IN_BYTES_ENCODED];
+    size_t outlen = 0;
+    base64_encode(dataStart, attrBytes, (char *)&buffer[0], &outlen, 0);
+    return response->Append_string(col_name,
+                                   std::string(buffer, outlen),
+                                   RDRS_BINARY_DATATYPE);
+  }
+  case NdbDictionary::Column::Datetime: {
+    ///< Precision down to 1 sec (sizeof(Datetime) == 8 bytes )
+    return RS_SERVER_ERROR(
+      ERROR_028 + std::string(" Column: ") + std::string(col_name) +
+      " Type: " + std::to_string(col->getType()));
+  }
+  case NdbDictionary::Column::Date: {
+    ///< Precision down to 1 day(sizeof(Date) == 4 bytes )
+    MYSQL_TIME lTime;
+    my_unpack_date(&lTime, (char*)col_ptr);
+    char to[MAX_DATE_STRING_REP_LENGTH];
+    my_date_to_str(lTime, to);
+    return response->Append_string(col_name, std::string(to),
+                                   RDRS_DATETIME_DATATYPE);
+  }
+  case NdbDictionary::Column::Blob: {
+    ///< Binary large object (see NdbBlob)
+    /// Treat it as binary data
+    return RS_SERVER_ERROR(
+      ERROR_037 + std::string(" Reading column length failed.") +
+      std::string(" Column: ") + std::string(col_name) +
+      " Type: " + std::to_string(col->getType()));
+  }
+  case NdbDictionary::Column::Text: {
+    ///< Text blob
+    return RS_SERVER_ERROR(
+      ERROR_037 + std::string(" Reading column length failed.") +
+      std::string(" Column: ") + std::string(col_name) +
+      " Type: " + std::to_string(col->getType()));
+  }
+  case NdbDictionary::Column::Bit: {
+    Uint32 words = col->getLength() / 8;
+    if (col->getLength() % 8 != 0) {
+      words += 1;
+    }
+    require(words <= BIT_MAX_SIZE_IN_BYTES);
+    // change endieness
+    int i = 0;
+    char reversed[BIT_MAX_SIZE_IN_BYTES];
+    for (int j = words - 1; j >= 0; j--) {
+      reversed[i++] = (char)col_ptr[j];
+    }
+    char buffer[BIT_MAX_SIZE_IN_BYTES_ENCODED];
+    size_t outlen = 0;
+    base64_encode(reversed, words, (char *)&buffer[0], &outlen, 0);
+    return response->Append_string(col_name,
+                                   std::string(buffer, outlen),
+                                   RDRS_BIT_DATATYPE);
+  }
+  case NdbDictionary::Column::Time: {
+    ///< Time without date
+    return RS_SERVER_ERROR(
+      ERROR_028 + std::string(" Column: ") + std::string(col_name) +
+      " Type: " + std::to_string(col->getType()));
+  }
+  case NdbDictionary::Column::Year: {
+    ///< Year 1901-2155 (1 byte)
+    Int32 year = (uint)(1900 + col_ptr[0]);
+    return response->Append_i32(col_name, year);
+  }
+  case NdbDictionary::Column::Timestamp: {
+    ///< Unix time
+    return RS_SERVER_ERROR(
+      ERROR_028 + std::string(" Column: ") +
+      std::string(col_name) +
+      " Type: " + std::to_string(col->getType()));
+  }
+  ///**
+  // * Time types in MySQL 5.6 add microsecond fraction.
+  // * One should use setPrecision(x) to set number of fractional
+  // * digits (x = 0-6, default 0).  Data formats are as in MySQL
+  // * and must use correct byte length.  NDB does not check data
+  // * itself since any values can be compared as binary strings.
+  // */
+  case NdbDictionary::Column::Time2: {
+    ///< 3 bytes + 0-3 fraction
+    uint precision = col->getPrecision();
+    longlong numericTime =
+      my_time_packed_from_binary((const unsigned char *)col_ptr, precision);
+    MYSQL_TIME lTime;
+    TIME_from_longlong_time_packed(&lTime, numericTime);
+    char to[MAX_DATE_STRING_REP_LENGTH];
+    my_TIME_to_str(lTime, to, precision);
+    return response->Append_string(col_name,
+                                   std::string(to),
+                                   RDRS_DATETIME_DATATYPE);
+  }
+  case NdbDictionary::Column::Datetime2: {
+    ///< 5 bytes plus 0-3 fraction
+    uint precision = col->getPrecision();
+    longlong numericDate =
+      my_datetime_packed_from_binary((const unsigned char *)col_ptr, precision);
+    MYSQL_TIME lTime;
+    TIME_from_longlong_datetime_packed(&lTime, numericDate);
+    char to[MAX_DATE_STRING_REP_LENGTH];
+    my_TIME_to_str(lTime, to, precision);
+    return response->Append_string(col_name,
+                                   std::string(to),
+                                   RDRS_DATETIME_DATATYPE);
+  }
+  case NdbDictionary::Column::Timestamp2: {
+    ///< 4 bytes + 0-3 fraction
+    uint precision = col->getPrecision();
+    my_timeval myTV{};
+    my_timestamp_from_binary(&myTV, (const unsigned char *)col_ptr, precision);
+    Int64 epochIn = myTV.m_tv_sec;
+    time_t stdtime(epochIn);
+    struct tm *time_info = gmtime(&stdtime);
+    MYSQL_TIME lTime  = {};
+    lTime.year        = time_info->tm_year + 1900;
+    lTime.month       = time_info->tm_mon +1;
+    lTime.day         = time_info->tm_mday;
+    lTime.hour        = time_info->tm_hour; 
+    lTime.minute      = time_info->tm_min; 
+    lTime.second      = time_info->tm_sec; 
+    lTime.second_part = myTV.m_tv_usec;
+    lTime.time_type   = MYSQL_TIMESTAMP_DATETIME;
+    char to[MAX_DATE_STRING_REP_LENGTH];
+    my_TIME_to_str(lTime, to, precision);
+    return response->Append_string(col_name,
+                                   std::string(to),
+                                   RDRS_DATETIME_DATATYPE);
+  }
+  }
+  return RS_SERVER_ERROR(
+    ERROR_028 + std::string(" Column: ") + std::string(col_name) +
+    " Type: " + std::to_string(col->getType()));
 }
 
 RS_Status PKROperation::CreateResponse() {
