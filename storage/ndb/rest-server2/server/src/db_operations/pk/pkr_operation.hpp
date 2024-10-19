@@ -63,6 +63,7 @@ class BatchKeyOperations {
                                    RS_Buffer *reqBuffer,
                                    RS_Buffer *respBuffer,
                                    Ndb *ndb_object);
+   RS_Status setup_read_operation();
 };
 
 typedef struct SubOpTuple {
