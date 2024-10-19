@@ -317,6 +317,13 @@ start:
   return RS_OK;
 }
 
+RS_Status BatchKeyOperations::execute() {
+  if (unlikely(ndbTransaction->execute(NdbTransaction::NoCommit) != 0)) {
+    return RS_RONDB_SERVER_ERROR(ndbTransaction->getNdbError(), ERROR_009);
+  }
+  return RS_OK;
+}
+
 /**
  * Set up read operation
  *
