@@ -43,6 +43,7 @@
 #include <unordered_map>
 #include <vector>
 #include <EventLogger.hpp>
+#include <ArenaMalloc.hpp>
 
 extern EventLogger *g_eventLogger;
 
@@ -648,6 +649,7 @@ void FeatureStoreCtrl::featureStore(
       return;
     }
   }
+  ArenaMalloc amalloc(64 * 1024);
   // Execute
   if (likely(static_cast<drogon::HttpStatusCode>(status.http_code) ==
         drogon::HttpStatusCode::k200OK)) {
@@ -707,7 +709,8 @@ void FeatureStoreCtrl::featureStore(
     }
     // pk_batch_read
     DEB_FS_CTRL("Perform Batch PK Read for Feature Store request");
-    status = pk_batch_read(noOps,
+    status = pk_batch_read((void*)&amalloc,
+                           noOps,
                            reqBuffs.data(),
                            respBuffs.data(),
                            currentThreadIndex);

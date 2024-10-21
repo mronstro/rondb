@@ -52,14 +52,14 @@ struct KeyOperation {
 
 class BatchKeyOperations {
  private:
-  Uint32 numOperations;
-  NdbTransaction *ndbTransaction;
-  Ndb *ndb_object;
-  bool isBatch;
-  struct KeyOperation *key_ops;
+  Uint32 m_numOperations;
+  NdbTransaction *m_ndbTransaction;
+  Ndb *m_ndb_object;
+  bool m_isBatch;
+  struct KeyOperation *m_key_ops;
  public:
    BatchKeyOperations();
-   ~BatchKeyOperations() = delete;
+   ~BatchKeyOperations();
    RS_Status perform_operation(ArenaMalloc*,
                                Uint32 numOps,
                                RS_Buffer *reqBuffer,

@@ -33,6 +33,7 @@
 #include <memory>
 #include <simdjson.h>
 #include <EventLogger.hpp>
+#include <ArenaMalloc.hpp>
 
 extern EventLogger *g_eventLogger;
 
@@ -186,7 +187,7 @@ void BatchPKReadCtrl::batchPKRead(
       return;
     }
   }
-
+  ArenaMalloc amalloc(256 * 1024);
   // Execute
   {
     auto noOps = reqStructs.size();
@@ -217,7 +218,8 @@ void BatchPKReadCtrl::batchPKRead(
     }
 
     // pk_batch_read
-    status = pk_batch_read(noOps,
+    status = pk_batch_read(&amalloc,
+                           noOps,
                            reqBuffs.data(),
                            respBuffs.data(),
                            currentThreadIndex);

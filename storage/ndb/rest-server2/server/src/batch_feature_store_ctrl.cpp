@@ -37,6 +37,7 @@
 #include <unordered_map>
 #include <vector>
 #include <EventLogger.hpp>
+#include <ArenaMalloc.hpp>
 
 extern EventLogger *g_eventLogger;
 
@@ -194,6 +195,7 @@ void BatchFeatureStoreCtrl::batch_featureStore(
 
   auto features = std::vector<std::vector<std::vector<char>>>();
   auto noOps    = readParams.size();
+  ArenaMalloc amalloc(256 * 1024);
   if (unlikely(noOps != 0)) {
     // Validate batch pkread
     for (auto readParam : readParams) {
@@ -237,7 +239,8 @@ void BatchFeatureStoreCtrl::batch_featureStore(
       reqBuffs[i].size = *length_ptr_casted;
     }
     // pk_batch_read
-    status = pk_batch_read(noOps,
+    status = pk_batch_read((void*)&amalloc,
+                           noOps,
                            reqBuffs.data(),
                            respBuffs.data(),
                            currentThreadIndex);

@@ -148,7 +148,8 @@ RS_Status pk_read(RS_Buffer *reqBuff,
 /**
  * Batched primary key read operation
  */
-RS_Status pk_batch_read(unsigned int no_req,
+RS_Status pk_batch_read(void *amalloc,
+                        unsigned int no_req,
                         RS_Buffer *req_buffs,
                         RS_Buffer *resp_buffs,
                         unsigned int threadIndex);

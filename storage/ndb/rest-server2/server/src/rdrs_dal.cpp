@@ -151,10 +151,12 @@ RS_Status pk_read(RS_Buffer *reqBuff,
   return status;
 }
 
-RS_Status pk_batch_read(unsigned int no_req,
+RS_Status pk_batch_read(void *amalloc_void,
+                        unsigned int no_req,
                         RS_Buffer *req_buffs,
                         RS_Buffer *resp_buffs,
                         unsigned int threadIndex) {
+  ArenaMalloc *amalloc = (ArenaMalloc*)amalloc_void;
   Ndb *ndb_object  = nullptr;
   RS_Status status = rdrsRonDBConnectionPool->GetNdbObject(&ndb_object,
                                                            threadIndex);
@@ -162,8 +164,20 @@ RS_Status pk_batch_read(unsigned int no_req,
     return status;
   }
   DATA_OP_RETRY_HANDLER(
-      PKROperation pkread(no_req, req_buffs, resp_buffs, ndb_object);
-      status = pkread.PerformOperation();
+    BatchKeyOperations pkread;
+    status = pkread.init_batch_operations(amalloc,
+                                          no_req,
+                                          req_buffs,
+                                          resp_buffs,
+                                          ndb_object);
+    if (status.http_code != SUCCESS) {
+      return status;
+    }
+    status = pkread.perform_operation(amalloc,
+                                      no_req,
+                                      req_buffs,
+                                      resp_buffs,
+                                      ndb_object);
   )
   rdrsRonDBConnectionPool->ReturnNdbObject(ndb_object,
                                            &status,

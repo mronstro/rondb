@@ -51,6 +51,9 @@
 BatchKeyOperations::BatchKeyOperations() {
 }
 
+BatchKeyOperations::~BatchKeyOperations() {
+}
+
 RS_Status
 BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
                                           Uint32 numOps,
@@ -59,19 +62,22 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
                                           Ndb *ndb_object) {
   RS_Status status = RS_OK;
   bool success = false;
-  isBatch = true;
+  m_isBatch = true;
   if (numOps == 1) {
-    isBatch = false;
+    m_isBatch = false;
   }
-  key_ops = (KeyOperation*)amalloc->alloc_bytes(
+  m_ndb_object = ndb_object;
+  m_numOperations = numOps;
+  m_key_ops = (KeyOperation*)amalloc->alloc_bytes(
     sizeof(KeyOperation) * numOps, 8);
-  if (unlikely(key_ops == nullptr)) {
+  if (unlikely(m_key_ops == nullptr)) {
     RS_Status error = RS_SERVER_ERROR(ERROR_067);
     return error;
   }
   for (Uint32 i = 0; i < numOps; i++) {
-    PKRRequest *req = new (&key_ops[i].m_req) PKRRequest(&reqBuffer[i]);
-    PKRResponse *resp = new (&key_ops[i].m_resp) PKRResponse(&respBuffer[i]);
+    PKRRequest *req = new (&m_key_ops[i].m_req) PKRRequest(&reqBuffer[i]);
+    PKRResponse *resp =
+      new (&m_key_ops[i].m_resp) PKRResponse(&respBuffer[i]);
     (void)resp;
     if (unlikely(ndb_object->setCatalogName(req->DB()) != 0)) {
       status = RS_CLIENT_404_WITH_MSG_ERROR(
@@ -89,15 +95,15 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
       req->MarkInvalidOp(status);
       continue;
     }
-    key_ops[i].m_tableDict = tableDict;
+    m_key_ops[i].m_tableDict = tableDict;
     Uint32 numPrimaryKeys = (Uint32)tableDict->getNoOfPrimaryKeys();
     Uint32 numColumns = (Uint32)tableDict->getNoOfColumns();
     Uint32 numReadColumns = req->ReadColumnsCount();
     const NdbRecord *ndb_record = tableDict->getDefaultRecord();
-    key_ops[i].m_ndb_record = ndb_record;
-    key_ops[i].m_num_pk_columns = numPrimaryKeys;
-    key_ops[i].m_num_table_columns = numColumns;
-    key_ops[i].m_num_read_columns = numReadColumns;
+    m_key_ops[i].m_ndb_record = ndb_record;
+    m_key_ops[i].m_num_pk_columns = numPrimaryKeys;
+    m_key_ops[i].m_num_table_columns = numColumns;
+    m_key_ops[i].m_num_read_columns = numReadColumns;
     if (unlikely(numPrimaryKeys != req->PKColumnsCount())) {
       status =
         RS_CLIENT_ERROR(
@@ -115,16 +121,16 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
     Uint32 num_bitmap_words = (numColumns + 31) / 32;
     Uint32 num_bitmap_bytes = 4 * num_bitmap_words;
     Uint8* bitmap_words = (Uint8*)amalloc->alloc_bytes(num_bitmap_bytes, 4);
-    key_ops[i].m_bitmap_read_columns = bitmap_words;
+    m_key_ops[i].m_bitmap_read_columns = bitmap_words;
     Uint32 row_len = NdbDictionary::getRecordRowLength(ndb_record);
     Uint8* row = (Uint8*)amalloc->alloc_bytes(row_len, 8);
-    key_ops[i].m_row = row;
+    m_key_ops[i].m_row = row;
     const NdbDictionary::Column **pkCols = (const NdbDictionary::Column**)
       amalloc->alloc_bytes(numPrimaryKeys * sizeof(NdbDictionary::Column*), 8);
-    key_ops[i].m_pkColumns = pkCols;
+    m_key_ops[i].m_pkColumns = pkCols;
     const NdbDictionary::Column **readCols = (const NdbDictionary::Column**)
       amalloc->alloc_bytes(numReadColumns * sizeof(NdbDictionary::Column*), 8);
-    key_ops[i].m_readColumns = readCols;
+    m_key_ops[i].m_readColumns = readCols;
     if (bitmap_words == nullptr ||
         pkCols == nullptr ||
         readCols == nullptr ||
@@ -155,7 +161,7 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
       Uint32 bit_value = 1 << col_bit;
       word |= bit_value;
       pk_bitmap_words[col_word] = word;
-      key_ops[i].m_pkColumns[j] = pk_col;
+      m_key_ops[i].m_pkColumns[j] = pk_col;
     }
     if (unlikely(failed)) {
       status = RS_CLIENT_ERROR(
@@ -183,7 +189,7 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
       Uint32 bit_value = 1 << col_bit;
       word |= bit_value;
       bitmap_words[col_word] = word;
-      key_ops[i].m_readColumns[j] = read_col;
+      m_key_ops[i].m_readColumns[j] = read_col;
     }
     if (unlikely(failed)) {
       status = RS_CLIENT_ERROR(
@@ -202,10 +208,10 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
 }
 
 RS_Status BatchKeyOperations::setup_transaction() {
-  const NdbDictionary::Table *table_dict = key_ops[0].m_tableDict;
-  ndbTransaction = ndb_object->startTransaction(table_dict);
-  if (unlikely(ndbTransaction == nullptr)) {
-    return RS_RONDB_SERVER_ERROR(ndb_object->getNdbError(), ERROR_005);
+  const NdbDictionary::Table *table_dict = m_key_ops[0].m_tableDict;
+  m_ndbTransaction = m_ndb_object->startTransaction(table_dict);
+  if (unlikely(m_ndbTransaction == nullptr)) {
+    return RS_RONDB_SERVER_ERROR(m_ndb_object->getNdbError(), ERROR_005);
   }
   return RS_OK;
 }
@@ -218,22 +224,22 @@ RS_Status BatchKeyOperations::setup_transaction() {
 RS_Status BatchKeyOperations::setup_read_operation() {
 
 start:
-  for (size_t opIdx = 0; opIdx < numOperations; opIdx++) {
+  for (size_t opIdx = 0; opIdx < m_numOperations; opIdx++) {
     // this sub operation can not be processed
-    PKRRequest *req = &key_ops[opIdx].m_req;
+    PKRRequest *req = &m_key_ops[opIdx].m_req;
     if (unlikely(req->IsInvalidOp())) {
       continue;
     }
-    Uint32 numPrimaryKeys = key_ops[opIdx].m_num_pk_columns;
+    Uint32 numPrimaryKeys = m_key_ops[opIdx].m_num_pk_columns;
     for (Uint32 colIdx = 0; colIdx < numPrimaryKeys; colIdx++) {
       RS_Status status =
-        set_operation_pk_col(key_ops[opIdx].m_pkColumns[colIdx],
+        set_operation_pk_col(m_key_ops[opIdx].m_pkColumns[colIdx],
                              req,
-                             key_ops[opIdx].m_row,
-                             key_ops[opIdx].m_ndb_record,
+                             m_key_ops[opIdx].m_row,
+                             m_key_ops[opIdx].m_ndb_record,
                              colIdx);
       if (status.http_code != SUCCESS) {
-        if (isBatch) {
+        if (m_isBatch) {
           req->MarkInvalidOp(status);
           goto start;
         } else {
@@ -241,40 +247,41 @@ start:
         }
       }
     }
-    const NdbOperation *operation = ndbTransaction->readTuple(
-      key_ops[opIdx].m_ndb_record,
-      (const char*)key_ops[opIdx].m_row,
-      key_ops[opIdx].m_ndb_record,
-      (char*)key_ops[opIdx].m_row,
+    const NdbOperation *operation = m_ndbTransaction->readTuple(
+      m_key_ops[opIdx].m_ndb_record,
+      (const char*)m_key_ops[opIdx].m_row,
+      m_key_ops[opIdx].m_ndb_record,
+      (char*)m_key_ops[opIdx].m_row,
       NdbOperation::LM_CommittedRead,
-      key_ops[opIdx].m_bitmap_read_columns,
+      m_key_ops[opIdx].m_bitmap_read_columns,
       nullptr,
       0);
     if (unlikely(operation == nullptr)) {
-      return RS_RONDB_SERVER_ERROR(ndbTransaction->getNdbError(), ERROR_007);
+      return RS_RONDB_SERVER_ERROR(m_ndbTransaction->getNdbError(), ERROR_007);
     }
-    key_ops[opIdx].m_ndbOperation = operation;
+    m_key_ops[opIdx].m_ndbOperation = operation;
   }
   return RS_OK;
 }
 
 RS_Status BatchKeyOperations::execute() {
-  if (unlikely(ndbTransaction->execute(NdbTransaction::NoCommit) != 0)) {
-    return RS_RONDB_SERVER_ERROR(ndbTransaction->getNdbError(), ERROR_009);
+  if (unlikely(m_ndbTransaction->execute(NdbTransaction::NoCommit) != 0)) {
+    return RS_RONDB_SERVER_ERROR(m_ndbTransaction->getNdbError(),
+                                 ERROR_009);
   }
   return RS_OK;
 }
 
 RS_Status BatchKeyOperations::create_response() {
   bool found = true;
-  for (size_t i = 0; i < numOperations; i++) {
-    PKRRequest *req = &key_ops[i].m_req;
-    PKRResponse *resp = &key_ops[i].m_resp;
-    const NdbOperation *op = key_ops[i].m_ndbOperation;
+  for (size_t i = 0; i < m_numOperations; i++) {
+    PKRRequest *req = &m_key_ops[i].m_req;
+    PKRResponse *resp = &m_key_ops[i].m_resp;
+    const NdbOperation *op = m_key_ops[i].m_ndbOperation;
     resp->SetDB(req->DB());
     resp->SetTable(req->Table());
     resp->SetOperationID(req->OperationId());
-    resp->SetNoOfColumns(key_ops[i].m_num_read_columns);
+    resp->SetNoOfColumns(m_key_ops[i].m_num_read_columns);
     if (unlikely(req->IsInvalidOp())) {
       resp->SetStatus(req->GetError().http_code, req->GetError().message);
       resp->Close();
@@ -297,14 +304,14 @@ RS_Status BatchKeyOperations::create_response() {
     }
     if (likely(found)) {
       // iterate over all columns
-      RS_Status ret = key_ops[i].append_op_recs(resp);
+      RS_Status ret = m_key_ops[i].append_op_recs(resp);
       if (ret.http_code != SUCCESS) {
         return ret;
       }
     }
     resp->Close();
   }
-  if (unlikely(!found && !isBatch)) {
+  if (unlikely(!found && !m_isBatch)) {
     return RS_CLIENT_404_ERROR();
   }
   return RS_OK;
@@ -665,7 +672,7 @@ RS_Status KeyOperation::write_col_to_resp(Uint32 colIdx,
 }
 
 void BatchKeyOperations::close_transaction() {
-  ndb_object->closeTransaction(ndbTransaction);
+  m_ndb_object->closeTransaction(m_ndbTransaction);
 }
 
 RS_Status BatchKeyOperations::perform_operation(
@@ -710,12 +717,13 @@ RS_Status BatchKeyOperations::perform_operation(
 }
 
 RS_Status BatchKeyOperations::abort() {
-  if (likely(ndbTransaction != nullptr)) {
-    NdbTransaction::CommitStatusType status = ndbTransaction->commitStatus();
+  if (likely(m_ndbTransaction != nullptr)) {
+    NdbTransaction::CommitStatusType status =
+      m_ndbTransaction->commitStatus();
     if (status == NdbTransaction::CommitStatusType::Started) {
-      ndbTransaction->execute(NdbTransaction::Rollback);
+      m_ndbTransaction->execute(NdbTransaction::Rollback);
     }
-    ndb_object->closeTransaction(ndbTransaction);
+    m_ndb_object->closeTransaction(m_ndbTransaction);
   }
   return RS_OK;
 }
@@ -727,8 +735,8 @@ RS_Status BatchKeyOperations::handle_ndb_error(RS_Status status) {
     // unload all tables used in this operation
     std::list<std::tuple<std::string, std::string>> tables;
     std::unordered_map<std::string, bool> tablesMap;
-    for (Uint32 i = 0; i < numOperations; i++) {
-      PKRRequest *req = &key_ops[i].m_req;
+    for (Uint32 i = 0; i < m_numOperations; i++) {
+      PKRRequest *req = &m_key_ops[i].m_req;
       if (req->IsInvalidOp()) {
         const char *db = req->DB();
         const char *table = req->Table();
@@ -740,7 +748,7 @@ RS_Status BatchKeyOperations::handle_ndb_error(RS_Status status) {
         }
       }
     }
-    HandleSchemaErrors(ndb_object, status, tables);
+    HandleSchemaErrors(m_ndb_object, status, tables);
   }
   abort();
   return RS_OK;
