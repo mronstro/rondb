@@ -88,7 +88,7 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
     }
     const NdbDictionary::Dictionary *dict = ndb_object->getDictionary();
     const NdbDictionary::Table *tableDict = dict->getTable(req->Table());
-    if (tableDict == nullptr) {
+    if (unlikely(tableDict == nullptr)) {
       status = RS_CLIENT_404_WITH_MSG_ERROR(
         ERROR_011 + std::string(" Database: ") +
         std::string(req->DB()) + " Table: " + req->Table());
@@ -131,10 +131,10 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
     const NdbDictionary::Column **readCols = (const NdbDictionary::Column**)
       amalloc->alloc_bytes(numReadColumns * sizeof(NdbDictionary::Column*), 8);
     m_key_ops[i].m_readColumns = readCols;
-    if (bitmap_words == nullptr ||
-        pkCols == nullptr ||
-        readCols == nullptr ||
-        row == nullptr) {
+    if (unlikely(bitmap_words == nullptr ||
+                 pkCols == nullptr ||
+                 readCols == nullptr ||
+                 row == nullptr)) {
       status = RS_SERVER_ERROR(ERROR_067);
       return status;
     }
@@ -146,7 +146,7 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
     for (; j < numPrimaryKeys; j++) {
       const NdbDictionary::Column *pk_col =
         tableDict->getColumn(req->PKName(j));
-      if (pk_col == nullptr || !pk_col->getPrimaryKey()) {
+      if (unlikely(pk_col == nullptr || !pk_col->getPrimaryKey())) {
         failed = true;
         break;
       }
@@ -154,7 +154,7 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
       Uint32 col_word = col_id / 32;
       Uint32 col_bit = col_id & 31;
       Uint32 col_bit_value = (pk_bitmap_words[col_word] >> col_bit) & 1;
-      if (col_bit_value != 0) {
+      if (unlikely(col_bit_value != 0)) {
         failed = true;
       }
       Uint32 word = pk_bitmap_words[col_word];
@@ -173,7 +173,7 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
     for (; j < numReadColumns; j++) {
       const NdbDictionary::Column *read_col =
         tableDict->getColumn(req->ReadColumnName(j));
-      if (read_col == nullptr) {
+      if (unlikely(read_col == nullptr)) {
         failed = true;
         break;
       }
@@ -181,7 +181,7 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
       Uint32 col_word = col_id / 32;
       Uint32 col_bit = col_id & 31;
       Uint32 col_bit_value = (bitmap_words[col_word] >> col_bit) & 1;
-      if (col_bit_value != 0) {
+      if (unlikely(col_bit_value != 0)) {
         failed = true;
         break;
       }
@@ -201,7 +201,7 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
     // At least one operation is successfully initialised
     success = true;
   }
-  if (success) {
+  if (likely(success)) {
     return RS_OK;
   }
   return status;
@@ -238,7 +238,7 @@ start:
                              m_key_ops[opIdx].m_row,
                              m_key_ops[opIdx].m_ndb_record,
                              colIdx);
-      if (status.http_code != SUCCESS) {
+      if (unlikely(status.http_code != SUCCESS)) {
         if (m_isBatch) {
           req->MarkInvalidOp(status);
           goto start;
@@ -304,8 +304,8 @@ RS_Status BatchKeyOperations::create_response() {
     }
     if (likely(found)) {
       // iterate over all columns
-      RS_Status ret = m_key_ops[i].append_op_recs(resp);
-      if (ret.http_code != SUCCESS) {
+      RS_Status ret = m_key_ops[i].append_op_recs(resp, req);
+      if (unlikely(ret.http_code != SUCCESS)) {
         return ret;
       }
     }
@@ -317,10 +317,11 @@ RS_Status BatchKeyOperations::create_response() {
   return RS_OK;
 }
 
-RS_Status KeyOperation::append_op_recs(PKRResponse *resp) {
+RS_Status KeyOperation::append_op_recs(PKRResponse *resp,
+                                       PKRRequest *req) {
   for (Uint32 colIdx = 0; colIdx < m_num_read_columns; colIdx++) {
-    RS_Status ret = write_col_to_resp(colIdx, resp);
-    if (ret.http_code != SUCCESS) {
+    RS_Status ret = write_col_to_resp(colIdx, resp, req);
+    if (unlikely(ret.http_code != SUCCESS)) {
       return ret;
     }
   }
@@ -341,7 +342,8 @@ static inline void my_unpack_date(MYSQL_TIME *l_time, const void *d) {
 }
 
 RS_Status KeyOperation::write_col_to_resp(Uint32 colIdx,
-                                          PKRResponse *response) {
+                                          PKRResponse *response,
+                                          PKRRequest *request) {
   const NdbDictionary::Column *col = m_readColumns[colIdx];
   const NdbRecord *ndb_record = m_ndb_record;
   const char *col_name = col->getName();
@@ -532,8 +534,10 @@ RS_Status KeyOperation::write_col_to_resp(Uint32 colIdx,
     default:
       return RS_CLIENT_ERROR(ERROR_019);
     }
-    if (attrBytes > MAX_TUPLE_SIZE_IN_BYTES) {
-      // TODO error code
+    if (unlikely(attrBytes > MAX_TUPLE_SIZE_IN_BYTES)) {
+      return RS_SERVER_ERROR(
+        ERROR_069 + std::string(" DB: ") + std::string(request->DB()) +
+        " Table: " + std::string(request->Table()));
     }
     char buffer[MAX_TUPLE_SIZE_IN_BYTES_ENCODED];
     size_t outlen = 0;
