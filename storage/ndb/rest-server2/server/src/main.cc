@@ -203,10 +203,6 @@ NdbMutex *globalConfigsMutex = nullptr;
 
 static void do_exit(int exit_code) {
   assert(!g_drogon_running);
-  if (g_rondbConnection != nullptr) {
-    delete g_rondbConnection;
-    g_rondbConnection = nullptr;
-  }
   if (jsonParsers != nullptr) {
     delete[] jsonParsers;
     jsonParsers = nullptr;
@@ -221,6 +217,10 @@ static void do_exit(int exit_code) {
     stop_api_key_cache();
   if (g_did_start_fs_cache)
     stop_fs_cache();
+  if (g_rondbConnection != nullptr) {
+    delete g_rondbConnection;
+    g_rondbConnection = nullptr;
+  }
   NdbMutex_Destroy(globalConfigsMutex);
   if (g_did_ndb_init)
     ndb_end(0);
