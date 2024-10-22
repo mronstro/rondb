@@ -483,13 +483,15 @@ RS_Status KeyOperation::write_col_to_resp(Uint32 colIdx,
     int precision = col->getPrecision();
     int scale = col->getScale();
     void *bin = (void*)col_ptr;
-    int binLen = col->getLength();
+    int binLen = col->getSizeInBytesForRecord();
     decimal_bin2str(bin,
                     binLen,
                     precision,
                     scale,
                     decStr,
                     DECIMAL_MAX_STR_LEN_IN_BYTES);
+    DEB_NDB_BE("col_name: %s Decimal column, decStr: %s, binLen: %u",
+               col_name, std::string(decStr).c_str(), binLen);
     return response->Append_string(col_name, std::string(decStr),
                                    RDRS_FLOAT_DATATYPE);
   }
