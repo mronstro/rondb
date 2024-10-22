@@ -126,6 +126,10 @@ constexpr char ERROR_068[] = "Read more columns than table has";
 constexpr int ERROR_CODE_TOO_MANY_COLUMNS   = 68;
 constexpr char ERROR_069[] = "Row size read bigger than allowed";
 constexpr int ERROR_CODE_TOO_LARGE_ROWS   = 69;
+constexpr char ERROR_070[] = "Set same PK column several times";
+constexpr int ERROR_CODE_SET_PK_MULTIPLE = 70;
+constexpr char ERROR_071[] = "Read column several times";
+constexpr int ERROR_CODE_READ_COLUMN_MULTIPLE = 71;
 #endif
 
 #ifdef __cplusplus

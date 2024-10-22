@@ -27,6 +27,16 @@
 
 extern EventLogger *g_eventLogger;
 
+#if (defined(VM_TRACE) || defined(ERROR_INSERT))
+#define DEBUG_POOL 1
+#endif
+
+#ifdef DEBUG_POOL
+#define DEB_POOL(...) do { g_eventLogger->info(__VA_ARGS__); } while (0)
+#else
+#define DEB_POOL(...) do { } while (0)
+#endif
+
 static void check_startup(bool x) {
   if (!x) {
     g_eventLogger->info("Failure to allocate memory during startup of"
@@ -205,6 +215,8 @@ RS_Status RDRSRonDBConnectionPool::GetNdbObject(Ndb **ndb_object,
   ThreadContext *thread_context = m_thread_context[threadIndex];
   require(threadIndex < m_num_threads);
   NdbMutex_Lock(thread_context->m_thread_context_mutex);
+  DEB_POOL("GetNdbObject(%u), in_use: %u",
+           threadIndex, thread_context->m_is_ndb_object_in_use);
   if (likely(thread_context->m_is_shutdown == false &&
              thread_context->m_is_ndb_object_in_use == false &&
              thread_context->m_ndb_object != nullptr)) {
@@ -216,23 +228,27 @@ RS_Status RDRSRonDBConnectionPool::GetNdbObject(Ndb **ndb_object,
     *ndb_object = thread_context->m_ndb_object;
     thread_context->m_is_ndb_object_in_use = true;
     NdbMutex_Unlock(m_thread_context[threadIndex]->m_thread_context_mutex);
+    DEB_POOL("GetNdbObject(%u), success", threadIndex);
     return RS_OK;
   }
   require(thread_context->m_is_ndb_object_in_use == false);
   if (thread_context->m_is_shutdown) {
     NdbMutex_Unlock(thread_context->m_thread_context_mutex);
+    DEB_POOL("GetNdbObject(%u), fail shutdown", threadIndex);
     return RS_SERVER_ERROR(ERROR_034);
   }
   NdbMutex_Unlock(thread_context->m_thread_context_mutex);
   Uint32 connection = threadIndex % m_num_data_connections;
   RS_Status status = dataConnections[connection]->GetNdbObject(ndb_object);
   if (unlikely(status.http_code != SUCCESS)) {
+    DEB_POOL("GetNdbObject(%u), fail get", threadIndex);
     return status;
   }
   NdbMutex_Lock(thread_context->m_thread_context_mutex);
   thread_context->m_ndb_object = *ndb_object;
   thread_context->m_is_ndb_object_in_use = true;
   NdbMutex_Unlock(thread_context->m_thread_context_mutex);
+  DEB_POOL("GetNdbObject(%u), success get", threadIndex);
   return RS_OK;
 }
 
@@ -241,6 +257,8 @@ RS_Status RDRSRonDBConnectionPool::ReturnNdbObject(Ndb *ndb_object,
                                                    Uint32 threadIndex) {
   ThreadContext *thread_context = m_thread_context[threadIndex];
   NdbMutex_Lock(thread_context->m_thread_context_mutex);
+  DEB_POOL("ReturnNdbObject(%u), in_use: %u",
+           threadIndex, thread_context->m_is_ndb_object_in_use);
   if (thread_context->m_is_shutdown == false) {
     require(ndb_object == thread_context->m_ndb_object);
     require(thread_context->m_is_ndb_object_in_use);

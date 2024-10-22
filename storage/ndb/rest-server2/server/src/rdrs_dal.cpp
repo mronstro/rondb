@@ -40,6 +40,9 @@
 #include <iterator>
 #include <sstream>
 #include <memory>
+#include <EventLogger.hpp>
+
+extern EventLogger *g_eventLogger;
 
 #include "storage/ndb/src/ronsql/RonSQLCommon.hpp"
 
@@ -165,14 +168,6 @@ RS_Status pk_batch_read(void *amalloc_void,
   }
   DATA_OP_RETRY_HANDLER(
     BatchKeyOperations pkread;
-    status = pkread.init_batch_operations(amalloc,
-                                          no_req,
-                                          req_buffs,
-                                          resp_buffs,
-                                          ndb_object);
-    if (status.http_code != SUCCESS) {
-      return status;
-    }
     status = pkread.perform_operation(amalloc,
                                       no_req,
                                       req_buffs,

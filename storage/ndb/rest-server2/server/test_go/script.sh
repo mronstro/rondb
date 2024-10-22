@@ -41,9 +41,11 @@ EOF
 cmd-test() {
   [ -f "${RDRS_CONFIG_FILE}" ] || die 'RDRS_CONFIG_FILE must be set and point to an existing file.'
   TEST_PACKAGE=hopsworks.ai/rdrs2/internal/integrationtests/batchpkread
+  TEST_CASE=
   case $# in
     0) ;;
     1) TEST_PACKAGE="$1" ;;
+    2) TEST_PACKAGE="$1" && TEST_CASE="-run $2" ;;
     *) die "Too many arguments" ;;
   esac
 
@@ -58,6 +60,7 @@ cmd-test() {
   go test -v \
      -p 1 \
      -count 1 \
+     $TEST_CASE \
      $TEST_PACKAGE
 }
 

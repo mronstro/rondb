@@ -47,6 +47,17 @@
 #include <decimal_utils.hpp>
 #include <my_time.h>
 #include <libbase64.h>
+#include <EventLogger.hpp>
+
+#if (defined(VM_TRACE) || defined(ERROR_INSERT))
+#define DEBUG_NDB_BE 1
+#endif
+
+#ifdef DEBUG_NDB_BE
+#define DEB_NDB_BE(...) do { g_eventLogger->info(__VA_ARGS__); } while (0)
+#else
+#define DEB_NDB_BE(...) do { } while (0)
+#endif
 
 BatchKeyOperations::BatchKeyOperations() {
 }
@@ -128,8 +139,16 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
     const NdbDictionary::Column **pkCols = (const NdbDictionary::Column**)
       amalloc->alloc_bytes(numPrimaryKeys * sizeof(NdbDictionary::Column*), 8);
     m_key_ops[i].m_pkColumns = pkCols;
-    const NdbDictionary::Column **readCols = (const NdbDictionary::Column**)
-      amalloc->alloc_bytes(numReadColumns * sizeof(NdbDictionary::Column*), 8);
+    const NdbDictionary::Column **readCols = nullptr;
+    if (numReadColumns != 0) {
+      readCols = (const NdbDictionary::Column**)
+        amalloc->alloc_bytes(numReadColumns *
+          sizeof(NdbDictionary::Column*), 8);
+    } else {
+      readCols = (const NdbDictionary::Column**)
+        amalloc->alloc_bytes(numColumns *
+          sizeof(NdbDictionary::Column*), 8);
+    }
     m_key_ops[i].m_readColumns = readCols;
     if (unlikely(bitmap_words == nullptr ||
                  pkCols == nullptr ||
@@ -141,13 +160,13 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
     Uint32 pk_bitmap_words[MAX_ATTRIBUTES_IN_TABLE/32];
     memset(bitmap_words, 0, num_bitmap_bytes);
     memset(pk_bitmap_words, 0, num_bitmap_bytes);
-    bool failed = false;
+    Uint32 failed = 0;
     Uint32 j = 0;
     for (; j < numPrimaryKeys; j++) {
       const NdbDictionary::Column *pk_col =
         tableDict->getColumn(req->PKName(j));
       if (unlikely(pk_col == nullptr || !pk_col->getPrimaryKey())) {
-        failed = true;
+        failed = 1;
         break;
       }
       Uint32 col_id = pk_col->getColumnNo();
@@ -155,7 +174,7 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
       Uint32 col_bit = col_id & 31;
       Uint32 col_bit_value = (pk_bitmap_words[col_word] >> col_bit) & 1;
       if (unlikely(col_bit_value != 0)) {
-        failed = true;
+        failed = 2;
       }
       Uint32 word = pk_bitmap_words[col_word];
       Uint32 bit_value = 1 << col_bit;
@@ -163,40 +182,62 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
       pk_bitmap_words[col_word] = word;
       m_key_ops[i].m_pkColumns[j] = pk_col;
     }
-    if (unlikely(failed)) {
-      status = RS_CLIENT_ERROR(
-        ERROR_014 + std::string(req->PKName(j)));
+    if (unlikely(failed != 0)) {
+      if (failed == 1) {
+        status = RS_CLIENT_ERROR(
+          ERROR_014 + std::string(req->PKName(j)));
+      } else {
+        status = RS_CLIENT_ERROR(
+          ERROR_070 + std::string(req->PKName(j)));
+      }
       req->MarkInvalidOp(status);
       continue;
     }
-    j = 0;
-    for (; j < numReadColumns; j++) {
-      const NdbDictionary::Column *read_col =
-        tableDict->getColumn(req->ReadColumnName(j));
-      if (unlikely(read_col == nullptr)) {
-        failed = true;
-        break;
+    if (numReadColumns != 0) {
+      j = 0;
+      for (; j < numReadColumns; j++) {
+        const NdbDictionary::Column *read_col =
+          tableDict->getColumn(req->ReadColumnName(j));
+        if (unlikely(read_col == nullptr)) {
+          failed = 1;
+          break;
+        }
+        Uint32 col_id = read_col->getColumnNo();
+        Uint32 col_word = col_id / 32;
+        Uint32 col_bit = col_id & 31;
+        Uint32 col_bit_value = (bitmap_words[col_word] >> col_bit) & 1;
+        if (unlikely(col_bit_value != 0)) {
+          failed = 2;
+          break;
+        }
+        Uint32 word = bitmap_words[col_word];
+        Uint32 bit_value = 1 << col_bit;
+        word |= bit_value;
+        bitmap_words[col_word] = word;
+        m_key_ops[i].m_readColumns[j] = read_col;
       }
-      Uint32 col_id = read_col->getColumnNo();
-      Uint32 col_word = col_id / 32;
-      Uint32 col_bit = col_id & 31;
-      Uint32 col_bit_value = (bitmap_words[col_word] >> col_bit) & 1;
-      if (unlikely(col_bit_value != 0)) {
-        failed = true;
-        break;
+      if (unlikely(failed != 0)) {
+        if (failed == 1) {
+          status = RS_CLIENT_ERROR(
+            ERROR_012 + std::string(" Column: ") +
+            std::string(req->ReadColumnName(i)));
+        } else {
+          status = RS_CLIENT_ERROR(
+            ERROR_037 + std::string(req->ReadColumnName(j)));
+        }
+        req->MarkInvalidOp(status);
+        continue;
       }
-      Uint32 word = bitmap_words[col_word];
-      Uint32 bit_value = 1 << col_bit;
-      word |= bit_value;
-      bitmap_words[col_word] = word;
-      m_key_ops[i].m_readColumns[j] = read_col;
-    }
-    if (unlikely(failed)) {
-      status = RS_CLIENT_ERROR(
-        ERROR_037 + std::string(req->ReadColumnName(j)));
-      status = RS_CLIENT_ERROR(ERROR_037);
-      req->MarkInvalidOp(status);
-      continue;
+    } else {
+      for (Uint32 k = 0; k < numColumns; k++) {
+        const NdbDictionary::Column *read_col = tableDict->getColumn(k);
+        m_key_ops[i].m_readColumns[k] = read_col;
+      }
+      Uint32* bitmap_words32 = (Uint32*)bitmap_words;
+      for (j = 0; j < num_bitmap_words; j++) {
+        bitmap_words32[j] = 0xFFFFFFFF;
+      }
+      m_key_ops[i].m_num_read_columns = numColumns;
     }
     // At least one operation is successfully initialised
     success = true;
@@ -224,7 +265,7 @@ RS_Status BatchKeyOperations::setup_transaction() {
 RS_Status BatchKeyOperations::setup_read_operation() {
 
 start:
-  for (size_t opIdx = 0; opIdx < m_numOperations; opIdx++) {
+  for (Uint32 opIdx = 0; opIdx < m_numOperations; opIdx++) {
     // this sub operation can not be processed
     PKRRequest *req = &m_key_ops[opIdx].m_req;
     if (unlikely(req->IsInvalidOp())) {
@@ -247,6 +288,8 @@ start:
         }
       }
     }
+    DEB_NDB_BE("readTuple: read_columns[%u]: 0x%x",
+              opIdx, m_key_ops[opIdx].m_bitmap_read_columns[0]);
     const NdbOperation *operation = m_ndbTransaction->readTuple(
       m_key_ops[opIdx].m_ndb_record,
       (const char*)m_key_ops[opIdx].m_row,
@@ -358,8 +401,8 @@ RS_Status KeyOperation::write_col_to_resp(Uint32 colIdx,
       Uint8 null_byte = row[null_byte_offset];
       Uint8 null_bit_value = (null_byte >> null_bit_in_byte) & 1;
       if (null_bit_value) {
-        return response->SetColumnDataNull(m_req.ReadColumnName(colIdx));
-       }
+        return response->SetColumnDataNull(col_name);
+      }
     }
   }
   Uint32 offset;
@@ -577,12 +620,17 @@ RS_Status KeyOperation::write_col_to_resp(Uint32 colIdx,
       " Type: " + std::to_string(col->getType()));
   }
   case NdbDictionary::Column::Bit: {
-    Uint32 words = col->getLength() / 8;
-    if (col->getLength() % 8 != 0) {
+    Uint32 len = col->getLength();
+    Uint32 words = len / 8;
+    Uint32 bits_used_in_last_word = len % 8;
+    Uint32 last_mask = 0xFF;
+    if (bits_used_in_last_word != 0) {
       words += 1;
+      last_mask = ((1 << bits_used_in_last_word) - 1);
     }
     require(words <= BIT_MAX_SIZE_IN_BYTES);
     // change endieness
+    col_ptr[words - 1] &= last_mask;
     int i = 0;
     char reversed[BIT_MAX_SIZE_IN_BYTES];
     for (int j = words - 1; j >= 0; j--) {
@@ -591,6 +639,11 @@ RS_Status KeyOperation::write_col_to_resp(Uint32 colIdx,
     char buffer[BIT_MAX_SIZE_IN_BYTES_ENCODED];
     size_t outlen = 0;
     base64_encode(reversed, words, (char *)&buffer[0], &outlen, 0);
+    DEB_NDB_BE("col_name: %s, col_ptr[words - 1] = %x, outlen: %u, string: %s",
+      col_name,
+      col_ptr[words - 1],
+      Uint32(outlen),
+      std::string(buffer, outlen).c_str());
     return response->Append_string(col_name,
                                    std::string(buffer, outlen),
                                    RDRS_BIT_DATATYPE);
@@ -686,6 +739,7 @@ RS_Status BatchKeyOperations::perform_operation(
   RS_Buffer *respBuffer,
   Ndb *ndb_object) {
 
+  DEB_NDB_BE("init_batch_operations");
   RS_Status status = init_batch_operations(
     amalloc,
     numOperations,
@@ -696,26 +750,31 @@ RS_Status BatchKeyOperations::perform_operation(
     handle_ndb_error(status);
     return status;
   }
+  DEB_NDB_BE("setup_transaction");
   status = setup_transaction();
   if (unlikely(status.http_code != SUCCESS)) {
     handle_ndb_error(status);
     return status;
   }
+  DEB_NDB_BE("setup_read_operation");
   status = setup_read_operation();
   if (unlikely(status.http_code != SUCCESS)) {
     handle_ndb_error(status);
     return status;
   }
+  DEB_NDB_BE("execute");
   status = execute();
   if (unlikely(status.http_code != SUCCESS)) {
     handle_ndb_error(status);
     return status;
   }
+  DEB_NDB_BE("create_response");
   status = create_response();
   if (unlikely(status.http_code != SUCCESS)) {
     handle_ndb_error(status);
     return status;
   }
+  DEB_NDB_BE("close_transaction");
   close_transaction();
   return RS_OK;
 }
