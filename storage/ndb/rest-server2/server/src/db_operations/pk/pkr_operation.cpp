@@ -138,6 +138,9 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
     m_key_ops[i].m_bitmap_read_columns = bitmap_words;
     Uint32 row_len = NdbDictionary::getRecordRowLength(ndb_record);
     Uint8* row = (Uint8*)amalloc->alloc_bytes(row_len, 8);
+    Uint32 row_len_aligned = ((row_len + 7) / 8) * 8;
+    /* Ensure no halfwritten words distort the rows for pk and reading */
+    memset(row, 0, row_len_aligned);
     m_key_ops[i].m_row = row;
     const NdbDictionary::Column **pkCols = (const NdbDictionary::Column**)
       amalloc->alloc_bytes(numPrimaryKeys * sizeof(NdbDictionary::Column*), 8);
@@ -316,6 +319,8 @@ start:
                              m_key_ops[opIdx].m_row,
                              m_key_ops[opIdx].m_ndb_record,
                              colIdx);
+      DEB_NDB_BE("First words of row is: 0x%x, op: %u",
+                 *(Uint32*)m_key_ops[opIdx].m_row, opIdx);
       if (unlikely(status.http_code != SUCCESS)) {
         if (m_isBatch) {
           req->MarkInvalidOp(status);
@@ -428,6 +433,8 @@ RS_Status KeyOperation::append_op_recs(PKRResponse *resp,
   for (Uint32 colIdx = 0; colIdx < m_num_read_columns; colIdx++) {
     RS_Status ret = write_col_to_resp(colIdx, resp, req);
     if (unlikely(ret.http_code != SUCCESS)) {
+      DEB_NDB_BE("Failed with colIdx: %u, code: %u, message: %s",
+        colIdx, ret.http_code, ret.message);
       return ret;
     }
   }
@@ -675,6 +682,24 @@ RS_Status KeyOperation::write_col_to_resp(Uint32 colIdx,
     require(m_blob_handles[colIdx] != nullptr);
     NdbBlob *blobHandle = m_blob_handles[colIdx];
     Uint64 length = 0;
+    int isNull = 0;
+    if (unlikely(blobHandle->getNull(isNull) != 0)) {
+      return RS_RONDB_SERVER_ERROR(
+        blobHandle->getNdbError(),
+          ERROR_037 + std::string(" Failed to check NULL of ") +
+          std::string(" Column: ") + std::string(col_name) +
+          " Type: " + std::to_string(col->getType()));
+    }
+    if (isNull) {
+      if (unlikely(blobHandle->getLength(length) != 0)) {
+        return RS_RONDB_SERVER_ERROR(
+          blobHandle->getNdbError(),
+          ERROR_037 + std::string(" NULL column has size != 0 ") +
+          std::string(" Column: ") + std::string(col_name) +
+          " Type: " + std::to_string(col->getType()));
+      }
+      return response->SetColumnDataNull(col_name);
+    }
     if (blobHandle->getLength(length) == -1) {
       return RS_SERVER_ERROR(
         ERROR_037 + std::string(" Reading column length failed.") +
@@ -763,6 +788,24 @@ RS_Status KeyOperation::write_col_to_resp(Uint32 colIdx,
     require(m_blob_handles[colIdx] != nullptr);
     NdbBlob *blobHandle = m_blob_handles[colIdx];
     Uint64 length = 0;
+    int isNull = 0;
+    if (unlikely(blobHandle->getNull(isNull) != 0)) {
+      return RS_RONDB_SERVER_ERROR(
+        blobHandle->getNdbError(),
+          ERROR_037 + std::string(" Failed to check NULL of ") +
+          std::string(" Column: ") + std::string(col_name) +
+          " Type: " + std::to_string(col->getType()));
+    }
+    if (isNull) {
+      if (unlikely(blobHandle->getLength(length) != 0)) {
+        return RS_RONDB_SERVER_ERROR(
+          blobHandle->getNdbError(),
+          ERROR_037 + std::string(" NULL column has size != 0 ") +
+          std::string(" Column: ") + std::string(col_name) +
+          " Type: " + std::to_string(col->getType()));
+      }
+      return response->SetColumnDataNull(col_name);
+    }
     if (blobHandle->getLength(length) == -1) {
       return RS_SERVER_ERROR(
         ERROR_037 + std::string(" Reading column length failed.") +
@@ -776,6 +819,7 @@ RS_Status KeyOperation::write_col_to_resp(Uint32 colIdx,
         std::to_string(response->GetRemainingCapacity()) +
         " Required: " + std::to_string(length + 1));
     }
+    DEB_NDB_BE("Read col_name: %s, TEXT of length: %llu", col_name, length);
     // NOTE: we not allocating a tmp buffer to hold the data
     // Reusing the reponse buffer
     char *tmpBuffer = static_cast<char*>(response->GetWritePointer());

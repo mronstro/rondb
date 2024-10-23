@@ -41,6 +41,17 @@
 #include <algorithm>
 #include <utility>
 #include <util/require.h>
+#include <EventLogger.hpp>
+
+#if (defined(VM_TRACE) || defined(ERROR_INSERT))
+#define DEBUG_NDB_BE 1
+#endif
+
+#ifdef DEBUG_NDB_BE
+#define DEB_NDB_BE(...) do { g_eventLogger->info(__VA_ARGS__); } while (0)
+#else
+#define DEB_NDB_BE(...) do { } while (0)
+#endif
 
 typedef unsigned char uchar;
 typedef Uint32 uint32;
@@ -745,6 +756,7 @@ RS_Status set_operation_pk_col(const NdbDictionary::Column *col,
   bool ret = NdbDictionary::getOffset(ndb_record, col_id, offset);
   require(ret);
   Uint8* primaryKeyCol = row + offset;
+  DEB_NDB_BE("Primary key column %s is at offset %u", col->getName(), offset);
 
   switch (col->getType()) {
   case NdbDictionary::Column::Undefined: {
