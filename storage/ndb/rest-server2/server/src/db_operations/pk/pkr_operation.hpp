@@ -43,6 +43,7 @@ struct KeyOperation {
   const NdbDictionary::Table *m_tableDict;
   const NdbDictionary::Column **m_pkColumns;
   const NdbDictionary::Column **m_readColumns;
+  NdbBlob **m_blob_handles;
   const NdbRecord *m_ndb_record;
   PKRRequest m_req;
   PKRResponse m_resp;

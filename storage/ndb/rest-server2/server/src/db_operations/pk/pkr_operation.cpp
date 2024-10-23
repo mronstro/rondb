@@ -85,6 +85,8 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
     RS_Status error = RS_SERVER_ERROR(ERROR_067);
     return error;
   }
+  DEB_NDB_BE("m_key_ops: %p, sizeof(KeyOperation): %u",
+             m_key_ops, (Uint32)sizeof(KeyOperation));
   for (Uint32 i = 0; i < numOps; i++) {
     PKRRequest *req = new (&m_key_ops[i].m_req) PKRRequest(&reqBuffer[i]);
     PKRResponse *resp =
@@ -115,6 +117,7 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
     m_key_ops[i].m_num_pk_columns = numPrimaryKeys;
     m_key_ops[i].m_num_table_columns = numColumns;
     m_key_ops[i].m_num_read_columns = numReadColumns;
+    m_key_ops[i].m_blob_handles = nullptr;
     if (unlikely(numPrimaryKeys != req->PKColumnsCount())) {
       status =
         RS_CLIENT_ERROR(
@@ -193,6 +196,7 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
       req->MarkInvalidOp(status);
       continue;
     }
+    bool use_blob_values = false;
     if (numReadColumns != 0) {
       j = 0;
       for (; j < numReadColumns; j++) {
@@ -215,6 +219,22 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
         word |= bit_value;
         bitmap_words[col_word] = word;
         m_key_ops[i].m_readColumns[j] = read_col;
+        if (unlikely(!use_blob_values &&
+                     (read_col->getType() == NdbDictionary::Column::Blob ||
+                      read_col->getType() == NdbDictionary::Column::Text))) {
+          if (use_blob_values == false) {
+            use_blob_values = true;
+            m_key_ops[i].m_blob_handles = (NdbBlob**)
+              amalloc->alloc_bytes(sizeof(NdbBlob*) * numReadColumns, 8);
+            if (m_key_ops[i].m_blob_handles == nullptr) {
+              status = RS_SERVER_ERROR(ERROR_067);
+              return status;
+            }
+            DEB_NDB_BE("Allocating memory at %p for"
+                       " m_key_ops[%u].m_blob_handles",
+                       m_key_ops[i].m_blob_handles, i);
+          }
+        }
       }
       if (unlikely(failed != 0)) {
         if (failed == 1) {
@@ -229,9 +249,26 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
         continue;
       }
     } else {
+      bool use_blob_values = false;
       for (Uint32 k = 0; k < numColumns; k++) {
         const NdbDictionary::Column *read_col = tableDict->getColumn(k);
         m_key_ops[i].m_readColumns[k] = read_col;
+        if (unlikely(!use_blob_values &&
+                     (read_col->getType() == NdbDictionary::Column::Blob ||
+                      read_col->getType() == NdbDictionary::Column::Text))) {
+          if (use_blob_values == false) {
+            use_blob_values = true;
+            m_key_ops[i].m_blob_handles = (NdbBlob**)
+              amalloc->alloc_bytes(sizeof(NdbBlob*) * numReadColumns, 8);
+            if (m_key_ops[i].m_blob_handles == nullptr) {
+              status = RS_SERVER_ERROR(ERROR_067);
+              return status;
+            }
+            DEB_NDB_BE("(2)Allocating memory at %p for"
+                       " m_key_ops[%u].m_blob_handles",
+                       m_key_ops[i].m_blob_handles, i);
+          }
+        }
       }
       Uint32* bitmap_words32 = (Uint32*)bitmap_words;
       for (j = 0; j < num_bitmap_words; j++) {
@@ -303,6 +340,32 @@ start:
       return RS_RONDB_SERVER_ERROR(m_ndbTransaction->getNdbError(), ERROR_007);
     }
     m_key_ops[opIdx].m_ndbOperation = operation;
+    if (unlikely(m_key_ops[opIdx].m_blob_handles != nullptr)) {
+      for (Uint32 colIdx = 0;
+           colIdx < m_key_ops[opIdx].m_num_read_columns;
+           colIdx++) {
+        const NdbDictionary::Column *col =
+          m_key_ops[opIdx].m_readColumns[colIdx];
+        if (unlikely(col->getType() == NdbDictionary::Column::Blob ||
+                     col->getType() == NdbDictionary::Column::Text)) {
+          m_key_ops[opIdx].m_blob_handles[colIdx] =
+            operation->getBlobHandle(col->getName());
+          DEB_NDB_BE("Blob handle for %s in op %u in col: %u is %p",
+            col->getName(),
+            opIdx,
+            colIdx,
+            m_key_ops[opIdx].m_blob_handles[colIdx]);
+          if (m_key_ops[opIdx].m_blob_handles[colIdx] == nullptr) {
+            RS_Status error = RS_SERVER_ERROR(ERROR_067);
+            return error;
+          }
+        } else {
+          DEB_NDB_BE("No Blob handle for %s in op %u in col: %u",
+            col->getName(), opIdx, colIdx);
+          m_key_ops[opIdx].m_blob_handles[colIdx] = nullptr;
+        }
+      }
+    }
   }
   return RS_OK;
 }
@@ -609,17 +672,158 @@ RS_Status KeyOperation::write_col_to_resp(Uint32 colIdx,
   case NdbDictionary::Column::Blob: {
     ///< Binary large object (see NdbBlob)
     /// Treat it as binary data
-    return RS_SERVER_ERROR(
-      ERROR_037 + std::string(" Reading column length failed.") +
-      std::string(" Column: ") + std::string(col_name) +
-      " Type: " + std::to_string(col->getType()));
+    require(m_blob_handles[colIdx] != nullptr);
+    NdbBlob *blobHandle = m_blob_handles[colIdx];
+    Uint64 length = 0;
+    if (blobHandle->getLength(length) == -1) {
+      return RS_SERVER_ERROR(
+        ERROR_037 + std::string(" Reading column length failed.") +
+          std::string(" Column: ") + std::string(col_name) +
+          " Type: " + std::to_string(col->getType()));
+    }
+    DEB_NDB_BE("Read col_name: %s, BLOB of length: %llu", col_name, length);
+    // check for max length
+    // (4 * ceil(input_size / 3))
+    const size_t maxEncodedSize = length / 3 + (length % 3 != 0) * 4;
+    if (unlikely(response->GetRemainingCapacity() < maxEncodedSize)) {
+      return RS_SERVER_ERROR(
+        ERROR_016 + std::string(" Buffer Remaining Capacity: ") +
+        std::to_string(response->GetRemainingCapacity()) +
+        " Required: " + std::to_string(maxEncodedSize));
+    }
+    Uint64 chunk = 0;
+    Uint64 total_read = 0;
+    char buffer[BLOB_MAX_FETCH_SIZE];
+    struct base64_state state;
+    size_t encodeOutlen = 0;
+    base64_stream_encode_init(&state, 0);
+
+    for (chunk = 0; chunk < (length / (BLOB_MAX_FETCH_SIZE)) + 1; chunk++) {
+      Uint64 pos = chunk * BLOB_MAX_FETCH_SIZE;
+      // NOTE this is bytes to read and also bytes read.
+      Uint32 bytes = BLOB_MAX_FETCH_SIZE;
+      if (pos + bytes > length) {
+        bytes = length - pos;
+      }
+      if (bytes != 0) {
+        if (unlikely(-1 == blobHandle->setPos(pos))) {
+          return RS_RONDB_SERVER_ERROR(
+            blobHandle->getNdbError(),
+            ERROR_037 + std::string(" Failed to set read position.") +
+            std::string(" Column: ") + std::string(col_name) +
+            " Type: " + std::to_string(col->getType()));
+        }
+        if (blobHandle->readData(buffer,
+                                 bytes /*to read, also bytes read*/) == -1) {
+          return RS_RONDB_SERVER_ERROR(
+            blobHandle->getNdbError(),
+            ERROR_037 + std::string(" Read data failed .") +
+            std::string(" Column: ") + std::string(col_name) +
+            " Type: " + std::to_string(col->getType()) +
+            " Position: " + std::to_string(pos));
+        }
+        if (bytes > 0) {
+          total_read += bytes;
+          if (chunk == 0) {
+            response->Append_string(col_name,
+                                    "",
+                                    RDRS_BINARY_DATATYPE);
+            // This adds a column to the response buffer. Right now the last
+            // byte of the response buffer is '\0'. Remove the last byte and
+            // start appending the base64 data
+            response->AdvanceWritePointer(-1);
+          }
+          base64_stream_encode(&state,
+                               (const char *)buffer,
+                               bytes,
+                               (char *)response->GetWritePointer(),
+                               &encodeOutlen);
+          response->AdvanceWritePointer(encodeOutlen);
+        }
+      }
+    }
+    if (total_read != length) {
+      return RS_RONDB_SERVER_ERROR(
+        blobHandle->getNdbError(),
+        ERROR_037 + std::string(" Not all of the data was read.") +
+        std::string(" Column: ") + std::string(col_name) +
+        " Expected to read: " + std::to_string(length) +
+        " bytes. Read: " + std::to_string(total_read));
+    }
+    base64_stream_encode_final(&state,
+                              (char *)response->GetWritePointer(),
+                              &encodeOutlen);
+    response->AdvanceWritePointer(encodeOutlen);
+    (response->GetResponseBuffer())[response->GetWriteHeader()] = '\0';
+    response->AdvanceWritePointer(1);
+    return RS_OK;
   }
   case NdbDictionary::Column::Text: {
     ///< Text blob
-    return RS_SERVER_ERROR(
-      ERROR_037 + std::string(" Reading column length failed.") +
-      std::string(" Column: ") + std::string(col_name) +
-      " Type: " + std::to_string(col->getType()));
+    require(m_blob_handles[colIdx] != nullptr);
+    NdbBlob *blobHandle = m_blob_handles[colIdx];
+    Uint64 length = 0;
+    if (blobHandle->getLength(length) == -1) {
+      return RS_SERVER_ERROR(
+        ERROR_037 + std::string(" Reading column length failed.") +
+        std::string(" Column: ") + std::string(col_name) +
+        " Type: " + std::to_string(col->getType()));
+    }
+    //+1 for null terminator
+    if (unlikely(response->GetRemainingCapacity() < length + 1)) {
+      return RS_SERVER_ERROR(
+        ERROR_016 + std::string(" Buffer Remaining Capacity: ") +
+        std::to_string(response->GetRemainingCapacity()) +
+        " Required: " + std::to_string(length + 1));
+    }
+    // NOTE: we not allocating a tmp buffer to hold the data
+    // Reusing the reponse buffer
+    char *tmpBuffer = static_cast<char*>(response->GetWritePointer());
+    Uint64 chunk = 0;
+    Uint64 total_read = 0;
+    for (chunk = 0; chunk < (length / (BLOB_MAX_FETCH_SIZE)) + 1; chunk++) {
+      Uint64 pos   = chunk * BLOB_MAX_FETCH_SIZE;
+      // NOTE this is bytes to read and also bytes read.
+      Uint32 bytes = BLOB_MAX_FETCH_SIZE;
+      if (pos + bytes > length) {
+        bytes = length - pos;
+      }
+      if (bytes != 0) {
+        if (-1 == blobHandle->setPos(pos)) {
+          return RS_RONDB_SERVER_ERROR(
+            blobHandle->getNdbError(),
+            ERROR_037 + std::string(" Failed to set read position.") +
+            std::string(" Column: ") + std::string(col_name) +
+            " Type: " + std::to_string(col->getType()));
+        }
+        if (blobHandle->readData(tmpBuffer,
+                                 bytes /*to read, also bytes read*/) == -1) {
+          return RS_RONDB_SERVER_ERROR(
+            blobHandle->getNdbError(),
+            ERROR_037 + std::string(" Read data failed .") +
+            std::string(" Column: ") + std::string(col_name) +
+            " Type: " + std::to_string(col->getType()) +
+            " Position: " + std::to_string(pos));
+        }
+        if (bytes > 0) {
+          tmpBuffer += bytes;  // move the pointer forward
+          total_read += bytes;
+        }
+      }
+    }
+    if (unlikely(total_read != length)) {
+      return RS_RONDB_SERVER_ERROR(
+        blobHandle->getNdbError(),
+        ERROR_037 + std::string(" Not all of the data was read.") +
+        std::string(" Column: ") + std::string(col_name) +
+        " Expected to read: " + std::to_string(length) +
+        " bytes. Read: " + std::to_string(total_read));
+    }
+    return response->Append_char(
+      col_name,
+      static_cast<char *>(response->GetWritePointer()),
+      length,
+      col->getCharset());
   }
   case NdbDictionary::Column::Bit: {
     Uint32 len = col->getLength();
