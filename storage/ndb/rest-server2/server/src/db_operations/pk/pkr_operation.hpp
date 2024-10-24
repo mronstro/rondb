@@ -65,11 +65,13 @@ class BatchKeyOperations {
    ~BatchKeyOperations();
    RS_Status perform_operation(ArenaMalloc*,
                                Uint32 numOps,
+                               bool is_batch,
                                RS_Buffer *reqBuffer,
                                RS_Buffer *respBuffer,
                                Ndb *ndb_object);
    RS_Status init_batch_operations(ArenaMalloc*,
                                    Uint32,
+                                   bool is_batch,
                                    RS_Buffer *reqBuffer,
                                    RS_Buffer *respBuffer,
                                    Ndb *ndb_object);
@@ -79,7 +81,7 @@ class BatchKeyOperations {
    RS_Status create_response();
    RS_Status append_op_recs(Uint32);
    void close_transaction();
-   RS_Status abort();
+   RS_Status abort_request();
    RS_Status handle_ndb_error(RS_Status);
 };
 

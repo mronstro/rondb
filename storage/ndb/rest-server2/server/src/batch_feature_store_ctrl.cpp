@@ -241,6 +241,7 @@ void BatchFeatureStoreCtrl::batch_featureStore(
     // pk_batch_read
     status = pk_batch_read((void*)&amalloc,
                            noOps,
+                           true,
                            reqBuffs.data(),
                            respBuffs.data(),
                            currentThreadIndex);

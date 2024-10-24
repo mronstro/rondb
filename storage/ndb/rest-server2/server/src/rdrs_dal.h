@@ -150,6 +150,7 @@ RS_Status pk_read(RS_Buffer *reqBuff,
  */
 RS_Status pk_batch_read(void *amalloc,
                         unsigned int no_req,
+                        bool is_batch,
                         RS_Buffer *req_buffs,
                         RS_Buffer *resp_buffs,
                         unsigned int threadIndex);

@@ -137,6 +137,7 @@ void PKReadCtrl::pkRead(const drogon::HttpRequestPtr &req,
     // pk_read
     status = pk_batch_read((void*)&amalloc,
                            1,
+                           false,
                            &reqBuff,
                            &respBuff,
                            currentThreadIndex);

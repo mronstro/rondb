@@ -68,17 +68,15 @@ BatchKeyOperations::~BatchKeyOperations() {
 RS_Status
 BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
                                           Uint32 numOps,
+                                          bool is_batch,
                                           RS_Buffer *reqBuffer,
                                           RS_Buffer *respBuffer,
                                           Ndb *ndb_object) {
   RS_Status status = RS_OK;
-  bool success = false;
-  m_isBatch = true;
-  if (numOps == 1) {
-    m_isBatch = false;
-  }
+  m_isBatch = is_batch;
   m_ndb_object = ndb_object;
   m_numOperations = numOps;
+  m_ndbTransaction = nullptr;
   m_key_ops = (KeyOperation*)amalloc->alloc_bytes(
     sizeof(KeyOperation) * numOps, 8);
   if (unlikely(m_key_ops == nullptr)) {
@@ -93,20 +91,26 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
       new (&m_key_ops[i].m_resp) PKRResponse(&respBuffer[i]);
     (void)resp;
     if (unlikely(ndb_object->setCatalogName(req->DB()) != 0)) {
-      status = RS_CLIENT_404_WITH_MSG_ERROR(
+      RS_Status err = RS_CLIENT_404_WITH_MSG_ERROR(
         ERROR_011 + std::string(" Database: ") +
         std::string(req->DB()) + " Table: " + req->Table());
-      req->MarkInvalidOp(status);
-      continue;
+      if (m_isBatch) {
+        req->MarkInvalidOp(err);
+        continue;
+      }
+      return err;
     }
     const NdbDictionary::Dictionary *dict = ndb_object->getDictionary();
     const NdbDictionary::Table *tableDict = dict->getTable(req->Table());
     if (unlikely(tableDict == nullptr)) {
-      status = RS_CLIENT_404_WITH_MSG_ERROR(
+      RS_Status err = RS_CLIENT_404_WITH_MSG_ERROR(
         ERROR_011 + std::string(" Database: ") +
         std::string(req->DB()) + " Table: " + req->Table());
-      req->MarkInvalidOp(status);
-      continue;
+      if (m_isBatch) {
+        req->MarkInvalidOp(err);
+        continue;
+      }
+      return err;
     }
     m_key_ops[i].m_tableDict = tableDict;
     Uint32 numPrimaryKeys = (Uint32)tableDict->getNoOfPrimaryKeys();
@@ -119,18 +123,23 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
     m_key_ops[i].m_num_read_columns = numReadColumns;
     m_key_ops[i].m_blob_handles = nullptr;
     if (unlikely(numPrimaryKeys != req->PKColumnsCount())) {
-      status =
+      DEB_NDB_BE("numPrimaryKeys: %u, reqPKKeys: %u",
+        numPrimaryKeys, req->PKColumnsCount());
+      RS_Status err =
         RS_CLIENT_ERROR(
         ERROR_013 + std::string(" Expecting: ") +
         std::to_string(numPrimaryKeys) +
         " Got: " + std::to_string(req->PKColumnsCount()));
-      req->MarkInvalidOp(status);
-      continue;
+      if (m_isBatch) {
+        req->MarkInvalidOp(err);
+        continue;
+      }
+      return err;
     }
     if (unlikely(numColumns < req->ReadColumnsCount())) {
       status = RS_CLIENT_ERROR(ERROR_068);
       req->MarkInvalidOp(status);
-      continue;
+      return status;
     }
     Uint32 num_bitmap_words = (numColumns + 31) / 32;
     Uint32 num_bitmap_bytes = 4 * num_bitmap_words;
@@ -189,15 +198,19 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
       m_key_ops[i].m_pkColumns[j] = pk_col;
     }
     if (unlikely(failed != 0)) {
+      RS_Status err;
       if (failed == 1) {
-        status = RS_CLIENT_ERROR(
+        err = RS_CLIENT_ERROR(
           ERROR_014 + std::string(req->PKName(j)));
       } else {
-        status = RS_CLIENT_ERROR(
+        err = RS_CLIENT_ERROR(
           ERROR_070 + std::string(req->PKName(j)));
       }
-      req->MarkInvalidOp(status);
-      continue;
+      if (m_isBatch) {
+        req->MarkInvalidOp(err);
+        continue;
+      }
+      return err;
     }
     bool use_blob_values = false;
     if (numReadColumns != 0) {
@@ -240,16 +253,20 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
         }
       }
       if (unlikely(failed != 0)) {
+        RS_Status err;
         if (failed == 1) {
-          status = RS_CLIENT_ERROR(
+          err = RS_CLIENT_ERROR(
             ERROR_012 + std::string(" Column: ") +
             std::string(req->ReadColumnName(i)));
         } else {
-          status = RS_CLIENT_ERROR(
+          err = RS_CLIENT_ERROR(
             ERROR_037 + std::string(req->ReadColumnName(j)));
         }
-        req->MarkInvalidOp(status);
-        continue;
+        if (m_isBatch) {
+          req->MarkInvalidOp(err);
+          continue;
+        }
+        return err;
       }
     } else {
       bool use_blob_values = false;
@@ -279,11 +296,6 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
       }
       m_key_ops[i].m_num_read_columns = numColumns;
     }
-    // At least one operation is successfully initialised
-    success = true;
-  }
-  if (likely(success)) {
-    return RS_OK;
   }
   return status;
 }
@@ -985,6 +997,7 @@ void BatchKeyOperations::close_transaction() {
 RS_Status BatchKeyOperations::perform_operation(
   ArenaMalloc *amalloc,
   Uint32 numOperations,
+  bool is_batch,
   RS_Buffer *reqBuffer,
   RS_Buffer *respBuffer,
   Ndb *ndb_object) {
@@ -993,6 +1006,7 @@ RS_Status BatchKeyOperations::perform_operation(
   RS_Status status = init_batch_operations(
     amalloc,
     numOperations,
+    is_batch,
     reqBuffer,
     respBuffer,
     ndb_object);
@@ -1029,7 +1043,7 @@ RS_Status BatchKeyOperations::perform_operation(
   return RS_OK;
 }
 
-RS_Status BatchKeyOperations::abort() {
+RS_Status BatchKeyOperations::abort_request() {
   if (likely(m_ndbTransaction != nullptr)) {
     NdbTransaction::CommitStatusType status =
       m_ndbTransaction->commitStatus();
@@ -1050,20 +1064,18 @@ RS_Status BatchKeyOperations::handle_ndb_error(RS_Status status) {
     std::unordered_map<std::string, bool> tablesMap;
     for (Uint32 i = 0; i < m_numOperations; i++) {
       PKRRequest *req = &m_key_ops[i].m_req;
-      if (req->IsInvalidOp()) {
-        const char *db = req->DB();
-        const char *table = req->Table();
-        std::string key(std::string(db) + "|" + std::string(table));
-        if (tablesMap.count(key) == 0) {
-          tables.push_back(std::make_tuple(std::string(db),
-                           std::string(table)));
-          tablesMap[key] = true;
-        }
+      const char *db = req->DB();
+      const char *table = req->Table();
+      std::string key(std::string(db) + "|" + std::string(table));
+      if (tablesMap.count(key) == 0) {
+        tables.push_back(std::make_tuple(std::string(db),
+                         std::string(table)));
+        tablesMap[key] = true;
       }
     }
     HandleSchemaErrors(m_ndb_object, status, tables);
   }
-  abort();
+  abort_request();
   return RS_OK;
 }
 

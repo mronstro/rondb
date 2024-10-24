@@ -220,6 +220,7 @@ void BatchPKReadCtrl::batchPKRead(
     // pk_batch_read
     status = pk_batch_read(&amalloc,
                            noOps,
+                           true,
                            reqBuffs.data(),
                            respBuffs.data(),
                            currentThreadIndex);

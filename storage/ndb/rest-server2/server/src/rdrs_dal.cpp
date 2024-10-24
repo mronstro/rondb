@@ -156,6 +156,7 @@ RS_Status pk_read(RS_Buffer *reqBuff,
 
 RS_Status pk_batch_read(void *amalloc_void,
                         unsigned int no_req,
+                        bool is_batch,
                         RS_Buffer *req_buffs,
                         RS_Buffer *resp_buffs,
                         unsigned int threadIndex) {
@@ -170,6 +171,7 @@ RS_Status pk_batch_read(void *amalloc_void,
     BatchKeyOperations pkread;
     status = pkread.perform_operation(amalloc,
                                       no_req,
+                                      is_batch,
                                       req_buffs,
                                       resp_buffs,
                                       ndb_object);

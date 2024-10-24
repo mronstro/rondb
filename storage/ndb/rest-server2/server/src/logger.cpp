@@ -40,10 +40,16 @@ void log(const int level, const char *msg) {
     strncpy(log_msg.message, msg, RS_LOG_MSG_LEN - 1);
     log_msg.message[RS_LOG_MSG_LEN - 1] = 0;
     my_cb_fns.logger(log_msg);
-    g_eventLogger->info("LOG2: %s", msg);
   } else {
-    //std::cout << msg << std::endl;
-    g_eventLogger->info("LOG: %s", msg);
+    if (level <= ErrorLevel) {
+      g_eventLogger->error("%s", msg);
+    } else if (level <= WarnLevel) {
+      g_eventLogger->warning("%s", msg);
+    } else if (level <= InfoLevel) {
+      g_eventLogger->info("%s", msg);
+    } else {
+      g_eventLogger->debug("%s", msg);
+    }
   }
 }
 

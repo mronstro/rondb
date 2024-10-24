@@ -48,7 +48,7 @@
 extern EventLogger *g_eventLogger;
 
 #if (defined(VM_TRACE) || defined(ERROR_INSERT))
-//#define DEBUG_FS_CTRL 1
+#define DEBUG_FS_CTRL 1
 #endif
 
 #ifdef DEBUG_FS_CTRL
@@ -229,23 +229,30 @@ std::shared_ptr<RestErrorCode>
       fsError = WRONG_DATA_TYPE->NewMessage(
         "Primary key '" + columnName + "' should be in '" +
         dataType + "' format.");
+      DEB_FS_CTRL("Wrong data type ++");
     } else {
+      DEB_FS_CTRL("Wrong data type");
       fsError = WRONG_DATA_TYPE;
     }
   } else if (err.find(ERROR_014) != std::string::npos ||
              err.find(ERROR_012) != std::string::npos) {
+    DEB_FS_CTRL("Wrong pk or column not exist");
     // "Column does not exist."
   // "Wrong primay-key column."
     fsError = INCORRECT_PRIMARY_KEY->NewMessage(err);
   } else if (err.find(ERROR_013) != std::string::npos) {
+    DEB_FS_CTRL("Wrong number of pk columns");
     // "Wrong number of primary-key columns.")
     fsError = nullptr;
+    //fsError = INCORRECT_PRIMARY_KEY->NewMessage(err);
     // Missing entry can happen and users can fill up missing features
     // by passed featues
   } else {
     if (code == drogon::k400BadRequest) {
+      DEB_FS_CTRL("BAD INPUT");
       fsError = READ_FROM_DB_FAIL_BAD_INPUT->NewMessage(err);
     } else {
+      DEB_FS_CTRL("FAILED");
       fsError = READ_FROM_DB_FAIL->NewMessage(err);
     }
   }
@@ -571,19 +578,21 @@ void FeatureStoreCtrl::featureStore(
   DEB_FS_CTRL("Parse Feature Store request");
   memcpy(jsonParser.get_buffer().get(), json_str, length);
   feature_store_data_structs::FeatureStoreRequest reqStruct;
-  RS_Status status = jsonParser.feature_store_parse(
-    simdjson::padded_string_view(
-      jsonParser.get_buffer().get(),
-      length,
-      globalConfigs.internal.reqBufferSize + simdjson::SIMDJSON_PADDING),
-      reqStruct);
+  {
+    RS_Status status = jsonParser.feature_store_parse(
+      simdjson::padded_string_view(
+        jsonParser.get_buffer().get(),
+        length,
+        globalConfigs.internal.reqBufferSize + simdjson::SIMDJSON_PADDING),
+        reqStruct);
 
-  if (unlikely(static_cast<drogon::HttpStatusCode>(status.http_code) !=
-                 drogon::HttpStatusCode::k200OK)) {
-    resp->setBody(std::string(std::string("Error:") + status.message));
-    resp->setStatusCode(drogon::HttpStatusCode::k400BadRequest);
-    callback(resp);
-    return;
+    if (unlikely(static_cast<drogon::HttpStatusCode>(status.http_code) !=
+                   drogon::HttpStatusCode::k200OK)) {
+      resp->setBody(std::string(std::string("Error:") + status.message));
+      resp->setStatusCode(drogon::HttpStatusCode::k400BadRequest);
+      callback(resp);
+      return;
+    }
   }
   // Get metadata for Feature Store request
   char *metadata_cache_entry = nullptr;
@@ -651,8 +660,7 @@ void FeatureStoreCtrl::featureStore(
   }
   ArenaMalloc amalloc(64 * 1024);
   // Execute
-  if (likely(static_cast<drogon::HttpStatusCode>(status.http_code) ==
-        drogon::HttpStatusCode::k200OK)) {
+  {
     DEB_FS_CTRL("Get Batch PK Read Params for Feature Store request");
     auto readParams = GetBatchPkReadParams(*metadata, reqStruct.entries);
     // Perform batch pk read
@@ -669,7 +677,7 @@ void FeatureStoreCtrl::featureStore(
     DEB_FS_CTRL("Validate Batch PK Read Params for Feature Store request");
     for (auto readParam : readParams) {
 
-      status = readParam.validate();
+      RS_Status status = readParam.validate();
       if (unlikely(static_cast<drogon::HttpStatusCode>(status.http_code) !=
                      drogon::HttpStatusCode::k200OK)) {
         DEB_FS_CTRL("Failed Validate Batch PK Read Params: %s, code: %d",
@@ -692,7 +700,7 @@ void FeatureStoreCtrl::featureStore(
       reqBuffs[i]  = reqBuff;
       respBuffs[i] = respBuff;
 
-      status =
+      RS_Status status =
         create_native_request(readParams[i], reqBuff.buffer, respBuff.buffer);
       if (unlikely(static_cast<drogon::HttpStatusCode>(status.http_code) !=
                      drogon::HttpStatusCode::k200OK)) {
@@ -708,30 +716,38 @@ void FeatureStoreCtrl::featureStore(
       reqBuffs[i].size = *length_ptr_casted;
     }
     // pk_batch_read
-    DEB_FS_CTRL("Perform Batch PK Read for Feature Store request");
-    status = pk_batch_read((void*)&amalloc,
-                           noOps,
-                           reqBuffs.data(),
-                           respBuffs.data(),
-                           currentThreadIndex);
-    if (unlikely(static_cast<drogon::HttpStatusCode>(status.http_code) !=
+    {
+      DEB_FS_CTRL("Perform Batch PK Read for Feature Store request");
+      RS_Status status = pk_batch_read((void*)&amalloc,
+                                       noOps,
+                                       true,
+                                       reqBuffs.data(),
+                                       respBuffs.data(),
+                                       currentThreadIndex);
+      if (unlikely(static_cast<drogon::HttpStatusCode>(status.http_code) !=
                    drogon::HttpStatusCode::k200OK)) {
-      auto fsError = TranslateRonDbError(status.http_code, status.message);
-      resp->setBody(fsError->Error());
-      resp->setStatusCode(
-        static_cast<drogon::HttpStatusCode>(fsError->GetStatus()));
-      callback(resp);
-      return;
+        DEB_FS_CTRL("pk_batch_read failed: http_code: %u, message: %s",
+                    status.http_code, status.message);
+        NdbSleep_MilliSleep(10);
+        auto fsError = TranslateRonDbError(status.http_code, status.message);
+        resp->setBody(fsError->Error());
+        resp->setStatusCode(
+          static_cast<drogon::HttpStatusCode>(fsError->GetStatus()));
+        callback(resp);
+        return;
+      }
     }
-    DEB_FS_CTRL("Ptocess Batch PK Read response for Feature Store request");
-    status = process_responses(respBuffs, dbResponseIntf);
-    if (unlikely(status.err_file_name[0] != '\0')) {
-      auto fsError = TranslateRonDbError(status.http_code, status.message);
-      resp->setBody(fsError->Error());
-      resp->setStatusCode(
-        static_cast<drogon::HttpStatusCode>(fsError->GetStatus()));
-      callback(resp);
-      return;
+    {
+      DEB_FS_CTRL("Process Batch PK Read response for Feature Store request");
+      RS_Status status = process_responses(respBuffs, dbResponseIntf);
+      if (unlikely(status.err_file_name[0] != '\0')) {
+        auto fsError = TranslateRonDbError(status.http_code, status.message);
+        resp->setBody(fsError->Error());
+        resp->setStatusCode(
+          static_cast<drogon::HttpStatusCode>(fsError->GetStatus()));
+        callback(resp);
+        return;
+      }
     }
     // convert resp to json
     DEB_FS_CTRL("Response to JSON for  Feature Store request");
