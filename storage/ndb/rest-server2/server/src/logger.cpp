@@ -22,6 +22,9 @@
 #include <string>
 #include <cstring>
 #include <iostream>
+#include <EventLogger.hpp>
+
+extern EventLogger *g_eventLogger;
 
 Callbacks my_cb_fns;
 
@@ -37,8 +40,10 @@ void log(const int level, const char *msg) {
     strncpy(log_msg.message, msg, RS_LOG_MSG_LEN - 1);
     log_msg.message[RS_LOG_MSG_LEN - 1] = 0;
     my_cb_fns.logger(log_msg);
+    g_eventLogger->info("LOG2: %s", msg);
   } else {
-    std::cout << msg << std::endl;
+    //std::cout << msg << std::endl;
+    g_eventLogger->info("LOG: %s", msg);
   }
 }
 
