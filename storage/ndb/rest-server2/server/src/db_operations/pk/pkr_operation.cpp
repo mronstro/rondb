@@ -102,6 +102,7 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
     }
     const NdbDictionary::Dictionary *dict = ndb_object->getDictionary();
     const NdbDictionary::Table *tableDict = dict->getTable(req->Table());
+    DEB_NDB_BE("Request on DB: %s, Table: %s", req->DB(), req->Table());
     if (unlikely(tableDict == nullptr)) {
       RS_Status err = RS_CLIENT_404_WITH_MSG_ERROR(
         ERROR_011 + std::string(" Database: ") +
@@ -223,8 +224,8 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
           break;
         }
         Uint32 col_id = read_col->getColumnNo();
-        Uint32 col_word = col_id / 32;
-        Uint32 col_bit = col_id & 31;
+        Uint32 col_word = col_id / 8;
+        Uint32 col_bit = col_id & 7;
         Uint32 col_bit_value = (bitmap_words[col_word] >> col_bit) & 1;
         if (unlikely(col_bit_value != 0)) {
           failed = 2;
@@ -342,8 +343,10 @@ start:
         }
       }
     }
-    DEB_NDB_BE("readTuple: read_columns[%u]: 0x%x",
-              opIdx, m_key_ops[opIdx].m_bitmap_read_columns[0]);
+    DEB_NDB_BE("readTuple: read_columns[%u]: 0x%x,0x%x",
+              opIdx,
+              m_key_ops[opIdx].m_bitmap_read_columns[0],
+              m_key_ops[opIdx].m_bitmap_read_columns[1]);
     const NdbOperation *operation = m_ndbTransaction->readTuple(
       m_key_ops[opIdx].m_ndb_record,
       (const char*)m_key_ops[opIdx].m_row,
@@ -483,6 +486,7 @@ RS_Status KeyOperation::write_col_to_resp(Uint32 colIdx,
       Uint8 null_byte = row[null_byte_offset];
       Uint8 null_bit_value = (null_byte >> null_bit_in_byte) & 1;
       if (null_bit_value) {
+        DEB_NDB_BE("Column %s is null", col_name);
         return response->SetColumnDataNull(col_name);
       }
     }
@@ -491,6 +495,8 @@ RS_Status KeyOperation::write_col_to_resp(Uint32 colIdx,
   bool ret = NdbDictionary::getOffset(ndb_record, col_id, offset);
   require(ret);
   Uint8 *col_ptr = row + offset;
+  DEB_NDB_BE("Column %s with col_id: %u is not null, offset: %u",
+             col_name, col_id, offset);
   switch (col->getType()) {
   case NdbDictionary::Column::Undefined: {
     ///< 4 bytes + 0-3 fraction
@@ -507,11 +513,15 @@ RS_Status KeyOperation::write_col_to_resp(Uint32 colIdx,
   }
   case NdbDictionary::Column::Smallint: {
     ///< 16 bit. 2 byte signed integer, can be used in array
-    return response->Append_i16(col_name, *(Int16*)col_ptr);
+    Int16 i16;
+    memcpy(&i16, col_ptr, sizeof(Int16));
+    return response->Append_i16(col_name, i16);
   }
   case NdbDictionary::Column::Smallunsigned: {
+    Uint16 u16;
+    memcpy(&u16, col_ptr, sizeof(Uint16));
     ///< 16 bit. 2 byte unsigned integer, can be used in array
-    return response->Append_iu16(col_name, *(Uint16*)col_ptr);
+    return response->Append_iu16(col_name, u16);
   }
   case NdbDictionary::Column::Mediumint: {
     ///< 24 bit. 3 byte signed integer, can be used in array
@@ -523,27 +533,39 @@ RS_Status KeyOperation::write_col_to_resp(Uint32 colIdx,
   }
   case NdbDictionary::Column::Int: {
     ///< 32 bit. 4 byte signed integer, can be used in array
-    return response->Append_i32(col_name, *(Int32*)col_ptr);
+    Int32 i32;
+    memcpy(&i32, col_ptr, sizeof(Int32));
+    return response->Append_i32(col_name, i32);
   }
   case NdbDictionary::Column::Unsigned: {
     ///< 32 bit. 4 byte unsigned integer, can be used in array
-    return response->Append_iu32(col_name, *(Uint32*)col_ptr);
+    Uint32 u32;
+    memcpy(&u32, col_ptr, sizeof(Uint32));
+    return response->Append_iu32(col_name, u32);
   }
   case NdbDictionary::Column::Bigint: {
     ///< 64 bit. 8 byte signed integer, can be used in array
-    return response->Append_i64(col_name, *(Int64*)col_ptr);
+    Int64 i64;
+    memcpy(&i64, col_ptr, sizeof(Int64));
+    return response->Append_i64(col_name, i64);
   }
   case NdbDictionary::Column::Bigunsigned: {
     ///< 64 Bit. 8 byte signed integer, can be used in array
-    return response->Append_iu64(col_name, *(Uint64*)col_ptr);
+    Uint64 u64;
+    memcpy(&u64, col_ptr, sizeof(Uint64));
+    return response->Append_iu64(col_name, u64);
   }
   case NdbDictionary::Column::Float: {
     ///< 32-bit float. 4 bytes float, can be used in array
-    return response->Append_f32(col_name, *(float*)col_ptr);
+    float f32;
+    memcpy(&f32, col_ptr, sizeof(float));
+    return response->Append_f32(col_name, f32);
   }
   case NdbDictionary::Column::Double: {
     ///< 64-bit float. 8 byte float, can be used in array
-    return response->Append_d64(col_name, *(double*)col_ptr);
+    double d64;
+    memcpy(&d64, col_ptr, sizeof(double));
+    return response->Append_d64(col_name, d64);
   }
   case NdbDictionary::Column::Olddecimal: {
     ///< MySQL < 5.0 signed decimal,  Precision, Scale
@@ -574,7 +596,8 @@ RS_Status KeyOperation::write_col_to_resp(Uint32 colIdx,
                     DECIMAL_MAX_STR_LEN_IN_BYTES);
     DEB_NDB_BE("col_name: %s Decimal column, decStr: %s, binLen: %u",
                col_name, std::string(decStr).c_str(), binLen);
-    return response->Append_string(col_name, std::string(decStr),
+    return response->Append_string(col_name,
+                                   std::string(decStr),
                                    RDRS_FLOAT_DATATYPE);
   }
   case NdbDictionary::Column::Char:

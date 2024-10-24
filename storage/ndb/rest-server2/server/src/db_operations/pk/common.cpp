@@ -61,6 +61,12 @@ static inline uint32 uint3korr(const uchar *A) {
                              ((static_cast<uint32>(A[2])) << 16));
 }
 
+static inline void int3store(uchar *T, uint A) {
+  *(T) = (uchar)(A);
+  *(T + 1) = (uchar)(A >> 8);
+  *(T + 2) = (uchar)(A >> 16);
+}
+
 inline void my_unpack_date(MYSQL_TIME *l_time, const void *d) {
   uchar b[4];
   memcpy(b, d, 3);
@@ -770,10 +776,11 @@ RS_Status set_operation_pk_col(const NdbDictionary::Column *col,
 
     char *parsed = nullptr;
     errno = 0;
-    Int64 *parsedNumber = reinterpret_cast<Int64 *>(primaryKeyCol);
-    *parsedNumber = strtoll(request->PKValueCStr(colIdx), &parsed, 10);
+    Int64 parsedNumber = strtoll(request->PKValueCStr(colIdx), &parsed, 10);
+    Int8 i = (Int8)parsedNumber;
+    memcpy(primaryKeyCol, &i, sizeof(Int8));
     if (unlikely(*parsed != '\0' || errno != 0 ||
-                 !(*parsedNumber >= -128 && *parsedNumber <= 127))) {
+                 !(parsedNumber >= -128 && parsedNumber <= 127))) {
       error = RS_CLIENT_ERROR(
         ERROR_015 + std::string(" Expecting TINYINT. Column: ") +
         std::string(request->PKName(colIdx)));
@@ -785,12 +792,12 @@ RS_Status set_operation_pk_col(const NdbDictionary::Column *col,
     ///< 8 bit. 1 byte unsigned integer, can be used in array
     char *parsed = nullptr;
     errno = 0;
-    Int64 *parsedNumber = reinterpret_cast<Int64 *>(primaryKeyCol);
-    *parsedNumber = strtoll(request->PKValueCStr(colIdx), &parsed, 10);
-
+    Uint64 parsedNumber = strtoull(request->PKValueCStr(colIdx), &parsed, 10);
+    Uint8 u = (Uint8)parsedNumber;
+    memcpy(primaryKeyCol, &u, sizeof(Uint8));
     if (unlikely(*parsed != '\0' ||
                  errno != 0 ||
-                 !(*parsedNumber >= 0 && *parsedNumber <= 255))) {
+                 !(parsedNumber >= 0 && parsedNumber <= 255))) {
       error = RS_CLIENT_ERROR(
         ERROR_015 + std::string(" Expecting TINYINT UNSIGNED. Column: ") +
         std::string(request->PKName(colIdx)));
@@ -802,11 +809,12 @@ RS_Status set_operation_pk_col(const NdbDictionary::Column *col,
     ///< 16 bit. 2 byte signed integer, can be used in array
     char *parsed = nullptr;
     errno = 0;
-    Int64 *parsedNumber = reinterpret_cast<Int64 *>(primaryKeyCol);
-    *parsedNumber = strtoll(request->PKValueCStr(colIdx), &parsed, 10);
+    Int64 parsedNumber = strtoll(request->PKValueCStr(colIdx), &parsed, 10);
+    Int16 i = (Int16)parsedNumber;
+    memcpy(primaryKeyCol, &i, sizeof(Int16));
     if (unlikely(*parsed != '\0' ||
                  errno != 0 ||
-                 !(*parsedNumber >= -32768 && *parsedNumber <= 32767))) {
+                 !(parsedNumber >= -32768 && parsedNumber <= 32767))) {
       error = RS_CLIENT_ERROR(
         ERROR_015 + std::string(" Expecting SMALLINT. Column: ") +
         std::string(request->PKName(colIdx)));
@@ -819,11 +827,12 @@ RS_Status set_operation_pk_col(const NdbDictionary::Column *col,
 
     char *parsed = nullptr;
     errno = 0;
-    Int64 *parsedNumber = reinterpret_cast<Int64 *>(primaryKeyCol);
-    *parsedNumber = strtoll(request->PKValueCStr(colIdx), &parsed, 10);
+    Uint64 parsedNumber = strtoull(request->PKValueCStr(colIdx), &parsed, 10);
+    Uint16 u = (Uint16)parsedNumber;
+    memcpy(primaryKeyCol, &u, sizeof(Uint16));
     if (unlikely(*parsed != '\0' ||
                  errno != 0 ||
-                 !(*parsedNumber >= 0 && *parsedNumber <= 65535))) {
+                 !(parsedNumber >= 0 && parsedNumber <= 65535))) {
       error = RS_CLIENT_ERROR(
         ERROR_015 + std::string(" Expecting SMALLINT UNSIGNED. Column: ") +
         std::string(request->PKName(colIdx)));
@@ -836,11 +845,12 @@ RS_Status set_operation_pk_col(const NdbDictionary::Column *col,
 
     char *parsed = nullptr;
     errno = 0;
-    Int64 *parsedNumber = reinterpret_cast<Int64 *>(primaryKeyCol);
-    *parsedNumber = strtoll(request->PKValueCStr(colIdx), &parsed, 10);
+    Int64 parsedNumber = strtoll(request->PKValueCStr(colIdx), &parsed, 10);
+    Int32 i = (Int32)parsedNumber;
+    int3store(primaryKeyCol, (uint)i);
     if (unlikely(*parsed != '\0' ||
                  errno != 0 ||
-                 !(*parsedNumber >= -8388608 && *parsedNumber <= 8388607))) {
+                 !(parsedNumber >= -8388608 && parsedNumber <= 8388607))) {
       error = RS_CLIENT_ERROR(
         ERROR_015 + std::string(" Expecting MEDIUMINT. Column: ") +
         std::string(request->PKName(colIdx)));
@@ -853,11 +863,12 @@ RS_Status set_operation_pk_col(const NdbDictionary::Column *col,
 
     char *parsed = nullptr;
     errno = 0;
-    Int64 *parsedNumber = reinterpret_cast<Int64 *>(primaryKeyCol);
-    *parsedNumber = strtoll(request->PKValueCStr(colIdx), &parsed, 10);
+    Int64 parsedNumber = strtoull(request->PKValueCStr(colIdx), &parsed, 10);
+    Uint32 u = (Uint32)parsedNumber;
+    int3store(primaryKeyCol, (uint)u);
     if (unlikely(*parsed != '\0' ||
                  errno != 0 ||
-                 !(*parsedNumber >= 0 && *parsedNumber <= 16777215))) {
+                 !(parsedNumber >= 0 && parsedNumber <= 16777215))) {
       error = RS_CLIENT_ERROR(
         ERROR_015 + std::string(" Expecting MEDIUMINT UNSIGNED. Column: ") +
         std::string(request->PKName(colIdx)));
@@ -869,12 +880,13 @@ RS_Status set_operation_pk_col(const NdbDictionary::Column *col,
     ///< 32 bit. 4 byte signed integer, can be used in array
     char *parsed = nullptr;
     errno = 0;
-    Int64 *parsedNumber = reinterpret_cast<Int64 *>(primaryKeyCol);
-    *parsedNumber = strtoll(request->PKValueCStr(colIdx), &parsed, 10);
+    Int64 parsedNumber = strtoll(request->PKValueCStr(colIdx), &parsed, 10);
+    Int32 i = (Int32)parsedNumber;
+    memcpy(primaryKeyCol, &i, sizeof(Int32));
     if (unlikely(*parsed != '\0' ||
                  errno != 0 ||
-                 !(*parsedNumber >= -2147483648 &&
-                   *parsedNumber <= 2147483647))) {
+                 !(parsedNumber >= -2147483648 &&
+                   parsedNumber <= 2147483647))) {
       error = RS_CLIENT_ERROR(
         ERROR_015 + std::string(" Expecting INT. Column: ") +
         std::string(request->PKName(colIdx)));
@@ -886,11 +898,12 @@ RS_Status set_operation_pk_col(const NdbDictionary::Column *col,
     ///< 32 bit. 4 byte unsigned integer, can be used in array
     char *parsed = nullptr;
     errno = 0;
-    Int64 *parsedNumber = reinterpret_cast<Int64 *>(primaryKeyCol);
-    *parsedNumber = strtoll(request->PKValueCStr(colIdx), &parsed, 10);
+    Int64 parsedNumber = strtoull(request->PKValueCStr(colIdx), &parsed, 10);
+    Uint32 u = (Uint32)parsedNumber;
+    memcpy(primaryKeyCol, &u, sizeof(Uint32));
     if (unlikely(*parsed != '\0' ||
                  errno != 0 ||
-                 !(*parsedNumber >= 0 && *parsedNumber <= 4294967295))) {
+                 !(parsedNumber >= 0 && parsedNumber <= 4294967295))) {
       error = RS_CLIENT_ERROR(
         ERROR_015 + std::string(" Expecting INT UNSIGNED. Column: ") +
         std::string(request->PKName(colIdx)));
@@ -902,8 +915,8 @@ RS_Status set_operation_pk_col(const NdbDictionary::Column *col,
     ///< 64 bit. 8 byte signed integer, can be used in array
     char *parsed = nullptr;
     errno = 0;
-    Int64 *parsedNumber = reinterpret_cast<Int64 *>(primaryKeyCol);
-    *parsedNumber = strtoll(request->PKValueCStr(colIdx), &parsed, 10);
+    Int64 parsedNumber = strtoll(request->PKValueCStr(colIdx), &parsed, 10);
+    memcpy(primaryKeyCol, &parsedNumber, sizeof(Int64));
     if (unlikely(*parsed != '\0' || errno != 0)) {
       error = RS_CLIENT_ERROR(
         ERROR_015 + std::string(" Expecting BIGINT. Column: ") +
@@ -916,8 +929,8 @@ RS_Status set_operation_pk_col(const NdbDictionary::Column *col,
     ///< 64 Bit. 8 byte signed integer, can be used in array
     char *parsed = nullptr;
     errno = 0;
-    Uint64 *parsedNumber = reinterpret_cast<Uint64 *>(primaryKeyCol);
-    *parsedNumber = strtoull(request->PKValueCStr(colIdx), &parsed, 10);
+    Uint64 parsedNumber = strtoull(request->PKValueCStr(colIdx), &parsed, 10);
+    memcpy(primaryKeyCol, &parsedNumber, sizeof(Uint64));
     const std::string numStr = std::string(request->PKValueCStr(colIdx));
     if (unlikely(*parsed != '\0' ||
                  errno != 0 ||
