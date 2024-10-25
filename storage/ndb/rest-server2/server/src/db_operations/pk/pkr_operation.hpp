@@ -33,24 +33,42 @@
 #include <NdbApi.hpp>
 #include <ArenaMalloc.hpp>
 
+//#define NDB_RECORD
+
 struct KeyOperation {
   Uint32 m_num_pk_columns;
   Uint32 m_num_read_columns;
   Uint32 m_num_table_columns;
+#ifdef NDB_RECORD
   Uint8 *m_bitmap_read_columns;
   Uint8 *m_row;
+#endif
   const NdbOperation *m_ndbOperation;
   const NdbDictionary::Table *m_tableDict;
   const NdbDictionary::Column **m_pkColumns;
   const NdbDictionary::Column **m_readColumns;
   NdbBlob **m_blob_handles;
+#ifdef NDB_RECORD
   const NdbRecord *m_ndb_record;
+#else
+  const NdbRecAttr **m_rec_attrs;
+  Uint32 *m_PkAttrIds;
+  Uint32 *m_ReadAttrIds;
+#endif
   PKRRequest m_req;
   PKRResponse m_resp;
+#ifdef NDB_RECORD
   RS_Status append_op_recs(PKRResponse *resp, PKRRequest *req);
+#else
+  RS_Status append_op_recs(PKRResponse *resp);
+#endif
   RS_Status write_col_to_resp(Uint32 colIdx,
+#ifdef NDB_RECORD
                               PKRResponse *resp,
                               PKRRequest *req);
+#else
+                              PKRResponse *resp);
+#endif
 };
 
 class BatchKeyOperations {

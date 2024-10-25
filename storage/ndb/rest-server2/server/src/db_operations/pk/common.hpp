@@ -48,11 +48,19 @@ typedef struct ColRec {
  *
  * @return status
  */
+//#define NDB_RECORD
+#ifdef NDB_RECORD
 RS_Status set_operation_pk_col(const NdbDictionary::Column *col,
                                PKRRequest *request,
                                Uint8 *row,
                                const NdbRecord *ndb_record,
                                Uint32 colIdx);
+#else
+RS_Status set_operation_pk_col(const NdbDictionary::Column *col,
+                               PKRRequest *request,
+                               Uint8 *row,
+                               Uint32 colIdx);
+#endif
 /**
  * Set up read operation
  * @param col information of column that we're querying

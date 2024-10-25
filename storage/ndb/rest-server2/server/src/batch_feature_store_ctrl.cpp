@@ -42,7 +42,7 @@
 extern EventLogger *g_eventLogger;
 
 #if (defined(VM_TRACE) || defined(ERROR_INSERT))
-//#define DEBUG_BFS_CTRL 1
+#define DEBUG_BFS_CTRL 1
 #endif
 
 #ifdef DEBUG_BFS_CTRL
