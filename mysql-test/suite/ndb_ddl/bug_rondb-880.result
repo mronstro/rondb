@@ -1,0 +1,61 @@
+RONDB-880 reproduction variant 1
+CALL create_t1();
+a	b	c
+124	0	def
+125	1	abc
+ALTER TABLE t1 MODIFY COLUMN b bigint NOT NULL;
+CALL end_t1();
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` bigint NOT NULL,
+  `c` text DEFAULT NULL,
+  PRIMARY KEY (`a`)
+) ENGINE=ndbcluster DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+a	b	c
+124	0	def
+125	1	abc
+RONDB-880 reproduction variant 2
+CALL create_t1();
+a	b	c
+124	0	def
+125	1	abc
+CREATE TABLE t2 (a int NOT NULL PRIMARY KEY, b bigint NOT NULL, c text) ENGINE=NDB;
+INSERT INTO t2 SELECT * FROM t1;
+DROP TABLE t1;
+ALTER TABLE t2 RENAME TO t1;
+CALL end_t1();
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` bigint NOT NULL,
+  `c` text DEFAULT NULL,
+  PRIMARY KEY (`a`)
+) ENGINE=ndbcluster DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+a	b	c
+124	0	def
+125	1	abc
+RONDB-880 reproduction variant 3
+CALL create_t1();
+a	b	c
+124	0	def
+125	1	abc
+CREATE TABLE tmp_blob_values (a int NOT NULL PRIMARY KEY, c text) ENGINE=NDB;
+INSERT INTO tmp_blob_values SELECT a, c FROM t1;
+UPDATE t1 SET c = NULL;
+ALTER TABLE t1 MODIFY COLUMN b BIGINT NOT NULL;
+UPDATE t1 JOIN tmp_blob_values USING (a) SET t1.c = tmp_blob_values.c;
+DROP TABLE tmp_blob_values;
+CALL end_t1();
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int NOT NULL,
+  `b` bigint NOT NULL,
+  `c` text DEFAULT NULL,
+  PRIMARY KEY (`a`)
+) ENGINE=ndbcluster DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+a	b	c
+124	0	def
+125	1	abc
+DROP PROCEDURE create_t1;
+DROP PROCEDURE end_t1;

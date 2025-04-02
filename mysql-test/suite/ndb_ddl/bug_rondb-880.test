@@ -1,0 +1,61 @@
+# Bug RONDB-880:
+#   ndb returns error 'DML count in transaction exceeds config parameter MaxDMLOperationsPerTransaction/MaxNoOfConcurrentOp'
+#   under the following circumstances:
+#   - A table has a TEXT column
+#   - The number of rows greatly exceeds MaxNoOfConcurrentOperations
+#   - The TEXT column contains data in each row
+#   - The table is ALTERed in a way that cannot be done inplace.
+
+-- source include/have_ndb.inc
+disable_query_log;
+DELIMITER %;
+CREATE PROCEDURE create_t1 ()
+BEGIN
+  CREATE TABLE t1 (a int NOT NULL PRIMARY KEY, b int NULL, c text) ENGINE=NDB;
+  SET @total= 25000;
+  REPEAT
+    INSERT INTO t1 VALUES
+      (@total, @total mod 2, if(@total mod 2, 'abc', 'def'));
+    SET @total= @total -1;
+  UNTIL @total = 0 END REPEAT;
+  SELECT * FROM t1 WHERE 123 < a AND a < 126 ORDER BY a;
+END %
+CREATE PROCEDURE end_t1 ()
+BEGIN
+  SHOW CREATE TABLE t1;
+  SELECT * FROM t1 WHERE 123 < a AND a < 126 ORDER BY a;
+  DROP TABLE t1;
+END %
+DELIMITER ;%
+enable_query_log;
+
+--echo RONDB-880 reproduction variant 1
+CALL create_t1();
+# When bug rondb-880 is present, the following ALTER TABLE statement produces
+# ERROR 1296 (HY000): Got error 261 'DML count in transaction exceeds config parameter MaxDMLOperationsPerTransaction/MaxNoOfConcurrentOp' from NDBCLUSTER
+ALTER TABLE t1 MODIFY COLUMN b bigint NOT NULL;
+CALL end_t1();
+
+--echo RONDB-880 reproduction variant 2
+CALL create_t1();
+CREATE TABLE t2 (a int NOT NULL PRIMARY KEY, b bigint NOT NULL, c text) ENGINE=NDB;
+# When bug rondb-880 is present, the following INSERT statement produces
+# ERROR 1296 (HY000): Got error 261 'DML count in transaction exceeds config parameter MaxDMLOperationsPerTransaction/MaxNoOfConcurrentOp' from NDBCLUSTER
+INSERT INTO t2 SELECT * FROM t1;
+DROP TABLE t1;
+ALTER TABLE t2 RENAME TO t1;
+CALL end_t1();
+
+--echo RONDB-880 reproduction variant 3
+CALL create_t1();
+CREATE TABLE tmp_blob_values (a int NOT NULL PRIMARY KEY, c text) ENGINE=NDB;
+INSERT INTO tmp_blob_values SELECT a, c FROM t1;
+UPDATE t1 SET c = NULL;
+ALTER TABLE t1 MODIFY COLUMN b BIGINT NOT NULL;
+UPDATE t1 JOIN tmp_blob_values USING (a) SET t1.c = tmp_blob_values.c;
+DROP TABLE tmp_blob_values;
+CALL end_t1();
+
+# Cleanup
+DROP PROCEDURE create_t1;
+DROP PROCEDURE end_t1;
