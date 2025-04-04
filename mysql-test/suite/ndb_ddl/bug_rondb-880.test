@@ -8,7 +8,6 @@
 
 -- source include/have_ndb.inc
 
-# Create data
 disable_query_log;
 DELIMITER %;
 CREATE PROCEDURE insert_data ()
@@ -23,139 +22,130 @@ BEGIN
     SET @total= @total -1;
   UNTIL @total = 0 END REPEAT;
 END %
+CREATE PROCEDURE create_t1_with_varchar ()
+BEGIN
+  CREATE TABLE t1 (a int NOT NULL PRIMARY KEY, b int NOT NULL, c varchar(20)) ENGINE=NDB;
+  CALL insert_data();
+END %
+CREATE PROCEDURE create_t1_with_text ()
+BEGIN
+  CREATE TABLE t1 (a int NOT NULL PRIMARY KEY, b int NOT NULL, c text) ENGINE=NDB;
+  CALL insert_data();
+END %
 DELIMITER ;%
 enable_query_log;
 
-# Avoid exhausting operation records, at least in absence of related bugs.
-SET ndb_use_transactions= 1;
+# Avoid exhausting operation records in the absence of bug RONDB-880.
+SET ndb_use_transactions= 0;
 
 --echo RONDB-880 reproduction variant 1
-CREATE TABLE t1 (a int NOT NULL PRIMARY KEY, b int NOT NULL, c varchar(20)) ENGINE=NDB; CALL insert_data();
-# This works no matter if the bug is present
+CALL create_t1_with_varchar();
+# This works no matter whether the bug is present
 ALTER TABLE t1 MODIFY COLUMN b bigint NOT NULL;
 DROP TABLE t1;
-CREATE TABLE t1 (a int NOT NULL PRIMARY KEY, b int NOT NULL, c text) ENGINE=NDB; CALL insert_data();
+CALL create_t1_with_text();
 # Altering an identical table except with a text column.
 # When bug RONDB-880 is present, the following ALTER TABLE statement produces
 # ERROR 1296 (HY000): Got error 261 'DML count in transaction exceeds config parameter MaxDMLOperationsPerTransaction/MaxNoOfConcurrentOp' from NDBCLUSTER
 ALTER TABLE t1 MODIFY COLUMN b bigint NOT NULL;
 DROP TABLE t1;
 
-#--echo RONDB-880 reproduction variant 2
-#CREATE TABLE t1 (a int NOT NULL PRIMARY KEY, b int NOT NULL, c text) ENGINE=NDB; CALL insert_data();
-#CREATE TABLE t2 (a int NOT NULL PRIMARY KEY, b bigint NOT NULL, c varchar(20)) ENGINE=NDB;
-#CREATE TABLE t3 (a int NOT NULL PRIMARY KEY, b bigint NOT NULL, c text) ENGINE=NDB;
-## This works no matter if the bug is present
-#INSERT INTO t2 SELECT * FROM t1;
-## Inserting into an identical table except with a text column.
-## When bug RONDB-880 is present, the following INSERT statement produces
-## ERROR 1296 (HY000): Got error 261 'DML count in transaction exceeds config parameter MaxDMLOperationsPerTransaction/MaxNoOfConcurrentOp' from NDBCLUSTER
-#INSERT INTO t3 SELECT * FROM t1;
-#DROP TABLE t1;
-#DROP TABLE t2;
-#DROP TABLE t3;
+--echo RONDB-880 reproduction variant 2
+CALL create_t1_with_text();
+CREATE TABLE t2 (a int NOT NULL PRIMARY KEY, b bigint NOT NULL, c varchar(20)) ENGINE=NDB;
+CREATE TABLE t3 (a int NOT NULL PRIMARY KEY, b bigint NOT NULL, c text) ENGINE=NDB;
+# This works no matter whether the bug is present
+INSERT INTO t2 SELECT * FROM t1;
+# Inserting into an identical table except with a text column.
+# When bug RONDB-880 is present, the following INSERT statement produces
+# ERROR 1296 (HY000): Got error 261 'DML count in transaction exceeds config parameter MaxDMLOperationsPerTransaction/MaxNoOfConcurrentOp' from NDBCLUSTER
+INSERT INTO t3 SELECT * FROM t1;
+DROP TABLE t1;
+DROP TABLE t2;
+DROP TABLE t3;
 
---echo RONDB-880 reproduction variant 4
-CREATE TABLE t1 (a int NOT NULL PRIMARY KEY, b int NOT NULL, c varchar(20)) ENGINE=NDB; CALL insert_data();
-# This works no matter if the bug is present
+--echo RONDB-880 reproduction variant 3
+CALL create_t1_with_varchar();
+# This works no matter whether the bug is present
 UPDATE t1 SET c = CONCAT(c, c);
 DROP TABLE t1;
-CREATE TABLE t1 (a int NOT NULL PRIMARY KEY, b int NOT NULL, c text) ENGINE=NDB; CALL insert_data();
+CALL create_t1_with_text();
 # Update an identical table except with a text column.
 # When bug RONDB-880 is present, the following UPDATE statement produces
 # ERROR 1296 (HY000): Got error 261 'DML count in transaction exceeds config parameter MaxDMLOperationsPerTransaction/MaxNoOfConcurrentOp' from NDBCLUSTER
-# todo no actually it works.
 UPDATE t1 SET c = CONCAT(c, c);
 DROP TABLE t1;
 
-# todo restore test with increment pkey, see if varchar vs text influences it.
-CREATE TABLE t1 (a int NOT NULL PRIMARY KEY, b int NOT NULL, c varchar(20)) ENGINE=NDB; CALL insert_data();
-# This works no matter if the bug is present
-UPDATE t1 SET a = a + 1;
-DROP TABLE t1;
-CREATE TABLE t1 (a int NOT NULL PRIMARY KEY, b int NOT NULL, c text) ENGINE=NDB; CALL insert_data();
-# Update an identical table except with a text column.
-# When bug RONDB-880 is present, the following ALTER TABLE statement produces
+--echo RONDB-880 reproduction variant 4
+CALL create_t1_with_varchar();
+# When bug RONDB-880 is present, the following UPDATE statement on a table without text columns produces
 # ERROR 1296 (HY000): Got error 261 'DML count in transaction exceeds config parameter MaxDMLOperationsPerTransaction/MaxNoOfConcurrentOp' from NDBCLUSTER
-UPDATE t1 SET a = a + 1;
+ALTER TABLE t1 CHANGE COLUMN c c TEXT CHARACTER SET utf8mb4;
+DROP TABLE t1;
+CALL create_t1_with_text();
+# Despite the text column, this works no matter whether the bug is present
+ALTER TABLE t1 CHANGE COLUMN c c TEXT CHARACTER SET utf8mb4;
 DROP TABLE t1;
 
-#
-#--echo RONDB-880 reproduction variant 5
-#CREATE TABLE t1 (a int NOT NULL PRIMARY KEY, b int NOT NULL, c varchar(17)) ENGINE=NDB; CALL insert_data();
-## When bug RONDB-880 is present, the following UPDATE statement produces
-## ERROR 1296 (HY000): Got error 261 'DML count in transaction exceeds config parameter MaxDMLOperationsPerTransaction/MaxNoOfConcurrentOp' from NDBCLUSTER
-#UPDATE t1 SET c = CONCAT(c, c);
-#DROP TABLE t1;
-#
-#--echo RONDB-880 reproduction variant 6
-#CREATE TABLE t1 (a int NOT NULL PRIMARY KEY, b int NOT NULL, c varchar(17)) ENGINE=NDB; CALL insert_data();
-## When bug RONDB-880 is present, each of the following REPLACE statements produce errors
-#REPLACE INTO t1 SELECT a, b+1, c FROM t1;
-#REPLACE INTO t1 SELECT a, b, CONCAT(c, c) FROM t1;
-#REPLACE INTO t1 SELECT a+1, b, c FROM t1;
-#DROP TABLE t1;
-#
-#--echo RONDB-880 reproduction variant 6
-#CREATE TABLE t1 (a int NOT NULL PRIMARY KEY, b int NOT NULL, c varchar(17)) ENGINE=NDB; CALL insert_data();
-#SELECT sum(b) FROM t1 WHERE a > LENGTH(c);
-#SELECT sum(t1x.b) FROM t1 t1x INNER JOIN t1 t1y ON t1x.a = t1y.a;
-#SELECT sum(t1x.b) FROM t1 t1x INNER JOIN t1 t1y ON t1x.a = t1y.a AND t1x.c = t1y.c;
-#SELECT sum(t1x.b) FROM t1 t1x INNER JOIN t1 t1y ON t1x.a = t1y.a AND LENGTH(t1x.c) = LENGTH(t1y.c);
-#SELECT sum(t1x.b) FROM t1 t1x INNER JOIN t1 t1y ON t1x.c = t1y.c;
-#DROP TABLE t1;
-#
-#CREATE TABLE t1 (a int NOT NULL PRIMARY KEY, b int NOT NULL, c varchar(17)) ENGINE=NDB; CALL insert_data();
-##ERROR 1296 (HY000): Got error 261 'DML count in transaction exceeds config parameter MaxDMLOperationsPerTransaction/MaxNoOfConcurrentOp' from NDBCLUSTER
-#CREATE TABLE t2 ENGINE=NDB AS SELECT a, b, c FROM t1;
-#DROP TABLE t1;
-#ALTER TABLE t2 RENAME TO t1;
-#DROP TABLE t1;
-#
-#CREATE TABLE t1 (a int NOT NULL PRIMARY KEY, b int NOT NULL, c varchar(17)) ENGINE=NDB; CALL insert_data();
-#ALTER TABLE t1 CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-#DROP TABLE t1;
-#
-#CREATE TABLE t1 (a int NOT NULL PRIMARY KEY, b int NOT NULL, c varchar(17)) ENGINE=NDB; CALL insert_data();
-#ALTER TABLE t1 CHANGE COLUMN c c TEXT CHARACTER SET utf8mb4;
-#DROP TABLE t1;
-#
-#CREATE TABLE t1 (a int NOT NULL PRIMARY KEY, b int NOT NULL, c varchar(17)) ENGINE=NDB; CALL insert_data();
-#ALTER TABLE t1
-#  MODIFY COLUMN b INT NOT NULL,
-#  DROP PRIMARY KEY,
-#  ADD PRIMARY KEY (a, b);
-#DROP TABLE t1;
-#
-#CREATE TABLE t1 (a int NOT NULL PRIMARY KEY, b int NOT NULL, c varchar(17)) ENGINE=NDB; CALL insert_data();
-#CREATE TABLE t2 (a int NOT NULL PRIMARY KEY, b int NOT NULL, c varchar(17)) ENGINE=NDB; INSERT INTO t2 SELECT * FROM data;
-#ALTER TABLE t1 ADD CONSTRAINT fk1 FOREIGN KEY (a) REFERENCES t2 (a);
-#ALTER TABLE t2 ADD CONSTRAINT fk2 FOREIGN KEY (a) REFERENCES t1 (a);
-#ALTER TABLE t1
-#  MODIFY COLUMN b mediumint NOT NULL;
-#ALTER TABLE t2
-#  MODIFY COLUMN b mediumint NOT NULL;
-#ALTER TABLE t1 DROP FOREIGN KEY fk1;
-#ALTER TABLE t2 DROP FOREIGN KEY fk2;
-#DROP TABLE t1;
-#DROP TABLE t2;
-#
-#CREATE TABLE t1 (a int NOT NULL PRIMARY KEY, b int NOT NULL, c varchar(17)) ENGINE=NDB; CALL insert_data();
-#ALTER TABLE t1 ADD COLUMN d text DEFAULT 'abc';
-#ALTER TABLE t1 ADD COLUMN e text NOT NULL DEFAULT 'abc';
-#DROP TABLE t1;
-#
-#CREATE TABLE t1 (a int NOT NULL PRIMARY KEY, b int NOT NULL, c varchar(17)) ENGINE=NDB; CALL insert_data();
-#CREATE TABLE t2 AS SELECT a, b + 1 AS b, c FROM t1;
-#DROP TABLE t1;
-#ALTER TABLE t2 RENAME TO t1;
-#DROP TABLE t1;
-#
-#CREATE TABLE t1 (a int NOT NULL PRIMARY KEY, b int NOT NULL, c varchar(17)) ENGINE=NDB; CALL insert_data();
-## No matter the datatype on c, it sems this produces the error:
-## ERROR 1297 (HY000): Got temporary error 234 'Out of operation records in transaction coordinator (increase MaxNoOfConcurrentOperations)' from NDBCLUSTER
-#UPDATE t1 t1x JOIN t1 t1y ON t1x.a = t1y.a SET t1x.b = t1y.b + 1;
-#DROP TABLE t1;
+--echo RONDB-880 reproduction variant 5
+CALL create_t1_with_varchar();
+# This works no matter whether the bug is present
+ALTER TABLE t1
+  MODIFY COLUMN b INT NOT NULL,
+  DROP PRIMARY KEY,
+  ADD PRIMARY KEY (a, b);
+DROP TABLE t1;
+CALL create_t1_with_text();
+# Alter an identical table except with a text column.
+# When bug RONDB-880 is present, the following ALTER TABLE statement produces
+# ERROR 1296 (HY000): Got error 261 'DML count in transaction exceeds config parameter MaxDMLOperationsPerTransaction/MaxNoOfConcurrentOp' from NDBCLUSTER
+ALTER TABLE t1
+  MODIFY COLUMN b INT NOT NULL,
+  DROP PRIMARY KEY,
+  ADD PRIMARY KEY (a, b);
+DROP TABLE t1;
+
+--echo RONDB-880 reproduction variant 6
+CALL create_t1_with_varchar();
+ALTER TABLE t1 RENAME TO t2;
+CALL create_t1_with_varchar();
+ALTER TABLE t1 ADD CONSTRAINT fk1 FOREIGN KEY (a) REFERENCES t2 (a);
+ALTER TABLE t2 ADD CONSTRAINT fk2 FOREIGN KEY (a) REFERENCES t1 (a);
+# This works no matter whether the bug is present
+ALTER TABLE t1 MODIFY COLUMN b mediumint NOT NULL;
+ALTER TABLE t2 MODIFY COLUMN b mediumint NOT NULL;
+ALTER TABLE t1 DROP FOREIGN KEY fk1;
+ALTER TABLE t2 DROP FOREIGN KEY fk2;
+DROP TABLE t1;
+DROP TABLE t2;
+CALL create_t1_with_text();
+ALTER TABLE t1 RENAME TO t2;
+CALL create_t1_with_text();
+ALTER TABLE t1 ADD CONSTRAINT fk1 FOREIGN KEY (a) REFERENCES t2 (a);
+ALTER TABLE t2 ADD CONSTRAINT fk2 FOREIGN KEY (a) REFERENCES t1 (a);
+# Alter an identical table except with a text column.
+# When bug RONDB-880 is present, the following ALTER TABLE statement produces
+# ERROR 1297 (HY000): Got temporary error 234 'Out of operation records in transaction coordinator (increase MaxNoOfConcurrentOperations)' from NDBCLUSTER
+ALTER TABLE t1 MODIFY COLUMN b mediumint NOT NULL;
+ALTER TABLE t2 MODIFY COLUMN b mediumint NOT NULL;
+ALTER TABLE t1 DROP FOREIGN KEY fk1;
+ALTER TABLE t2 DROP FOREIGN KEY fk2;
+DROP TABLE t1;
+DROP TABLE t2;
+
+--echo RONDB-880 reproduction variant 7
+CALL create_t1_with_varchar();
+# When bug RONDB-880 is present, the following UPDATE statement produces
+# ERROR 1297 (HY000): Got temporary error 234 'Out of operation records in transaction coordinator (increase MaxNoOfConcurrentOperations)' from NDBCLUSTER
+UPDATE t1 t1x JOIN t1 t1y ON t1x.a = t1y.a SET t1x.b = t1y.b + 1;
+DROP TABLE t1;
+CALL create_t1_with_text();
+# When bug RONDB-880 is present, the following UPDATE statement produces
+# ERROR 1297 (HY000): Got temporary error 234 'Out of operation records in transaction coordinator (increase MaxNoOfConcurrentOperations)' from NDBCLUSTER
+UPDATE t1 t1x JOIN t1 t1y ON t1x.a = t1y.a SET t1x.b = t1y.b + 1;
+DROP TABLE t1;
 
 # Cleanup
 DROP PROCEDURE insert_data;
+DROP PROCEDURE create_t1_with_varchar;
+DROP PROCEDURE create_t1_with_text;
