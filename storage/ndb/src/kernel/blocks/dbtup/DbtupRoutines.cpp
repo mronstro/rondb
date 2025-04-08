@@ -3402,8 +3402,8 @@ int Dbtup::read_pseudo(const Uint32 *inBuffer, Uint32 inPos,
     }
     case AttributeHeader::COPY_ROWID:
       sz = 2;
-      outBuffer[1] = req_struct->operPtrP->m_copy_tuple_location.m_page_no;
-      outBuffer[2] = req_struct->operPtrP->m_copy_tuple_location.m_page_idx;
+      outBuffer[1] = (req_struct->operPtrP->m_copy_tuple_location & 0xFFFFFFFF);
+      outBuffer[2] = (req_struct->operPtrP->m_copy_tuple_location >> 32);
       break;
     case AttributeHeader::FLUSH_AI: {
       thrjam(req_struct->jamBuffer);

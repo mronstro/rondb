@@ -1029,6 +1029,7 @@ struct Operationrec {
   Uint32 fragPageId;
 
   CommitState m_commit_state;
+  Uint8 m_refresh_case;
 
   bool is_first_operation() const { return prevActiveOp == RNIL; }
   bool is_last_operation() const { return nextActiveOp == RNIL; }
@@ -1044,7 +1045,7 @@ struct Operationrec {
    * can find out about the fragment page id and the page offset.
    */
   Local_key m_tuple_location;
-  Local_key m_copy_tuple_location;
+  Uint32 *m_copy_tuple_location;
 
   /**
    * In case we need to allocate a new disk row part we store the new
@@ -4009,29 +4010,32 @@ public:
   static constexpr Uint32 COPY_TUPLE_HEADER32 = 4;
 
   Tuple_header* alloc_copy_tuple(const Tablerec* tabPtrP,
-                                 Local_key* ptr,
-                                 bool init){
-    Uint32 * dst = c_undo_buffer.alloc_copy_tuple(ptr,
-                                                  tabPtrP->total_rec_size);
+                                 Uint32 ** ptr,
+                                 bool init) {
+    size_t size = tabPtrP->total_rec_size * 4;
+    Uint32 * dst = lc_ndbd_pool_malloc(size,
+                                       RG_TRANSACTION_MEMORY,
+                                       getThreadId(),
+                                       false);
     if (unlikely(dst == 0))
       return nullptr;
     if (init) {
-      std::memset(dst, 0, tabPtrP->total_rec_size);
+      std::memset(dst, 0, size);
     } else {
 #ifdef HAVE_VALGRIND
-      std::memset(dst, 0, tabPtrP->total_rec_size);
+      std::memset(dst, 0, size);
 #endif
     }
+    *ptr = dst;
     Uint32 count = tabPtrP->m_no_of_attributes;
     ChangeMask *mask = (ChangeMask *)(dst + COPY_TUPLE_HEADER32);
     mask->m_cols = count;
     return (Tuple_header *)(mask->end_of_mask(count));
   }
 
-  Uint32 *get_copy_tuple_raw(const Local_key *ptr) {
-    return c_undo_buffer.get_ptr(ptr);
+  void free_copy_tuple(Uint32 *ptr) {
+    lc_ndbd_pool_free(ptr);
   }
-
   Tuple_header *get_copy_tuple(Uint32 *rawptr) {
     return (Tuple_header *)(get_change_mask_ptr(rawptr)->end_of_mask());
   }

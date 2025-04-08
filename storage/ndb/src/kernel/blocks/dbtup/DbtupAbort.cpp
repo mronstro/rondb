@@ -59,9 +59,9 @@ void Dbtup::handle_disk_reorg_flag(OperationrecPtr operPtr,
   ndbrequire(m_curr_tup->c_operation_pool.getValidPtr(prevOperPtr));
 
   Tuple_header *copy_last =
-    get_copy_tuple(&lastOperPtr.p->m_copy_tuple_location);
+    get_copy_tuple(lastOperPtr.p->m_copy_tuple_location);
   Tuple_header *copy_prev =
-    get_copy_tuple(&prevOperPtr.p->m_copy_tuple_location);
+    get_copy_tuple(prevOperPtr.p->m_copy_tuple_location);
   Local_key key;
   memcpy(&key, copy_last->get_disk_ref_ptr(regTabPtr), sizeof(key));
   memcpy(copy_prev->get_disk_ref_ptr(regTabPtr), &key, sizeof(key));
@@ -127,7 +127,7 @@ Dbtup::do_tup_abort_operation(Signal* signal,
       opPtrP->op_struct.bit_field.m_disk_preallocated) {
     jam();
     Local_key key;
-    Tuple_header *copy = get_copy_tuple(&opPtrP->m_copy_tuple_location);
+    Tuple_header *copy = get_copy_tuple(opPtrP->m_copy_tuple_location);
     memcpy(&key, copy->get_disk_ref_ptr(tablePtrP), sizeof(key));
     disk_page_abort_prealloc(signal, fragPtrP, &key, key.m_page_idx);
   }
@@ -148,7 +148,7 @@ Dbtup::do_tup_abort_operation(Signal* signal,
         lgman.free_log_space(undo_insert_len, jamBuffer());
  
         Local_key key;
-        Tuple_header *copy= get_copy_tuple(&opPtrP->m_copy_tuple_location);
+        Tuple_header *copy = get_copy_tuple(opPtrP->m_copy_tuple_location);
         memcpy(&key, copy->get_disk_ref_ptr(tablePtrP), sizeof(key));
         Uint32 row_size = key.m_page_idx;
         disk_page_abort_prealloc(signal, fragPtrP, &key, row_size);
@@ -502,9 +502,9 @@ void Dbtup::removeActiveOpList(Operationrec *const regOperPtr,
   OperationrecPtr nextOperPtr;
   OperationrecPtr prevOperPtr;
 
-  if (!regOperPtr->m_copy_tuple_location.isNull()) {
+  if (regOperPtr->m_copy_tuple_location != nullptr) {
     jam();
-    c_undo_buffer.free_copy_tuple(&regOperPtr->m_copy_tuple_location);
+    free_copy_tuple(regOperPtr->m_copy_tuple_location);
   }
 
   prevOperPtr.i = regOperPtr->prevActiveOp;

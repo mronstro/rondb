@@ -10,7 +10,7 @@ let $pkcount = 1;
 let $fixcount = 2;
 let $varcount = 2;
 let $dynfixcount = 2;
-let $dynvarcount = 503;
+let $dynvarcount = (4096 - 512) + 503;
 let $ddcount = 1;
 let $colcount =
   ($pkcount + $fixcount + $varcount + $dynfixcount + $dynvarcount + $ddcount);

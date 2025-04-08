@@ -1386,7 +1386,7 @@ Dbtup::setup_read(KeyReqStruct *req_struct,
     } else {
       jamDebug();
       req_struct->m_tuple_ptr =
-          get_copy_tuple(&currOpPtr.p->m_copy_tuple_location);
+        get_copy_tuple(currOpPtr.p->m_copy_tuple_location);
     }
 
     if (regTabPtr->need_expand(disk)) {
@@ -1577,8 +1577,8 @@ Dbtup::load_extra_diskpage(Signal *signal, Uint32 opRec, Uint32 flags)
   ndbrequire(m_curr_tup->c_operation_pool.getValidPtr(prevOpPtr));
 
   PagePtr page_ptr;
-  ndbassert(!prevOpPtr.p->m_copy_tuple_location.isNull());
-  Tuple_header *ptr = get_copy_tuple(&prevOpPtr.p->m_copy_tuple_location);
+  ndbassert(prevOpPtr.p->m_copy_tuple_location != nullptr);
+  Tuple_header *ptr = get_copy_tuple(prevOpPtr.p->m_copy_tuple_location);
   jamEntry();
   /**
    * We will never need an extra disk page if the first operation was an
@@ -2190,7 +2190,7 @@ bool Dbtup::execTUPKEYREQ(Signal* signal,
     op_struct.bit_field.tupVersion = ZNIL;
     op_struct.bit_field.m_triggers = triggers;
 
-    regOperPtr->m_copy_tuple_location.setNull();
+    regOperPtr->m_copy_tuple_location = nullptr;
     regOperPtr->op_struct.op_bit_fields = op_struct.op_bit_fields;
   }
   {
@@ -3392,7 +3392,7 @@ int Dbtup::handleUpdateReq(Signal* signal,
   Tuple_header *dst;
   Tuple_header *base= req_struct->m_tuple_ptr, *org;
   ChangeMask * change_mask_ptr;
-  if (unlikely((dst= alloc_copy_tuple(
+  if (unlikely((dst = alloc_copy_tuple(
     regTabPtr, &operPtrP->m_copy_tuple_location, false)) == 0))
   {
     terrorCode= ZNO_COPY_TUPLE_MEMORY_ERROR;
@@ -3410,8 +3410,8 @@ int Dbtup::handleUpdateReq(Signal* signal,
     jam();
     Operationrec* prevOp= req_struct->prevOpPtr.p;
     tup_version= prevOp->op_struct.bit_field.tupVersion;
-    Uint32 * rawptr = get_copy_tuple_raw(&prevOp->m_copy_tuple_location);
-    org= get_copy_tuple(rawptr);
+    Uint32 * rawptr = prevOp->m_copy_tuple_location;
+    org = get_copy_tuple(rawptr);
     copy_change_mask_info(regTabPtr,
         change_mask_ptr,
         get_change_mask_ptr(rawptr));
@@ -4014,7 +4014,7 @@ int Dbtup::handleInsertReq(Signal* signal,
     if(unlikely(!prevOp->is_first_operation()))
     {
       jam();
-      org = get_copy_tuple(&prevOp->m_copy_tuple_location);
+      org = get_copy_tuple(prevOp->m_copy_tuple_location);
     } else {
       jamDebug();
     }
@@ -4497,7 +4497,7 @@ trans_mem_error:
   terrorCode = ZNO_COPY_TUPLE_MEMORY_ERROR;
   regOperPtr.p->m_undo_buffer_space = 0;
   if (mem_insert) regOperPtr.p->m_tuple_location.setNull();
-  regOperPtr.p->m_copy_tuple_location.setNull();
+  regOperPtr.p->m_copy_tuple_location = nullptr;
   tupkeyErrorLab(req_struct);
   return -1;
 
@@ -4631,10 +4631,10 @@ int Dbtup::handleDeleteReq(Signal* signal,
     regOperPtr->op_struct.bit_field.tupVersion =
         prevOp->op_struct.bit_field.tupVersion;
     // make copy since previous op is committed before this one
-    const Tuple_header *org = get_copy_tuple(&prevOp->m_copy_tuple_location);
+    const Tuple_header *org = get_copy_tuple(prevOp->m_copy_tuple_location);
     Uint32 len = regTabPtr->total_rec_size -
       Uint32(((Uint32*)dst) -
-          get_copy_tuple_raw(&regOperPtr->m_copy_tuple_location));
+          regOperPtr->m_copy_tuple_location);
     memcpy(dst, org, 4 * len);
     req_struct->m_tuple_ptr = dst;
     copy_bits = org->m_header_bits;
@@ -4933,10 +4933,7 @@ Dbtup::handleRefreshReq(Signal* signal,
       return -1;
     }
   }
-
-  /* Store the refresh scenario in the copy tuple location */
-  // TODO : Verify this is never used as a copy tuple location!
-  regOperPtr.p->m_copy_tuple_location.m_file_no = refresh_case;
+  regOperPtr.p->m_refresh_case = refresh_case;
   return 0;
 }
 
@@ -10067,8 +10064,8 @@ Dbtup::nr_read_pk(Uint64 fragPtrI,
       OperationrecPtr opPtr;
       opPtr.i = req_struct.m_tuple_ptr->m_operation_ptr_i;
       ndbrequire(m_curr_tup->c_operation_pool.getValidPtr(opPtr));
-      ndbassert(!opPtr.p->m_copy_tuple_location.isNull());
-      req_struct.m_tuple_ptr = get_copy_tuple(&opPtr.p->m_copy_tuple_location);
+      ndbassert(opPtr.p->m_copy_tuple_location != nullptr);
+      req_struct.m_tuple_ptr = get_copy_tuple(opPtr.p->m_copy_tuple_location);
       copy = true;
     }
     Uint32 *tab_descr = tablePtr.p->tabDescriptor;
