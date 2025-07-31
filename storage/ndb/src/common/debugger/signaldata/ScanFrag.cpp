@@ -55,6 +55,10 @@ bool printSCAN_FRAGREQ(FILE *output, const Uint32 *theData, Uint32 len,
     fprintf(output, "f");
   if (ScanFragReq::getQueryThreadFlag(sig->requestInfo))
     fprintf(output, "q");
+  if (ScanFragReq::getParallelOrderedScanFlag(sig->requestInfo))
+    fprintf(output, "(cs)");
+  if (ScanFragReq::getTTLOnlyExpiredFragFlag(sig->requestInfo))
+    fprintf(output, "(ttl)");
   if (ScanFragReq::getNoDiskFlag(sig->requestInfo))
     fprintf(output, "(nodisk)");
   else
@@ -82,11 +86,14 @@ bool printSCAN_FRAGREQ(FILE *output, const Uint32 *theData, Uint32 len,
   fprintf(output, " batch_size_rows: %u\n", sig->batch_size_rows);
   fprintf(output, " batch_size_bytes: %u\n", sig->batch_size_bytes);
 
-  if (ScanFragReq::getCorrFactorFlag(sig->requestInfo)) {
-    fprintf(output, " corrFactorLo: 0x%x\n", sig->variableData[0]);
-    fprintf(output, " corrFactorHi: 0x%x\n", sig->variableData[1]);
+  if (ScanFragReq::getCorrFactorFlag(sig->requestInfo) ||
+      ScanFragReq::getParallelOrderedScanFlag(sig->requestInfo) ||
+      ScanFragReq::getTTLOnlyExpiredFragFlag(sig->requestInfo)) {
+    fprintf(output, " variableData[0]: 0x%x\n", sig->variableData[0]);
+    if (len > (ScanFragReq::SignalLength + 1)) {
+      fprintf(output, " variableData[0]: 0x%x\n", sig->variableData[1]);
+    }
   }
-
   return true;
 }
 

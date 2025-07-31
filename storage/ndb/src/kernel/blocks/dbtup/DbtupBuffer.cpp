@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2003, 2024, Oracle and/or its affiliates.
-   Copyright (c) 2023, 2024, Hopsworks and/or its affiliates.
+   Copyright (c) 2023, 2025, Hopsworks and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -461,7 +461,7 @@ void Dbtup::SendAggResToAPI(Signal* signal, const void* lqhTcConnectrec,
   if (res_len != 0) {
     ndbrequire(lqhScanPtrP->m_agg_n_res_recs == 0);
     TransIdAI * transIdAI=  (TransIdAI *)signal->getDataPtrSend();
-    transIdAI->connectPtr = lqhScanPtrP->scanApiOpPtr;
+    transIdAI->connectPtr = lqhScanPtrP->scanApiOpPtr[lqhScanPtrP->scanApiOpPtr_index];
     transIdAI->transId[0] = lqhOpPtrP->transid[0];
     transIdAI->transId[1] = lqhOpPtrP->transid[1];
     ndbrequire(lqhScanPtrP->m_agg_curr_batch_size_bytes == 0);
@@ -477,8 +477,10 @@ void Dbtup::SendAggResToAPI(Signal* signal, const void* lqhTcConnectrec,
       " trans[0]: %u, trans[2]: %u, connectPtr: %u, blockref: %u"
       ", size_rows[%u, %u], size_bytes: [%u, %u], n_res_recs: %u\n",
       res_len,
-      lqhOpPtrP->transid[0], lqhOpPtrP->transid[1],
-      lqhScanPtrP->scanApiOpPtr, lqhScanPtrP->scanApiBlockref,
+      lqhOpPtrP->transid[0],
+      lqhOpPtrP->transid[1],
+      lqhScanPtrP->scanApiOpPtr[lqhScanPtrP->scanApiOpPtr_index],
+      lqhScanPtrP->scanApiBlockref,
       lqhScanPtrP->m_agg_curr_batch_size_rows,
       lqhScanPtrP->m_curr_batch_size_rows,
       lqhScanPtrP->m_agg_curr_batch_size_bytes,

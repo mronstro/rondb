@@ -733,6 +733,7 @@ class NdbScanOperation : public NdbOperation {
   ScanPruningState m_pruneState;
   Uint32 m_pruningKey;  // Can be distr key hash or actual partition id.
 
+  bool m_continousScan;
   /**
    * This flag indicates whether a scan operation was 
    * successfully finalised
