@@ -2684,16 +2684,13 @@ void Dblqh::execCREATE_TAB_REQ(Signal *signal) {
   tabptr.p->m_disk_table= 0;
   tabptr.p->m_use_new_hash_function = (req->hashFunctionFlag != 0);
 
-  // Zart
+  // TTL related
   tabptr.p->m_ttl_sec = req->ttlSec;
   tabptr.p->m_ttl_col_no = req->ttlColumnNo;
-#ifdef TTL_DEBUG
-  if (NEED_PRINT(tabptr.i)) {
-    g_eventLogger->info("Zart, [LQH]Gen Tablerec, table_id: %u, TTL sec: %u, "
-                        "TTL column no: %u", tabptr.i,
-                        tabptr.p->m_ttl_sec, tabptr.p->m_ttl_col_no);
-  }
-#endif  // TTL_DEBUG
+
+  TTL_RONDB_TRACE(tabptr.i, "[LQH]Gen Tablerec, table_id: %u, TTL sec: %u, "
+                  "TTL column no: %u", tabptr.i,
+                  tabptr.p->m_ttl_sec, tabptr.p->m_ttl_col_no);
 
   if (req->primaryTableId != RNIL)
   {
@@ -5961,7 +5958,7 @@ void Dblqh::execTUPKEYCONF(Signal *signal) {
       if (scanPtr->m_aggregation) {
         if (tupKeyConf->agg_batch_size_bytes) {
           /*
-           * Moz
+           * PA related
            * conf->agg_batch_size_bytes > 0 only happens
            * in group by mode and reaches the aggregation
            * batch limitation. so here conf->agg_n_res_recs
@@ -6856,7 +6853,7 @@ void Dblqh::seizeTcrec(TcConnectionrecPtr& tcConnectptr,
   locTcConnectptr.p->gci_lo = 0;
   locTcConnectptr.p->errorCode = 0;
   /*
-   * Zart
+   * TTL related
    * reset original_operation to maximum uint8
    */
   locTcConnectptr.p->original_operation = 0xFF;
@@ -7974,10 +7971,10 @@ void Dblqh::handle_acquire_scan_frag_access(Fragrecord *fragPtrP) {
   m_scan_frag_access_contended++;
   do
   {
+    Uint64 waited = 0;
 #ifdef NDB_HAVE_CPU_PAUSE
     Uint32 num_spins = 1;
     Uint64 elapsed = 0;
-    Uint64 waited = 0;
     NdbMutex_Unlock(&fragPtrP->frag_mutex);
     start_spin_time = NdbTick_getCurrentTicks();
     NdbSpin();
@@ -8081,10 +8078,10 @@ void Dblqh::handle_acquire_read_key_frag_access(Fragrecord *fragPtrP,
   m_read_key_frag_access_contended++;
   do
   {
+    Uint64 waited = 0;
 #ifdef NDB_HAVE_CPU_PAUSE
     Uint32 num_spins = 1;
     Uint64 elapsed = 0;
-    Uint64 waited = 0;
     NdbMutex_Unlock(&fragPtrP->frag_mutex);
     start_spin_time = NdbTick_getCurrentTicks();
     NdbSpin();
@@ -8170,12 +8167,12 @@ void Dblqh::handle_acquire_write_key_frag_access(Fragrecord *fragPtrP,
   m_write_key_frag_access_contended++;
   do
   {
+    Uint64 waited = 0;
     ndbrequire(fragPtrP->m_cond_write_key_waiters == 0);
     fragPtrP->m_cond_write_key_waiters = 1;
 #ifdef NDB_HAVE_CPU_PAUSE
     Uint32 num_spins = 1;
     Uint64 elapsed = 0;
-    Uint64 waited = 0;
     ndbrequire(fragPtrP->m_spin_write_key_waiters == 0);
     fragPtrP->m_spin_write_key_waiters = 1;
     NdbMutex_Unlock(&fragPtrP->frag_mutex);
@@ -8280,12 +8277,12 @@ void Dblqh::handle_acquire_exclusive_frag_access(Fragrecord *fragPtrP,
      * We only perform spinning on platforms that actually support
      * spinning in some fashion.
      */
+    Uint64 waited = 0;
     ndbrequire(fragPtrP->m_cond_exclusive_waiters == 0);
     fragPtrP->m_cond_exclusive_waiters = 1;
 #ifdef NDB_HAVE_CPU_PAUSE
     Uint32 num_spins = 1;
     Uint64 elapsed = 0;
-    Uint64 waited = 0;
     ndbrequire(fragPtrP->m_spin_exclusive_waiters == 0);
     fragPtrP->m_spin_exclusive_waiters = 1;
     NdbMutex_Unlock(&fragPtrP->frag_mutex);
@@ -8829,7 +8826,7 @@ void Dblqh::execLQHKEYREQ(Signal *signal) {
     {
       if (likely(LqhKeyReq::getDirtyFlag(Treqinfo)))
       {
-        jamDebug();
+        jam();
         use_lock = false;
       }
       else
@@ -8846,7 +8843,7 @@ void Dblqh::execLQHKEYREQ(Signal *signal) {
         if (likely(instanceNo != RNIL))
         {
           jamDebug();
-          jamLineDebug(Uint16(instanceNo));
+          jamLine(Uint16(instanceNo));
           lqh = (Dblqh*)globalData.getBlock(DBLQH, instanceNo);
         }
         else
@@ -8857,6 +8854,8 @@ void Dblqh::execLQHKEYREQ(Signal *signal) {
         c_acc->m_curr_acc = lqh->c_acc;
         c_tup->m_curr_tup = lqh->c_tup;
       }
+    } else {
+      ndbrequire(m_curr_lqh == this);
     }
     bool succ = lqh->seize_op_rec(tcConnectptr,
                                   use_lock,
@@ -9047,20 +9046,16 @@ void Dblqh::execLQHKEYREQ(Signal *signal) {
   {
     regTcPtr->operation = (Operation_t)op == ZREAD_EX ? ZREAD : (Operation_t)op;
     /*
-     * Zart
+     * TTL related
      * Since operation can be changed later, original_operation
      * is the original one.
      * Used for ZWRITE
      */
     regTcPtr->original_operation = regTcPtr->operation;
-#ifdef TTL_DEBUG
-    if (NEED_PRINT(tabptr.i)) {
-      g_eventLogger->info("Zart, [TableId: %u]"
-                          "Set Dblqh::TcConnectionrec::original_opertation: %u",
-                          tabptr.i,
-                          regTcPtr->original_operation);
-    }
-#endif  // TTL_DEBUG
+    TTL_RONDB_TRACE(tabptr.i, "[TableId: %u]"
+                    "Set Dblqh::TcConnectionrec::original_opertation: %u",
+                    tabptr.i,
+                    regTcPtr->original_operation);
     regTcPtr->lockType = op == ZREAD_EX                ? ZUPDATE
                          : (Operation_t)op == ZWRITE   ? ZINSERT
                          : (Operation_t)op == ZREFRESH ? ZINSERT
@@ -9084,18 +9079,13 @@ void Dblqh::execLQHKEYREQ(Signal *signal) {
     }
   }
   /*
-   * Zart
-   * TTL
+   * TTL related
    */
   regTcPtr->ttl_ignore = LqhKeyReq::getTTLIgnoreFlag(Treqinfo);
   regTcPtr->ttl_only_expired = LqhKeyReq::getTTLOnlyExpiredFlag(Treqinfo);
-#ifdef TTL_DEBUG
-  if (NEED_PRINT(tabptr.i)) {
-    g_eventLogger->info("Zart, Dblqh::execLQHKEYREQ(), ttl_ignore: %u, only_expired: %u",
-                        regTcPtr->ttl_ignore,
-                        regTcPtr->ttl_only_expired);
-  }
-#endif  // TTL_DEBUG
+  TTL_RONDB_TRACE(tabptr.i, "Dblqh::execLQHKEYREQ(), ttl_ignore: %u, only_expired: %u",
+                  regTcPtr->ttl_ignore,
+                  regTcPtr->ttl_only_expired);
 
   if (regTcPtr->dirtyOp) {
     ndbrequire(regTcPtr->opSimple);
@@ -9249,8 +9239,7 @@ void Dblqh::execLQHKEYREQ(Signal *signal) {
     ndbassert(refToMain(senderRef) != DBTC);
   } else if (op == ZINSERT) {
     /*
-     * Zart
-     * TTL
+     * TTL related
      * For TTL table, replica needs to receive
      * ZINSERT
      */
@@ -10123,16 +10112,14 @@ void Dblqh::exec_acckeyreq(Signal *signal, TcConnectionrecPtr regTcPtr) {
          (Uint32)Dbacc::Operationrec::OP_MASK) == ZUPDATE) {
       ndbrequire(signal->theData[1] == ZUPDATE);
       /*
-       * Zart
+       * TTL related
        * Detected "Duplicated" key while inserting into this TTL table,
        * and we have converted operation from ZINSERT to ZUPDATE
        */
-#ifdef TTL_DEBUG
-      g_eventLogger->info("Zart, Found duplicated row while inserting[1], convert "
-                          "operation from ZINSERT to ZINSERT_TTL and try...");
-#endif  // TTL_DEBUG
+      TTL_RONDB_TRACE(regTcPtr.p->tableref, "Found duplicated row while inserting[1], convert "
+                      "operation from ZINSERT to ZINSERT_TTL and try...");
       /*
-       * Zart
+       * TTL related
        * Here, we convert operation of Dblqh::TcConnectionrec from ZINSERT
        * to ZINSERT_TTL
        * NOTICE:
@@ -10146,47 +10133,36 @@ void Dblqh::exec_acckeyreq(Signal *signal, TcConnectionrecPtr regTcPtr) {
       ndbrequire((regTcPtr.p->operation & 0x07) == ZINSERT);
     }
     /*
-     * Zart
-     * TTL
+     * TTL related
      */
     if (regTcPtr.p->ttl_ignore && signal->theData[5] != 1) {
-#ifdef TTL_DEBUG
-      g_eventLogger->info("Zart, Dblqh::execACCKEYCONF[1], ttl_ignore in "
-                          "ACCKEYCONF is 0 but the related "
-                          "Dblqh::TcConnectionrec::ttl_ignore has already "
-                          "been set as 1, so keep it! "
-                          "table id: %u",
-                           tabptr.i);
-#endif  // TTL_DEBUG
+      TTL_RONDB_TRACE(regTcPtr.p->tableref, "Dblqh::execACCKEYCONF[1], ttl_ignore in "
+                      "ACCKEYCONF is 0 but the related "
+                      "Dblqh::TcConnectionrec::ttl_ignore has already "
+                      "been set as 1, so keep it! "
+                      "table id: %u",
+                      tabptr.i);
     } else if (regTcPtr.p->ttl_ignore != 1 && signal->theData[5] == 1) {
-#ifdef TTL_DEBUG
-      g_eventLogger->info("Zart, Dblqh::execACCKEYCONF[1], ttl_ignore in "
-                          "ACCKEYCONF is 1 and the related "
-                          "Dblqh::TcConnectionrec::ttl_ignore is 0, "
-                          "so set it to 1! "
-                          "table id: %u",
-                           tabptr.i);
-#endif  // TTL_DEBUG
+      TTL_RONDB_TRACE(regTcPtr.p->tableref, "Dblqh::execACCKEYCONF[1], ttl_ignore in "
+                      "ACCKEYCONF is 1 and the related "
+                      "Dblqh::TcConnectionrec::ttl_ignore is 0, "
+                      "so set it to 1! "
+                      "table id: %u",
+                      tabptr.i);
       /* IMPORTANT */
       regTcPtr.p->ttl_ignore = signal->theData[5];
     } else if (regTcPtr.p->ttl_ignore && signal->theData[5]) {
-#ifdef TTL_DEBUG
-      g_eventLogger->info("Zart, Dblqh::execACCKEYCONF[1], ttl_ignore in "
-                          "both ACCKEYCONF and the related "
-                          "Dblqh::TcConnectionrec is 1, "
-                          "no need to set again"
-                          "table id: %u",
-                           tabptr.i);
-#endif  // TTL_DEBUG
+      TTL_RONDB_TRACE(regTcPtr.p->tableref, "Dblqh::execACCKEYCONF[1], ttl_ignore in "
+                      "both ACCKEYCONF and the related "
+                      "Dblqh::TcConnectionrec is 1, "
+                      "no need to set again"
+                      "table id: %u",
+                      tabptr.i);
     }
-#ifdef TTL_DEBUG
-    if (NEED_PRINT(regTcPtr.p->tableref)) {
-      g_eventLogger->info("Zart, Dblqh::execACCKEYCONF[1], final ignore_ttl: %u, "
-                          "table id: %u",
-                           regTcPtr.p->ttl_ignore,
-                           regTcPtr.p->tableref);
-    }
-#endif  // TTL_DEBUG
+    TTL_RONDB_TRACE(regTcPtr.p->tableref, "Dblqh::execACCKEYCONF[1], final ignore_ttl: %u, "
+                    "table id: %u",
+                    regTcPtr.p->ttl_ignore,
+                    regTcPtr.p->tableref);
     jamDebug();
     continueACCKEYCONF(signal, signal->theData[3], signal->theData[4],
                        regTcPtr);
@@ -11361,7 +11337,7 @@ void Dblqh::execACCKEYCONF(Signal *signal) {
     jamDebug();
     c_tup->prepareTUPKEYREQ(localKey1, localKey2, fragptr.p->tupFragptr);
     /*
-     * Zart
+     * TTL related
      * In normal path, the below check and type convertion will be done
      * in Dblqh::exec_acckeyreq()
      * We come here in this situation: This trx was waiting for a record
@@ -11374,16 +11350,14 @@ void Dblqh::execACCKEYCONF(Signal *signal) {
          (Uint32)Dbacc::Operationrec::OP_MASK) == ZUPDATE) {
       ndbrequire(signal->theData[1] == ZUPDATE);
       /*
-       * Zart
+       * TTL related
        * Detected "Duplicated" key while inserting into this TTL table,
        * and we have converted operation from ZINSERT to ZUPDATE
        */
-#ifdef TTL_DEBUG
-      g_eventLogger->info("Zart, Found duplicated row while inserting[2], convert "
-                          "operation from ZINSERT to ZINSERT_TTL and try...");
-#endif  // TTL_DEBUG
+      TTL_RONDB_TRACE(regTcPtr->tableref, "Found duplicated row while inserting[2], convert "
+                      "operation from ZINSERT to ZINSERT_TTL and try...");
       /*
-       * Zart
+       * TTL related
        * Here, we convert operation of Dblqh::TcConnectionrec from ZINSERT
        * to ZINSERT_TTL
        * NOTICE:
@@ -11397,47 +11371,36 @@ void Dblqh::execACCKEYCONF(Signal *signal) {
       ndbrequire((regTcPtr->operation & 0x07) == ZINSERT);
     }
     /*
-     * Zart
-     * TTL
+     * TTL related
      */
     if (regTcPtr->ttl_ignore && signal->theData[5] != 1) {
-#ifdef TTL_DEBUG
-      g_eventLogger->info("Zart, Dblqh::execACCKEYCONF[2], ttl_ignore in "
-                          "ACCKEYCONF is 0 but the related "
-                          "Dblqh::TcConnectionrec::ttl_ignore has already "
-                          "been set as 1, so keep it! "
-                          "table id: %u",
-                           tabptr.i);
-#endif  // TTL_DEBUG
+      TTL_RONDB_TRACE(tabptr.i, "Dblqh::execACCKEYCONF[2], ttl_ignore in "
+                      "ACCKEYCONF is 0 but the related "
+                      "Dblqh::TcConnectionrec::ttl_ignore has already "
+                      "been set as 1, so keep it! "
+                      "table id: %u",
+                      tabptr.i);
     } else if (regTcPtr->ttl_ignore != 1 && signal->theData[5] == 1) {
-#ifdef TTL_DEBUG
-      g_eventLogger->info("Zart, Dblqh::execACCKEYCONF[2], ttl_ignore in "
-                          "ACCKEYCONF is 1 and the related "
-                          "Dblqh::TcConnectionrec::ttl_ignore is 0, "
-                          "so set it to 1! "
-                          "table id: %u",
-                           tabptr.i);
-#endif  // TTL_DEBUG
+      TTL_RONDB_TRACE(tabptr.i, "Dblqh::execACCKEYCONF[2], ttl_ignore in "
+                      "ACCKEYCONF is 1 and the related "
+                      "Dblqh::TcConnectionrec::ttl_ignore is 0, "
+                      "so set it to 1! "
+                      "table id: %u",
+                      tabptr.i);
       /* IMPORTANT */
       regTcPtr->ttl_ignore = signal->theData[5];
     } else if (regTcPtr->ttl_ignore && signal->theData[5]) {
-#ifdef TTL_DEBUG
-      g_eventLogger->info("Zart, Dblqh::execACCKEYCONF[2], ttl_ignore in "
-                          "both ACCKEYCONF and the related "
-                          "Dblqh::TcConnectionrec is 1, "
-                          "no need to set again"
-                          "table id: %u",
-                           tabptr.i);
-#endif  // TTL_DEBUG
+      TTL_RONDB_TRACE(tabptr.i, "Dblqh::execACCKEYCONF[2], ttl_ignore in "
+                      "both ACCKEYCONF and the related "
+                      "Dblqh::TcConnectionrec is 1, "
+                      "no need to set again"
+                      "table id: %u",
+                      tabptr.i);
     }
-#ifdef TTL_DEBUG
-    if (NEED_PRINT(regTcPtr->tableref)) {
-      g_eventLogger->info("Zart, Dblqh::execACCKEYCONF[2], final ignore_ttl: %u, "
-                          "table id: %u",
-                           signal->theData[5],
-                           regTcPtr->tableref);
-    }
-#endif  // TTL_DEBUG
+    TTL_RONDB_TRACE(regTcPtr->tableref, "Dblqh::execACCKEYCONF[2], final ignore_ttl: %u, "
+                    "table id: %u",
+                    signal->theData[5],
+                    regTcPtr->tableref);
     continueACCKEYCONF(signal, localKey1, localKey2, m_tc_connect_ptr);
   }
   release_frag_access(fragptr.p);
@@ -11456,14 +11419,14 @@ void Dblqh::continueACCKEYCONF(Signal *signal, Uint32 localKey1,
    * TABLE.
    * ----------------------------------------------------------------------- */
   /*
-   * Zart
+   * TTL related
    * TODO (Zhao)
    * Check this if path. Maybe we need to do operation converting
    *
    */
   if (unlikely(regTcPtr->operation == ZWRITE)) {
     /*
-     * Zart
+     * TTL related
      * [TTL Replication ZWRITE to replicas]
      * Before developing TTL. The code here seems to convert operation
      * from ZWRITE to real operation and update to regTcPtr->operation on
@@ -11534,7 +11497,7 @@ void Dblqh::continueACCKEYCONF(Signal *signal, Uint32 localKey1,
   else
   {
     /*
-     * Zart
+     * TTL related
      * TODO (Zhao)
      * maybe need to handle this code path for TTL
      */
@@ -11588,7 +11551,7 @@ Dblqh::acckeyconf_tupkeyreq(Signal* signal, TcConnectionrec* regTcPtr,
   regTcPtr->m_row_id.m_page_idx = page_idx;
   regTcPtr->transactionState = TcConnectionrec::WAIT_TUP;
   /*
-   * Zart
+   * TTL related
    * TODO (Zhao)
    * Investigate what is m_use_rowid for...
    *
@@ -11624,7 +11587,7 @@ Dblqh::acckeyconf_tupkeyreq(Signal* signal, TcConnectionrec* regTcPtr,
     return;
   } else {
     /*
-     * Zart
+     * TTL related
      * For ZINSERT_TTL, if we come here it means
      * that user is trying to insert an already
      * exist row and we converted operation type from
@@ -12336,8 +12299,7 @@ void Dblqh::packLqhkeyreqLab(Signal *signal,
   LqhKeyReq::setRowidFlag(Treqinfo, regTcPtr->m_use_rowid);
 
   /*
-   * Zart
-   * TTL
+   * TTL related
    * TODO (Zhao)
    * Double check that it needs to set ttl_ignore for LqhKeyReq
    * in other places as well
@@ -12359,7 +12321,7 @@ void Dblqh::packLqhkeyreqLab(Signal *signal,
 
   {
   /*
-   * Zart
+   * TTL related
    * Before replicating operation to replicas, if the table is
    * a TTL table and the original operation is ZWRITE, we need to
    * make sure that we send ZWRITE to replicas instead of ZUPDATE/ZINSERT,
@@ -12373,11 +12335,9 @@ void Dblqh::packLqhkeyreqLab(Signal *signal,
       regTcPtr->original_operation == ZWRITE) {
     ndbrequire(LqhKeyReq::getOperation(Treqinfo) == ZINSERT ||
                LqhKeyReq::getOperation(Treqinfo) == ZUPDATE);
-#ifdef TTL_DEBUG
-    g_eventLogger->info("Zart, set LqhKeyReq op to ZWRITE from %u in order to "
-                        "replicate correctly",
-                        LqhKeyReq::getOperation(Treqinfo));
-#endif  // TTL_DEBUG
+    TTL_RONDB_TRACE(fragptr.p->tabRef, "set LqhKeyReq op to ZWRITE from %u in order to "
+                    "replicate correctly",
+                    LqhKeyReq::getOperation(Treqinfo));
     LqhKeyReq::setOperation(Treqinfo, ZWRITE);
   }
   }
@@ -15199,9 +15159,8 @@ void Dblqh::abortContinueAfterBlockedLab(Signal *signal,
   }
 
   regTcPtr.p->transactionState = TcConnectionrec::WAIT_ACC_ABORT;
-#ifdef TTL_DEBUG
-  g_eventLogger->info("Zart, Dbacc::[6]");
-#endif  // TTL_DEBUG
+  // TTL related
+  // g_eventLogger->info("TTL_RONDB_TRACE, Dbacc::[6]");
   c_acc->execACC_ABORTREQ(signal,
                           regTcPtr.p->accConnectrec,
                           regTcPtr.p->accConnectPtrP,
@@ -16905,25 +16864,24 @@ void Dblqh::scanNextLoopLab(Signal *signal, Uint32 clientPtrI, Uint32 accOpPtr,
   signal->theData[2] = scanFlag;
 
   ndbrequire(is_scan_ok(scanPtr, fragstatus));
-  // Moz statemach
+  /*
+   * PA related
+   * statemach
+   */
   ndbrequire(!scanPtr->m_aggregation ||
              (scanPtr->scanState == ScanRecord::WAIT_NEXT_SCAN ||
              scanPtr->scanState == ScanRecord::WAIT_SCAN_NEXTREQ));
   scanPtr->scanState = ScanRecord::WAIT_NEXT_SCAN;
   scanPtr->scan_lastSeen = __LINE__;
   if (unlikely(in_send_next_scan == 0)) {
-    // MOZ DEBUG PRINT
-#ifdef MOZ_AGG_DEBUG
-    bool print = (fragPtr->fragId == 0 && scanPtr->m_aggregation);
-#else
-    bool print = false;
-#endif // MOZ_AGG_DEBUG
+    bool debug_pa_print = PA_NEED_PRINT(scanPtr->m_aggregation,
+                            fragPtr->tabRef, fragPtr->fragId);
     send_next_NEXT_SCANREQ(signal,
                            block,
                            f,
                            scanPtr,
                            clientPtrI,
-                           print);
+                           debug_pa_print);
     return;
   }
   /**
@@ -16950,18 +16908,19 @@ void Dblqh::scanLockReleasedLab(Signal* signal,
                                 TcConnectionrec* const regTcPtr)
 {
   ScanRecord * const scanPtr = scanptr.p;
-  // MOZ DEBUG PRINT
-#ifdef MOZ_AGG_DEBUG
+#ifdef DEBUG_PA
   {
   FragrecordPtr regFragptr;
   regFragptr.i = regTcPtr->fragmentptr;
   ndbrequire(c_fragment_pool.getPtr(regFragptr));
-  if (regFragptr.p->fragId == 0) {
-    // g_eventLogger->info("MOZ %u : %u",
-    //           scanPtr->scanReleaseCounter, scanPtr->m_curr_batch_size_rows);
+  PA_RONDB_TRACE(scanPtr->m_aggregation,
+                 regFragptr.p->tabRef, regFragptr.p->fragId,
+                 "Dblqh::scanLockReleasedLab(), "
+                 "scanPtr->scanReleaseCount: %u, "
+                 "scanPtr->m_curr_batch_size_rows: %u",
+                 scanPtr->scanReleaseCounter, scanPtr->m_curr_batch_size_rows);
   }
-  }
-#endif // MOZ_AGG_DEBUG
+#endif // DEBUG_PA
   if (scanPtr->scanReleaseCounter == scanPtr->m_curr_batch_size_rows) {
     if ((scanPtr->scanErrorCounter > 0) ||
         (scanPtr->scanCompletedStatus == ZTRUE)) {
@@ -16972,7 +16931,7 @@ void Dblqh::scanLockReleasedLab(Signal* signal,
     } else if (scanPtr->m_last_row && !scanPtr->scanLockHold) {
       jam();
       /*
-       * Moz
+       * PA related
        * TODO (Zhao)
        * Seems there's no need to do something for pushdown
        * aggregation
@@ -16983,7 +16942,7 @@ void Dblqh::scanLockReleasedLab(Signal* signal,
       jam();
       scanPtr->scan_lastSeen = __LINE__;
       /*
-       * Moz
+       * PA related
        * Here is where we send the scanfragconf to TC
        * when pushdown aggregation finishes a batch.
        */
@@ -17011,13 +16970,13 @@ void Dblqh::scanLockReleasedLab(Signal* signal,
     */
 
     /*
-     * Moz
+     * PA related
      * In pushdown aggregation mode, before we send
      * scanfragconf to TC, we need to make sure that
      * there is no agg results cached in aggregation
      * interpreter.
      * See more details at Dblqh::scanTupkeyConfLab(),
-     * search for [MOZ-COMMENT] there.
+     * search for [PA-COMMENT] there.
      */
     if (scanPtr->m_aggregation) {
       // TODO (Zhao)
@@ -17044,9 +17003,21 @@ void Dblqh::scanReleaseLocksLab(Signal *signal,
   Fragrecord::FragStatus fragstatus = fragptr.p->fragStatus;
   ndbrequire(is_scan_ok(scanPtr, fragstatus));
   check_send_scan_hb_rep(signal, scanPtr, regTcPtr);
+  if (scanPtr->readCommitted) {
+    jamDebug();
+    Uint32 release_counter = scanPtr->scanReleaseCounter;
+    Uint32 curr_rows = scanPtr->m_curr_batch_size_rows;
+    Uint32 num_releases = (curr_rows - release_counter) + 1;
+    if (release_counter >= curr_rows) {
+      num_releases = 1;
+    }
+    scanPtr->scanReleaseCounter += (num_releases - 1);
+    scanLockReleasedLab(signal, regTcPtr);
+    return;
+  }
   while (true) {
-    const Uint32 accOpPtr = scanPtr->readCommitted ?
-      get_acc_ptr_from_scan_record(scanPtr, 0, false) :
+    jamDebug();
+    const Uint32 accOpPtr =
       get_acc_ptr_from_scan_record(scanPtr,
                                    scanPtr->scanReleaseCounter-1,
                                    false);
@@ -17980,7 +17951,10 @@ void Dblqh::continueAfterReceivingAllAiLab(
     return;
   }
 
-  // Moz statemach
+  /*
+   * PA related
+   * statemach
+   */
   ndbrequire(!scanPtr->m_aggregation ||
              scanPtr->scanState == ScanRecord::SCAN_FREE);
   scanPtr->scanState = ScanRecord::WAIT_ACC_SCAN;
@@ -18225,30 +18199,33 @@ void Dblqh::storedProcConfScanLab(Signal *signal,
     signal->theData[1] = RNIL;
     signal->theData[2] = NextScanReq::ZSCAN_NEXT;
     signal->theData[0] = sig0;
-    // Moz statemach
+    /*
+     * PA related
+     * statemach
+     */
     ndbrequire(!scanPtr->m_aggregation ||
                scanPtr->scanState == ScanRecord::WAIT_ACC_SCAN);
     scanPtr->scanState = ScanRecord::WAIT_NEXT_SCAN;
     scanPtr->scan_lastSeen = __LINE__;
-    // MOZ DEBUG PRINT
-    bool print = false;
-#ifdef MOZ_AGG_DEBUG
-    {
-    FragrecordPtr regFragptr;
-    regFragptr.i = tcConnectptr.p->fragmentptr;
-    ndbrequire(c_fragment_pool.getPtr(regFragptr));
-    if (regFragptr.p->fragId == 0 && scanPtr->m_aggregation) {
-      print = true;
-    }
-    }
-#endif // MOZ_AGG_DEBUG
+
+    /*
+     * PA related
+     * {
+     * FragrecordPtr regFragptr;
+     * regFragptr.i = tcConnectptr.p->fragmentptr;
+     * ndbrequire(c_fragment_pool.getPtr(regFragptr));
+     * }
+     * regFragptr.p is expected to be same with fragptr.p here.
+     */
+    bool debug_pa_print = PA_NEED_PRINT(scanPtr->m_aggregation,
+                                   fragptr.p->tabRef, fragptr.p->fragId);
     if (likely(in_send_next_scan == 0)) {
       send_next_NEXT_SCANREQ(signal,
                              block,
                              f,
                              scanPtr,
                              tcConnectptr.p->clientConnectrec,
-                             print);
+                             debug_pa_print);
       return;
     }
     ndbassert(in_send_next_scan == 1);
@@ -18392,6 +18369,14 @@ Uint32 Dblqh::copyNextRange(Uint32 *dst, TcConnectionrec *tcPtrP) {
     if (ERROR_INSERTED(5074)) break;
 
     tcPtrP->primKeyLen -= rangeLen;
+
+    if (ERROR_INSERTED(5112)) {
+      jam();
+      /* Scan with infinite results */
+      g_eventLogger->info("LQH %u : Repeating range scan", instance());
+      tcPtrP->primKeyLen += rangeLen;
+      return rangeLen;
+    }
 
     if (rangeLen == totalLen) {
       /* All range information has been copied, free the section */
@@ -18935,7 +18920,6 @@ void Dblqh::scanTupkeyConfLab(Signal* signal,
 
   regTcPtr->transactionState = TcConnectionrec::SCAN_STATE_USED;
 
-  // Moz
   const Uint32 rows = scanPtr->m_curr_batch_size_rows;
   const Uint32 accOpPtr = scanPtr->readCommitted ?
                   get_acc_ptr_from_scan_record(scanPtr, 0, false) :
@@ -18968,7 +18952,7 @@ void Dblqh::scanTupkeyConfLab(Signal* signal,
 
   if (!scanPtr->m_aggregation) {
     /*
-     * Moz
+     * PA related
      * In aggregation mode, since we don't follow batch strategy 100%,
      * in the situation which has small group, m_curr_batch_size_rows
      * could be bigger than MAX_PARALLEL_OP_PER_SCAN_RC
@@ -18996,21 +18980,19 @@ void Dblqh::scanTupkeyConfLab(Signal* signal,
     }
   }
 
-  // MOZ DEBUG PRINT
-  bool print = false;
-#ifdef MOZ_AGG_DEBUG
+  bool debug_pa_print = false;
+#ifdef DEBUG_PA
   {
   FragrecordPtr regFragptr;
   regFragptr.i = regTcPtr->fragmentptr;
   ndbrequire(c_fragment_pool.getPtr(regFragptr));
-  if (regFragptr.p->fragId == 0 && scanPtr->m_aggregation) {
-    print = true;
+  debug_pa_print = PA_NEED_PRINT(scanPtr->m_aggregation,
+                          regFragptr.p->tabRef, regFragptr.p->fragId);
   }
-  }
-#endif // MOZ_AGG_DEBUG
+#endif // DEBUG_PA
   // TODO (Zhao) Skip here for pushdown aggregation
   // (DONE!)
-  if (scanPtr->check_scan_batch_completed(print) || last_row) {
+  if (scanPtr->check_scan_batch_completed(debug_pa_print) || last_row) {
     if (scanPtr->scanLockHold == ZTRUE) {
       jam();
       scanPtr->scan_lastSeen = __LINE__;
@@ -19019,8 +19001,7 @@ void Dblqh::scanTupkeyConfLab(Signal* signal,
     } else {
       jam();
       scanPtr->scanReleaseCounter = rows + 1;
-      check_send_scan_hb_rep(signal, scanPtr, regTcPtr);
-      scanLockReleasedLab(signal, regTcPtr);
+      scanReleaseLocksLab(signal, regTcPtr);
       return;
     }
   }
@@ -19033,7 +19014,6 @@ void Dblqh::scanTupkeyConfLab(Signal* signal,
   } else {
     jamDebug();
     scanPtr->scanFlag = NextScanReq::ZSCAN_NEXT_COMMIT;
-    // Moz DEBUG
     Uint32 index = (scanPtr->readCommitted) ? 0 :
                    scanPtr->m_curr_batch_size_rows-1;
     Uint32 accOpPtr= get_acc_ptr_from_scan_record(scanPtr,
@@ -19122,14 +19102,12 @@ void Dblqh::scanTupkeyRefLab(Signal* signal,
        *       WE NEED TO RELEASE ALL LOCKS CURRENTLY
        *       HELD BY THIS SCAN.
        * -------------------------------------------------------------------- */
-      scanReleaseLocksLab(signal, tcConnectptr.p);
     } else {
       jam();
       scanPtr->m_curr_batch_size_rows = rows + 1;
       scanPtr->scanReleaseCounter = rows + 1;
-      check_send_scan_hb_rep(signal, scanPtr, tcConnectptr.p);
-      scanLockReleasedLab(signal, tcConnectptr.p);
     }  // if
+    scanReleaseLocksLab(signal, tcConnectptr.p);
     return;
   }  // if
 
@@ -19138,8 +19116,9 @@ void Dblqh::scanTupkeyRefLab(Signal* signal,
   if (unlikely(rows && time_passed > 1) &&
       (refToMain(scanPtr->scanApiBlockref) != DBSPJ || time_passed > 10 ) &&
       (!scanPtr->m_aggregation || scanPtr->m_agg_n_res_recs == 0)) {
-    /* Moz explains up if
-     * [MOZ-COMMENT]
+    /* PA related
+     * explains up if
+     * [PA-COMMENT]
      * In pushdown aggregation mode, if we are using filter, then time_pased &&
      * rows > 0 could be true, but it doesn't represent that there are no
      * remaining  aggregation results left in the aggregation_interpreter since
@@ -19167,18 +19146,18 @@ void Dblqh::scanTupkeyRefLab(Signal* signal,
      * -----------------------------------------------------------------------
      */
     scanPtr->scanReleaseCounter = rows + 1;
-    check_send_scan_hb_rep(signal, scanPtr, tcConnectptr.p);
-    scanLockReleasedLab(signal, tcConnectptr.p);
+    scanReleaseLocksLab(signal, tcConnectptr.p);
     return;
   } else {
-    // MOZ DEBUG PRINT
-#ifdef MOZ_AGG_DEBUG
-    if (scanPtr->m_aggregation && scanPtr->m_agg_n_res_recs > 0 &&
-        scanPtr->m_agg_interpreter->frag_id() == 0) {
-      g_eventLogger->info("Moz-SKIP send scanfragconf, scanPtr->m_agg_n_res_recs: %u",
-              scanPtr->m_agg_n_res_recs);
+#ifdef DEBUG_PA
+    if (scanPtr->m_agg_n_res_recs) {
+      PA_RONDB_TRACE(scanPtr->m_aggregation,
+                     regTcPtr->tableref, scanPtr->m_agg_interpreter->frag_id(),
+                     "Dblqh::scanTupkeyRefLab(), "
+                     "SKIP send scanfragconf, scanPtr->m_agg_n_res_recs: %u",
+                     scanPtr->m_agg_n_res_recs);
     }
-#endif // MOZ_AGG_DEBUG
+#endif // DEBUG_PA
   }
   jamDebug();
   jamDataDebug(scanPtr->m_curr_batch_size_rows);
@@ -19205,7 +19184,10 @@ void Dblqh::closeScanLab(Signal *signal, TcConnectionrec *regTcPtr) {
   Fragrecord::FragStatus fragstatus = regFragPtr.p->fragStatus;
   ExecFunction f = scanPtr->scanFunction_NEXT_SCANREQ;
 
-  // Moz statemach
+  /*
+   * PA related
+   * statemach
+   */
   ndbrequire(!scanPtr->m_aggregation ||
              (scanPtr->scanState == ScanRecord::WAIT_SCAN_NEXTREQ ||
              scanPtr->scanState == ScanRecord::WAIT_NEXT_SCAN));
@@ -19499,6 +19481,17 @@ Uint32 Dblqh::initScanrec(const ScanFragReq *scanFragReq, Uint32 aiLen,
   scanPtr->scanApiOpPtr = scanApiOpPtr;
   scanPtr->m_max_batch_size_rows = max_rows;
   scanPtr->m_max_batch_size_bytes = max_bytes;
+  if (!ttl_only_expired) {
+    scanPtr->m_ttl_purge_window_size = 0;
+  } else {
+    /*
+     * Both the getTTLOnlyExpiredFragFlag and the getCorrFactorFlag may use
+     * the variableData, but they shouldn't be active at the same time.
+     * So here we must make sure variableData[0] isn't set by getCorrFactorFlag;
+     */
+    ndbrequire(!ScanFragReq::getCorrFactorFlag(reqinfo));
+    scanPtr->m_ttl_purge_window_size = scanFragReq->variableData[0];
+  }
 
   const Uint32 scanPrio = ScanFragReq::getScanPrio(reqinfo);
 
@@ -19915,12 +19908,18 @@ void Dblqh::init_release_scanrec(ScanRecord *scanPtr) {
   scanPtr->scanType = ScanRecord::ST_IDLE;
   scanPtr->scanTcWaiting = 0;
   scanPtr->scan_lastSeen = __LINE__;
-  // Moz reset aggregation variables
+  /*
+   * PA related
+   * reset aggregation variables
+   */
   scanPtr->m_aggregation = false;
   scanPtr->m_agg_curr_batch_size_rows = 0;
   scanPtr->m_agg_curr_batch_size_bytes = 0;
   scanPtr->m_agg_n_res_recs = 0;
-  // Moz release aggregation interpreter
+  /*
+   * PA related
+   * release aggregation interpreter
+   */
   if (scanPtr->m_agg_interpreter != nullptr) {
     AggInterpreter* ptr = scanPtr->m_agg_interpreter;
     /*
@@ -19931,11 +19930,11 @@ void Dblqh::init_release_scanrec(ScanRecord *scanPtr) {
      * (CHECKED).
      */
     ndbrequire(ptr->gb_map()->empty());
-#ifdef MOZ_AGG_MALLOC
+#ifdef PA_MALLOC
     AggInterpreter::Destruct(ptr);
 #else
     delete ptr;
-#endif // MOZ_AGG_MALLOC
+#endif // PA_MALLOC
     scanPtr->m_agg_interpreter = nullptr;
   }
 }
@@ -20087,7 +20086,7 @@ void Dblqh::send_next_NEXT_SCANREQ(Signal* signal,
                                    ExecFunction f,
                                    ScanRecord * const scanPtr,
                                    Uint32 clientPtrI,
-                                   bool debug_print)
+                                   bool debug_pa_print)
 {
   (void)clientPtrI;
   /**
@@ -20146,10 +20145,6 @@ void Dblqh::send_next_NEXT_SCANREQ(Signal* signal,
 #define ZMICROS_TO_WAIT_IN_JBB_WITH_MARGIN 500
 #define ZROWS_PER_MICRO 2
 #define ZMIN_SCAN_WITH_CONCURRENCY 0U
-
-#ifndef MOZ_AGG_DEBUG
-  (void)debug_print;
-#endif // !MOZ_AGG_DEBUG
 
   Uint32 prioAFlag = scanPtr->prioAFlag;
   Uint32 cnf_max_scan_direct_count = c_max_scan_direct_count;
@@ -20219,14 +20214,11 @@ void Dblqh::send_next_NEXT_SCANREQ(Signal* signal,
           prim_tab_fragptr.p->m_cond_write_key_waiters == 0 &&
           prim_tab_fragptr.p->m_cond_exclusive_waiters == 0) {
         jamDebug();
-        // MOZ DEBUG PRINT
-#ifdef MOZ_AGG_DEBUG
-        if (debug_print) {
-          g_eventLogger->info("No-break, max_scan_direct_count: %u, scan_direct_count: %u, "
-            "tot_scan_direct_count: %u, tot_scan_limit: %u",
-            max_scan_direct_count, scan_direct_count, tot_scan_direct_count, tot_scan_limit);
-        }
-#endif // MOZ_AGG_DEBUG
+        PA_RONDB_TRACE_2(debug_pa_print,
+          "Dblqh::send_next_NEXT_SCANREQ(), "
+          "No-break, max_scan_direct_count: %u, scan_direct_count: %u, "
+          "tot_scan_direct_count: %u, tot_scan_limit: %u",
+          max_scan_direct_count, scan_direct_count, tot_scan_direct_count, tot_scan_limit);
         scan_direct_count = 1;
         m_tot_scan_direct_count = tot_scan_direct_count;
         /**
@@ -20234,14 +20226,11 @@ void Dblqh::send_next_NEXT_SCANREQ(Signal* signal,
          * NEXT_SCANREQ as a direct signal.
          */
       } else {
-        // MOZ DEBUG PRINT
-#ifdef MOZ_AGG_DEBUG
-        if (debug_print) {
-          g_eventLogger->info("Realtime-break, max_scan_direct_count: %u, scan_direct_count: %u, "
-            "tot_scan_direct_count: %u, tot_scan_limit: %u",
-            max_scan_direct_count, scan_direct_count, tot_scan_direct_count, tot_scan_limit);
-        }
-#endif // MOZ_AGG_DEBUG
+        PA_RONDB_TRACE_2(debug_pa_print,
+          "Dblqh::send_next_NEXT_SCANREQ(), "
+          "Realtime-break, max_scan_direct_count: %u, scan_direct_count: %u, "
+          "tot_scan_direct_count: %u, tot_scan_limit: %u",
+          max_scan_direct_count, scan_direct_count, tot_scan_direct_count, tot_scan_limit);
         scanPtr->m_exec_direct_batch_size_words = 0;
         BlockReference resultRef = scanPtr->scanApiBlockref;
 
@@ -20301,12 +20290,9 @@ void Dblqh::send_next_NEXT_SCANREQ(Signal* signal,
     }
     jamDebug();
     m_scan_direct_count = scan_direct_count + 1;
-    // MOZ DEBUG PRINT
-#ifdef MOZ_AGG_DEBUG
-    if (debug_print) {
-      g_eventLogger->info("m_scan_direct_count: %u", m_scan_direct_count);
-    }
-#endif // MOZ_AGG_DEBUG
+    PA_RONDB_TRACE_2(debug_pa_print,
+      "Dblqh::send_next_NEXT_SCANREQ(), "
+      "m_scan_direct_count: %u", m_scan_direct_count);
     m_in_send_next_scan = 1;
     /**
      * To ensure that the scheduler behave differently with more
@@ -20326,8 +20312,10 @@ void Dblqh::send_next_NEXT_SCANREQ(Signal* signal,
       return;
     }
     jamDebug();
+    /* Request to call again */
     ndbassert(m_in_send_next_scan == 2);
     m_in_send_next_scan = 0;
+    ndbrequire(have_frag_scan_access());
   } while (1);
 }
 
@@ -20339,37 +20327,39 @@ void Dblqh::sendScanFragConf(Signal *signal, Uint32 scanCompleted,
                              const TcConnectionrec *const regTcPtr) {
   jamDebug();
   ScanRecord * const scanPtr = scanptr.p;
-  // MOZ DEBUG PRINT
-#ifdef MOZ_AGG_DEBUG
-  bool print = false;
+  [[maybe_unused]] bool debug_pa_print = false;
+#ifdef DEBUG_PA
   {
     FragrecordPtr regFragptr;
     regFragptr.i = regTcPtr->fragmentptr;
     ndbrequire(c_fragment_pool.getPtr(regFragptr));
-    if (regFragptr.p->fragId == 0 && scanPtr->m_aggregation) {
-      print = true;
+    debug_pa_print = PA_NEED_PRINT(scanPtr->m_aggregation,
+                            regFragptr.p->tabRef, regFragptr.p->fragId);
+    if (debug_pa_print) {
       ndbrequire(regFragptr.p->fragId == scanPtr->m_agg_interpreter->frag_id());
-      g_eventLogger->info("MOZ sendScanFragConf, rows:[%u, %u], bytes: [%u, %u], n_res_recs: %u",
-                                    scanPtr->m_agg_curr_batch_size_rows,
-                                    scanPtr->m_curr_batch_size_rows,
-                                    scanPtr->m_agg_curr_batch_size_bytes,
-                                    scanPtr->m_curr_batch_size_bytes,
-                                    scanPtr->m_agg_n_res_recs);
+      PA_RONDB_TRACE_2(debug_pa_print,
+                       "Dblqh::sendScanFragConf(), "
+                       "sendScanFragConf, rows:[%u, %u], bytes: [%u, %u], n_res_recs: %u",
+                       scanPtr->m_agg_curr_batch_size_rows,
+                       scanPtr->m_curr_batch_size_rows,
+                       scanPtr->m_agg_curr_batch_size_bytes,
+                       scanPtr->m_curr_batch_size_bytes,
+                       scanPtr->m_agg_n_res_recs);
     }
   }
-#endif // MOZ_AGG_DEBUG
+#endif // DEBUG_PA
   /*
-   * Moz
+   * PA related
    * In pushdown aggregation mode, before we send
    * scanfragconf to TC, we need to make sure that
    * there is no agg results cached in aggregation
    * interpreter.
    * See more details at Dblqh::scanTupkeyConfLab(),
-   * search for [MOZ-COMMENT] there.
+   * search for [PA-COMMENT] there.
    */
   if (scanPtr->m_aggregation) {
     /*
-     * Moz
+     * PA related
      * In groupby mode, sendScanFragConf when:
      *  1. batch complete: scanPtr->m_agg_interpreter->NumOfResRecords()
      *     will at least return 1 even group by hash is empty
@@ -20390,7 +20380,7 @@ void Dblqh::sendScanFragConf(Signal *signal, Uint32 scanCompleted,
                (scanPtr->m_agg_n_res_recs == 0 ||
                scanPtr->m_agg_n_res_recs == 1));
   }
-  // Moz
+  // PA related
   // Make sure that we send correct m_curr_batch_size_XXX, otherwise
   // the API cannot start to parse the TRANSID_AI message
   Uint32 tmp_completed_ops = scanPtr->m_aggregation ?
@@ -20402,7 +20392,7 @@ void Dblqh::sendScanFragConf(Signal *signal, Uint32 scanCompleted,
   ndbassert((scanPtr->m_agg_curr_batch_size_bytes % sizeof(Uint32)) == 0);
   if (scanPtr->m_aggregation) {
     /*
-     * Moz
+     * PA related
      * TODO (Zhao)
      * potential crash here? double check.
      * 1. API quits while scanning. scanPtr->scanState == WAIT_CLOSE_SCAN
@@ -20447,23 +20437,23 @@ void Dblqh::sendScanFragConf(Signal *signal, Uint32 scanCompleted,
 
   if (!scanPtr->scanLockHold) {
     jamDebug();
-    // Moz DEBUG PRINT
-#ifdef MOZ_AGG_DEBUG
-    if (print) {
-      g_eventLogger->info("reset rows: [%u, %u], bytes: [%u, %u], n_res_recs: %u",
-                                  scanPtr->m_agg_curr_batch_size_rows,
-                                  scanPtr->m_curr_batch_size_rows,
-                                  scanPtr->m_agg_curr_batch_size_bytes,
-                                  scanPtr->m_curr_batch_size_bytes,
-                                  scanPtr->m_agg_n_res_recs);
-    }
-#endif // MOZ_AGG_DEBUG
+    PA_RONDB_TRACE_2(debug_pa_print,
+                     "Dblqh::sendScanFragConf(), "
+                     "reset rows: [%u, %u], bytes: [%u, %u], n_res_recs: %u",
+                     scanPtr->m_agg_curr_batch_size_rows,
+                     scanPtr->m_curr_batch_size_rows,
+                     scanPtr->m_agg_curr_batch_size_bytes,
+                     scanPtr->m_curr_batch_size_bytes,
+                     scanPtr->m_agg_n_res_recs);
     scanPtr->m_curr_batch_size_rows = 0;
     scanPtr->m_curr_batch_size_bytes= 0;
     scanPtr->m_agg_curr_batch_size_rows = 0;
     scanPtr->m_agg_curr_batch_size_bytes= 0;
     scanPtr->m_agg_n_res_recs = 0;
-    // Moz statemach
+    /*
+     * PA related
+     * statemach
+     */
     ndbrequire(!scanPtr->m_aggregation ||
                (scanPtr->scanState == ScanRecord::WAIT_NEXT_SCAN ||
                scanPtr->scanState == ScanRecord::WAIT_ACC_SCAN ||
@@ -20907,6 +20897,8 @@ void Dblqh::execCOPY_FRAGREQ(Signal *signal) {
     regTcPtr->transactionState = TcConnectionrec::SCAN_STATE_USED;
   }
 
+  acquire_frag_scan_access_new(prim_tab_fragptr.p, tcConnectptr.p);
+
   {
     AccScanReq *req = (AccScanReq *)&signal->theData[0];
     Uint32 sig_request_info = 0;
@@ -20962,6 +20954,9 @@ void Dblqh::execCOPY_FRAGREQ(Signal *signal) {
       /* ACC_SCANCONF */
       jamEntry();
   accScanConfCopyLab(signal);
+
+  /* release_frag_access if not already released */
+  release_frag_access(prim_tab_fragptr.p);
   return;
 }
 
@@ -26821,7 +26816,8 @@ Dblqh::execFSWRITEREQ(const FsReadWriteReq* req) const /* called direct cross th
   Ptr<GlobalPage> page_ptr;
   ndbrequire(req->getFormatFlag(req->operationFlag) == req->fsFormatSharedPage);
   ndbrequire(
-      m_shared_page_pool.getPtr(page_ptr, req->data.sharedPage.pageNumber));
+    m_shared_page_pool.getPtr(page_ptr,
+                              req->data.zeroPageIndicator.pageNumber));
 
   LogFileRecordPtr currLogFilePtr;
   currLogFilePtr.i = req->userPointer;
@@ -36475,7 +36471,8 @@ void Dblqh::execDBINFO_SCANREQ(Signal *signal) {
         TablerecPtr tabPtr;
         tabPtr.i = tableid;
         ptrAss(tabPtr, tablerec);
-        if (tabPtr.p->tableStatus != Tablerec::NOT_DEFINED) {
+        if (tabPtr.p->tableStatus == Tablerec::TABLE_DEFINED ||
+            tabPtr.p->tableStatus == Tablerec::TABLE_READ_ONLY) {
           jam();
           // Loop over all fragments for this table.
           Uint32 num_fragments_in_array = tabPtr.p->num_fragments_in_array;
@@ -36663,7 +36660,8 @@ void Dblqh::execDBINFO_SCANREQ(Signal *signal) {
         TablerecPtr tabPtr;
         tabPtr.i = tableid;
         ptrAss(tabPtr, tablerec);
-        if (tabPtr.p->tableStatus != Tablerec::NOT_DEFINED) {
+        if (tabPtr.p->tableStatus == Tablerec::TABLE_DEFINED ||
+            tabPtr.p->tableStatus == Tablerec::TABLE_READ_ONLY) {
           jam();
           // Loop over the fragments of this table.
           Uint32 num_fragments_in_array = tabPtr.p->num_fragments_in_array;
@@ -37372,11 +37370,11 @@ Dblqh::ScanRecord::~ScanRecord() {
 
   AggInterpreter* ptr = m_agg_interpreter;
   if (ptr != nullptr) {
-#ifdef MOZ_AGG_MALLOC
+#ifdef PA_MALLOC
     AggInterpreter::Destruct(ptr);
 #else
     delete ptr;
-#endif // MOZ_AGG_MALLOC
+#endif // PA_MALLOC
   }
   m_agg_interpreter = nullptr;
 }
@@ -38833,3 +38831,28 @@ Dblqh::DatabaseRecord::DatabaseRecord(Dblqh &dblqh,
   m_database_id(databaseId)
 {
 }
+
+#if defined(USE_INIT_GLOBAL_VARIABLES)
+void Dblqh::checkInitGlobalVariables() {
+  /* Called between signal executions in the job buffer */
+  if (qt_likely(globalData.ndbMtQueryWorkers > 0)) {
+    if (unlikely(m_fragment_lock_status != FRAGMENT_UNLOCKED)) {
+      jam();
+      jamLine(refToMain(reference()));
+      jamLine(refToInstance(reference()));
+      jamLine(m_fragment_lock_status);
+      jamLine(m_old_fragment_lock_status);
+
+      g_eventLogger->error(
+          "Block %u instance %u should be unlocked but has "
+          "fragment lock status %u "
+          "old status %u",
+          refToMain(reference()), refToInstance(reference()),
+          m_fragment_lock_status, m_old_fragment_lock_status);
+
+      const bool fragmentLockReleased = false;
+      ndbrequire(fragmentLockReleased);
+    }
+  }
+}
+#endif

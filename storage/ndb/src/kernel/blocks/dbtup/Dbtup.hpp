@@ -224,9 +224,14 @@ inline const Uint32 *ALIGN_WORD(const void *ptr) {
 #define ZWRONG_INPUT_TO_BINARY_SEARCH 934
 #define ZNO_SUCH_NUMBER_SIZE_SUPPORTED 935
 #define ZNO_SUCH_SEARCH_INTERVAL_METHOD 936
+#define ZINCONSISTENCY_INPUT_PARAM 937
+#define ZTOO_MUCH_INPUT_PARAM 938
+#define ZWRONG_INPUT_PARAM_COLUMN 939
+
+#define MAX_INPUT_PARAMS 16
 
 /*
- * Moz
+ * PA related
  * Aggregation interpreter errors start from 1860
  */
 #define ZAGG_MATH_OVERFLOW 1860
@@ -1164,7 +1169,7 @@ struct Operationrec {
       RF_MULTI_EXIST = 4       /* Refresh op !first in trans, row exists */
     };
     /*
-     * Zart
+     * TTL related
      * keep original operation type
      */
     Uint32 original_op_type;
@@ -1982,6 +1987,7 @@ Uint32 cnoOfMaxAllocatedTriggerRec;
       m_deferred_constraints = true;
       m_disable_fk_checks = false;
       m_tuple_ptr = NULL;
+      ttl_purge_window_size = 0;
     }
 
     KeyReqStruct(EmulatedJamBuffer *_jamBuffer) : changeMask(false) {
@@ -1992,6 +1998,7 @@ Uint32 cnoOfMaxAllocatedTriggerRec;
       m_when = KRS_PREPARE;
       m_deferred_constraints = true;
       m_disable_fk_checks = false;
+      ttl_purge_window_size = 0;
     }
 
     KeyReqStruct(Dbtup *tup) : changeMask(false) {
@@ -2003,6 +2010,7 @@ Uint32 cnoOfMaxAllocatedTriggerRec;
       m_deferred_constraints = true;
       m_disable_fk_checks = false;
       m_dbtup_ptr = tup;
+      ttl_purge_window_size = 0;
     }
 
     KeyReqStruct(Dbtup *tup, When when) : changeMask() {
@@ -2015,6 +2023,7 @@ Uint32 cnoOfMaxAllocatedTriggerRec;
       m_disable_fk_checks = false;
       m_tuple_ptr = NULL;
       m_dbtup_ptr = tup;
+      ttl_purge_window_size = 0;
     }
 
     /**
@@ -2161,6 +2170,7 @@ Uint32 cnoOfMaxAllocatedTriggerRec;
     Uint32 agg_curr_batch_size_rows;
     Uint32 agg_curr_batch_size_bytes;
     Uint32 agg_n_res_recs;
+    Uint32 ttl_purge_window_size;
   };
 
   friend struct Undo_buffer;
@@ -2848,6 +2858,10 @@ private:
   int readKeyAttributes(KeyReqStruct *req_struct, const Uint32 *inBuffer,
                         Uint32 inBufLen, Uint32 *outBuffer, Uint32 TmaxRead,
                         bool xfrmFlag);
+
+  int setInputParameters(KeyReqStruct *req_struct,
+                         Uint32 *inBuffer,
+                         Uint32 inBufLen);
 
   //------------------------------------------------------------------
   //------------------------------------------------------------------

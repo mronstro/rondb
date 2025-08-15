@@ -1584,6 +1584,7 @@ class alignas(NDB_CL) SimulatedBlock
   void init_global_ptrs(void **tmp, size_t cnt);
   void init_global_uint32_ptrs(void **tmp, size_t cnt);
   void init_global_uint32(void **tmp, size_t cnt);
+  void init_global_block();
   void disable_global_variables();
   void enable_global_variables();
 #endif
@@ -1993,6 +1994,8 @@ public:
     Uint32 num_rr_groups = globalData.ndbRRGroups;
     Uint32 num_distr_threads = num_query_instances;
 
+    m_num_lqhkeyreq_counts = globalData.theNumLqhKeyReqCounts;
+    m_num_scan_fragreq_counts = globalData.theNumScanFragReqCounts;
     m_num_rr_groups = num_rr_groups;
     m_num_distribution_threads = num_distr_threads;
     if (!Ndb_InitRRGroups(&m_rr_group[0],
@@ -2195,6 +2198,14 @@ public:
   {
     return m_shared_ldm_instance[instance];
   }
+
+#if defined(USE_INIT_GLOBAL_VARIABLES)
+  /**
+   * Optional method to check / init global variables between
+   * job buffer signal executions
+   */
+  virtual void checkInitGlobalVariables();
+#endif
 
  protected:
   /**

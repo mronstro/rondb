@@ -26,6 +26,7 @@
 #include <iostream>
 #include <memory>
 #include <openssl/evp.h>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <functional>
@@ -74,6 +75,8 @@
 extern EventLogger *g_eventLogger;
 
 APIKeyCache *apiKeyCache = nullptr;
+
+bool contains_upper(std::string_view s);
 
 std::vector<std::string> split(const std::string &, char);
 RS_Status computeHash(const std::string &unhashed, std::string &hashed);
@@ -276,7 +279,15 @@ RS_Status APIKeyCache::find_and_validate(const std::string &apiKey,
   userDBs->m_lastUsed = NdbTick_getCurrentTicks();
   if (!dbs.empty()) {
     for (const auto &db : dbs) {
-      if (userDBs->userDBs.find(db) == userDBs->userDBs.end()) {
+      // lower case the database name 
+      // in HW database name comparision is case insensitive
+      std::string lower_db = std::string(db);
+      if (contains_upper(lower_db)) {
+        std::transform(lower_db.begin(), lower_db.end(), lower_db.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+      }
+
+      if (userDBs->userDBs.find(lower_db) == userDBs->userDBs.end()) {
         if (inc_refcount_done) userDBs->m_ref_count--;
 #ifdef DEBUG_AUTH
         int ref_count = userDBs->m_ref_count;
@@ -368,19 +379,16 @@ RS_Status APIKeyCache::update_record(std::vector<std::string_view> dbs,
                                      UserDBs *userDBs,
                                      char **db_ptrs) {
   NDB_TICKS lastUpdated = NdbTick_getCurrentTicks();
-  std::unordered_map<std::string_view, bool> dbsMap;
-  for (const auto &db : dbs) {
-    DEB_AUTH_DBS("Valid API Key with db: %s", std::string(db).c_str());
-    dbsMap[db] = true;
-  }
-  userDBs->userDBs = dbsMap;
+  userDBs->userDBs.clear();
+  userDBs->userDBs.insert(dbs.begin(), dbs.end());
   userDBs->m_lastUpdated = lastUpdated;
   assert(userDBs->m_state == UserDBs::IS_VALIDATING ||
          userDBs->m_state == UserDBs::IS_VALID);
   userDBs->m_state = UserDBs::IS_VALID;
-  if (userDBs->m_db_ptrs)
+  if (userDBs->m_db_ptrs) {
     free(userDBs->m_db_ptrs);
-  userDBs->m_db_ptrs = (char*)db_ptrs;
+  }
+  userDBs->m_db_ptrs = db_ptrs;
   return CRS_Status::SUCCESS.status;
 }
 
@@ -408,7 +416,6 @@ void APIKeyCache::cache_entry_updater(const std::string &apiKey) {
   NdbMutex_Unlock(m_rwLock[key_cache_id]);
   require(userDBs->m_state == UserDBs::IS_VALIDATING);
   NdbMutex_Unlock(userDBs->m_waitLock);
-  RS_Status status;
   bool first = true;
   while (true) {
     bool fail = false;
@@ -416,7 +423,7 @@ void APIKeyCache::cache_entry_updater(const std::string &apiKey) {
     HopsworksAPIKey key;
     std::vector<std::string_view> dbs;
     if (!m_evicted) {
-      status = authenticate_user(apiKey, key);
+      RS_Status status = authenticate_user(apiKey, key);
       if (status.http_code != HTTP_CODE::SUCCESS) {
         fail = true;
       }
@@ -424,7 +431,7 @@ void APIKeyCache::cache_entry_updater(const std::string &apiKey) {
 
     char **db_ptrs = nullptr;
     if (!fail && !m_evicted) {
-      status = get_user_databases(key, dbs, &db_ptrs);
+      RS_Status status = get_user_databases(key, dbs, &db_ptrs);
       if (status.http_code != HTTP_CODE::SUCCESS) {
         fail = true;
       }
@@ -454,6 +461,7 @@ void APIKeyCache::cache_entry_updater(const std::string &apiKey) {
       }
       DEB_AUTH("Invalid API Key: %s", apiKey.c_str());
       userDBs->m_state = UserDBs::IS_INVALID;
+      free(db_ptrs);
     }
     first = false;
     userDBs->m_lastUpdated = lastUpdated;
@@ -492,6 +500,7 @@ void APIKeyCache::cache_entry_updater(const std::string &apiKey) {
        */
       DEB_AUTH_THREAD("API key %s, delete", apiKey.c_str());
       NdbMutex_Lock(m_rwLock[key_cache_id]);
+      delete m_key_cache[key_cache_id][apiKey];
       m_key_cache[key_cache_id].erase(apiKey);
       NdbMutex_Unlock(m_rwLock[key_cache_id]);
       return;
@@ -557,16 +566,7 @@ RS_Status APIKeyCache::authenticate_user(const std::string &apiKey,
 RS_Status APIKeyCache::get_user_databases(HopsworksAPIKey &key,
                                           std::vector<std::string_view> &dbs,
                                           char ***db_ptrs) {
-  RS_Status status = get_user_projects(key.user_id, dbs, db_ptrs);
-  if (status.http_code != HTTP_CODE::SUCCESS) {
-    return status;
-  }
-  return CRS_Status::SUCCESS.status;
-}
-
-RS_Status APIKeyCache::get_user_projects(int uid,
-                                         std::vector<std::string_view> &dbs,
-                                         char ***db_ptrs) {
+  int uid = key.user_id;
   int count = 0;
   char **projects = nullptr;
   RS_Status status = find_all_projects(uid, &projects, &count);
@@ -575,7 +575,15 @@ RS_Status APIKeyCache::get_user_projects(int uid,
   }
   for (int i = 0; i < count; i++) {
     char *db_str = projects[i];
+
+    // lower case the database name inplace
     std::string_view str(db_str, strlen(db_str));
+    if (contains_upper(str)) {
+      for (char* p = db_str; *p != '\0'; ++p) {
+          *p = std::tolower(static_cast<unsigned char>(*p));
+      }
+    }
+
     dbs.push_back(str);
   }
   *db_ptrs = projects;
@@ -662,7 +670,7 @@ std::string APIKeyCache::to_string() {
     for (const auto &entry : m_key_cache[i]) {
       ss << "API Key: " << entry.first << ", UserDBs: ";
       for (const auto &db : entry.second->userDBs) {
-        ss << db.first << ", ";
+        ss << db << ", ";
       }
       ss << std::endl;
     }
@@ -692,5 +700,11 @@ Uint64 APIKeyCache::last_updated(const std::string &apiKey) {
   Uint64 lastUpdated = userDBs->m_lastUpdated.getUint64();
   NdbMutex_Unlock(userDBs->m_waitLock);
   return lastUpdated;
+}
+
+bool contains_upper(std::string_view sv) {
+    return std::any_of(sv.begin(), sv.end(), [](unsigned char c) {
+        return std::isupper(c);
+    });
 }
 

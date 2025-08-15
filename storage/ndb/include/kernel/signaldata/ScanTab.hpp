@@ -100,6 +100,7 @@ class ScanTabReq {
    * Optional
    */
   Uint32 distributionKey;
+  UintR ttlPurgeWindowSize;
 
   /**
    * Get:ers for requestInfo
@@ -424,8 +425,7 @@ inline void ScanTabReq::setMultiFragFlag(UintR &requestInfo, Uint32 flag) {
 }
 
 /*
- * Zart
- * TTL
+ * TTL related
  */
 inline
 UintR

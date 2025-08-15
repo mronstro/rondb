@@ -4808,7 +4808,7 @@ void Qmgr::execDISCONNECT_REP(Signal *signal) {
   nodePtr.i = getOwnNodeId();
   ptrCheckGuard(nodePtr, MAX_NODES, nodeRec);
 
-  char buf[100];
+  char buf[500];
   if (nodeInfo.getType() == NodeInfo::DB &&
       getNodeState().startLevel < NodeState::SL_STARTED) {
     jam();
@@ -4816,8 +4816,13 @@ void Qmgr::execDISCONNECT_REP(Signal *signal) {
     CRASH_INSERTION(938);
     CRASH_INSERTION(944);
     CRASH_INSERTION(946);
-    BaseString::snprintf(buf, 100, "Node %u disconnected in phase: %u", nodeId,
-                         nodePtr.p->phase);
+    BaseString::snprintf(buf, 500, "Node %u disconnected in phase: %u. Since "
+                         "node %u is a data node and this node hasn't finished "
+                         "starting up, this node will now exit. You will see a "
+                         "stack trace, but this is expected, not a bug.",
+                         nodeId,
+                         nodePtr.p->phase,
+                         nodeId);
     progError(__LINE__, NDBD_EXIT_SR_OTHERNODEFAILED, buf);
     ndbabort();
   }
@@ -4828,27 +4833,54 @@ void Qmgr::execDISCONNECT_REP(Signal *signal) {
     return;
   }
 
-  switch (nodePtr.p->phase) {
-    case ZRUNNING:
-      jam();
-      break;
-    case ZINIT:
-      ndbabort();
-    case ZSTARTING:
-      progError(__LINE__, NDBD_EXIT_CONNECTION_SETUP_FAILED,
-                lookupConnectionError(err));
-    case ZPREPARE_FAIL:
-      ndbabort();
-    case ZFAIL_CLOSING:
-      ndbabort();
-    case ZAPI_ACTIVATION_ONGOING:
-      ndbabort();
-    case ZAPI_ACTIVE:
-      ndbabort();
-    case ZAPI_INACTIVE: {
-      BaseString::snprintf(buf, 100, "Node %u disconnected", nodeId);
-      progError(__LINE__, NDBD_EXIT_SR_OTHERNODEFAILED, buf);
-    }
+  switch(nodePtr.p->phase) {
+  case ZRUNNING:
+    jam();
+    break;
+  case ZINIT:
+    ndbabort();
+  case ZSTARTING:
+    BaseString::snprintf(buf, 500, "Node %u disconnected while this node was "
+                         "in phase ZSTARTING. This node will now exit. You will "
+                         "see a stack trace, but this is expected, not a bug. "
+                         "Disconnect error from %u: %s.",
+                         nodeId, nodeId, lookupConnectionError(err));
+    progError(__LINE__, NDBD_EXIT_CONNECTION_SETUP_FAILED, buf);
+  case ZPREPARE_FAIL:
+    ndbabort();
+  case ZFAIL_CLOSING:
+    BaseString::snprintf(buf, 500, "Node %u disconnected while this node was "
+                         "in phase ZFAIL_CLOSING. This node will now exit. You "
+                         "will see a stack trace, but this is expected, not a "
+                         "bug.",
+                         nodeId);
+    progError(__LINE__, NDBD_EXIT_SR_OTHERNODEFAILED, buf);
+    ndbabort();
+  case ZAPI_ACTIVATION_ONGOING:
+    BaseString::snprintf(buf, 500, "Node %u disconnected while this node was "
+                         "in phase ZAPI_ACTIVATION_ONGOING. This node will now "
+                         "exit. You will see a stack trace, but this is "
+                         "expected, not a bug.",
+                         nodeId);
+    progError(__LINE__, NDBD_EXIT_SR_OTHERNODEFAILED, buf);
+    ndbabort();
+  case ZAPI_ACTIVE:
+    BaseString::snprintf(buf, 500, "Node %u disconnected while this node was "
+                         "in phase ZAPI_ACTIVE. This node will now exit. You "
+                         "will see a stack trace, but this is expected, not a "
+                         "bug.",
+                         nodeId);
+    progError(__LINE__, NDBD_EXIT_SR_OTHERNODEFAILED, buf);
+    ndbabort();
+  case ZAPI_INACTIVE:
+  {
+    BaseString::snprintf(buf, 500, "Node %u disconnected while this node was "
+                         "in phase ZAPI_INACTIVE. This node will now exit. You "
+                         "will see a stack trace, but this is expected, not a "
+                         "bug.",
+                         nodeId);
+    progError(__LINE__, NDBD_EXIT_SR_OTHERNODEFAILED, buf);
+  }
   }
 
   if (ERROR_INSERTED(939) && ERROR_INSERT_EXTRA == nodeId) {
@@ -8126,6 +8158,33 @@ void Qmgr::execNODE_FAILREP(Signal *signal) {
   }
 }
 
+static const char *getAllocFailureExplanation(Uint32 errorCode) {
+  switch (errorCode) {
+    case AllocNodeIdRef::NoError:
+      return "No Error";
+    case AllocNodeIdRef::Undefined:
+      return "Undefined error.  Retry";
+    case AllocNodeIdRef::NF_FakeErrorREF:
+      return "Node Failure. Retry";
+    case AllocNodeIdRef::Busy:
+      return "System busy with another nodeid allocation. Retry";
+    case AllocNodeIdRef::NotMaster:
+      return "Request to incorrect node. Retry";
+    case AllocNodeIdRef::NodeReserved:
+      return "Node id already reserved";
+    case AllocNodeIdRef::NodeConnected:
+      return "Node id already in use";
+    case AllocNodeIdRef::NodeFailureHandlingNotCompleted:
+      return "Node id not yet ready for use.  Retry";
+    case AllocNodeIdRef::NodeTypeMismatch:
+      return "Node id of wrong type";
+    case AllocNodeIdRef::NotReady:
+      return "Data node not ready for nodeid allocation yet. Retry";
+    default:
+      return "Unknown error code";
+  }
+}
+
 void Qmgr::execALLOC_NODEID_REQ(Signal *signal) {
   jamEntry();
   AllocNodeIdReq req = *(AllocNodeIdReq *)signal->getDataPtr();
@@ -8179,8 +8238,9 @@ void Qmgr::execALLOC_NODEID_REQ(Signal *signal) {
 
     if (error) {
       jam();
-      g_eventLogger->debug("Alloc node id for node %u failed, err: %u",
-                           nodePtr.i, error);
+      g_eventLogger->debug(
+          "Alloc node id request for node %u rejected due to %s (%u)",
+          nodePtr.i, getAllocFailureExplanation(error), error);
       AllocNodeIdRef *ref = (AllocNodeIdRef *)signal->getDataPtrSend();
       ref->senderRef = reference();
       ref->errorCode = error;
@@ -8279,8 +8339,9 @@ void Qmgr::execALLOC_NODEID_REQ(Signal *signal) {
 
   if (error) {
     jam();
-    g_eventLogger->info("Alloc nodeid for node %u failed,err: %u", req.nodeId,
-                        error);
+    g_eventLogger->info(
+        "Alloc node id request for node %u rejected due to %s (%u)", req.nodeId,
+        getAllocFailureExplanation(error), error);
     AllocNodeIdRef *ref = (AllocNodeIdRef *)signal->getDataPtrSend();
     ref->senderRef = reference();
     ref->errorCode = error;
@@ -8390,9 +8451,11 @@ void Qmgr::completeAllocNodeIdReq(Signal *signal) {
       ptrAss(nodePtr, nodeRec);
       nodePtr.p->m_secret = 0;
     }
-    g_eventLogger->info("Alloc node id for node %u failed, err: %u",
-                        opAllocNodeIdReq.m_req.nodeId,
-                        opAllocNodeIdReq.m_error);
+    g_eventLogger->info(
+        "Alloc node id request for node %u rejected due to %s (%u)",
+        opAllocNodeIdReq.m_req.nodeId,
+        getAllocFailureExplanation(opAllocNodeIdReq.m_error),
+        opAllocNodeIdReq.m_error);
 
     AllocNodeIdRef *ref = (AllocNodeIdRef *)signal->getDataPtrSend();
     ref->senderRef = reference();

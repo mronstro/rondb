@@ -146,8 +146,8 @@
   } while (0)
 #endif
 
-//#define TRACE_INTERPRETER
-//#define TRACE_INTERPRETER_REGISTERS
+//#define TRACE_INTERPRETER 1
+//#define TRACE_INTERPRETER_REGISTERS 1
 
 #define RET_NULL Uint32(~0)
 #define EQUAL_MATCH 0
@@ -187,7 +187,8 @@ Uint32 binary_uint64_search_exact(Uint64 test_ordinal,
 static Uint32 binary_uint64_search_smaller(Uint64 test_ordinal,
                                            const char *memory_ptr,
                                            Uint32 num_elems,
-                                           bool not_include_equal) {
+                                           bool not_include_equal,
+                                           bool search_interval) {
   Uint32 start = 0;
   Uint32 end = num_elems;
   if (num_elems == 0) {
@@ -205,13 +206,25 @@ static Uint32 binary_uint64_search_smaller(Uint64 test_ordinal,
       end = mid_point;
     }
   }
+#ifdef TRACE_INTERPRETER
+  g_eventLogger->info("Smaller: start: %u, end: %u, num_elems: %u, val: %llu,"
+    " ord: %llu, flag: %u",
+    start, end, num_elems, value, test_ordinal, not_include_equal);
+#endif
   if (not_include_equal) {
     test_position = start * 8;
     memcpy(&value, memory_ptr + test_position, 8);
     if (value != test_ordinal) {
       if (start == 0) return RET_NULL;
       else return start - 1;
+    } else if ((search_interval == true) &&
+               ((start + 1) < num_elems)) {
+      test_position = (start + 1) * 8;
+      memcpy(&value, memory_ptr + test_position, 8);
+      if (value == test_ordinal)
+        return start + 1;
     }
+
   }
   return start;
 }
@@ -219,7 +232,8 @@ static Uint32 binary_uint64_search_smaller(Uint64 test_ordinal,
 static Uint32 binary_uint64_search_larger(Uint64 test_ordinal,
                                           const char *memory_ptr,
                                           Uint32 num_elems,
-                                          bool not_include_equal) {
+                                          bool not_include_equal,
+                                          bool search_interval) {
   Uint32 start = 0;
   Uint32 end = num_elems;
   if (num_elems == 0) {
@@ -237,11 +251,25 @@ static Uint32 binary_uint64_search_larger(Uint64 test_ordinal,
       start = mid_point + 1;
     }
   }
+#ifdef TRACE_INTERPRETER
+  g_eventLogger->info("Larger: start: %u, end: %u, num_elems: %u, val: %llu,"
+    " ord: %llu, flag: %u",
+    start, end, num_elems, value, test_ordinal, not_include_equal);
+#endif
+
   if (not_include_equal == ZTRUE && end > 0) {
     test_position = (end - 1) * 8;
     memcpy(&value, memory_ptr + test_position, 8);
     if (value == test_ordinal) {
-      return end - 1;
+      if ((search_interval == false) ||
+          (end == 1))
+        return end - 1;
+      test_position = (end - 2) * 8;
+      memcpy(&value, memory_ptr + test_position, 8);
+      if (value == test_ordinal)
+        return end - 2;
+      else
+        return end - 1;
     }
   }
   return end;
@@ -278,7 +306,8 @@ static Uint32 binary_uint32_search_exact(Uint32 test_ordinal,
 static Uint32 binary_uint32_search_smaller(Uint32 test_ordinal,
                                            const char *memory_ptr,
                                            Uint32 num_elems,
-                                           bool not_include_equal) {
+                                           bool not_include_equal,
+                                           bool search_interval) {
   Uint32 start = 0;
   Uint32 end = num_elems;
   if (num_elems == 0) {
@@ -296,12 +325,29 @@ static Uint32 binary_uint32_search_smaller(Uint32 test_ordinal,
       end = mid_point;
     }
   }
+#ifdef TRACE_INTERPRETER
+  g_eventLogger->info("Smaller: start: %u, end: %u, num_elems: %u, val: %u,"
+    " ord: %u, flag: %u",
+    start, end, num_elems, value, test_ordinal, not_include_equal);
+#endif
   if (not_include_equal) {
     test_position = start * 4;
     memcpy(&value, memory_ptr + test_position, 4);
     if (value != test_ordinal) {
       if (start == 0) return RET_NULL;
       else return start - 1;
+    } else if ((search_interval == true) &&
+               ((start + 1) < num_elems)) {
+      /**
+       * This is a special case:
+       * We might have something like (4,5,5,8). In this case we will have
+       * start == 1 and would return 1 which would lead to NULL. But in
+       * reality we should return 2 since 5 is also part of the next interval.
+       */
+      test_position = (start + 1) * 4;
+      memcpy(&value, memory_ptr + test_position, 4);
+      if (value == test_ordinal)
+        return start + 1;
     }
   }
   return start;
@@ -310,7 +356,8 @@ static Uint32 binary_uint32_search_smaller(Uint32 test_ordinal,
 static Uint32 binary_uint32_search_larger(Uint32 test_ordinal,
                                           const char *memory_ptr,
                                           Uint32 num_elems,
-                                          bool not_include_equal) {
+                                          bool not_include_equal,
+                                          bool search_interval) {
   Uint32 start = 0;
   Uint32 end = num_elems;
   if (num_elems == 0) {
@@ -328,19 +375,37 @@ static Uint32 binary_uint32_search_larger(Uint32 test_ordinal,
       start = mid_point + 1;
     }
   }
+#ifdef TRACE_INTERPRETER
+  g_eventLogger->info("Larger: start: %u, end: %u, num_elems: %u, val: %u,"
+    " ord: %u, flag: %u",
+    start, end, num_elems, value, test_ordinal, not_include_equal);
+#endif
   if (not_include_equal && end > 0) {
     test_position = (end - 1) * 4;
     memcpy(&value, memory_ptr + test_position, 4);
     if (value == test_ordinal) {
-      return end - 1;
+      if ((search_interval == false) ||
+          (end == 1))
+        return end - 1;
+      /**
+       * Special case to handle, this could be e.g.
+       * (2,3,3,5) and we are searching for 3, in this case we should
+       * return end - 2 rather than end - 1.
+       */
+      test_position = (end - 2) * 4;
+      memcpy(&value, memory_ptr + test_position, 4);
+      if (value == test_ordinal)
+        return end - 2;
+      else
+        return end - 1;
     }
   }
   return end;
 }
 
 Uint32 binary_uint16_search_exact(Uint16 test_ordinal,
-                                         const char *memory_ptr,
-                                         Uint32 num_elems) {
+                                  const char *memory_ptr,
+                                  Uint32 num_elems) {
   Uint32 start = 0;
   Uint32 end = num_elems;
   if (num_elems == 0) {
@@ -369,7 +434,8 @@ Uint32 binary_uint16_search_exact(Uint16 test_ordinal,
 static Uint32 binary_uint16_search_smaller(Uint16 test_ordinal,
                                            const char *memory_ptr,
                                            Uint32 num_elems,
-                                           bool not_include_equal) {
+                                           bool not_include_equal,
+                                           bool search_interval) {
   Uint32 start = 0;
   Uint32 end = num_elems;
   if (num_elems == 0) {
@@ -393,6 +459,12 @@ static Uint32 binary_uint16_search_smaller(Uint16 test_ordinal,
     if (value != test_ordinal) {
       if (start == 0) return RET_NULL;
       else return start - 1;
+    } else if ((search_interval == true) &&
+               ((start + 1) < num_elems)) {
+      test_position = (start + 1) * 2;
+      memcpy(&value, memory_ptr + test_position, 2);
+      if (value == test_ordinal)
+        return start + 1;
     }
   }
   return start;
@@ -401,7 +473,8 @@ static Uint32 binary_uint16_search_smaller(Uint16 test_ordinal,
 static Uint32 binary_uint16_search_larger(Uint16 test_ordinal,
                                           const char *memory_ptr,
                                           Uint32 num_elems,
-                                          bool not_include_equal) {
+                                          bool not_include_equal,
+                                          bool search_interval) {
   Uint32 start = 0;
   Uint32 end = num_elems;
   if (num_elems == 0) {
@@ -423,59 +496,25 @@ static Uint32 binary_uint16_search_larger(Uint16 test_ordinal,
     test_position = (end - 1) * 2;
     memcpy(&value, memory_ptr + test_position, 2);
     if (value == test_ordinal) {
-      return end - 1;
+      if ((search_interval == false) ||
+          (end == 1))
+        return end - 1;
+      test_position = (end - 2) * 2;
+      memcpy(&value, memory_ptr + test_position, 2);
+      if (value == test_ordinal)
+        return end - 2;
+      else
+        return end - 1;
     }
   }
   return end;
 }
 
-static Uint32 binary_odd_search_exact(Uint64 test_ordinal,
-                                      const char *memory_ptr,
-                                      Uint32 num_elems,
-                                      Uint32 number_size) {
-  Uint32 start = 0;
-  Uint32 end = num_elems;
-  if (num_elems == 0) {
-    return RET_NULL;
-  }
+static Uint64
+get_odd_sized_number(const char *memory_ptr,
+                     Uint32 test_position,
+                     Uint32 number_size) {
   Uint64 value = 0;
-  Uint32 test_position;
-  while (start < end) {
-    Uint32 mid_point = (start + end) / 2;
-    test_position = mid_point * number_size;
-    const uchar *number_ptr = (const uchar*)(memory_ptr + test_position);
-    switch (number_size) {
-      case 1: {
-        Uint8 val8 = *number_ptr;
-        value = (Uint64)val8;
-        break;
-      }
-      case 3: {
-        Uint32 val32 = uint3korr(number_ptr);
-        value = (Uint64)val32;
-        break;
-      }
-      case 5: {
-        value = uint5korr(number_ptr);
-        break;
-      }
-      case 6: {
-        value = uint6korr(number_ptr);
-        break;
-      }
-      default: {
-        require(false);
-        return RET_NULL;
-      }
-    }
-    if (value < test_ordinal) {
-      start = mid_point + 1;
-    } else {
-      end = mid_point;
-    }
-  }
-  if (start == num_elems) return RET_NULL;
-  test_position = start * number_size;
   const uchar *number_ptr = (const uchar*)(memory_ptr + test_position);
   switch (number_size) {
     case 1: {
@@ -498,9 +537,35 @@ static Uint32 binary_odd_search_exact(Uint64 test_ordinal,
     }
     default: {
       require(false);
-      return RET_NULL;
     }
   }
+  return value;
+}
+
+static Uint32 binary_odd_search_exact(Uint64 test_ordinal,
+                                      const char *memory_ptr,
+                                      Uint32 num_elems,
+                                      Uint32 number_size) {
+  Uint32 start = 0;
+  Uint32 end = num_elems;
+  if (num_elems == 0) {
+    return RET_NULL;
+  }
+  Uint64 value = 0;
+  Uint32 test_position;
+  while (start < end) {
+    Uint32 mid_point = (start + end) / 2;
+    test_position = mid_point * number_size;
+    value = get_odd_sized_number(memory_ptr, test_position, number_size);
+    if (value < test_ordinal) {
+      start = mid_point + 1;
+    } else {
+      end = mid_point;
+    }
+  }
+  if (start == num_elems) return RET_NULL;
+  test_position = start * number_size;
+  value = get_odd_sized_number(memory_ptr, test_position, number_size);
   if (value == test_ordinal)
     return start;
   return RET_NULL;
@@ -510,7 +575,8 @@ static Uint32 binary_odd_search_smaller(Uint64 test_ordinal,
                                         const char *memory_ptr,
                                         Uint32 num_elems,
                                         Uint32 number_size,
-                                        bool not_include_equal) {
+                                        bool not_include_equal,
+                                        bool search_interval) {
   Uint32 start = 0;
   Uint32 end = num_elems;
   if (num_elems == 0) {
@@ -521,68 +587,31 @@ static Uint32 binary_odd_search_smaller(Uint64 test_ordinal,
   while (start < end) {
     Uint32 mid_point = (start + end) / 2;
     test_position = mid_point * number_size;
-    const uchar *number_ptr = (const uchar*)(memory_ptr + test_position);
-    switch (number_size) {
-      case 1: {
-        Uint8 val8 = *number_ptr;
-        value = (Uint64)val8;
-        break;
-      }
-      case 3: {
-        Uint32 val32 = uint3korr(number_ptr);
-        value = (Uint64)val32;
-        break;
-      }
-      case 5: {
-        value = uint5korr(number_ptr);
-        break;
-      }
-      case 6: {
-        value = uint6korr(number_ptr);
-        break;
-      }
-      default: {
-        require(false);
-        return RET_NULL;
-      }
-    }
+    value = get_odd_sized_number(memory_ptr, test_position, number_size);
     if (value < test_ordinal) {
       start = mid_point + 1;
     } else {
       end = mid_point;
     }
   }
+#ifdef TRACE_INTERPRETER
+  g_eventLogger->info("Smaller: start: %u, end: %u, num_elems: %u,"
+    " val: %llu, ord: %llu, flag: %u, size: %u",
+    start, end, num_elems, value, test_ordinal, not_include_equal, number_size);
+#endif
   if (not_include_equal) {
     test_position = start * number_size;
-    const uchar *number_ptr = (const uchar*)(memory_ptr + test_position);
-    switch (number_size) {
-      case 1: {
-        Uint8 val8 = *number_ptr;
-        value = (Uint64)val8;
-        break;
-      }
-      case 3: {
-        Uint32 val32 = uint3korr(number_ptr);
-        value = (Uint64)val32;
-        break;
-      }
-      case 5: {
-        value = uint5korr(number_ptr);
-        break;
-      }
-      case 6: {
-        value = uint6korr(number_ptr);
-        break;
-      }
-      default: {
-        require(false);
-        return RET_NULL;
-      }
-    }
+    value = get_odd_sized_number(memory_ptr, test_position, number_size);
     if (value != test_ordinal) {
       if (start == 0) return RET_NULL;
       else return (start - 1);
       return end - 1;
+    } else if ((search_interval == true) &&
+               ((start + 1) < num_elems)) {
+      test_position = (start + 1) * number_size;
+      value = get_odd_sized_number(memory_ptr, test_position, number_size);
+      if (value == test_ordinal)
+        return start + 1;
     }
   }
   return start;
@@ -592,7 +621,8 @@ static Uint32 binary_odd_search_larger(Uint64 test_ordinal,
                                        const char *memory_ptr,
                                        Uint32 num_elems,
                                        Uint32 number_size,
-                                       bool not_include_equal) {
+                                       bool not_include_equal,
+                                       bool search_interval) {
   Uint32 start = 0;
   Uint32 end = num_elems;
   if (num_elems == 0) {
@@ -603,66 +633,31 @@ static Uint32 binary_odd_search_larger(Uint64 test_ordinal,
   while (start < end) {
     Uint32 mid_point = (start + end) / 2;
     test_position = mid_point * number_size;
-    const uchar *number_ptr = (const uchar*)(memory_ptr + test_position);
-    switch (number_size) {
-      case 1: {
-        Uint8 val8 = *number_ptr;
-        value = (Uint64)val8;
-        break;
-      }
-      case 3: {
-        Uint32 val32 = uint3korr(number_ptr);
-        value = (Uint64)val32;
-        break;
-      }
-      case 5: {
-        value = uint5korr(number_ptr);
-        break;
-      }
-      case 6: {
-        value = uint6korr(number_ptr);
-        break;
-      }
-      default: {
-        require(false);
-        return RET_NULL;
-      }
-    }
+    value = get_odd_sized_number(memory_ptr, test_position, number_size);
     if (value > test_ordinal) {
       end = mid_point;
     } else {
       start = mid_point + 1;
     }
   }
+#ifdef TRACE_INTERPRETER
+  g_eventLogger->info("Larger: start: %u, end: %u, num_elems: %u,"
+    " val: %llu, ord: %llu, flag: %u, size: %u",
+    start, end, num_elems, value, test_ordinal, not_include_equal, number_size);
+#endif
   if (not_include_equal && end > 0) {
     test_position = (end - 1) * number_size;
-    const uchar *number_ptr = (const uchar*)(memory_ptr + test_position);
-    switch (number_size) {
-      case 1: {
-        Uint8 val8 = *number_ptr;
-        value = (Uint64)val8;
-        break;
-      }
-      case 3: {
-        Uint32 val32 = uint3korr(number_ptr);
-        value = (Uint64)val32;
-        break;
-      }
-      case 5: {
-        value = uint5korr(number_ptr);
-        break;
-      }
-      case 6: {
-        value = uint6korr(number_ptr);
-        break;
-      }
-      default: {
-        require(false);
-        return RET_NULL;
-      }
-    }
+    value = get_odd_sized_number(memory_ptr, test_position, number_size);
     if (value == test_ordinal) {
-      return end - 1;
+      if ((search_interval == false) ||
+          (end == 1))
+        return end - 1;
+      test_position = (end - 2) * number_size;
+      value = get_odd_sized_number(memory_ptr, test_position, number_size);
+      if (value == test_ordinal)
+        return end - 2;
+      else
+        return end - 1;
     }
   }
   return end;
@@ -997,7 +992,7 @@ Uint32 Dbtup::copyAttrinfo(Uint32 storedProcId,
         ndbrequire((cinBuffer[proc_start] >> 16) == 0x0721);
 
         // 3. construct agg_interpreter
-#ifdef MOZ_AGG_MALLOC
+#ifdef PA_MALLOC
         /*
          * Use Ndbd_mem_manager
          */
@@ -1015,14 +1010,14 @@ Uint32 Dbtup::copyAttrinfo(Uint32 storedProcId,
         ndbrequire(page_ptr != nullptr);
         ndbrequire(page_ptr != nullptr);
         scan_rec_ptr->m_agg_interpreter =
-          new(page_ptr) AggInterpreter(&cinBuffer[proc_start], proc_len, false,
+          new(page_ptr) AggInterpreter(&cinBuffer[proc_start], proc_len,
                               prepare_fragptr.p->fragmentId/*,
                               &m_ctx.m_mm, page_ptr, allocPageRef*/);
 #else
         scan_rec_ptr->m_agg_interpreter =
-          new AggInterpreter(&cinBuffer[proc_start], proc_len, false,
+          new AggInterpreter(&cinBuffer[proc_start], proc_len,
                               prepare_fragptr.p->fragmentId);
-#endif // MOZ_AGG_MALLOC
+#endif // PA_MALLOC
         ndbrequire(scan_rec_ptr->m_agg_interpreter->Init());
       }
     }
@@ -2054,6 +2049,8 @@ bool Dbtup::execTUPKEYREQ(Signal* signal,
   req_struct.agg_curr_batch_size_bytes = 0;
   req_struct.agg_n_res_recs = 0;
 
+  req_struct.ttl_purge_window_size = 0;
+
   if (unlikely(trans_state != TRANS_IDLE)) {
     TUPKEY_abort(&req_struct, 39);
     return false;
@@ -2094,8 +2091,7 @@ bool Dbtup::execTUPKEYREQ(Signal* signal,
 #endif
     req_struct.scan_rec = lqhScanPtrP;
     /*
-     * Zart
-     * TTL
+     * TTL related
      */
     regOperPtr->ttl_ignore = lqhScanPtrP->m_ttl_ignore;
     if (lqhScanPtrP->m_ttl_ignore == 1 ||
@@ -2105,31 +2101,27 @@ bool Dbtup::execTUPKEYREQ(Signal* signal,
       regOperPtr->ttl_ignore = 0;
     }
     regOperPtr->ttl_only_expired = lqhScanPtrP->m_ttl_only_expired;
-#ifdef TTL_DEBUG
-    if (NEED_PRINT(prepare_fragptr.p->fragTableId)) {
-      g_eventLogger->info("Zart, Dbtup::execTUPKEYREQ(), Ignore TTL[%u, %u]: %u, "
-                          "only expired: %u",
-                           lqhScanPtrP->m_ttl_ignore,
-                           lqhScanPtrP->m_ttl_ignore_for_ral,
-                           regOperPtr->ttl_ignore,
-                           regOperPtr->ttl_only_expired);
-    }
-#endif  // TTL_DEBUG
+
+    TTL_RONDB_TRACE(prepare_fragptr.p->fragTableId,
+                    "Dbtup::execTUPKEYREQ(), Ignore TTL[%u, %u]: %u, "
+                    "only expired: %u",
+                    lqhScanPtrP->m_ttl_ignore,
+                    lqhScanPtrP->m_ttl_ignore_for_ral,
+                    regOperPtr->ttl_ignore,
+                    regOperPtr->ttl_only_expired);
     /*
-     * Zart
+     * TTL related
      * TODO (Zhao)
      * double check here
      */
     if (lqhScanPtrP->m_ttl_ignore == 0 && lqhOpPtrP->ttl_ignore) {
-#ifdef TTL_DEBUG
-      if (NEED_PRINT(prepare_fragptr.p->fragTableId)) {
-        g_eventLogger->info("Zart, Dbtup::execTUPKEYREQ(), Ignore TTL "
-                            "for one operation in a normal scan");
-      }
-#endif  // TTL_DEBUG
+      TTL_RONDB_TRACE(prepare_fragptr.p->fragTableId,
+                      "Dbtup::execTUPKEYREQ(), Ignore TTL "
+                      "for one operation in a normal scan");
       ndbrequire(false);
       regOperPtr->ttl_ignore = lqhOpPtrP->ttl_ignore;
     }
+    req_struct.ttl_purge_window_size = lqhScanPtrP->m_ttl_purge_window_size;
   } else {
     Uint32 attrBufLen = lqhOpPtrP->totReclenAi;
     Uint32 dirtyOp = lqhOpPtrP->dirtyOp;
@@ -2164,12 +2156,18 @@ bool Dbtup::execTUPKEYREQ(Signal* signal,
     regOperPtr->ttl_ignore = lqhOpPtrP->ttl_ignore;
     regOperPtr->ttl_only_expired = lqhOpPtrP->ttl_only_expired;
 #ifdef TTL_DEBUG
-    if (NEED_PRINT(prepare_fragptr.p->fragTableId) &&
-        regOperPtr->ttl_ignore) {
-      g_eventLogger->info("Zart, Dbtup::execTUPKEYREQ(), Ignore TTL "
-                   "for one operation");
+    if (regOperPtr->ttl_ignore) {
+      TTL_RONDB_TRACE(prepare_fragptr.p->fragTableId,
+                      "Dbtup::execTUPKEYREQ(), Ignore TTL "
+                      "for one operation");
     }
 #endif  // TTL_DEBUG
+  }
+  if (req_struct.ttl_purge_window_size != 0 && !regOperPtr->ttl_only_expired) {
+    g_eventLogger->warning("reset ttl_purge_window_size from %u to 0 "
+                        "since ttl_only_expired is not set",
+                        req_struct.ttl_purge_window_size);
+    req_struct.ttl_purge_window_size = 0;
   }
   req_struct.m_deferred_constraints = deferred_constraints;
   req_struct.m_disable_fk_checks = disable_fk_checks;
@@ -2201,26 +2199,22 @@ bool Dbtup::execTUPKEYREQ(Signal* signal,
     req_struct.m_reorg = reorg;
     regOperPtr->op_type = op;
     /*
-     * Zart
+     * TTL related
      * We keep original operation type for regOperPtr,
      * so that we can handle HandleUpdateReq() correctly
      * in the future
      */
     regOperPtr->original_op_type = original_op;
-#ifdef TTL_DEBUG
-    if (NEED_PRINT(prepare_fragptr.p->fragTableId)) {
-      g_eventLogger->info("Zart, [TableId: %u]"
-                          "Set Dbtup::Operationrec::original_op_type: %u, "
-                          "current Dbtup::Operationrec::op_type: %u, "
-                          "ignore TTL ?(%u), "
-                          "only expired?(%u)",
-                          prepare_fragptr.p->fragTableId,
-                          regOperPtr->original_op_type,
-                          regOperPtr->op_type,
-                          regOperPtr->ttl_ignore,
-                          regOperPtr->ttl_only_expired);
-    }
-#endif  // TTL_DEBUG
+    TTL_RONDB_TRACE(prepare_fragptr.p->fragTableId, "[TableId: %u]"
+                    "Set Dbtup::Operationrec::original_op_type: %u, "
+                    "current Dbtup::Operationrec::op_type: %u, "
+                    "ignore TTL ?(%u), "
+                    "only expired?(%u)",
+                    prepare_fragptr.p->fragTableId,
+                    regOperPtr->original_op_type,
+                    regOperPtr->op_type,
+                    regOperPtr->ttl_ignore,
+                    regOperPtr->ttl_only_expired);
   }
   {
     /**
@@ -2896,21 +2890,20 @@ int Dbtup::checkTTL(Tablerec* regTabPtr,
   [[maybe_unused]] const Uint32 size_in_words =
                                 AttributeDescriptor::getSizeInWords(TattrDesc1);
   ndbrequire(type_id == NDB_TYPE_DATETIME2 || type_id == NDB_TYPE_TIMESTAMP2);
-#ifdef TTL_DEBUG
-  g_eventLogger->info("Zart, handleXXXReq TTL check, table_id: %u, "
-      "type_id: %u, size: %u, size_in_bytes: %u, "
-      "size_in_words: %u",
-      req_struct->fragPtrP->fragTableId, type_id, size,
-      size_in_bytes, size_in_words);
-#endif  // TTL_DEBUG
+  TTL_RONDB_TRACE(req_struct->fragPtrP->fragTableId,
+                  "handleXXXReq TTL check, table_id: %u, "
+                  "type_id: %u, size: %u, size_in_bytes: %u, "
+                  "size_in_words: %u",
+                  req_struct->fragPtrP->fragTableId, type_id, size,
+                  size_in_bytes, size_in_words);
   /*
-   * Zart
+   * TTL related
    * Prepare correct attribute id format before passing it to readAttributes
    */
   attrId = attrId << 16;
   Uint32 out_buf[3];
   /*
-   * Zart
+   * TTL related
    * TODO (Zhao)
    * Double check whether it's safe to reuse req_struct here or not.
    */
@@ -2920,12 +2913,11 @@ int Dbtup::checkTTL(Tablerec* regTabPtr,
       out_buf,
       3);
   AttributeHeader* ahOut = (AttributeHeader*)out_buf;
-#ifdef TTL_DEBUG
-  g_eventLogger->info("Zart, Get ttl column data, col_id: %u, "
-      "byte_size: %u, data_size: %u, is_null: %u",
-      ahOut->getAttributeId(), ahOut->getByteSize(),
-      ahOut->getDataSize(), ahOut->isNULL());
-#endif  // TTL_DEBUG
+  TTL_RONDB_TRACE(req_struct->fragPtrP->fragTableId,
+                  "Get ttl column data, col_id: %u, "
+                  "byte_size: %u, data_size: %u, is_null: %u",
+                  ahOut->getAttributeId(), ahOut->getByteSize(),
+                  ahOut->getDataSize(), ahOut->isNULL());
   ndbrequire(regTabPtr->m_ttl_col_no == ahOut->getAttributeId());
 
   int cmp_ret = 0;
@@ -2933,7 +2925,7 @@ int Dbtup::checkTTL(Tablerec* regTabPtr,
   if (ret >= 0) {
     if (!ahOut->isNULL()) {
       /*
-       * Zart
+       * TTL related
        * Just need to parse to second part.
        */
       MYSQL_TIME dt;
@@ -2968,12 +2960,13 @@ int Dbtup::checkTTL(Tablerec* regTabPtr,
               ahOut->getDataPtr()), 0);
         TIME_from_longlong_datetime_packed(&dt, dt_bin);
       }
-#ifdef TTL_DEBUG
-      g_eventLogger->info("Zart, Parsed TTL column data: "
-          "%u.%u.%u %u:%u:%u",
-          dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
-#endif  // TTL_DEBUG
+      TTL_RONDB_TRACE(req_struct->fragPtrP->fragTableId,
+                      "Parsed TTL column data: "
+                      "%u.%u.%u %u:%u:%u",
+                      dt.year, dt.month, dt.day,
+                      dt.hour, dt.minute, dt.second);
       Uint32 ttl_sec = regTabPtr->m_ttl_sec;
+      ttl_sec += req_struct->ttl_purge_window_size;
       bool valid_future_dt = true;
       if (ttl_sec != 0) {
         Interval interval;
@@ -2982,14 +2975,14 @@ int Dbtup::checkTTL(Tablerec* regTabPtr,
         bool add_ret = date_add_interval(&dt, INTERVAL_SECOND,
             interval, nullptr);
         if (add_ret) {
-          g_eventLogger->warning("Zart, TTL column adds "
+          g_eventLogger->warning("TTL column adds "
               "interval overflowing");
           valid_future_dt = false;
         }
       }
       if (valid_future_dt) {
         /*
-         * Zart
+         * TTL related
          * Get current utc time
          */
         MYSQL_TIME curr_dt;
@@ -3011,17 +3004,18 @@ int Dbtup::checkTTL(Tablerec* regTabPtr,
         }
 
         /*
-         * Zart
+         * TTL related
          * Compare with TTL
          */
-#ifdef TTL_DEBUG
-        g_eventLogger->info("Zart, Get TTL "
-            "expired time: %u.%u.%u %u:%u:%u, "
-            "current time: %u.%u.%u %u:%u:%u",
-            dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second,
-            curr_dt.year, curr_dt.month, curr_dt.day, curr_dt.hour,
-            curr_dt.minute, curr_dt.second);
-#endif  // TTL_DEBUG
+        TTL_RONDB_TRACE(req_struct->fragPtrP->fragTableId,
+                        "Get TTL [%u + (%u) = %u], "
+                        "expired time: %u.%u.%u %u:%u:%u, "
+                        "current time: %u.%u.%u %u:%u:%u",
+                        regTabPtr->m_ttl_sec,
+                        req_struct->ttl_purge_window_size, ttl_sec,
+                        dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second,
+                        curr_dt.year, curr_dt.month, curr_dt.day, curr_dt.hour,
+                        curr_dt.minute, curr_dt.second);
         cmp_ret = my_time_compare(dt, curr_dt);
       } else {
         // future_dt overflows, we assume this row doesn't expire
@@ -3029,7 +3023,7 @@ int Dbtup::checkTTL(Tablerec* regTabPtr,
       }
     } else {
       /*
-       * Zart
+       * TTL related
        * TODO (Zhao)
        * remove the warning log here.
        */
@@ -3057,11 +3051,10 @@ void Dbtup::PrepareAccLockReq4RAL(void* scan_rec_ptr, Signal* signal) {
   ndbrequire(c_scanOpPool.getValidPtr(scan_op_PTR));
   ScanOp* scan_op = scan_op_PTR.p;
   ndbrequire(!(scan_op->m_bits & ScanOp::SCAN_LOCK));
-#ifdef TTL_DEBUG
-  g_eventLogger->info("Zart, Dbtup::PrepareAccLockReq4RAL, "
-                      "ScanOp::m_tableId: %u, scanAccPtr: %u",
-      scan_op->m_tableId, scan_op_PTR.i);
-#endif  // TTL_DEBUG
+  TTL_RONDB_TRACE(scan_op->m_tableId,
+                  "Dbtup::PrepareAccLockReq4RAL, "
+                  "ScanOp::m_tableId: %u, scanAccPtr: %u",
+                  scan_op->m_tableId, scan_op_PTR.i);
   FragrecordPtr fragPtr;
   fragPtr.i = scan_op->m_fragPtrI;
   ndbrequire(c_fragment_pool.getPtr(fragPtr));
@@ -3143,14 +3136,13 @@ int Dbtup::handleReadReq(
   }
 
   /*
-   * Zart
+   * TTL related
    * Here we check whether the row is expired
    */
   if (_regOperPtr->ttl_ignore == 1) {
-#ifdef TTL_DEBUG
-    g_eventLogger->info("Zart, (Read) Skip checking TTL since "
-                        "ttl ignore is set");
-#endif  // TTL_DEBUG
+    TTL_RONDB_TRACE(req_struct->fragPtrP->fragTableId,
+                    "(Read) Skip checking TTL since "
+                    "ttl ignore is set");
   }
 
   if (_regOperPtr->ttl_ignore == 0 &&
@@ -3158,9 +3150,8 @@ int Dbtup::handleReadReq(
     bool has_error = false;
     int err_no = 0;
     int cmp_ret = 0;
-#ifdef TTL_DEBUG
-    g_eventLogger->info("Zart, (READ) handleReadReq TTL check");
-#endif  // TTL_DEBUG
+    TTL_RONDB_TRACE(req_struct->fragPtrP->fragTableId,
+                    "(READ) handleReadReq TTL check");
     cmp_ret = checkTTL(regTabPtr, req_struct, &has_error, &err_no);
     if (!has_error) {
       if (_regOperPtr->ttl_only_expired == 0) {
@@ -3191,22 +3182,18 @@ int Dbtup::handleReadReq(
                       signal);
               }
               ttl_ignore_for_ral = c_acc->WhetherSkipTTL(signal);
-#ifdef TTL_DEBUG
-              g_eventLogger->info("Zart, Dbtup::handleReadReq() check whether needs "
-                  "to ignore TTL: %d", ttl_ignore_for_ral);
-#endif  // TTL_DEBUG
+              TTL_RONDB_TRACE(req_struct->fragPtrP->fragTableId,
+                              "Dbtup::handleReadReq() check whether needs "
+                              "to ignore TTL: %d", ttl_ignore_for_ral);
             } else {
-#ifdef TTL_DEBUG
-              g_eventLogger->info("Zart, Dbtup::handleReadReq() skip TTL "
-                  "checking for locking-scan on TTL "
-                  "table");
-#endif  // TTL_DEBUG
+              TTL_RONDB_TRACE(req_struct->fragPtrP->fragTableId,
+                              "Dbtup::handleReadReq() skip TTL "
+                              "checking for locking-scan on TTL "
+                              "table");
             }
           }
           if (!ttl_ignore_for_ral) {
-#ifdef TTL_DEBUG
-            g_eventLogger->info("Zart, (READ) TTL expired");
-#endif  // TTL_DEBUG
+            TTL_RONDB_TRACE(req_struct->fragPtrP->fragTableId, "(READ) TTL expired");
             terrorCode = 626;
             tupkeyErrorLab(req_struct);
             return -1;
@@ -3214,18 +3201,16 @@ int Dbtup::handleReadReq(
         }
       } else {
         if (cmp_ret > 0) {
-#ifdef TTL_DEBUG
-          g_eventLogger->info("Zart, (READ) TTL skip non-expired row "
-                              "since only_expired flag is set");
-#endif  // TTL_DEBUG
+          TTL_RONDB_TRACE(req_struct->fragPtrP->fragTableId,
+                          "(READ) TTL skip non-expired row "
+                          "since only_expired flag is set");
           terrorCode = 626;
           tupkeyErrorLab(req_struct);
           return -1;
         } else {
-#ifdef TTL_DEBUG
-          g_eventLogger->info("Zart, (READ) TTL return expired row "
-                              "since only_expired flag is set");
-#endif  // TTL_DEBUG
+          TTL_RONDB_TRACE(req_struct->fragPtrP->fragTableId,
+                          "(READ) TTL return expired row "
+                          "since only_expired flag is set");
         }
       }
     } else {
@@ -3316,7 +3301,7 @@ int Dbtup::handleUpdateReq(Signal* signal,
 
 #ifdef TTL_DEBUG
   /*
-   * Zart
+   * TTL related
    * Here we check whether the row is expired
    *
    * PRECONDITION:
@@ -3325,12 +3310,14 @@ int Dbtup::handleUpdateReq(Signal* signal,
    */
   if (operPtrP->original_op_type == ZWRITE &&
       is_ttl_table(regTabPtr)) {
-    g_eventLogger->info("Zart, (UPDATE) Skip checking TTL since "
-                        "the original operation is ZWRITE.");
+    TTL_RONDB_TRACE(req_struct->fragPtrP->fragTableId,
+                    "(UPDATE) Skip checking TTL since "
+                    "the original operation is ZWRITE.");
   }
   if (operPtrP->ttl_ignore == 1) {
-    g_eventLogger->info("Zart, (Update) Skip checking TTL since "
-                        "ttl ignore is set");
+    TTL_RONDB_TRACE(req_struct->fragPtrP->fragTableId,
+                    "(Update) Skip checking TTL since "
+                     "ttl ignore is set");
   }
 #endif  // TTL_DEBUG
   if (operPtrP->ttl_ignore == 0 &&
@@ -3339,43 +3326,38 @@ int Dbtup::handleUpdateReq(Signal* signal,
     bool has_error = false;
     int err_no = 0;
     int cmp_ret = 0;
-#ifdef TTL_DEBUG
-    g_eventLogger->info("Zart, (UPDATE) handleUpdateReq TTL check");
-#endif  // TTL_DEBUG
+    TTL_RONDB_TRACE(req_struct->fragPtrP->fragTableId,
+                    "(UPDATE) handleUpdateReq TTL check");
     cmp_ret = checkTTL(regTabPtr, req_struct, &has_error, &err_no);
     if (!has_error) {
       if (cmp_ret <= 0 && operPtrP->op_type != ZINSERT_TTL) {
         /*
-         * Zart
+         * TTL related
          * 1. Normal update on an already existing but expired row
          */
-#ifdef TTL_DEBUG
-        g_eventLogger->info("Zart, (UPDATE) TTL expired");
-#endif  // TTL_DEBUG
+        TTL_RONDB_TRACE(req_struct->fragPtrP->fragTableId, "(UPDATE) TTL expired");
         terrorCode = 626; // HA_ERR_KEY_NOT_FOUND
         tupkeyErrorLab(req_struct);
         return -1;
       } else if (cmp_ret > 0 && operPtrP->op_type == ZINSERT_TTL) {
         /*
-         * Zart
+         * TTL related
          * 2. Insert an already existing but non-expired row
          */
-#ifdef TTL_DEBUG
-        g_eventLogger->info("Zart, (UPDATE) ZINSERT_TIL but already "
-                            "existing row hasn't expired");
-#endif  // TTL_DEBUG
+        TTL_RONDB_TRACE(req_struct->fragPtrP->fragTableId,
+                        "(UPDATE) ZINSERT_TIL but already "
+                        "existing row hasn't expired");
         terrorCode = 630; // HA_ERR_FOUND_DUPP_KEY
         tupkeyErrorLab(req_struct);
         return -1;
       }
       if (cmp_ret <= 0 && operPtrP->op_type == ZINSERT_TTL) {
-#ifdef TTL_DEBUG
-        g_eventLogger->info("Zart, (UPDATE) ZINSERT_TTL on an duplicated "
-                            "expired row");
-#endif  // TTL_DEBUG
+        TTL_RONDB_TRACE(req_struct->fragPtrP->fragTableId,
+                        "(UPDATE) ZINSERT_TTL on an duplicated "
+                        "expired row");
       }
     } else {
-      g_eventLogger->warning("Zart, (UPDATE) Failed to read a TTL column");
+      g_eventLogger->warning("(UPDATE) Failed to read a TTL column");
       jam();
       ndbrequire(err_no < 0);
       terrorCode = Uint32(-err_no);
@@ -3385,8 +3367,9 @@ int Dbtup::handleUpdateReq(Signal* signal,
   }
 #ifdef TTL_DEBUG
   if (operPtrP->op_type == ZINSERT_TTL && !is_ttl_table(regTabPtr)) {
-    g_eventLogger->info("Zart, (UPDATE) ZINSERT_TTL on an duplicated "
-                        "expired row on non-primary table");
+    TTL_RONDB_TRACE(req_struct->fragPtrP->fragTableId,
+                    "(UPDATE) ZINSERT_TTL on an duplicated "
+                    "expired row on non-primary table");
   }
 #endif  // TTL_DEBUG
   Tuple_header *dst;
@@ -4567,14 +4550,13 @@ int Dbtup::handleDeleteReq(Signal* signal,
   }
 
   /*
-   * Zart
+   * TTL related
    * Here we check whether the row is expired
    */
   if (regOperPtr->ttl_ignore == 1) {
-#ifdef TTL_DEBUG
-    g_eventLogger->info("Zart, (Delete) Skip checking TTL since "
-                        "ttl ignore is set");
-#endif  // TTL_DEBUG
+    TTL_RONDB_TRACE(req_struct->fragPtrP->fragTableId,
+                    "(Delete) Skip checking TTL since "
+                    "ttl ignore is set");
   }
 
   if (regOperPtr->ttl_ignore == 0 &&
@@ -4582,19 +4564,16 @@ int Dbtup::handleDeleteReq(Signal* signal,
     bool has_error = false;
     int err_no = 0;
     int cmp_ret = 0;
-#ifdef TTL_DEBUG
-    g_eventLogger->info("Zart, (DELETE) handleDeleteReq TTL check");
-#endif  // TTL_DEBUG
+    TTL_RONDB_TRACE(req_struct->fragPtrP->fragTableId,
+                    "(DELETE) handleDeleteReq TTL check");
     cmp_ret = checkTTL(regTabPtr, req_struct, &has_error, &err_no);
     if (!has_error) {
       if (cmp_ret <= 0) {
         /*
-         * Zart
+         * TTL related
          * 1. Normal deletion on an already existing but expired row
          */
-#ifdef TTL_DEBUG
-        g_eventLogger->info("Zart, (DELETE) TTL expired");
-#endif  // TTL_DEBUG
+        TTL_RONDB_TRACE(req_struct->fragPtrP->fragTableId, "(DELETE) TTL expired");
         terrorCode = 626; // HA_ERR_KEY_NOT_FOUND
         tupkeyErrorLab(req_struct);
         return -1;
@@ -4610,8 +4589,9 @@ int Dbtup::handleDeleteReq(Signal* signal,
 
 #ifdef TTL_DEBUG
   if (!is_ttl_table(regTabPtr)) {
-    g_eventLogger->info("Zart, (DELETE) delete a row on non-primary table %u",
-                        req_struct->fragPtrP->fragTableId);
+    TTL_RONDB_TRACE(req_struct->fragPtrP->fragTableId,
+                    "(DELETE) delete a row on non-primary table %u",
+                    req_struct->fragPtrP->fragTableId);
   }
 #endif  // TTL_DEBUG
   Uint32 copy_bits = 0;
@@ -5088,8 +5068,7 @@ int Dbtup::interpreterStartLab(Signal *signal, KeyReqStruct *req_struct) {
   Uint32 op_type = regOperPtr->op_type;
   if (likely(((RtotalLen + 5) <= RattrinbufLen) &&
         (RattrinbufLen >= 5) &&
-        (RtotalLen + 5 < ZATTR_BUFFER_SIZE)))
-  {
+        (RtotalLen + 5 < ZATTR_BUFFER_SIZE))) {
     /* ---------------------------------------------------------------- */
     // We start by checking consistency. We must have the first five
     // words of the ATTRINFO to give us the length of the regions. The
@@ -5097,18 +5076,56 @@ int Dbtup::interpreterStartLab(Signal *signal, KeyReqStruct *req_struct) {
     // length and finally the total length must be within the limits.
     /* ---------------------------------------------------------------- */
 
+    Uint32 inputParamLen = 0;
+    if (unlikely(RinitReadLen > 0 &&
+        (cinBuffer[5] >> 16) == 0xFFFF)) {
+      inputParamLen = cinBuffer[5] & 0xFFFF;
+#ifdef TRACE_INTERPRETER
+      g_eventLogger->info("(%u) %u words for input parameters",
+        instance(), inputParamLen);
+#endif
+      if (inputParamLen > RinitReadLen ||
+          inputParamLen < 4 ||
+          inputParamLen > (1 + MAX_INPUT_PARAMS * 3)) {
+        jam();
+        if (inputParamLen > RinitReadLen ||
+            inputParamLen < 4)
+          terrorCode = ZINCONSISTENCY_INPUT_PARAM;
+        else
+          terrorCode = ZTOO_MUCH_INPUT_PARAM;
+        tupkeyErrorLab(req_struct);
+        return -1;
+      }
+      int ret = setInputParameters(req_struct,
+                                   &cinBuffer[5],
+                                   inputParamLen);
+      if (ret < 0) {
+        terrorCode = Uint32(-ret);
+        tupkeyErrorLab(req_struct);
+        return -1;
+      }
+      RinitReadLen -= inputParamLen;
+      RinstructionCounter += inputParamLen;
+    }
     if (likely(RinitReadLen > 0)) {
       if (likely(op_type == ZREAD)) {
         jamDebug();
         RinstructionCounter += RinitReadLen;
       } else {
         jamDebug();
+#ifdef TRACE_INTERPRETER
+        g_eventLogger->info("(%u) %u words for initial read",
+          instance(), RinitReadLen);
+#endif
         /* ---------------------------------------------------------------- */
         // The first step that can be taken in the interpreter is to read
         // data of the tuple before any updates have been applied.
         /* ---------------------------------------------------------------- */
-        TnoDataRW = readAttributes(req_struct, &cinBuffer[5], RinitReadLen,
-                                   &dst[0], dstLen);
+        TnoDataRW = readAttributes(req_struct,
+                                   &cinBuffer[5 + inputParamLen],
+                                   RinitReadLen,
+                                   &dst[0],
+                                   dstLen);
         if (TnoDataRW >= 0) {
           jamDebug();
           RattroutCounter = TnoDataRW;
@@ -5124,6 +5141,10 @@ int Dbtup::interpreterStartLab(Signal *signal, KeyReqStruct *req_struct) {
     }
     if (RexecRegionLen > 0) {
       jamDebug();
+#ifdef TRACE_INTERPRETER
+      g_eventLogger->info("(%u) %u words for interpreter",
+        instance(), RexecRegionLen);
+#endif
       /* ---------------------------------------------------------------- */
       // The next step is the actual interpreted execution. This executes
       // a register-based virtual machine which can read and write attributes
@@ -5177,6 +5198,10 @@ int Dbtup::interpreterStartLab(Signal *signal, KeyReqStruct *req_struct) {
       // We can also apply a set of updates without any conditions as part
       // of the interpreted execution.
       /* ---------------------------------------------------------------- */
+#ifdef TRACE_INTERPRETER
+      g_eventLogger->info("(%u) %u words for final update",
+        instance(), RfinalUpdateLen);
+#endif
       if (op_type == ZUPDATE || op_type == ZINSERT) {
         jamDebug();
         TnoDataRW= updateAttributes(req_struct,
@@ -5199,8 +5224,15 @@ int Dbtup::interpreterStartLab(Signal *signal, KeyReqStruct *req_struct) {
     }
     if (likely(RinitReadLen > 0)) {
       jamDebug();
-      TnoDataRW = readAttributes(req_struct, &cinBuffer[5], RinitReadLen,
-                                 &dst[0], dstLen);
+#ifdef TRACE_INTERPRETER
+      g_eventLogger->info("(%u) %u words for initial read after interpreter",
+        instance(), RinitReadLen);
+#endif
+      TnoDataRW = readAttributes(req_struct,
+                                 &cinBuffer[5 + inputParamLen],
+                                 RinitReadLen,
+                                 &dst[0],
+                                 dstLen);
       if (TnoDataRW >= 0) {
         jamDebug();
         RattroutCounter = TnoDataRW;
@@ -5213,6 +5245,10 @@ int Dbtup::interpreterStartLab(Signal *signal, KeyReqStruct *req_struct) {
     }
     if (RfinalRLen > 0) {
       jamDebug();
+#ifdef TRACE_INTERPRETER
+      g_eventLogger->info("(%u) %u words for final read",
+        instance(), RfinalRLen);
+#endif
       /* ---------------------------------------------------------------- */
       // The final action is that we can also read the tuple after it has
       // been updated.
@@ -7615,6 +7651,7 @@ int Dbtup::interpreterNextLab(Signal* signal,
             ret = binary_uint64_search_smaller(ordinal,
                                                &TheapMemoryChar[Toffset],
                                                TnumElems,
+                                               true,
                                                true);
             if (ret == RET_NULL || ((ret & 1) == 1)) {
               TregMemBuffer[TretElemsRegister] = NULL_INDICATOR;
@@ -7626,6 +7663,7 @@ int Dbtup::interpreterNextLab(Signal* signal,
             ret = binary_uint64_search_larger(ordinal,
                                               &TheapMemoryChar[Toffset],
                                               TnumElems,
+                                              true,
                                               true);
             if ((ret & 1) == 0) {
               TregMemBuffer[TretElemsRegister] = NULL_INDICATOR;
@@ -7676,6 +7714,7 @@ int Dbtup::interpreterNextLab(Signal* signal,
             ret = binary_uint32_search_smaller(ordinal,
                                                &TheapMemoryChar[Toffset],
                                                TnumElems,
+                                               true,
                                                true);
             if (ret == RET_NULL || ((ret & 1) == 1)) {
               TregMemBuffer[TretElemsRegister] = NULL_INDICATOR;
@@ -7687,6 +7726,7 @@ int Dbtup::interpreterNextLab(Signal* signal,
             ret = binary_uint32_search_larger(ordinal,
                                               &TheapMemoryChar[Toffset],
                                               TnumElems,
+                                              true,
                                               true);
             if ((ret & 1) == 0) {
               TregMemBuffer[TretElemsRegister] = NULL_INDICATOR;
@@ -7737,6 +7777,7 @@ int Dbtup::interpreterNextLab(Signal* signal,
             ret = binary_uint16_search_smaller(ordinal,
                                                &TheapMemoryChar[Toffset],
                                                TnumElems,
+                                               true,
                                                true);
             if (ret == RET_NULL || ((ret & 1) == 1)) {
               TregMemBuffer[TretElemsRegister] = NULL_INDICATOR;
@@ -7748,6 +7789,7 @@ int Dbtup::interpreterNextLab(Signal* signal,
             ret = binary_uint16_search_larger(ordinal,
                                               &TheapMemoryChar[Toffset],
                                               TnumElems,
+                                              true,
                                               true);
             if ((ret & 1) == 0) {
               TregMemBuffer[TretElemsRegister] = NULL_INDICATOR;
@@ -7807,6 +7849,7 @@ int Dbtup::interpreterNextLab(Signal* signal,
                                             &TheapMemoryChar[Toffset],
                                             TnumElems,
                                             TnumberSize,
+                                            true,
                                             true);
             if (ret == RET_NULL || ((ret & 1) == 1)) {
               TregMemBuffer[TretElemsRegister] = NULL_INDICATOR;
@@ -7819,6 +7862,7 @@ int Dbtup::interpreterNextLab(Signal* signal,
                                            &TheapMemoryChar[Toffset],
                                            TnumElems,
                                            TnumberSize,
+                                           true,
                                            true);
             if ((ret & 1) == 0) {
               TregMemBuffer[TretElemsRegister] = NULL_INDICATOR;
@@ -7895,6 +7939,7 @@ int Dbtup::interpreterNextLab(Signal* signal,
             ret = binary_uint64_search_smaller(ordinal,
                                                &TheapMemoryChar[Toffset],
                                                TnumElems,
+                                               false,
                                                false);
             break;
           }
@@ -7902,6 +7947,7 @@ int Dbtup::interpreterNextLab(Signal* signal,
             ret = binary_uint64_search_larger(ordinal,
                                               &TheapMemoryChar[Toffset],
                                               TnumElems,
+                                              false,
                                               false);
             break;
           }
@@ -7909,14 +7955,16 @@ int Dbtup::interpreterNextLab(Signal* signal,
             ret = binary_uint64_search_smaller(ordinal,
                                                &TheapMemoryChar[Toffset],
                                                TnumElems,
-                                               true);
+                                               true,
+                                               false);
             break;
           }
           case LARGER_EQUAL_MATCH: {
             ret = binary_uint64_search_larger(ordinal,
                                               &TheapMemoryChar[Toffset],
                                               TnumElems,
-                                              true);
+                                              true,
+                                              false);
             break;
           }
           default: {
@@ -7978,6 +8026,7 @@ int Dbtup::interpreterNextLab(Signal* signal,
             ret = binary_uint32_search_smaller(ordinal,
                                                &TheapMemoryChar[Toffset],
                                                TnumElems,
+                                               false,
                                                false);
             break;
           }
@@ -7985,6 +8034,7 @@ int Dbtup::interpreterNextLab(Signal* signal,
             ret = binary_uint32_search_larger(ordinal,
                                               &TheapMemoryChar[Toffset],
                                               TnumElems,
+                                              false,
                                               false);
             break;
           }
@@ -7992,14 +8042,16 @@ int Dbtup::interpreterNextLab(Signal* signal,
             ret = binary_uint32_search_smaller(ordinal,
                                                &TheapMemoryChar[Toffset],
                                                TnumElems,
-                                               true);
+                                               true,
+                                               false);
             break;
           }
           case LARGER_EQUAL_MATCH: {
             ret = binary_uint32_search_larger(ordinal,
                                               &TheapMemoryChar[Toffset],
                                               TnumElems,
-                                              true);
+                                              true,
+                                              false);
             break;
           }
           default: {
@@ -8058,6 +8110,7 @@ int Dbtup::interpreterNextLab(Signal* signal,
             ret = binary_uint16_search_smaller(ordinal,
                                                &TheapMemoryChar[Toffset],
                                                TnumElems,
+                                               false,
                                                false);
             break;
           }
@@ -8065,6 +8118,7 @@ int Dbtup::interpreterNextLab(Signal* signal,
             ret = binary_uint16_search_larger(ordinal,
                                               &TheapMemoryChar[Toffset],
                                               TnumElems,
+                                              false,
                                               false);
             break;
           }
@@ -8072,14 +8126,16 @@ int Dbtup::interpreterNextLab(Signal* signal,
             ret = binary_uint16_search_smaller(ordinal,
                                                &TheapMemoryChar[Toffset],
                                                TnumElems,
-                                               true);
+                                               true,
+                                               false);
             break;
           }
           case LARGER_EQUAL_MATCH: {
             ret = binary_uint16_search_larger(ordinal,
                                               &TheapMemoryChar[Toffset],
                                               TnumElems,
-                                              true);
+                                              true,
+                                              false);
             break;
           }
           default: {
@@ -8159,6 +8215,7 @@ int Dbtup::interpreterNextLab(Signal* signal,
                                             &TheapMemoryChar[Toffset],
                                             TnumElems,
                                             TnumberSize,
+                                            false,
                                             false);
             break;
           }
@@ -8167,6 +8224,7 @@ int Dbtup::interpreterNextLab(Signal* signal,
                                            &TheapMemoryChar[Toffset],
                                            TnumElems,
                                            TnumberSize,
+                                           false,
                                            false);
             break;
           }
@@ -8175,7 +8233,8 @@ int Dbtup::interpreterNextLab(Signal* signal,
                                             &TheapMemoryChar[Toffset],
                                             TnumElems,
                                             TnumberSize,
-                                            true);
+                                            true,
+                                            false);
             break;
           }
           case LARGER_EQUAL_MATCH: {
@@ -8183,7 +8242,8 @@ int Dbtup::interpreterNextLab(Signal* signal,
                                            &TheapMemoryChar[Toffset],
                                            TnumElems,
                                            TnumberSize,
-                                           true);
+                                           true,
+                                           false);
             break;
           }
           default: {

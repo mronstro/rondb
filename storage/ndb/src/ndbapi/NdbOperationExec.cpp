@@ -131,6 +131,8 @@ void NdbOperation::setRequestInfoTCKEYREQ(bool lastFlag, bool longSignal) {
   TcKeyReq::setStartFlag(requestInfo, theStartIndicator);
   TcKeyReq::setDirtyFlag(requestInfo, theDirtyIndicator);
   TcKeyReq::setOperationType(requestInfo, theOperationType);
+  TcKeyReq::setBatchSafeFlag(requestInfo, theBatchSafeFlag);
+  TcKeyReq::setBatchUnsafeFlag(requestInfo, theBatchUnsafeFlag);
 
   /**
    * These two operations are not set since init to 0 makes them true,
@@ -155,8 +157,7 @@ void NdbOperation::setRequestInfoTCKEYREQ(bool lastFlag, bool longSignal) {
       theReadCommittedBaseIndicator & static_cast<Uint8>(longSignal));
   TcKeyReq::setNoWaitFlag(requestInfo, (m_flags & OF_NOWAIT) != 0);
   /*
-   * Zart
-   * TTL
+   * TTL related
    */
   TcKeyReq::setTTLIgnoreFlag(requestInfo,
                           (m_flags & OF_TTL_IGNORE) != 0);
@@ -945,6 +946,43 @@ int NdbOperation::buildSignalsNdbRecord(Uint32 aTC_ConnectPtr, Uint64 aTransId,
   }
 
   OperationType tOpType = theOperationType;
+
+  /* Input parameters (part of initial read signal words) */
+  if (m_inputParams != nullptr) {
+    if (!code) {
+      // Error
+      setErrorCodeAbort(4356);
+      return -1;
+    }
+    Uint32 len = 1 + 3 * m_numInputParams;
+    AttributeHeader ah(0xFFFF, len);
+    res = insertATTRINFOHdr_NdbRecord(Uint32(0xFFFF), len);
+    if (res) return res;
+    for (Uint32 i = 0; i < m_numInputParams; i++) {
+      const NdbDictionary::Column *inputParamCol = m_inputParams[i].column;
+      const void *pvalue = m_inputParams[i].value;
+      Uint32 attrId = inputParamCol->getAttrId();
+
+      if (attrId >= AttributeHeader::INTERPRETER_INPUT_FIRST &&
+          attrId <= AttributeHeader::INTERPRETER_INPUT_FIRST + 15) {
+        if (inputParamCol->getType() != NdbDictionary::Column::Unsigned ||
+            inputParamCol->getSize() != 8 ||
+            inputParamCol->getSizeInBytes() != 8) {
+          // Error
+          setErrorCodeAbort(4352);
+          return -1;
+        }
+        res = insertATTRINFOHdr_NdbRecord(attrId, 8);
+        if (res) return res;
+        res = insertATTRINFOData_NdbRecord((const char*)pvalue, 8);
+        if (res) return res;
+      } else {
+        // Error
+        setErrorCodeAbort(4353);
+        return -1;
+      }
+    }
+  }
 
   /* Initial read signal words */
   if (tOpType == ReadRequest || tOpType == ReadExclusive ||

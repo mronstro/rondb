@@ -18,6 +18,11 @@
  */
 
 /*
+ * NOTE:
+ * -----
+ * When updating the default setting of a config variable, ensure that you also
+ * set the same default in init_defaults.go in the test_go directory.
+ *
  * These class definitions for configuration are wrapped in macros so they can
  * be used for several things:
  * 1) Define the class
@@ -30,6 +35,8 @@
  * CLASS(Name, Contents) for class definition
  * CM(Datatype, Variablename, JSONKeyname, init expression, docstring) for data
  *     member included in parsing and printing
+ * ALIAS(ActualVariableName, ActualJSONKeyname, AliasJSONKeyname) for aliases,
+ *     e.g. for backward compatibility
  * PROBLEM(condition, message) for validation
  * CLASSDEFS(Contents) for all other class definition content
  * VECTOR(Datatype) to indicate that a vector of this datatype will be used
@@ -64,13 +71,15 @@ CLASS
  CM(Uint32, reqBufferSize, ReqBufferSize, 1024 * 1024, "")
  CM(Uint32, respBufferSize, RespBufferSize, 5 * 1024 * 1024, "")
  CM(Uint32, preAllocatedBuffers, PreAllocatedBuffers, 32, "")
- CM(Uint32, batchMaxSize, BatchMaxSize, 256,
+ CM(Uint32, batchMaxSize, BatchMaxSize, 128,
     "Maximum number of requests contained in a batch request.")
  CM(Uint32, operationIdMaxSize, OperationIDMaxSize, 256,
     "Maximum length of operation ID strings.")
  //todo warn (preallocatedbuffers == 0, "preAllocatedBuffers should be > 0")
  PROBLEM(reqBufferSize < 256, "ReqBufferSize should be >= 256")
  PROBLEM(respBufferSize < 256, "RespBufferSize should be >= 256")
+ PROBLEM(batchMaxSize > 512, "BatchMaxSize should be <= 512")
+ PROBLEM(batchMaxSize < 50, "BatchMaxSize should be >= 50")
 )
 
 CLASS
@@ -78,19 +87,23 @@ CLASS
  CM(bool, enable, Enable, true, "Whether to enable the REST server.")
  CM(bool, useCompression, UseCompression, true, "Whether to send response gzip compressed")
  CM(std::string, serverIP, ServerIP, "0.0.0.0", "The IP address to listen on.")
- CM(Uint16, serverPort, ServerPort, 5406, "TCP port to listen on.")
- CM(unsigned, numThreads, NumThreads, 16,
+ CM(Uint16, serverPort, ServerPort, 4406, "TCP port to listen on.")
+ CM(unsigned, numThreads, NumThreads, 64,
     "Number of threads handling REST requests.")
- CM(bool, healthRequiresAPIKey, HealthRequiresAPIKey, false,
-    "Set to true to authenticate the health endpoint. Only applies if"
-    " .APIKey.UseHopsworksAPIKeys is also set to true.")
- CM(bool, pingRequiresAPIKey, PingRequiresAPIKey, false,
-    "Set to true to authenticate the ping endpoint. Only applies if"
-    " .APIKey.UseHopsworksAPIKeys is also set to true.")
+ CM(bool, healthRequiresAuth, HealthRequiresAuth, false,
+    "Set to true to require authentication for the health endpoint.")
+ ALIAS(healthRequiresAuth, HealthRequiresAuth, HealthRequiresAPIKey)
+ CM(bool, pingRequiresAuth, PingRequiresAuth, false,
+    "Set to true to require authentication for the ping endpoint.")
+ ALIAS(pingRequiresAuth, PingRequiresAuth, PingRequiresAPIKey)
+ CM(bool, useSingleTransaction, UseSingleTransaction, true,
+    "Set to true to use single transaction for entire batch.")
  PROBLEM(!enable, "REST must be enabled")
  PROBLEM(serverIP.empty(), "REST server IP cannot be empty")
  PROBLEM(serverPort == 0, "REST server port cannot be zero")
- PROBLEM(numThreads == 0, "Number of REST threads cannot be zero")
+ PROBLEM(numThreads < RDRS_MIN_NUM_THREADS,
+         "Number of REST threads cannot be less than "
+         MACRO_TO_STRING_CONSTANT(RDRS_MIN_NUM_THREADS))
  PROBLEM(numThreads > 991, "Number of REST threads too high")
 )
 
@@ -170,7 +183,7 @@ CLASS
 (GRPC,
  CM(bool, enable, Enable, false, "Whether to enable the gRPC server.")
  CM(std::string, serverIP, ServerIP, "0.0.0.0", "The IP address to listen on.")
- CM(Uint16, serverPort, ServerPort, 4406, "TCP port to listen on.")
+ CM(Uint16, serverPort, ServerPort, 5406, "TCP port to listen on.")
  PROBLEM(enable, "gRPC not supported")
 )
 
@@ -278,8 +291,9 @@ CLASS
 (TLS,
  CM(bool, enableTLS, EnableTLS, false,
     "Whether to enable TLS for the REST server")
- CM(bool, requireAndVerifyClientCert, RequireAndVerifyClientCert, false,
+ CM(bool, requireClientCert, RequireClientCert, false,
     "Whether to require REST clients to provide a client certificate")
+ ALIAS(requireClientCert, RequireClientCert, RequireAndVerifyClientCert)
  CM(std::string, certificateFile, CertificateFile, "",
     "Path to the server certificate file")
  CM(std::string, privateKeyFile, PrivateKeyFile, "",
@@ -292,13 +306,14 @@ CLASS
          privateKeyFile.empty()),
          "cannot enable TLS if `CertificateFile` or `PrivateKeyFile` is"
          " not set")
- PROBLEM(!enableTLS && requireAndVerifyClientCert,
+ PROBLEM(!enableTLS && requireClientCert,
          "cannot require client certificates if TLS is not enabled")
 )
 
 CLASS
 (APIKey,
- CM(bool, useHopsworksAPIKeys, UseHopsworksAPIKeys, true, "")
+ CM(bool, useHopsworksAPIKeys, UseHopsworksAPIKeys, true,
+    "Whether to allow authentication via Hopsworks API keys")
  CM(Uint32, cacheRefreshIntervalMS, CacheRefreshIntervalMS, 10000, "")
  CM(Uint32, cacheUnusedEntriesEvictionMS, CacheUnusedEntriesEvictionMS, 60000,
     "")
@@ -318,8 +333,32 @@ CLASS
 
 CLASS
 (Security,
+ CM(bool, insecureAllowAll, InsecureAllowAll, false,
+    "WARNING, INSECURE! Authorize everyone to do everything, even"
+    " without authentication")
  CM(TLS, tls, TLS, TLS(), "")
  CM(APIKey, apiKey, APIKey, APIKey(), "")
+ PROBLEM(insecureAllowAll && apiKey.useHopsworksAPIKeys,
+         "When .Security.InsecureAllowAll is set,"
+         " .Security.APIKey.UseHopsworksAPIKeys must be turned off")
+ PROBLEM(!insecureAllowAll && !apiKey.useHopsworksAPIKeys,
+         "When all authentication methods are turned off,"
+         " .Security.InsecureAllowAll must be set. (The only authentication"
+         " method supported in this version is"
+         " .Security.APIKey.UseHopsworksAPIKeys)")
+)
+
+CLASS
+(FeatureStoreMetadataCache,
+ CM(Uint32, cacheUnusedEntriesEvictionMS, CacheUnusedEntriesEvictionMS, 1800000,
+    "") // 30 min
+ PROBLEM(cacheUnusedEntriesEvictionMS <= 0,
+         "cache unused entries eviction must be greater than 0")
+)
+
+CLASS
+(FeatureStore,
+ CM(FeatureStoreMetadataCache, featureStoreMetadataCache, FeatureStoreMetadataCache, FeatureStoreMetadataCache(), "")
 )
 
 CLASS
@@ -390,10 +429,17 @@ CLASS
     " metadata. It has the same schema as .RonDB. If it is not present in the"
     " config file, then it will be set to .RonDB")
  CM(Security, security, Security, Security(), "")
+ CM(FeatureStore, featureStore, FeatureStore, FeatureStore(), "")
  CM(LogConfig, log, Log, LogConfig(), "")
  CM(Testing, testing, Testing, Testing(),
     "Connetivity necessary for testing. rdrs2 will validate but not use these"
     " settings.")
+ PROBLEM(security.insecureAllowAll && rest.healthRequiresAuth,
+         "Combining .Security.InsecureAllowAll and"
+         " .REST.HealthRequiresAuth is not allowed")
+ PROBLEM(security.insecureAllowAll && rest.pingRequiresAuth,
+         "Combining .Security.InsecureAllowAll and"
+         " .REST.PingRequiresAuth is not allowed")
  CLASSDEFS
  (
   static AllConfigs get_all();

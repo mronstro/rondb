@@ -683,21 +683,21 @@ int runOneNoCommitEarlyError(NDBT_Context* ctx,
 int runNoCommitEarlyError(NDBT_Context* ctx, NDBT_Step* step){
   if (runOneNoCommitEarlyError(ctx, step, 8032, 233) != NDBT_OK)
     return NDBT_FAILED;
-  if (runOneNoCommitEarlyError(ctx, step, 8120, 202) != NDBT_OK)
+  if (runOneNoCommitEarlyError(ctx, step, 8300, 202) != NDBT_OK)
     return NDBT_FAILED;
-  if (runOneNoCommitEarlyError(ctx, step, 8121, 202) != NDBT_OK)
+  if (runOneNoCommitEarlyError(ctx, step, 8301, 202) != NDBT_OK)
     return NDBT_FAILED;
-  if (runOneNoCommitEarlyError(ctx, step, 8122, 282) != NDBT_OK)
+  if (runOneNoCommitEarlyError(ctx, step, 8302, 282) != NDBT_OK)
     return NDBT_FAILED;
-  if (runOneNoCommitEarlyError(ctx, step, 8123, 209) != NDBT_OK)
+  if (runOneNoCommitEarlyError(ctx, step, 8303, 209) != NDBT_OK)
     return NDBT_FAILED;
-  if (runOneNoCommitEarlyError(ctx, step, 8124, 237) != NDBT_OK)
+  if (runOneNoCommitEarlyError(ctx, step, 8304, 237) != NDBT_OK)
     return NDBT_FAILED;
-  if (runOneNoCommitEarlyError(ctx, step, 8126, 209) != NDBT_OK)
+  if (runOneNoCommitEarlyError(ctx, step, 8305, 209) != NDBT_OK)
     return NDBT_FAILED;
-  if (runOneNoCommitEarlyError(ctx, step, 8127, 275) != NDBT_OK)
+  if (runOneNoCommitEarlyError(ctx, step, 8306, 275) != NDBT_OK)
     return NDBT_FAILED;
-  if (runOneNoCommitEarlyError(ctx, step, 8128, 241) != NDBT_OK)
+  if (runOneNoCommitEarlyError(ctx, step, 8307, 241) != NDBT_OK)
     return NDBT_FAILED;
   return NDBT_OK;
 }
@@ -3771,7 +3771,7 @@ int testAbortRace(NDBT_Context *ctx, NDBT_Step *step) {
  * - performs a local checkpoint.
  * - fills the table with #records given in the test context.
  * - performs another local checkpoint. With the pLCP, only the
- *    the records inserted into the context's table is expected to
+ *    records inserted into the context's table is expected to
  *    appear in the LCP-statistics calculated by the test.
  * - Checks the LCP'd records.
  */
@@ -3779,12 +3779,13 @@ int runCheckLCPStats(NDBT_Context *ctx, NDBT_Step *step) {
   NdbRestarter restarter;
   Uint32 master = restarter.getMasterNodeId();
 
-  // Perform an LCP and wait it to start and finish
-  int dump_req[] = {DumpStateOrd::DihStartLcpImmediately};
-  CHECK3(restarter.dumpStateOneNode(master, dump_req, 1) == 0);
   int filter[] = {15, NDB_MGM_EVENT_CATEGORY_CHECKPOINT, 0};
   NdbLogEventHandle handle =
       ndb_mgm_create_logevent_handle(restarter.handle, filter);
+
+  // Perform an LCP and wait it to start and finish
+  int dump_req[] = {DumpStateOrd::DihStartLcpImmediately};
+  CHECK3(restarter.dumpStateOneNode(master, dump_req, 1) == 0);
 
   struct ndb_logevent event;
   while (ndb_logevent_get_next(handle, &event, 0) >= 0 &&

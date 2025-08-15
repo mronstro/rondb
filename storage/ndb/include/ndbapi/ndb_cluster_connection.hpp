@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2004, 2024, Oracle and/or its affiliates.
-   Copyright (c) 2023, 2023, Hopsworks and/or its affiliates.
+   Copyright (c) 2023, 2025, Hopsworks and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -39,7 +39,7 @@ class Ndb_cluster_connection_node_iter {
     cur_pos = pos;
   }
   void init_get_next_node() {
-    start_state = 0;
+    start_index = 0;
     start_state = cur_pos;
   }
   void reset_state() {
@@ -453,6 +453,7 @@ class Ndb_cluster_connection {
    * @return #nodes connected, or -1 on error
    */
   int wait_until_ready(const int *nodes, int cnt, int timeout);
+  int db_nodes_all_alive();
 #endif
 
  private:

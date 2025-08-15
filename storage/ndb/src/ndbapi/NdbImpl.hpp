@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2003, 2024, Oracle and/or its affiliates.
-   Copyright (c) 2021, 2024, Hopsworks and/or its affiliates.
+   Copyright (c) 2021, 2025, Hopsworks and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -193,6 +193,7 @@ class NdbImpl : public trp_client {
 
   // 1 indicates to release all connections to node
   Uint32 the_release_ind[MAX_NDB_NODES];
+  Uint16 m_node_hint_count[MAX_NDB_NODES];
 
   NdbWaiter theWaiter;
 
@@ -230,6 +231,12 @@ class NdbImpl : public trp_client {
   }
 
   Uint32 get_waitfor_timeout() const {
+    DBUG_EXECUTE_IF("ndb_reduced_api_protocol_timeout", {
+      // Value > 1000 millis as check_send_timeout() has coarse
+      // resolution optimisation
+      DBUG_PRINT("info", ("Reducing timeout base to 2000 millis"));
+      return 2000;
+    });
     return m_ndb_cluster_connection.m_ndbapiconfig.m_waitfor_timeout;
   }
   const NdbApiConfig &get_ndbapi_config_parameters() const {

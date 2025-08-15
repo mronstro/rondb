@@ -27,7 +27,7 @@ RUN --mount=type=cache,target=/var/cache/apt,id=ubuntu22-apt-$TARGETPLATFORM \
     && apt-get install -y wget tar gzip vim \
     libaio1 libaio-dev \
     libncurses5 libnuma-dev \
-    bc default-jdk maven \
+    bc default-jdk maven libcurl4-openssl-dev \
     sudo iproute2 dnsutils
     # Java & Maven are required by YCSB
     # bc is required by dbt2
@@ -143,5 +143,5 @@ RUN chmod 777 -R $RONDB_DATA_DIR \
 RUN echo "PS1='${debian_chroot:+(\$debian_chroot)}\h:\w\$ '" >> /etc/bash.bashrc
 
 ENTRYPOINT ["./docker/rondb_standalone/entrypoints/main.sh"]
-EXPOSE 3306 33060 11860 1186 4406 5406
+EXPOSE 3306 33060 11860 1186 4406 5406 6379
 CMD ["mysqld"]

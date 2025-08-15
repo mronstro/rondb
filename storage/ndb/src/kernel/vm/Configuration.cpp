@@ -258,6 +258,26 @@ void Configuration::fetch_configuration(
   iter.get(CFG_TCP_ONLY_IPV4, &use_only_ipv4);
   globalData.theUseOnlyIPv4Flag = use_only_ipv4;
 
+  Uint32 use_tc_in_same_rr_group = 0;
+  iter.get(CFG_DB_USE_TC_IN_RR_GROUP, &use_tc_in_same_rr_group);
+  globalData.theUseTcInSameRRGroup = use_tc_in_same_rr_group;
+
+  Uint32 max_rr_group_size = DEF_MAX_RR_GROUP_SIZE;
+  iter.get(CFG_DB_MAX_RR_GROUP_SIZE, &max_rr_group_size);
+  globalData.theMaxRRGroupSize = max_rr_group_size;
+
+  Uint32 max_send_delay = 0;
+  iter.get(CFG_DB_MAX_SEND_DELAY, &max_send_delay);
+  globalData.theMaxSendDelay = max_send_delay;
+
+  Uint32 num_lqhkeyreq_counts = NUM_LQHKEYREQ_COUNTS;
+  iter.get(CFG_DB_NUM_LQHKEYREQ_COUNTS, &num_lqhkeyreq_counts);
+  globalData.theNumLqhKeyReqCounts = num_lqhkeyreq_counts;
+
+  Uint32 num_scan_fragreq_counts = NUM_SCAN_FRAGREQ_COUNTS;
+  iter.get(CFG_DB_NUM_SCAN_FRAGREQ_COUNTS, &num_scan_fragreq_counts);
+  globalData.theNumScanFragReqCounts = num_scan_fragreq_counts;
+
   const char * pidfile_dir;
   if(iter.get(CFG_NODE_PIDFILE_DIR, &pidfile_dir) == 0)
   {
@@ -343,6 +363,42 @@ Configuration::get_total_memory(const ndb_mgm_configuration_iterator *p,
     total_memory_set = true;
     return total_memory_size;
   }
+}
+
+void
+Configuration::set_location_domain_id() {
+  const char * msg = "Invalid configuration fetched";
+  char buf[255];
+  ndb_mgm_configuration_iterator * p = m_clusterConfigIter;
+  g_eventLogger->info("Set LocationDomainId's");
+
+  Uint32 max_location_domain_id = 0;
+  for (ndb_mgm_first(p); ndb_mgm_valid(p); ndb_mgm_next(p)) {
+    Uint32 nodeId;
+    Uint32 location_domain_id = 0;
+    if (ndb_mgm_get_int_parameter(p, CFG_NODE_ID, &nodeId)) {
+      ERROR_SET(fatal, NDBD_EXIT_INVALID_CONFIG, msg,
+                "Node data (Id) missing");
+    }
+    if(nodeId > MAX_NODES || nodeId == 0) {
+      BaseString::snprintf(buf, sizeof(buf),
+	       "Invalid node id: %d", nodeId);
+      ERROR_SET(fatal, NDBD_EXIT_INVALID_CONFIG, msg, buf);
+    }
+    if (ndb_mgm_get_int_parameter(p,
+                                  CFG_LOCATION_DOMAIN_ID,
+                                  &location_domain_id)) {
+      location_domain_id = 0;
+    }
+    if (location_domain_id > 16) {
+      ERROR_SET(fatal, NDBD_EXIT_INVALID_CONFIG, msg,
+                "LocationDomainId > 16");
+    }
+    globalData.theLocationDomainId[nodeId] = location_domain_id;
+    max_location_domain_id =
+      std::max(max_location_domain_id, location_domain_id);
+  }
+  globalData.theMaxLocationDomainId = max_location_domain_id;
 }
 
 void
@@ -947,7 +1003,8 @@ Configuration::get_and_set_redo_buffer(const ndb_mgm_configuration_iterator *p)
     Uint32 num_ldm_threads = globalData.ndbMtLqhWorkers;
     redo_buffer64 = Uint64(num_ldm_threads) * Uint64(32) * MBYTE64;
     redo_buffer64 /= Uint64(num_log_parts);
-    redo_buffer64 = MIN(redo_buffer64, Uint64(128) * MBYTE64);
+    /* Set the min to be 64 MB per log part, should be more than sufficient */
+    redo_buffer64 = MIN(redo_buffer64, Uint64(64) * MBYTE64);
   }
   globalData.theRedoBuffer = redo_buffer64;
   Uint64 ret_size = redo_buffer64 * Uint64(num_log_parts);
@@ -1700,7 +1757,8 @@ Configuration::setupConfiguration()
                                  num_cpus,
                                  globalData.ndbRRGroups,
                                  use_tc_threads,
-                                 use_ldm_threads);
+                                 use_ldm_threads,
+                                 globalData.theMaxRRGroupSize);
     }
     else
     {
@@ -1865,12 +1923,19 @@ Configuration::setupConfiguration()
        * ndbRRGroups haven't been set yet, means we didn't use
        * do_parse_auto. Calculate it here.
        */
-      globalData.ndbRRGroups = Ndb_GetRRGroups(globalData.ndbMtQueryWorkers);
+      globalData.ndbRRGroups = Ndb_GetRRGroups(globalData.ndbMtQueryWorkers,
+                                               globalData.theMaxRRGroupSize);
     }
   } while (0);
-
   calcSizeAlt(cf);
   set_not_active_nodes();
+  set_location_domain_id();
+  Uint32 tot_num_threads = get_num_threads() + globalData.ndbMtSendThreads;
+  if (tot_num_threads > 32 &&
+      globalData.theMaxSendDelay == 0) {
+    /* Change default of MaxSendDelay in large data nodes to 200 us */
+    globalData.theMaxSendDelay = 200;
+  }
   DBUG_VOID_RETURN;
 }
 

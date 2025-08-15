@@ -4043,9 +4043,13 @@ int MgmtSrvr::alloc_node_id_req(NodeId free_node_id,
           if (!getNodeInfo(nodeId).is_confirmed()) nodeId = 0;
           if (first_attempt && (ref->errorCode != AllocNodeIdRef::NotMaster)) {
             first_attempt = false;
+            const char *reason =
+                (ref->errorCode == AllocNodeIdRef::Busy
+                     ? "System busy with another nodeid allocation"
+                     : "Node id not yet ready for use");
             g_eventLogger->info(
-                "Alloc node id %u rejected with error code %u, will retry",
-                free_node_id, ref->errorCode);
+                "Alloc node id %u rejected due to %s (%u), will retry",
+                free_node_id, reason, ref->errorCode);
           }
           /* sleep for a while before retrying */
           ss.unlock();
@@ -4652,6 +4656,12 @@ bool MgmtSrvr::alloc_node_id_impl(NodeId &nodeid, enum ndb_mgm_node_type type,
       if (error_code == 0) {
         const char *alias, *str = nullptr;
         alias = ndb_mgm_get_node_type_alias_string(type, &str);
+        /*
+         * WARNING:
+         * MySQL server uses this specific error message to determine
+         * whether it should terminate during startup.
+         * DO NOT modify or remove this error message.
+         */
         error_string.appfmt("No free node id found for %s(%s).", alias, str);
       }
     }

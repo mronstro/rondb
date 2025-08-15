@@ -2665,8 +2665,7 @@ void Dbdict::initialiseTableRecord(TableRecordPtr tablePtr, Uint32 tableId) {
   tablePtr.p->indexStatBgRequest = 0;
   tablePtr.p->m_obj_ptr_i = RNIL;
   /*
-   * Zart
-   * TTL
+   * TTL related
    */
   tablePtr.p->ttlSec = RNIL;
   tablePtr.p->ttlColumnNo = RNIL;
@@ -2939,16 +2938,6 @@ void Dbdict::execSTTOR(Signal *signal) {
     indexStatBg_sendContinueB(signal);
     break;
   }
-  case 8:
-  {
-    D("Phase 8 in DBDICT reached");
-    break;
-  }
-  case 103:
-  {
-    D("Phase 103 in DBDICT reached");
-    break;
-  }
   default:
   {
     ndbabort();
@@ -2969,10 +2958,8 @@ void Dbdict::sendSTTORRY(Signal *signal) {
   signal->theData[7] = 5;
   signal->theData[8] = 6;
   signal->theData[9] = 7; /* start index stat bg loop */
-  signal->theData[10] = 8;
-  signal->theData[11] = 103;
-  signal->theData[12] = ZNOMOREPHASES;
-  sendSignal(NDBCNTR_REF, GSN_STTORRY, signal, 13, JBB);
+  signal->theData[10] = ZNOMOREPHASES;
+  sendSignal(NDBCNTR_REF, GSN_STTORRY, signal, 11, JBB);
 }
 
 /* ---------------------------------------------------------------- */
@@ -6067,19 +6054,15 @@ void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
   tablePtr.p->ttlSec = c_tableDesc.TTLSec;
   tablePtr.p->ttlColumnNo = c_tableDesc.TTLColumnNo;
 
-#ifdef TTL_DEBUG
-  if (NEED_PRINT(tablePtr.p->tableId)) {
-    g_eventLogger->info("Zart, [DICT]s< parsed c_tableDesc , table_id: %u, "
-                        "TTL sec: %u, TTL column no: %u",
-                       tablePtr.p->tableId,
-                       c_tableDesc.TTLSec,
-                       c_tableDesc.TTLColumnNo);
-    g_eventLogger->info("Zart, [DICT]GEN TableRecord: table_id: %u, "
-                        "TTL sec: %u, TTL column no: %u",
-                       tablePtr.p->tableId, tablePtr.p->ttlSec,
-                       tablePtr.p->ttlColumnNo);
-  }
-#endif  // TTL_DEBUG
+  g_eventLogger->info("[DICT]s< parsed c_tableDesc , table_id: %u, "
+                      "TTL sec: %u, TTL column no: %u",
+                      tablePtr.p->tableId,
+                      c_tableDesc.TTLSec,
+                      c_tableDesc.TTLColumnNo);
+  g_eventLogger->info("[DICT]GEN TableRecord: table_id: %u, "
+                      "TTL sec: %u, TTL column no: %u",
+                      tablePtr.p->tableId, tablePtr.p->ttlSec,
+                      tablePtr.p->ttlColumnNo);
 
   handleTabInfo(it, parseP, c_tableDesc);
 
@@ -6422,11 +6405,9 @@ void Dbdict::handleTabInfo(SimpleProperties::Reader &it,
                  == DictTabInfo::ExtTimestamp2 ||
                  AttributeDescriptor::getType(attrPtr.p->attributeDescriptor)
                  == DictTabInfo::ExtDatetime2);
-#ifdef TTL_DEBUG
-      g_eventLogger->info("Zart, [DICT]TTL validation on TTL attrId passed. "
+      g_eventLogger->info("[DICT]TTL validation on TTL attrId passed. "
                           "attrId: %u",
-                           attrPtr.p->attributeId);
-#endif  // TTL_DEBUG
+                          attrPtr.p->attributeId);
     }
     attrPtr.p->autoIncrement = attrDesc.AttributeAutoIncrement;
     {
@@ -8214,8 +8195,7 @@ void Dbdict::execTC_SCHVERCONF(Signal *signal) {
     }
 
     /*
-     * Zart
-     * TTL
+     * TTL related
      * send primaryTable to TC to make sure the table record
      * of non-table table can find its primary table record to
      * get the TTL info.

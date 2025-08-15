@@ -979,7 +979,7 @@ struct alignas(NDB_CL) thr_job_queue {
    * threads waiting for buffers to become available. In such cases these are
    * allocated as 'extra_signals' allowed to execute.
    */
-  static constexpr unsigned RESERVED = 4;  // In addition to 'SAFETY'
+  static constexpr unsigned RESERVED = SAFETY + 8;  // In addition to 'SAFETY'
 
   /**
    * We start being CONGESTED a bit before reaching the RESERVED limit.
@@ -990,7 +990,7 @@ struct alignas(NDB_CL) thr_job_queue {
    * congested state (Smaller JB quotas, tighter checking of JB-state,
    * optionally requiring the write_lock to be taken.)
    */
-  static constexpr unsigned CONGESTED = RESERVED + 4;  // 4+4
+  static constexpr unsigned CONGESTED = RESERVED + 4;  // 10+4
 
   /**
    * As there are multiple writers, 'm_write_lock' has to be set before
@@ -1176,6 +1176,11 @@ is_recv_thread(unsigned thr_no)
   return thr_no >= recv_base &&
          thr_no < recv_base + globalData.ndbMtReceiveThreads;
 }
+
+static
+bool
+handle_full_job_buffers(struct thr_data* selfptr,
+                        Uint32 & send_sum);
 
 /**
  * thr_jb_read_state is tightly associated with thr_job_queue.
@@ -1774,10 +1779,12 @@ struct alignas(NDB_CL) thr_data {
   Uint32 m_global_variables_ptr_instances;
   Uint32 m_global_variables_uint32_ptr_instances;
   Uint32 m_global_variables_uint32_instances;
+  Uint32 m_global_variables_block_instances;
   bool m_global_variables_enabled;
   void *m_global_variables_ptrs[1024];
   void *m_global_variables_uint32_ptrs[1024];
   void *m_global_variables_uint32[1024];
+  SimulatedBlock *m_global_variables_block[MAX_INSTANCES_PER_THREAD];
 #endif
   bool
   is_real_main_thread(unsigned thr_no)
@@ -2844,7 +2851,6 @@ extend_send_delay(struct thr_send_trps &trp_state, NDB_TICKS now)
   {
     /**
      * No need to change timer when no send delay or when all
-     * changes have already been performed.
      * changes have already been performed.
      */
     return;
@@ -4908,18 +4914,6 @@ static unsigned get_free_in_queue(const thr_job_queue *q) {
  * Check if the specified congested waitfor-thread (arg) still has
  * job buffer congestion (-> outgoing JBs too full), return true if so.
  */
-static bool check_congested_job_queue(thr_job_queue *waitfor) {
-  unsigned free;
-  if (unlikely(glob_use_write_lock_mutex)) {
-    lock(&waitfor->m_write_lock);
-    free = get_free_estimate_out_queue(waitfor);
-    unlock(&waitfor->m_write_lock);
-  } else {
-    free = get_free_estimate_out_queue(waitfor);
-  }
-  return (free <= thr_job_queue::CONGESTED);
-}
-
 static bool check_full_job_queue(thr_job_queue *waitfor) {
   unsigned free;
   if (unlikely(glob_use_write_lock_mutex)) {
@@ -7726,6 +7720,7 @@ mt_receiver_thread_main(void *thr_arg) {
   bool has_received = false;
   int cnt = 0;
   bool real_time = false;
+  bool buffersFull = false;
   Uint64 min_spin_timer_us;
   NDB_TICKS yield_ticks;
   NDB_TICKS before;
@@ -7861,6 +7856,7 @@ mt_receiver_thread_main(void *thr_arg) {
      *    This check is performed in check_recv_yield as well as in
      *    recv_yield, so no need to do it before everything as well.
      * 4) There are no 'min_spin' configured or min_spin has elapsed
+     * 5) Job buffer isn't full
      * We will not check spin timer until we have checked the
      * transporters at least one loop and discovered no data. We also
      * ensure that we have not executed any signals before we start
@@ -7874,6 +7870,7 @@ mt_receiver_thread_main(void *thr_arg) {
     if (lagging_timers == 0 &&          // 1)
         pending_send  == false &&       // 2)
         send_sum == 0 &&                // 2)
+        !buffersFull &&                 // 5)
         (min_spin_timer_us == 0 ||      // 4)
          (sum == 0 &&
           !has_received &&
@@ -7901,7 +7898,9 @@ mt_receiver_thread_main(void *thr_arg) {
       {
         slept = true;
       }
-      num_events = globalTransporterRegistry.pollReceive(delay, recvdata);
+      if (likely(buffersFull == false)) {
+        num_events = globalTransporterRegistry.pollReceive(delay, recvdata);
+      }
       if (slept)
       {
         recv_awake(&selfptr->m_waiter);
@@ -7919,60 +7918,31 @@ mt_receiver_thread_main(void *thr_arg) {
     {
       watchDogCounter = 8;
       lock(&rep->m_receive_lock[recv_thread_idx]);
-      const bool buffersFull =
+      buffersFull =
         (globalTransporterRegistry.performReceive(recvdata,
                                                   recv_thread_idx,
                                                   true) != 0);
       unlock(&rep->m_receive_lock[recv_thread_idx]);
       has_received = true;
-
-      if (buffersFull)       /* Receive queues(s) are full */
-      {
-        /**
-         * Will wait for congestion to disappear or 1 ms has passed.
-         */
-        watchDogCounter = 18;  // "Yielding to OS"
-        static constexpr Uint32 nano_wait_1ms = 1000*1000;    /* -> 1 ms */
-        NDB_TICKS before = NdbTick_getCurrentTicks();
-
-        /**
-         * Find (one of) the congested receive queues we need to wait for
-         * in order to get out of 'buffersFull' state. We will be woken up
-         * when consumer has freed a JB-page from the 'congested_queue'.
-         */
-        assert(!selfptr->m_congested_threads_mask.isclear());
-        const unsigned thr_no = selfptr->m_congested_threads_mask.find_first();
-        struct thr_data *congested_thr = &rep->m_thread[thr_no];
-        const unsigned self_jbb = thr_no % NUM_JOB_BUFFERS_PER_THREAD;
-        thr_job_queue *congested_queue = &congested_thr->m_jbb[self_jbb];
-
-        const bool waited = yield(&congested_thr->m_congestion_waiter,
-                                  nano_wait_1ms,
-                                  check_congested_job_queue,
-                                  congested_queue);
-        if (waited)
-        {
-          NDB_TICKS after = NdbTick_getCurrentTicks();
-          selfptr->m_read_jbb_state_consumed = true;
-          selfptr->m_buffer_full_nanos_sleep +=
-            NdbTick_Elapsed(before, after).nanoSec();
-        }
-        /**
-         * We waited due to congestion, or didn't find the expected congestion.
-         * Recheck if it cleared while we (not-)waited.
-         */
-        recheck_congested_job_buffers(selfptr);
-      }
     }
     /**
      * Ensure that all received signals are sent to the receivers before
      * we start processing local signals to ourselves.
      */
-    if (has_received)
+    if (has_received || buffersFull)
     {
       watchDogCounter = 6;
       flush_all_local_signals_and_wakeup(selfptr);
       do_flush(selfptr);
+    }
+    if (unlikely(buffersFull)) {
+      recheck_congested_job_buffers(selfptr);
+      if (selfptr->m_congested_threads_mask.isclear()) {
+        buffersFull = false;
+      }
+    }
+    if (unlikely(selfptr->m_max_signals_per_jb == 0 && glob_num_threads > 1)) {
+      handle_full_job_buffers(selfptr, send_sum);
     }
     selfptr->m_stat.m_loop_cnt++;
   }
@@ -8704,8 +8674,10 @@ mt_setConfMaxSignalsBeforeFlushReceiver(Uint32 max_signals_before_flush_receiver
 void
 mt_setMinSendDelay(Uint32 min_send_delay)
 {
-  g_min_send_delay = min_send_delay;
-  g_min_send_delay_available = (2 * g_min_send_delay) / 3;
+  if (min_send_delay >= globalData.theMaxSendDelay) {
+    g_min_send_delay = min_send_delay;
+    g_min_send_delay_available = (2 * g_min_send_delay) / 3;
+  }
 }
 
 void
@@ -9715,6 +9687,8 @@ static
 void
 rep_init(struct thr_repository* rep, unsigned int cnt, Ndbd_mem_manager *mm)
 {
+  mt_setMinSendDelay(globalData.theMaxSendDelay);
+
   rep->m_mm = mm;
 
   rep->m_thread_count = cnt;
@@ -9986,6 +9960,7 @@ assign_receiver_threads(void)
   Uint32 num_recv_threads = globalData.ndbMtReceiveThreads;
   Uint32 recv_thread_idx = 0;
   Uint32 recv_thread_idx_shm = 0;
+  Uint32 max_trp_id = 0;
   for (Uint32 i = 0; i < MAX_NODES; i++)
   {
     g_api_node_to_recv_instance_map[i] = RNIL;
@@ -9994,37 +9969,60 @@ assign_receiver_threads(void)
   {
     Transporter *trp =
       globalTransporterRegistry.get_transporter(trp_id);
+    if (trp) {
+      max_trp_id = std::max(max_trp_id, trp_id);
+    }
+  }
+  /**
+   * We sort the assignment after LocationDomainId. This ensures that we
+   * are well distributed on the receive threads for each of the location
+   * domains. In particular this is important for the API nodes that resides
+   * in the same location domain id as us.
+   *
+   * We implement by first assigning all transporters belonging to location
+   * domain id 0, next to 1 and so forth. In this manner we distribute the
+   * connections over all receive threads.
+   *
+   * Shared memory transporters are by definition local and distributed
+   * separately, we handle this by handling shared memory transporters in
+   * the first loop with location domain id equal to 0.
+   */
+  for (Uint32 ld_id = 0; ld_id <= globalData.theMaxLocationDomainId; ld_id++) {
+    for (Uint32 trp_id = 1; trp_id <= max_trp_id; trp_id++) {
 
     /**
      * Ensure that shared memory transporters are well distributed
      * over all receive threads, so distribute those independent of
      * rest of transporters.
      */
-    if (trp)
-    {
-      Uint32 node_id =
-        globalTransporterRegistry.get_transporter_node_id(trp_id);
-      if (globalTransporterRegistry.is_shm_transporter(trp_id))
-      {
-        g_trp_to_recv_thr_map[trp_id] = recv_thread_idx_shm;
-        g_api_node_to_recv_instance_map[node_id] = recv_thread_idx_shm;
-        globalTransporterRegistry.set_recv_thread_idx(trp,recv_thread_idx_shm);
-        DEB_MULTI_TRP(("SHM trp %u uses recv_thread_idx: %u",
-                       trp_id, recv_thread_idx_shm));
-        recv_thread_idx_shm++;
-        if (recv_thread_idx_shm == num_recv_threads) recv_thread_idx_shm = 0;
+      Transporter *trp =
+        globalTransporterRegistry.get_transporter(trp_id);
+      if (trp) {
+        Uint32 node_id =
+          globalTransporterRegistry.get_transporter_node_id(trp_id);
+        if (globalTransporterRegistry.is_shm_transporter(trp_id)) {
+          if (ld_id != 0) continue;
+          g_trp_to_recv_thr_map[trp_id] = recv_thread_idx_shm;
+          g_api_node_to_recv_instance_map[node_id] = recv_thread_idx_shm;
+          globalTransporterRegistry.set_recv_thread_idx(trp,recv_thread_idx_shm);
+          DEB_MULTI_TRP(("SHM trp %u uses recv_thread_idx: %u",
+                         trp_id, recv_thread_idx_shm));
+          recv_thread_idx_shm++;
+          if (recv_thread_idx_shm == num_recv_threads) recv_thread_idx_shm = 0;
+        } else {
+          if (globalData.theLocationDomainId[node_id] != ld_id) continue;
+          g_trp_to_recv_thr_map[trp_id] = recv_thread_idx;
+          g_api_node_to_recv_instance_map[node_id] = recv_thread_idx;
+          DEB_MULTI_TRP(("TCP trp %u uses recv_thread_idx: %u",
+                         trp_id, recv_thread_idx));
+          globalTransporterRegistry.set_recv_thread_idx(trp,recv_thread_idx);
+          recv_thread_idx++;
+          if (recv_thread_idx == num_recv_threads) recv_thread_idx = 0;
+         }
       } else {
-        g_trp_to_recv_thr_map[trp_id] = recv_thread_idx;
-        g_api_node_to_recv_instance_map[node_id] = recv_thread_idx;
-        DEB_MULTI_TRP(("TCP trp %u uses recv_thread_idx: %u",
-                       trp_id, recv_thread_idx));
-        globalTransporterRegistry.set_recv_thread_idx(trp,recv_thread_idx);
-        recv_thread_idx++;
-        if (recv_thread_idx == num_recv_threads) recv_thread_idx = 0;
+        /* Flag for no transporter */
+        g_trp_to_recv_thr_map[trp_id] = MAX_NTRANSPORTERS;
       }
-    } else {
-      /* Flag for no transporter */
-      g_trp_to_recv_thr_map[trp_id] = MAX_NTRANSPORTERS;
     }
   }
   return;
@@ -10901,6 +10899,8 @@ void mt_clear_global_variables(thr_data *selfptr) {
       Uint32 *tmp = (Uint32 *)selfptr->m_global_variables_uint32[i];
       (*tmp) = Uint32(~0);
     }
+    for (Uint32 i = 0; i < selfptr->m_global_variables_block_instances; i++)
+      selfptr->m_global_variables_block[i]->checkInitGlobalVariables();
   }
 }
 
@@ -10948,6 +10948,15 @@ void mt_init_global_variables_uint32_instances(Uint32 self, void **tmp,
     selfptr->m_global_variables_uint32_instances = inx + 1;
   }
 }
+
+void mt_init_global_variables_block(Uint32 self, SimulatedBlock *block) {
+  struct thr_repository *rep = g_thr_repository;
+  struct thr_data *selfptr = &rep->m_thread[self];
+  const Uint32 inx = selfptr->m_global_variables_block_instances;
+  selfptr->m_global_variables_block[inx] = block;
+  selfptr->m_global_variables_block_instances = inx + 1;
+}
+
 #endif
 
 /**

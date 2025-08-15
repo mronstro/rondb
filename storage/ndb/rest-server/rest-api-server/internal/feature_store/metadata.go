@@ -87,6 +87,7 @@ func (fgf *FeatureGroupFeatures) String() string {
 
 type FeatureMetadata struct {
 	FeatureStoreName    string
+	FeatureStoreId      int
 	FeatureGroupName    string
 	FeatureGroupVersion int
 	FeatureGroupId      int
@@ -171,7 +172,7 @@ func newFeatureViewMetadata(
 		var feature = featureValue[0]
 		var fgFeature = FeatureGroupFeatures{}
 		fgFeature.FeatureStoreName = feature.FeatureStoreName
-		fgFeature.FeatureStoreId = featureStoreId
+		fgFeature.FeatureStoreId = feature.FeatureStoreId
 		fgFeature.FeatureGroupName = feature.FeatureGroupName
 		fgFeature.FeatureGroupVersion = feature.FeatureGroupVersion
 		fgFeature.FeatureGroupId = feature.FeatureGroupId
@@ -205,9 +206,9 @@ func newFeatureViewMetadata(
 		for _, feature := range fgFeature.Features {
 			if (*feature).IsComplex() {
 				if _, exist := fgSchemaCache[feature.FeatureGroupId]; !exist {
-					projectId, dalErr := dal.GetProjectID(fgFeature.FeatureStoreName)
+					projectId, dalErr := dal.GetProjectID(fgFeature.FeatureStoreId)
 					if dalErr != nil {
-						return nil, errors.New("Failed to get project id. " + dalErr.Error())
+						return nil, fmt.Errorf("Failed to get project id. Feature store name: %s. Error %v ", fgFeature.FeatureStoreName, dalErr.Error())
 					}
 					log.Debugf("project id is %d", projectId)
 					newFgSchema, err := dal.GetFeatureGroupAvroSchema(
@@ -414,6 +415,7 @@ func GetFeatureViewMetadata(featureStoreName, featureViewName string, featureVie
 			fsIdToName[featureGroup.FeatureStoreId] = featureStoreName
 			feature.FeatureStoreName = featureStoreName
 		}
+		feature.FeatureStoreId = featureGroup.FeatureStoreId
 		feature.FeatureGroupName = featureGroup.Name
 		feature.FeatureGroupVersion = featureGroup.Version
 		feature.FeatureGroupId = tdf.FeatureGroupID

@@ -1248,6 +1248,31 @@ int NdbOperation::handleOperationOptions(const OperationType type,
     }
   }
 
+  if ((opts->optionsPresent & OperationOptions::OO_SET_INPUT_PARAM) &&
+       opts->numInputParams > 0) {
+    if (opts->inputParams == nullptr) {
+      return 4354;
+    }
+    // Validate SetValuesSpec
+    for (Uint32 i = 0; i < opts->numInputParams; i++) {
+      const NdbDictionary::Column *pcol = opts->inputParams[i].column;
+      const void *pvalue = opts->inputParams[i].value;
+
+      if (pcol == nullptr) {
+        // Column is NULL in inputParams structure
+        return 4355;
+      }
+
+      if (pvalue == nullptr) {
+        if (!pcol->getNullable()) {
+          // Trying to set a NOT NULL attribute to NULL
+          return 4203;
+        }
+      }
+    }
+    op->m_inputParams = opts->inputParams;
+    op->m_numInputParams = opts->numInputParams;
+  }
   if ((opts->optionsPresent & OperationOptions::OO_GETVALUE) &&
       (opts->numExtraGetValues > 0)) {
     if (opts->extraGetValues == nullptr) {
@@ -1542,15 +1567,13 @@ int NdbOperation::handleOperationOptions(const OperationType type,
   }
 
   /*
-   * Zart
+   * TTL related
    * Ignore TTL
    */
-  if (opts->optionsPresent & OperationOptions::OO_TTL_IGNORE)
-  {
+  if (opts->optionsPresent & OperationOptions::OO_TTL_IGNORE) {
     op->m_flags |= OF_TTL_IGNORE;
   }
-  if (opts->optionsPresent & OperationOptions::OO_DIRTY_FLAG)
-  {
+  if (opts->optionsPresent & OperationOptions::OO_DIRTY_FLAG) {
     if (type != WriteRequest ||
         !ndbd_interpreted_write_supported(
             op->theNdbCon->getNdb()->getMinDbNodeVersion())) {
@@ -1559,9 +1582,14 @@ int NdbOperation::handleOperationOptions(const OperationType type,
     op->theDirtyIndicator = 1;
     op->theSimpleIndicator = 1;
   }
-  if (opts->optionsPresent & OperationOptions::OO_TTL_ONLY_EXPIRED)
-  {
+  if (opts->optionsPresent & OperationOptions::OO_TTL_ONLY_EXPIRED) {
     op->m_flags |= OF_TTL_ONLY_EXPIRED;
+  }
+  if (opts->optionsPresent & OperationOptions::OO_BATCH_SAFE_FLAG) {
+    op->theBatchSafeFlag = 1;
+  }
+  if (opts->optionsPresent & OperationOptions::OO_BATCH_UNSAFE_FLAG) {
+    op->theBatchUnsafeFlag = 1;
   }
   return 0;
 }

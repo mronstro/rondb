@@ -1013,6 +1013,9 @@ class NdbOperation {
   Uint32 getPartitionId() const;
 #endif
 
+  void setTTLPurgeWindowSize(Uint32 size);
+  Uint32 getTTLPurgeWindowSize() const;
+
   /* Specification of an extra value to get
    * as part of an NdbRecord operation.
    * Inputs :
@@ -1126,13 +1129,15 @@ class NdbOperation {
       OO_GET_FINAL_VALUE = 0x2000,
       OO_REPLICA_APPLIER = 0x4000,
       /*
-       * Zart
-       * TTL
+       * TTL related
        */
       OO_TTL_IGNORE    = 0x8000,
       OO_INTERPRETED_INSERT = 0x10000,
       OO_DIRTY_FLAG = 0x20000,
-      OO_TTL_ONLY_EXPIRED = 0x40000
+      OO_TTL_ONLY_EXPIRED = 0x40000,
+      OO_BATCH_SAFE_FLAG = 0x80000,
+      OO_BATCH_UNSAFE_FLAG = 0x100000,
+      OO_SET_INPUT_PARAM = 0x200000
     };
 
     /* An operation-specific abort option.
@@ -1152,6 +1157,10 @@ class NdbOperation {
     /* Extra column values to be set  */
     const SetValueSpec *extraSetValues;
     Uint32 numExtraSetValues;
+
+    /* Input parameters  */
+    const SetValueSpec *inputParams;
+    Uint32 numInputParams;
 
     /* Specific partition to execute this operation on */
     Uint32 partitionId;
@@ -1547,6 +1556,8 @@ class NdbOperation {
   Uint8 theCommitIndicator;  // Indicator of whether commit operation
   Uint8 theSimpleIndicator;  // Indicator of whether simple operation
   Uint8 theDirtyIndicator;   // Indicator of whether dirty operation
+  Uint8 theBatchSafeFlag;    // Batching is safe
+  Uint8 theBatchUnsafeFlag;  // Batching is unsafe
   /**
    * Indicates that the base operation is ReadCommitted although it has
    * been upgraded to use locking read.
@@ -1559,6 +1570,7 @@ class NdbOperation {
                                      // to be used
   Int8 theDistrKeyIndicator_;   // Indicates whether distr. key is used
 
+  Uint32 theTTLPurgeWindowSize;
   enum OP_FLAGS {
     OF_NO_DISK = 0x1,
 
@@ -1577,7 +1589,7 @@ class NdbOperation {
     OF_TTL_ONLY_EXPIRED = 0x200
   };
   /*
-   * Zart
+   * TTL related
    * Expanded it to 16 bits
    */
   Uint16 m_flags;
@@ -1626,6 +1638,10 @@ class NdbOperation {
   /* Ptr to supplied SetValueSpec for NdbRecord */
   const SetValueSpec *m_extraSetValues;
   Uint32 m_numExtraSetValues;
+
+  /* Ptr to supplied InputParams for NdbRecord */
+  const SetValueSpec *m_inputParams;
+  Uint32 m_numInputParams;
 
   Uint32 m_any_value;  // Valid if m_use_any_value!=0
 

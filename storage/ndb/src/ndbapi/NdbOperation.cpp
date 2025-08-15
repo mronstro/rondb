@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2003, 2024, Oracle and/or its affiliates.
-   Copyright (c) 2024, 2024, Hopsworks and/or its affiliates.
+   Copyright (c) 2024, 2025, Hopsworks and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -157,11 +157,14 @@ int NdbOperation::init(const NdbTableImpl *tab, NdbTransaction *myConnection) {
   theStartIndicator = 0;
   theCommitIndicator = 0;
   theSimpleIndicator = 0;
+  theBatchSafeFlag = 0;
+  theBatchUnsafeFlag = 0;
   theDirtyIndicator = 0;
   theReadCommittedBaseIndicator = 0;
   theInterpretIndicator = 0;
   theInterpretInsertIndicator = 0;
   theDistrKeyIndicator_ = 0;
+  theTTLPurgeWindowSize = 0;
   theScanInfo = 0;
   theTotalNrOfKeyWordInSignal = 8;
   theMagicNumber = getMagicNumber();
@@ -174,6 +177,8 @@ int NdbOperation::init(const NdbTableImpl *tab, NdbTransaction *myConnection) {
   m_interpreted_code = nullptr;
   m_extraSetValues = nullptr;
   m_numExtraSetValues = 0;
+  m_inputParams = nullptr;
+  m_numInputParams = 0;
   m_customData = nullptr;
 
   if (theReceiver.init(NdbReceiver::NDB_OPERATION, this)) {

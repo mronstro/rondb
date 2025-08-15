@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2022, 2024, Oracle and/or its affiliates.
-   Copyright (c) 2020, 2023, Hopsworks and/or its affiliates.
+   Copyright (c) 2020, 2025, Hopsworks and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -157,7 +157,10 @@ int THRConfig::setLockIoThreadsToCPU(unsigned val) {
   return 0;
 }
 
-void THRConfig::add(T_Type t, unsigned realtime, unsigned spintime) {
+void THRConfig::add(T_Type t,
+                    unsigned realtime,
+                    unsigned spintime,
+                    unsigned nosend) {
   T_Thread tmp;
   tmp.m_type = t;
   tmp.m_bind_type = T_Thread::B_UNBOUND;
@@ -166,7 +169,7 @@ void THRConfig::add(T_Type t, unsigned realtime, unsigned spintime) {
   tmp.m_thread_prio = NO_THREAD_PRIO_USED;
   tmp.m_shared_cpu_id = Uint32(~0);
   tmp.m_shared_instance = 0;
-  tmp.m_nosend = 0;
+  tmp.m_nosend = nosend;
   if (spintime > 9000) spintime = 9000;
   tmp.m_spintime = spintime;
   tmp.m_core_bind = false;
@@ -312,7 +315,11 @@ THRConfig::compute_automatic_thread_config(
     { 41, 20 },
     { 42, 21 },
     { 43, 21 },
-    { 44, 22 }
+    { 44, 22 },
+    { 45, 22 },
+    { 46, 23 },
+    { 47, 23 },
+    { 48, 24 },
   };
 
   static const struct entry {
@@ -346,9 +353,9 @@ THRConfig::compute_automatic_thread_config(
     { 19, 1, 1, 18, 10, 3, 5 }, // 38-39 CPUs
     { 20, 1, 1, 20, 10, 3, 5 }, // 40-41 CPUs
     { 21, 1, 1, 20, 11, 3, 6 }, // 42-43 CPUs
-    { 21, 1, 1, 22, 11, 3, 6 }, // 44-45 CPUs
-    { 21, 1, 1, 22, 12, 4, 6 }, // 46-47 CPUs
-    { 22, 1, 1, 24, 12, 4, 6 }, // 48
+    { 22, 1, 1, 22, 11, 3, 6 }, // 44-45 CPUs
+    { 23, 1, 1, 22, 12, 4, 6 }, // 46-47 CPUs
+    { 24, 1, 1, 24, 12, 4, 6 }, // 48
   };
   Uint32 cpu_cnt;
   if (num_cpus == 0)
@@ -434,12 +441,52 @@ THRConfig::compute_automatic_thread_config(
 
     Uint32 rem_threads = cpu_cnt -
       (ldm_threads + 2 + tc_threads + recv_threads + send_threads);
-    ldm_threads += rem_threads;
+    /* Handle integer division issues and prioritise more send threads */
+    Uint32 loop_count = 0;
+    while (1) {
+      /**
+       * Add more send threads is prioritised since larger nodes will
+       * have more send thread mutex contention. Other than that it
+       * follows the above mathematics, but prioritising recv thread
+       * over tc threads.
+       *
+       * As an example look at cpu_cnt = 63, in this case the above
+       * calculation gives ldm_threads = 31, tc_threads = 15, recv_threads = 7
+       * and send_threads = 5. This means rem_threads will be 3. So
+       * distributing these 3 threads we prioritise first send thread,
+       * next ldm threads and next recv thread. Send thread is most
+       * prioritised for very large CPU counts.
+       *
+       * After this loop we also ensure number of ldm threads is an even
+       * number to ensure Round Robin group balancing. Also here we
+       * prioritise send thread.
+       */
+      if (rem_threads == 0) break;
+      rem_threads--;
+      send_threads++;
+      if (rem_threads == 0) break;
+      rem_threads--;
+      ldm_threads++;
+      if (rem_threads == 0) break;
+      if ((loop_count & 3) == 0) {
+        rem_threads--;
+        recv_threads++;
+      }
+      if (rem_threads == 0) break;
+      if ((loop_count & 1) == 0) {
+        rem_threads--;
+        tc_threads++;
+      }
+      loop_count++;
+    }
     if ((ldm_threads & 1) == 1)
     {
-      /* Balanced Round Robin groups */
+      /**
+       * 1. Balanced Round Robin groups
+       * 2. More send threads decreases pressure on send thread mutex
+       */
       ldm_threads--;
-      tc_threads++;
+      send_threads++;
     }
   }
   else
@@ -451,7 +498,7 @@ THRConfig::compute_automatic_thread_config(
     tc_threads = table[used_map_id].tc_threads;
     send_threads = table[used_map_id].send_threads;
     recv_threads = table[used_map_id].recv_threads;
-    if (cpu_cnt % 2 != 0)
+    if (cpu_cnt % 2 != 0 && cpu_cnt != 1)
     {
       recv_threads++;
     }
@@ -477,7 +524,8 @@ THRConfig::do_parse_auto(unsigned realtime,
                          unsigned num_cpus,
                          unsigned &num_rr_groups,
                          bool use_tc_threads,
-                         bool use_ldm_threads) {
+                         bool use_ldm_threads,
+                         unsigned max_rr_group_size) {
   Uint32 tc_threads = 0;
   Uint32 ldm_threads = 0;
   Uint32 main_threads = 0;
@@ -525,12 +573,35 @@ THRConfig::do_parse_auto(unsigned realtime,
                       rep_threads,
                       recv_threads,
                       send_threads);
+
+  Uint32 num_query_instances =
+    ldm_threads +
+    tc_threads +
+    recv_threads +
+    main_threads +
+    rep_threads;
+  Uint32 calc_num_cpus = num_query_instances + send_threads;
+  require(calc_num_cpus <= num_cpus);
+
+  unsigned nosend_ldm = 0;
+  unsigned nosend_tc = 0;
+  unsigned nosend_main = 0;
+  if (calc_num_cpus > 32) {
+    /**
+     * The send assistance algorithm becomes too aggressive with many
+     * threads, we retain nosend = 0 for main thread but disable it for
+     * the LDM and TC threads. recv threads never assist send threads
+     * and send threads cannot assist themselves :).
+     */
+    nosend_ldm = 1;
+    nosend_tc = 1;
+  }
   for (Uint32 i = 0; i < main_threads; i++)
   {
-    add(T_MAIN, realtime, spintime);
+    add(T_MAIN, realtime, spintime, nosend_main);
   }
   for (Uint32 i = 0; i < rep_threads; i++) {
-    add(T_REP, realtime, spintime);
+    add(T_REP, realtime, spintime, nosend_main);
   }
   /**
    * We add an IO thread to handle the IO threads.
@@ -547,29 +618,21 @@ THRConfig::do_parse_auto(unsigned realtime,
    * of automated thread config that is based on the CPUs that the
    * OS has bound the ndbmtd process to.
    */
-  add(T_IO, realtime, 0);
-  add(T_IXBLD, realtime, 0);
-  add(T_WD, realtime, 0);
+  add(T_IO, realtime, 0, 0);
+  add(T_IXBLD, realtime, 0, 0);
+  add(T_WD, realtime, 0, 0);
   for (Uint32 i = 0; i < ldm_threads; i++) {
-    add(T_LDM, realtime, spintime);
+    add(T_LDM, realtime, spintime, nosend_ldm);
   }
   for (Uint32 i = 0; i < tc_threads; i++) {
-    add(T_TC, realtime, spintime);
+    add(T_TC, realtime, spintime, nosend_tc);
   }
   for (Uint32 i = 0; i < send_threads; i++) {
-    add(T_SEND, realtime, spintime);
+    add(T_SEND, realtime, spintime, 0);
   }
   for (Uint32 i = 0; i < recv_threads; i++) {
-    add(T_RECV, realtime, spintime);
+    add(T_RECV, realtime, spintime, 0);
   }
-  Uint32 num_query_instances =
-    ldm_threads +
-    tc_threads +
-    recv_threads +
-    main_threads +
-    rep_threads;
-  Uint32 calc_num_cpus = num_query_instances + send_threads;
-  require(calc_num_cpus <= num_cpus);
 
   struct ndb_hwinfo *hwinfo = Ndb_GetHWInfo(false);
   if (hwinfo->is_cpuinfo_available && config_num_cpus == 0) {
@@ -596,12 +659,13 @@ THRConfig::do_parse_auto(unsigned realtime,
      * which L3 cache a Round Robin group belongs to.
      */
     num_rr_groups =
-      Ndb_CreateCPUMap(num_query_instances);
+      Ndb_CreateCPUMap(num_query_instances, max_rr_group_size);
     Uint32 count_ldm_threads = ldm_threads;
     Uint32 count_tc_threads = tc_threads;
     Uint32 count_main_threads = main_threads;
     Uint32 count_rep_threads = rep_threads;
     Uint32 count_recv_threads = recv_threads;
+    Uint32 count_send_threads = send_threads;
     g_eventLogger->info("Number of RR Groups = %u", num_rr_groups);
     Uint32 rr_group = 0;
     Uint32 next_cpu_id = Ndb_GetFirstCPUInMap(rr_group);
@@ -615,27 +679,22 @@ THRConfig::do_parse_auto(unsigned realtime,
     Uint32 odd_ldms_per_rr_group = num_ldms_per_rr_group & 1;
     Uint32 num_only_ldm_groups =
       num_ldms_per_rr_group - odd_ldms_per_rr_group;
-    Uint32 num_only_ldms_in_group = 2 * num_only_ldm_groups;
+    Uint32 num_only_ldms_in_group = num_rr_groups * num_only_ldm_groups;
     assert(num_only_ldms_in_group <= count_ldm_threads);
 
-    for (Uint32 i = 0; i < num_cpus; i++)
-    {
+    for (Uint32 i = 0; i < num_cpus; i++) {
       Uint32 thread_type = T_SEND; // T_SEND silences compiler
       Uint32 inx = RNIL;
       Uint32 odd = (i & 1) == 1;
-      if (i != 0)
-      {
+      if (i != 0) {
         next_cpu_id = Ndb_GetNextCPUInMap(next_cpu_id, rr_group);
       }
-      if (num_only_ldms_in_group > 0)
-      {
+      if (num_only_ldms_in_group > 0) {
         thread_type = T_LDM;
         count_ldm_threads--;
         num_only_ldms_in_group--;
         inx = count_ldm_threads;
-      }
-      else
-      {
+      } else {
         /**
          * We want to balance the CPU load on the non-LDM CPU cores and
          * similarly we want to achieve a balanced load on the Round Robin
@@ -652,64 +711,52 @@ THRConfig::do_parse_auto(unsigned realtime,
          * core and thus we should have a fairly good balance also on
          * Round Robin groups.
          */
-        if (odd)
-        {
-          if (count_main_threads > 0)
-          {
-            thread_type = T_MAIN;
-            count_main_threads--;
-            inx = count_main_threads;
-          }
-          else if (count_rep_threads > 0)
-          {
+        if (odd) {
+          if (count_tc_threads > 0) {
+            thread_type = T_TC;
+            count_tc_threads--;
+            inx = count_tc_threads;
+          } else if (count_rep_threads > 0) {
             thread_type = T_REP;
             count_rep_threads--;
             inx = count_rep_threads;
-          }
-          else if (count_tc_threads > 0)
-          {
-            thread_type = T_TC;
-            count_tc_threads--;
-            inx = count_tc_threads;
-          }
-          else if (count_recv_threads > 0)
-          {
+          } else if (count_recv_threads > 0) {
             thread_type = T_RECV;
             count_recv_threads--;
             inx = count_recv_threads;
-          }
-          else
-          {
-            /* Send thread handled in non-odd part */
-            odd = false;
+          } else {
+            require(send_threads > 0);
+            thread_type = T_SEND;
+            count_send_threads--;
+            inx = count_send_threads;
           }
         }
-        if (!odd)
-        {
-          if (count_ldm_threads > 0)
-          {
+        if (!odd) {
+          if (count_ldm_threads > 0) {
             thread_type = T_LDM;
             count_ldm_threads--;
             inx = count_ldm_threads;
-          }
-          else if (count_recv_threads > 0)
-          {
+          } else if (count_recv_threads > 0) {
             thread_type = T_RECV;
             count_recv_threads--;
             inx = count_recv_threads;
-          }
-          else if (count_tc_threads > 0)
-          {
+          } else if (count_main_threads > 0) {
+            thread_type = T_MAIN;
+            count_main_threads--;
+            inx = count_main_threads;
+          } else if (count_send_threads > 0) {
+            thread_type = T_SEND;
+            count_send_threads--;
+            inx = count_send_threads;
+          } else if (count_rep_threads > 0) {
+            thread_type = T_REP;
+            count_rep_threads--;
+            inx = count_rep_threads;
+          } else {
+            require(tc_threads > 0);
             thread_type = T_TC;
             count_tc_threads--;
             inx = count_tc_threads;
-          }
-          else
-          {
-            require(send_threads > 0);
-            thread_type = T_SEND;
-            send_threads--;
-            inx = send_threads;
           }
         }
       }
@@ -790,7 +837,7 @@ THRConfig::do_parse_auto(unsigned realtime,
       }
     }
   } else {
-    num_rr_groups = Ndb_GetRRGroups(num_query_instances);
+    num_rr_groups = Ndb_GetRRGroups(num_query_instances, max_rr_group_size);
   }
   return 0;
 }
@@ -806,10 +853,10 @@ THRConfig::do_parse_classic(unsigned MaxNoOfExecutionThreads,
    */
   if (__ndbmt_classic) {
     m_classic = true;
-    add(T_LDM, realtime, spintime);
-    add(T_MAIN, realtime, spintime);
-    add(T_IO, realtime, 0);
-    add(T_WD, realtime, 0);
+    add(T_LDM, realtime, spintime, 0);
+    add(T_MAIN, realtime, spintime, 0);
+    add(T_IO, realtime, 0, 0);
+    add(T_WD, realtime, 0, 0);
     const bool allow_too_few_cpus = true;
     return do_bindings(allow_too_few_cpus);
   }
@@ -843,21 +890,21 @@ THRConfig::do_parse_classic(unsigned MaxNoOfExecutionThreads,
     lqhthreads = __ndbmt_lqh_threads;
   }
 
-  add(T_MAIN, realtime, spintime); /* Global */
-  add(T_REP, realtime, spintime);  /* Local, main consumer is SUMA */
+  add(T_MAIN, realtime, spintime, 0); /* Global */
+  add(T_REP, realtime, spintime, 0);  /* Local, main consumer is SUMA */
   for (Uint32 i = 0; i < recvthreads; i++) {
-    add(T_RECV, realtime, spintime);
+    add(T_RECV, realtime, spintime, 0);
   }
-  add(T_IO, realtime, 0);
-  add(T_WD, realtime, 0);
+  add(T_IO, realtime, 0, 0);
+  add(T_WD, realtime, 0, 0);
   for (Uint32 i = 0; i < lqhthreads; i++) {
-    add(T_LDM, realtime, spintime);
+    add(T_LDM, realtime, spintime, 0);
   }
   for (Uint32 i = 0; i < tcthreads; i++) {
-    add(T_TC, realtime, spintime);
+    add(T_TC, realtime, spintime, 0);
   }
   for (Uint32 i = 0; i < sendthreads; i++) {
-    add(T_SEND, realtime, spintime);
+    add(T_SEND, realtime, spintime, 0);
   }
 
   // If we have set TC-threads...we say that this is "new" code
@@ -1090,7 +1137,7 @@ int THRConfig::do_bindings(bool allow_too_few_cpus) {
      *    threads to do.
      */
     const T_Thread *io_thread = &m_threads[T_IO][0];
-    add(T_IXBLD, 0, 0);
+    add(T_IXBLD, 0, 0, 0);
 
     if (io_thread->m_bind_type != T_Thread::B_UNBOUND) {
       /* IO thread is bound, we should be bound to
@@ -1347,7 +1394,7 @@ int THRConfig::handle_spec(const char *str, unsigned realtime,
     const int index = m_threads[type].size();
     for (unsigned i = 0; i < cnt; i++) {
       add(type, values[IX_REALTIME].unsigned_val,
-          values[IX_SPINTIME].unsigned_val);
+          values[IX_SPINTIME].unsigned_val, 0);
     }
 
     assert(m_threads[type].size() == index + cnt);
@@ -1441,7 +1488,7 @@ THRConfig::do_parse_thrconfig(const char * ThreadConfig,
   for (Uint32 i = 0; i < T_END; i++) {
     if (m_setInThreadConfig.get(i)) continue;
     while (m_threads[i].size() < m_entries[i].m_default_count) {
-      add((T_Type)i, realtime, spintime);
+      add((T_Type)i, realtime, spintime, 0);
     }
   }
 
@@ -1575,7 +1622,7 @@ TAPTEST(thr_config) {
                                                               separator */
         "main={ cpuset=1,,3 }, ldm={cpubind=2}",           /* empty between , */
         "io={ spintime = 0 }",  /* Spintime on IO thread is not settable */
-        "tc,tc,tc={count=161}", /* More than 160 TCs not allowed */
+        "tc,tc,tc={count=361}", /* More than 160 TCs not allowed */
         "tc,tc,tc={count=3",    /* Missing } at end */
         "tc,tc,tc={count=3,count=3}",  /* count specified twice */
         "tc,tc,tc={count=3,cpuset;3}", /* ; instead of = */

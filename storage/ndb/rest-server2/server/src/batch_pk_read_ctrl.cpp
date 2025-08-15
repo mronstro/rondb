@@ -33,6 +33,7 @@
 #include <simdjson.h>
 #include <EventLogger.hpp>
 #include <ArenaMalloc.hpp>
+#include <util/require.h>
 
 extern EventLogger *g_eventLogger;
 
@@ -95,15 +96,6 @@ void BatchPKReadCtrl::batchPKRead(
     callback(resp);
     return;
   }
-
-  if (unlikely(reqStructs.size() > globalConfigs.internal.batchMaxSize)) {
-    resp->setBody("Batch size exceeds maximum allowed size: " +
-                  std::to_string(globalConfigs.internal.batchMaxSize));
-    resp->setStatusCode(drogon::HttpStatusCode::k400BadRequest);
-    callback(resp);
-    return;
-  }
-
   // Validate
   std::unordered_map<std::string_view, bool> db_map;
   std::unordered_map<std::string, bool> table_map;
@@ -201,18 +193,22 @@ void BatchPKReadCtrl::batchPKRead(
     Uint32 request_buffer_size = globalConfigs.internal.reqBufferSize * 2;
     Uint32 request_buffer_limit = request_buffer_size / 2;
     Uint32 current_head = 0;
-    RS_Buffer current_request_buffer = rsBufferArrayManager.get_req_buffer();
+    reqBuffs[0] = rsBufferArrayManager.get_req_buffer();
     respBuffs[0] = rsBufferArrayManager.get_resp_buffer();
+    Uint32 current_request_buffer_idx = 0;
     for (Uint32 i = 0; i < noOps; i++) {
-      RS_Buffer reqBuff = getNextReqRS_Buffer(current_head,
-                                              request_buffer_limit,
-                                              current_request_buffer,
-                                              i);
-      reqBuffs[i]  = reqBuff;
+      if (i > 0)
+        reqBuffs[i] = getNextReqRS_Buffer(
+          current_head,
+          request_buffer_limit,
+          reqBuffs[current_request_buffer_idx],
+          current_request_buffer_idx,
+          i
+        );
       DEB_BPK_CTRL("Buffer: %p, current_head: %u",
         reqBuff.buffer, current_head);
       status = create_native_request(reqStructs[i],
-                                     (Uint32*)reqBuff.buffer,
+                                     (Uint32*)reqBuffs[i].buffer,
                                      current_head);
       if (unlikely(static_cast<drogon::HttpStatusCode>(status.http_code) !=
           drogon::HttpStatusCode::k200OK)) {
@@ -222,10 +218,12 @@ void BatchPKReadCtrl::batchPKRead(
         release_array_buffers(reqBuffs.data(), respBuffs.data(), i);
         return;
       }
-      UintPtr length_ptr = reinterpret_cast<UintPtr>(reqBuff.buffer) +
+      UintPtr length_ptr = reinterpret_cast<UintPtr>(reqBuffs[i].buffer) +
         static_cast<UintPtr>(PK_REQ_LENGTH_IDX) * ADDRESS_SIZE;
       Uint32 *length_ptr_casted = reinterpret_cast<Uint32*>(length_ptr);
       reqBuffs[i].size = *length_ptr_casted;
+      require(reqBuffs[i].buffer + reqBuffs[i].size <=
+              reqBuffs[current_request_buffer_idx].buffer + current_head);
     }
 
     metricsUpdater.set_key_requests(noOps);

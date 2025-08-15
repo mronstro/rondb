@@ -739,8 +739,7 @@ class ha_ndbcluster : public handler, public Partition_handler {
 
   int update_stats(THD *thd, bool do_read_stat);
   /*
-   * Zart
-   * TTL
+   * TTL related
    */
   bool m_ttl_ignore;
   bool m_ttl_fk;
@@ -751,5 +750,6 @@ bool is_cluster_failure_code(int error);
 //static constexpr int NDB_INVALID_SCHEMA_OBJECT = 241;
 
 int ndb_to_mysql_error(const NdbError *ndberr);
+int fail_index_offline(TABLE *t, int index);
 
 #endif

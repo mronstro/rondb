@@ -1040,20 +1040,16 @@ void Dbtc::execTC_SCHVERREQ(Signal *signal) {
     tabptr.p->m_flags |= TableRecord::TR_FULLY_REPLICATED;
   }
   /*
-   * Zart
-   * TTL
+   * TTL related
    */
   tabptr.p->m_ttl_sec = req->ttlSec;
   tabptr.p->m_ttl_col_no = req->ttlColumnNo;
   tabptr.p->m_primary_table_id = req->primaryTableId;
-#ifdef TTL_DEBUG
-  if (NEED_PRINT(tabptr.i)) {
-    g_eventLogger->info("Zart, [TC]Gen Tablerec, table_id: %u, TTL sec: %u, "
-                        "TTL column no: %u, primaryTableId: %u",
-        tabptr.i, tabptr.p->m_ttl_sec, tabptr.p->m_ttl_col_no,
-        tabptr.p->m_primary_table_id);
-  }
-#endif  // TTL_DEBUG
+  TTL_RONDB_TRACE(tabptr.i,
+                  "[TC]Gen Tablerec, table_id: %u, TTL sec: %u, "
+                  "TTL column no: %u, primaryTableId: %u",
+                  tabptr.i, tabptr.p->m_ttl_sec, tabptr.p->m_ttl_col_no,
+                  tabptr.p->m_primary_table_id);
 
   tabptr.p->m_disk_based = req->diskBased;
 
@@ -1406,6 +1402,11 @@ void Dbtc::execREAD_CONFIG_REQ(Signal *signal) {
   UintR tables;
 
   ndbrequire(!ndb_mgm_get_int_parameter(p, CFG_TC_TABLE, &tables));
+
+  c_use_query_thread_for_locked_reads = true;
+  ndb_mgm_get_int_parameter(p,
+                            CFG_DB_QT_READ_LOCKED,
+                            &c_use_query_thread_for_locked_reads);
 
   m_low_latency_trans = 0;
   ndb_mgm_get_int_parameter(p, CFG_DB_LOW_LATENCY, &m_low_latency_trans);
@@ -2372,35 +2373,56 @@ void Dbtc::execTCRELEASEREQ(Signal *signal) {
 /****************************************************************************/
 // Error Handling for TCKEYREQ messages
 /****************************************************************************/
-void Dbtc::signalErrorRefuseLab(Signal *signal,
-                                ApiConnectRecordPtr const apiConnectptr) {
+void Dbtc::handleSignalStateProblem(Signal *signal,
+                                    ApiConnectRecordPtr const apiConnectptr,
+                                    NodeId signalNodeId, Uint32 context) {
   ptrGuard(apiConnectptr);
-  if (apiConnectptr.p->apiConnectstate != CS_DISCONNECTED &&
-      apiConnectptr.p->apiConnectstate != CS_RELEASE)
-  {
-    jam();
-    apiConnectptr.p->abortState = AS_IDLE;
-    apiConnectptr.p->apiConnectstate = CS_ABORTING;
-  }  // if
-  sendSignalErrorRefuseLab(signal, apiConnectptr);
-}  // Dbtc::signalErrorRefuseLab()
+  g_eventLogger->warning(
+      "TC %u : Signal from node %u in context %u finds ApiConnectRecord %u "
+      "in unexpected state %u",
+      instance(), signalNodeId, context, apiConnectptr.i,
+      apiConnectptr.p->apiConnectstate);
 
-void Dbtc::sendSignalErrorRefuseLab(Signal* signal, ApiConnectRecordPtr const apiConnectptr)
-{
-  //ndbassert(false);
-  ptrGuard(apiConnectptr);
-  if (apiConnectptr.p->apiConnectstate != CS_DISCONNECTED) {
-    jam();
-    /* Force state print */
-    printState(signal, 12, apiConnectptr, true);
-    signal->theData[0] = apiConnectptr.p->ndbapiConnect;
-    signal->theData[1] = signal->theData[ttransid_ptr];
-    signal->theData[2] = signal->theData[ttransid_ptr + 1];
-    signal->theData[3] = ZSIGNAL_ERROR;
-    sendSignal(apiConnectptr.p->ndbapiBlockref, GSN_TCROLLBACKREP, signal, 4,
-               JBB);
+  /* Handle signal sender */
+  /* Data node involved in errors -> crash, API -> disconnect */
+  ndbrequire(getNodeInfo(signalNodeId).getType() == NODE_TYPE_API);
+  g_eventLogger->warning("TC %u : Disconnecting signal sending node %u",
+                         instance(), signalNodeId);
+
+  /* Ask QMGR to eject signal sending API */
+  signal->theData[0] = 900;
+  signal->theData[1] = signalNodeId;
+  sendSignal(QMGR_REF, GSN_DUMP_STATE_ORD, signal, 2, JBA);
+
+  /* Handle record owner */
+  if (apiConnectptr.p->apiConnectstate != CS_DISCONNECTED &&
+      apiConnectptr.p->apiConnectstate != CS_RELEASE) {
+    const NodeId acrOwnerNodeId = refToNode(apiConnectptr.p->ndbapiBlockref);
+
+    if (acrOwnerNodeId == signalNodeId) {
+      jam();
+      return;
+    }
+
+    g_eventLogger->warning(
+        "TC %u : ApiConnectRecord %u receiving signal in unexpected state %u "
+        "from node %u owned by different node %u",
+        instance(), apiConnectptr.i, apiConnectptr.p->apiConnectstate,
+        signalNodeId, acrOwnerNodeId);
+
+    /* Data node errors -> crash, API -> disconnect */
+    ndbrequire(getNodeInfo(acrOwnerNodeId).getType() == NODE_TYPE_API);
+    g_eventLogger->warning("TC %u : Disconnecting record owning node %u",
+                           instance(), acrOwnerNodeId);
+
+    /* Ask QMGR to eject API */
+    signal->theData[0] = 900;
+    signal->theData[1] = acrOwnerNodeId;
+    sendSignal(QMGR_REF, GSN_DUMP_STATE_ORD, signal, 2, JBA);
   }
-}  // Dbtc::sendSignalErrorRefuseLab()
+
+  /* Do nothing more - API disconnection is responsible for cleanup */
+}  // Dbtc::handleSignalStateProblem
 
 void Dbtc::abortBeginErrorLab(Signal *signal,
                               ApiConnectRecordPtr const apiConnectptr) {
@@ -2425,7 +2447,7 @@ void Dbtc::printState(Signal *signal, int place,
   if (!force_trace) return;
 
   g_eventLogger->info(
-      "-- Dbtc::printState -- "
+      "-- Dbtc::printState(%u) -- "
       "Received from place = %d"
       " apiConnectptr.i = %u"
       " apiConnectstate = %d "
@@ -2445,8 +2467,8 @@ void Dbtc::printState(Signal *signal, int place,
       "tckeyrec = %u"
       " returnsignal = %d"
       " apiFailState = %u",
-      place, apiConnectptr.i, apiConnectptr.p->apiConnectstate, ctcTimer,
-      apiConnectptr.p->ndbapiBlockref, apiConnectptr.p->transid[0],
+      instance(), place, apiConnectptr.i, apiConnectptr.p->apiConnectstate,
+      ctcTimer, apiConnectptr.p->ndbapiBlockref, apiConnectptr.p->transid[0],
       apiConnectptr.p->transid[1], getApiConTimer(apiConnectptr),
       apiConnectptr.p->counter, apiConnectptr.p->lqhkeyconfrec,
       apiConnectptr.p->lqhkeyreqrec, apiConnectptr.p->cascading_scans_count,
@@ -2528,8 +2550,7 @@ Dbtc::TCKEY_abort(Signal* signal, int place, ApiConnectRecordPtr const apiConnec
     return;
   case 1:
     jam();
-    printState(signal, 3, apiConnectptr);
-    sendSignalErrorRefuseLab(signal, apiConnectptr);
+    ndbabort();  // Not used currently
     return;
   case 2:{
     printState(signal, 6, apiConnectptr);
@@ -2804,8 +2825,7 @@ Dbtc::TCKEY_abort(Signal* signal, int place, ApiConnectRecordPtr const apiConnec
 
     case 55:
       jam();
-      printState(signal, 5, apiConnectptr);
-      sendSignalErrorRefuseLab(signal, apiConnectptr);
+      ndbabort();  // Not used currently
       return;
 
     case 56: {
@@ -2965,44 +2985,39 @@ void Dbtc::execKEYINFO(Signal *signal) {
     jam();
     warningHandlerLab(signal, __LINE__);
     return;
-  }//if
-  switch (apiConnectptr.p->apiConnectstate)
-  {
-  case CS_RECEIVING:
-  case CS_REC_COMMITTING:
-  case CS_START_SCAN:
-    jam();
-    /*empty*/;
-    break;
-  case CS_ABORTING:
-  case CS_RELEASE:
-    jam();
-    return;     /* IGNORE */
-  case CS_CONNECTED:
-    jam();
-    /****************************************************************>*/
-    /*       MOST LIKELY CAUSED BY A MISSED SIGNAL. SEND REFUSE AND   */
-    /*       SET STATE TO ABORTING.                                   */
-    /****************************************************************>*/
-    printState(signal, 11, apiConnectptr);
-    signalErrorRefuseLab(signal, apiConnectptr);
-    return;
-  case CS_STARTED:
-    jam();
-    /****************************************************************>*/
-    /*       MOST LIKELY CAUSED BY A MISSED SIGNAL. SEND REFUSE AND   */
-    /*       SET STATE TO ABORTING. SINCE A TRANSACTION WAS STARTED   */
-    /*       WE ALSO NEED TO ABORT THIS TRANSACTION.                  */
-    /****************************************************************>*/
-    terrorCode = ZSIGNAL_ERROR;
-    printState(signal, 2, apiConnectptr);
-    abortErrorLab(signal, apiConnectptr);
-    return;
-  default:
-    jam();
-    ndbabort();
-    return;
-  }//switch
+  }  // if
+  switch (apiConnectptr.p->apiConnectstate) {
+    case CS_RECEIVING:
+    case CS_REC_COMMITTING:
+    case CS_START_SCAN:
+      jam();
+      /*empty*/;
+      break;
+    case CS_ABORTING:
+    case CS_RELEASE:
+      jam();
+      return; /* IGNORE */
+    case CS_CONNECTED:
+      jam();
+      handleSignalStateProblem(signal, apiConnectptr,
+                               refToNode(signal->getSendersBlockRef()), 1);
+      return;
+    case CS_STARTED:
+      jam();
+      /****************************************************************>*/
+      /*       MOST LIKELY CAUSED BY A MISSED SIGNAL. SEND REFUSE AND   */
+      /*       SET STATE TO ABORTING. SINCE A TRANSACTION WAS STARTED   */
+      /*       WE ALSO NEED TO ABORT THIS TRANSACTION.                  */
+      /****************************************************************>*/
+      terrorCode = ZSIGNAL_ERROR;
+      printState(signal, 2, apiConnectptr);
+      abortErrorLab(signal, apiConnectptr);
+      return;
+    default:
+      jam();
+      ndbabort();
+      return;
+  }  // switch
 
   UintR TtcTimer = ctcTimer;
   CacheRecordPtr cachePtr;
@@ -3762,6 +3777,7 @@ void Dbtc::execTCKEYREQ(Signal *signal) {
     jamDebug();
     regApiPtr->m_flags |= TexecFlag;
   }
+  tc_clearbit(regApiPtr->m_flags, ApiConnectRecord::TF_NOT_OUTSTANDING_FLAG);
   bool tabSingleUserMode = localTabptr.p->singleUserMode;
   bool is_committed_read = ((TcKeyReq::getDirtyFlag(Treqinfo)) &&
                             (TcKeyReq::getOperationType(Treqinfo) == ZREAD));
@@ -3840,7 +3856,8 @@ void Dbtc::execTCKEYREQ(Signal *signal) {
         compare_transid1 = compare_transid1 | compare_transid2;
         if (unlikely(compare_transid1 != 0)) {
           releaseSections(handle);
-          TCKEY_abort(signal, 1, apiConnectptr);
+          handleSignalStateProblem(signal, apiConnectptr,
+                                   refToNode(sendersBlockRef), 2);
           return;
         }  // if
         ndbrequire(regApiPtr->apiCopyRecord != RNIL);
@@ -3976,53 +3993,54 @@ void Dbtc::execTCKEYREQ(Signal *signal) {
        * THUS THERE IS NO ACTION FROM THE API THAT CAN SPEED UP THIS PROCESS.
        *---------------------------------------------------------------------*/
       releaseSections(handle);
-      TCKEY_abort(signal, 55, apiConnectptr);
+      handleSignalStateProblem(signal, apiConnectptr,
+                               refToNode(sendersBlockRef), 3);
       return;
   }  // switch
-  if (unlikely(ERROR_INSERTED(8120) || (TtabIndex >= TtabMaxIndex)))
+  if (unlikely(ERROR_INSERTED(8300) || (TtabIndex >= TtabMaxIndex)))
   {
     releaseSections(handle);
     TCKEY_abort(signal, 7, apiConnectptr);
     return;
   }
-  if (ERROR_INSERTED(8121))
+  if (ERROR_INSERTED(8301))
   {
     releaseSections(handle);
     TCKEY_abort(signal, 0, apiConnectptr);
     return;
   }
-  if (ERROR_INSERTED(8122))
+  if (ERROR_INSERTED(8302))
   {
     releaseSections(handle);
     TCKEY_abort(signal, TexecFlag ? 60 : 57, apiConnectptr);
     return;
   }
-  if (ERROR_INSERTED(8123))
+  if (ERROR_INSERTED(8303))
   {
     releaseSections(handle);
     TCKEY_abort(signal, 1, apiConnectptr);
     return;
   }
-  if (ERROR_INSERTED(8124))
+  if (ERROR_INSERTED(8304))
   {
     releaseSections(handle);
     TCKEY_abort(signal, 59, apiConnectptr);
     return;
   }
-  if (ERROR_INSERTED(8126))
+  if (ERROR_INSERTED(8305))
   {
     releaseSections(handle);
     TCKEY_abort(signal, 55, apiConnectptr);
     return;
   }
-  if (ERROR_INSERTED(8127))
+  if (ERROR_INSERTED(8306))
   {
     releaseSections(handle);
     terrorCode = ZSEIZE_API_COPY_ERROR;
     abortErrorLab(signal, apiConnectptr);
     return;
   }
-  if (ERROR_INSERTED(8128))
+  if (ERROR_INSERTED(8307))
   {
     releaseSections(handle);
     terrorCode = ZWRONG_SCHEMA_VERSION_ERROR;
@@ -4183,7 +4201,7 @@ void Dbtc::execTCKEYREQ(Signal *signal) {
     regCachePtr->m_read_committed_base = 0;
     regCachePtr->m_noWait = 0;
     /*
-     * Zart
+     * TTL related
      * TODO (Zhao)
      * unable to ignore TTL in ShortTcKeyReq?
      */
@@ -4697,8 +4715,7 @@ void Dbtc::tckeyreq050Lab(Signal *signal, CacheRecordPtr const cachePtr,
     return;
   }
   /*
-   * Zart
-   * TTL
+   * TTL related
    * if the current table is TTL table, check whether allow
    * this operation to go to replica or not
    */
@@ -4760,16 +4777,14 @@ void Dbtc::tckeyreq050Lab(Signal *signal, CacheRecordPtr const cachePtr,
         jam();
         req->anyNode = 1;
         /*
-         * Zart
-         * TTL
+         * TTL related
          * [CASE 1.1] key look-up on TTL & FULLY_REPLICATED table
          */
         if (!ttl_can_go_to_replica) {
-#ifdef TTL_DEBUG
-          g_eventLogger->info("Zart, Dbtc::tckeyreq050Lab(), FULLY_REPLICATED "
-                              "table: %u is not allowed to go to any node",
-                              localTabptr.i);
-#endif  // TTL_DEBUG
+          TTL_RONDB_TRACE(localTabptr.i,
+                          "Dbtc::tckeyreq050Lab(), FULLY_REPLICATED "
+                          "table: %u is not allowed to go to any node",
+                          localTabptr.i);
           req->anyNode = 0;
         }
       }
@@ -4881,48 +4896,46 @@ void Dbtc::tckeyreq050Lab(Signal *signal, CacheRecordPtr const cachePtr,
   regCachePtr->fragmentDistributionKey = (tnodeinfo >> 16) & 255;
   Uint32 TreadBackup = (localTabptr.p->m_flags & TableRecord::TR_READ_BACKUP);
   /*
-   * Zart
+   * TTL related
    * If the current table is TTL table, adjust TreadBackup based on
    * ttl_can_go_to_replica
    * [CASE 1.2] key look-up on TTL & READ_BACKUP table
    */
   if (ttl_table && !ttl_can_go_to_replica) {
-#ifdef TTL_DEBUG
-    g_eventLogger->info("Zart, Dbtc::tckeyreq050Lab(), DISALLOW the operation to go to "
-                        "replica for ttl table id: %u, op: %u"
-                        "read_backup: %u, fully_replicated: %u "
-                        "TopSimple: %u, TopDirty: %u, "
-                        "m_write_count: %u, m_exec_count: %u, "
-                        "m_exec_write_count: %u, m_simple_read_count: %u "
-                        "ApiConnectRecord: %u, count: %u",
-                        localTabptr.i, Toperation,
-                        TreadBackup,
-                        localTabptr.p->m_flags & TableRecord::TR_FULLY_REPLICATED,
-                        regTcPtr->opSimple, regTcPtr->dirtyOp,
-                        regApiPtr->m_write_count, regApiPtr->m_exec_count,
-                        regApiPtr->m_exec_write_count, regApiPtr->m_simple_read_count,
-                        apiConnectptr.i,
-                        regApiPtr->tcConnect.getCount());
-#endif  // TTL_DEBUG
+    TTL_RONDB_TRACE(localTabptr.i,
+                    "Dbtc::tckeyreq050Lab(), DISALLOW the operation to go to "
+                    "replica for ttl table id: %u, op: %u"
+                    "read_backup: %u, fully_replicated: %u "
+                    "TopSimple: %u, TopDirty: %u, "
+                    "m_write_count: %u, m_exec_count: %u, "
+                    "m_exec_write_count: %u, m_simple_read_count: %u "
+                    "ApiConnectRecord: %u, count: %u",
+                    localTabptr.i, Toperation,
+                    TreadBackup,
+                    localTabptr.p->m_flags & TableRecord::TR_FULLY_REPLICATED,
+                    regTcPtr->opSimple, regTcPtr->dirtyOp,
+                    regApiPtr->m_write_count, regApiPtr->m_exec_count,
+                    regApiPtr->m_exec_write_count, regApiPtr->m_simple_read_count,
+                    apiConnectptr.i,
+                    regApiPtr->tcConnect.getCount());
     TreadBackup = 0;
   } else if (ttl_table) {
-#ifdef TTL_DEBUG
-    g_eventLogger->info("Zart, Dbtc::tckeyreq050Lab(), ALLOW the operation to go to "
-                        "replica for ttl table id: %u, op: %u"
-                        "read_backup: %u, fully_replicated: %u "
-                        "TopSimple: %u, TopDirty: %u, "
-                        "m_write_count: %u, m_exec_count: %u, "
-                        "m_exec_write_count: %u, m_simple_read_count: %u "
-                        "ApiConnectRecord: %u, count: %u",
-                        localTabptr.i, Toperation,
-                        TreadBackup,
-                        localTabptr.p->m_flags & TableRecord::TR_FULLY_REPLICATED,
-                        regTcPtr->opSimple, regTcPtr->dirtyOp,
-                        regApiPtr->m_write_count, regApiPtr->m_exec_count,
-                        regApiPtr->m_exec_write_count, regApiPtr->m_simple_read_count,
-                        apiConnectptr.i,
-                        regApiPtr->tcConnect.getCount());
-#endif  // TTL_DEBUG
+    TTL_RONDB_TRACE(localTabptr.i,
+                    "Dbtc::tckeyreq050Lab(), ALLOW the operation to go to "
+                    "replica for ttl table id: %u, op: %u"
+                    "read_backup: %u, fully_replicated: %u "
+                    "TopSimple: %u, TopDirty: %u, "
+                    "m_write_count: %u, m_exec_count: %u, "
+                    "m_exec_write_count: %u, m_simple_read_count: %u "
+                    "ApiConnectRecord: %u, count: %u",
+                    localTabptr.i, Toperation,
+                    TreadBackup,
+                    localTabptr.p->m_flags & TableRecord::TR_FULLY_REPLICATED,
+                    regTcPtr->opSimple, regTcPtr->dirtyOp,
+                    regApiPtr->m_write_count, regApiPtr->m_exec_count,
+                    regApiPtr->m_exec_write_count, regApiPtr->m_simple_read_count,
+                    apiConnectptr.i,
+                    regApiPtr->tcConnect.getCount());
   }
   if (Toperation == ZREAD || Toperation == ZREAD_EX) {
     Uint8 TopSimple = regTcPtr->opSimple;
@@ -5025,6 +5038,7 @@ void Dbtc::tckeyreq050Lab(Signal *signal, CacheRecordPtr const cachePtr,
       Uint32 exec_flag =
         tc_testbit(regApiPtr->m_flags, ApiConnectRecord::TF_EXEC_FLAG);
       if ((exec_flag == 0) ||
+          (TopDirty == false && c_use_query_thread_for_locked_reads == false) ||
           regApiPtr->m_exec_count > 0 ||
           ((regTcPtr->m_special_op_flags &
             TcConnectRecord::SOF_BATCH_UNSAFE) != 0))
@@ -6854,9 +6868,11 @@ void Dbtc::sendtckeyconf(Signal *signal, UintR TcommitFlag,
   }            // if
   if (TcommitFlag) {
     jam();
-    tc_clearbit(regApiPtr->m_flags, ApiConnectRecord::TF_EXEC_FLAG);
     if (TcommitFlag == 1) {
+      tc_clearbit(regApiPtr->m_flags, ApiConnectRecord::TF_EXEC_FLAG);
       time_track_complete_transaction(regApiPtr);
+    } else {
+      regApiPtr->m_flags |= ApiConnectRecord::TF_NOT_OUTSTANDING_FLAG;
     }
   }
   regApiPtr->m_tc_hbrep_timer = ctcTimer;
@@ -7473,7 +7489,7 @@ void Dbtc::commit020Lab(Signal *signal,
       if (Tcount < ZMAX_COMMIT_PER_RT_BREAK &&
           !(ERROR_INSERTED(8057) || ERROR_INSERTED(8073) ||
             ERROR_INSERTED(8089) ||
-            (ERROR_INSERTED(8132) && ((apiConnectptr.i & 0x1) == 0)))) {
+            (ERROR_INSERTED(8123) && ((apiConnectptr.i & 0x1) == 0)))) {
         jam();
         continue;
       }
@@ -7491,7 +7507,7 @@ void Dbtc::commit020Lab(Signal *signal,
           sendSignalWithDelay(CMVMI_REF, GSN_NDB_TAMPER, signal, 100, 1);
           return;
         }
-        if (ERROR_INSERTED(8089) || ERROR_INSERTED(8132)) {
+        if (ERROR_INSERTED(8089) || ERROR_INSERTED(8123)) {
           jam();
           apiConnectptr.p->nextTcOperation = localTcConnectptr.i;
           setApiConTimer(apiConnectptr, ctcTimer, __LINE__);
@@ -7880,7 +7896,6 @@ void Dbtc::copyApi(Signal *signal,
 
   copyPtr.p->ndbapiBlockref = regApiPtr.p->ndbapiBlockref;
   copyPtr.p->globalcheckpointid = regApiPtr.p->globalcheckpointid;
-  copyPtr.p->failureNr = regApiPtr.p->failureNr;
   copyPtr.p->ndbapiConnect = TndbapiConnect;
   copyPtr.p->tcConnect = regApiPtr.p->tcConnect;
   copyPtr.p->nextTcOperation = RNIL;
@@ -7900,6 +7915,8 @@ void Dbtc::copyApi(Signal *signal,
   ndbrequire(copyPtr.p->m_queuedDatabasePtrI == RNIL64);
   copyPtr.p->m_concurrent_overtakeable_operations =
     regApiPtr.p->m_concurrent_overtakeable_operations;
+  copyPtr.p->tcBlockref = regApiPtr.p->tcBlockref;
+  copyPtr.p->failureNr = regApiPtr.p->failureNr;
 
   GcpRecordPtr gcpPtr;
   gcpPtr.i = TgcpPointer;
@@ -7990,7 +8007,7 @@ void Dbtc::complete010Lab(Signal *signal,
     apiConnectptr.p->finish_trans_counter++;
     if (tcConList.next(localTcConnectptr)) {
       if (Tcount < ZMAX_COMMIT_PER_RT_BREAK && !ERROR_INSERTED(8112) &&
-          !(ERROR_INSERTED(8132) && ((apiConnectptr.i & 0x1) != 0))) {
+          !(ERROR_INSERTED(8123) && ((apiConnectptr.i & 0x1) != 0))) {
         jamDebug();
         continue;
       }
@@ -8002,7 +8019,7 @@ void Dbtc::complete010Lab(Signal *signal,
           CLEAR_ERROR_INSERT_VALUE;
           return;
         }  // if
-        if (ERROR_INSERTED(8112) || ERROR_INSERTED(8132)) {
+        if (ERROR_INSERTED(8112) || ERROR_INSERTED(8123)) {
           jam();
           apiConnectptr.p->nextTcOperation = localTcConnectptr.i;
           setApiConTimer(apiConnectptr, ctcTimer, __LINE__);
@@ -9370,6 +9387,7 @@ void Dbtc::execTC_COMMITREQ(Signal *signal) {
     const Uint32 transId2 = regApiPtr->transid[1];
     Uint32 errorCode = 0;
 
+    tc_clearbit(regApiPtr->m_flags, ApiConnectRecord::TF_NOT_OUTSTANDING_FLAG);
     regApiPtr->m_flags |= ApiConnectRecord::TF_EXEC_FLAG;
     regApiPtr->m_simple_read_count = 0;
     regApiPtr->m_exec_count = 0;
@@ -9515,6 +9533,8 @@ void Dbtc::execTCROLLBACKREQ(Signal *signal) {
     return;
   }  // if
 
+  tc_clearbit(apiConnectptr.p->m_flags,
+    ApiConnectRecord::TF_NOT_OUTSTANDING_FLAG);
   apiConnectptr.p->m_flags |= ApiConnectRecord::TF_EXEC_FLAG;
   apiConnectptr.p->m_tc_hbrep_timer = ctcTimer;
   switch (apiConnectptr.p->apiConnectstate) {
@@ -10274,7 +10294,7 @@ int Dbtc::releaseAndAbort(Signal *signal, ApiConnectRecord *const regApiPtr) {
       abo->transid1 = regApiPtr->transid[0];
       abo->transid2 = regApiPtr->transid[1];
       Uint32 len = Abort::SignalLength;
-      if (ERROR_INSERTED(8120))
+      if (ERROR_INSERTED(8300))
       {
         Uint32 nodeId = refToNode(blockRef);
         if (getNodeInfo(nodeId).m_query_threads > 0)
@@ -15577,6 +15597,7 @@ void Dbtc::execSCAN_TABREQ(Signal *signal) {
 
   ptrAss(tabptr, tableRecord);
 
+  tc_clearbit(transP->m_flags, ApiConnectRecord::TF_NOT_OUTSTANDING_FLAG);
   if (unlikely(ScanTabReq::getMultiFragFlag(ri) &&
                !ScanTabReq::getViaSPJFlag(ri))) {
     jam();
@@ -15597,7 +15618,8 @@ void Dbtc::execSCAN_TABREQ(Signal *signal) {
         likely((transid1 == buddyApiPtr.p->transid[0]) &&
                (transid2 == buddyApiPtr.p->transid[1]))) {
       jamDebug();
-      
+      tc_clearbit(buddyApiPtr.p->m_flags,
+        ApiConnectRecord::TF_NOT_OUTSTANDING_FLAG);
       if (unlikely(buddyApiPtr.p->apiConnectstate == CS_ABORTING ||
                    buddyApiPtr.p->apiConnectstate == CS_RELEASE))
       {
@@ -15993,6 +16015,11 @@ Uint32 Dbtc::initScanrec(ScanRecordPtr scanptr, const ScanTabReq *scanTabReq,
     jam();
     scanptr.p->m_scan_block_no = DBSPJ;
   }
+  if (!ScanTabReq::getTTLOnlyExpiredFlag(ri)) {
+    scanptr.p->m_ttl_purge_window_size = 0;
+  } else {
+    scanptr.p->m_ttl_purge_window_size = scanTabReq->ttlPurgeWindowSize;
+  }
 
   scanptr.p->scanRequestInfo = tmp;
   scanptr.p->m_read_committed_base = ScanTabReq::getReadCommittedBaseFlag(ri);
@@ -16178,8 +16205,7 @@ void Dbtc::diFcountReqLab(Signal *signal, ScanRecordPtr scanptr,
       ((tabPtr.p->m_flags & TableRecord::TR_FULLY_REPLICATED) != 0);
 
   /*
-   * Zart
-   * TTL
+   * TTL related
    * TTL & FULLY_REPLICATED table
    * we don't need to handle scanptr.p->m_read_any_node here,
    * since we will handle this situation in 
@@ -16357,8 +16383,7 @@ void Dbtc::sendDihGetNodesLab(Signal *signal, ScanRecordPtr scanptr,
     fragLocationPtr.p->m_next_index = 0;
   }
   /*
-   * Zart
-   * TTL
+   * TTL related
    * if the current table is TTL table, check whether allow
    * this scan to go to replica or not
    */
@@ -16386,16 +16411,15 @@ void Dbtc::sendDihGetNodesLab(Signal *signal, ScanRecordPtr scanptr,
     bool lockmode = ScanFragReq::getLockMode(scanptr.p->scanRequestInfo);
     bool holdlock = ScanFragReq::getHoldLockFlag(scanptr.p->scanRequestInfo);
 
-#ifdef TTL_DEBUG
-    g_eventLogger->info("Zart, Dbtc::sendDihGetNodesLab(), ttl_table: [%u]%u, "
-                        "read_back: %u, fully_replicated: %u rc: %u, lockmode: %u, "
-                        "holdlock: %u, "
-                        "ApiConnectRecord: %u, count: %u",
-                        tabPtr.i,
-                        ttl_table, read_back, fully_replicated,
-                        rc, lockmode, holdlock,
-                        buddyApiPtr.i, op_count);
-#endif  // TTL_DEBUG
+    TTL_RONDB_TRACE(tabPtr.i,
+                    "Dbtc::sendDihGetNodesLab(), ttl_table: [%u]%u, "
+                    "read_back: %u, fully_replicated: %u rc: %u, lockmode: %u, "
+                    "holdlock: %u, "
+                    "ApiConnectRecord: %u, count: %u",
+                    tabPtr.i,
+                    ttl_table, read_back, fully_replicated,
+                    rc, lockmode, holdlock,
+                    buddyApiPtr.i, op_count);
     if (!ttl_table || (ttl_table && (read_back || fully_replicated) &&
         (rc || rcb) && op_count == 0)) {
       ndbrequire(!ttl_table || (!lockmode && !holdlock));
@@ -16413,14 +16437,14 @@ void Dbtc::sendDihGetNodesLab(Signal *signal, ScanRecordPtr scanptr,
      * for more than 5-10 microseconds per signal.
      */
     if (fragCnt >= DiGetNodesReq::MAX_DIGETNODESREQS ||
-        ERROR_INSERTED(8129))
+        ERROR_INSERTED(8120))
     {
       jam();
       signal->theData[0] = TcContinueB::ZSTART_FRAG_SCANS;
       signal->theData[1] = apiConnectptr.i;
       signal->theData[2] = apiConnectptr.p->transid[0];
       signal->theData[3] = apiConnectptr.p->transid[1];
-      if (ERROR_INSERTED(8129))
+      if (ERROR_INSERTED(8120))
       {
         jam();
         // Delay CONTINUEB
@@ -16658,18 +16682,16 @@ bool Dbtc::sendDihGetNodeReq(Signal *signal, ScanRecordPtr scanptr,
   req->scan_indicator = ZTRUE;
   req->anyNode = scanptr.p->m_read_any_node;
   /*
-   * Zart
-   * TTL
+   * TTL related
    * [CASE 2.1 ]Scan on TTL & FULLY_REPLICATED table
    */
   if (!ttl_can_go_to_replica) {
-#ifdef TTL_DEBUG
-    g_eventLogger->info("Zart,  Dbtc::sendDihGetNodeReq(), ignore FULLY_REPLICATED "
-                         "for TTL table id: [%u], frag id: %u, m_read_any_node before: %u",
-                          scanptr.p->scanTableref,
-                          scanFragId,
-                          scanptr.p->m_read_any_node);
-#endif  // TTL_DEBUG
+    TTL_RONDB_TRACE(scanptr.p->scanTableref,
+                    "Dbtc::sendDihGetNodeReq(), ignore FULLY_REPLICATED "
+                    "for TTL table id: [%u], frag id: %u, m_read_any_node before: %u",
+                    scanptr.p->scanTableref,
+                    scanFragId,
+                    scanptr.p->m_read_any_node);
     req->anyNode = 0;
   }
   req->jamBufferPtr = jamBuffer();
@@ -16750,8 +16772,7 @@ bool Dbtc::sendDihGetNodeReq(Signal *signal, ScanRecordPtr scanptr,
   NodeId primaryNodeId = nodeId;
   Uint32 TreadBackup = (tabPtr.p->m_flags & TableRecord::TR_READ_BACKUP);
   /*
-   * Zart
-   * TTL
+   * TTL related
    * Since READ_BACKUP will read replica instead of primary, it doesn't
    * work with TTL table's read what you have locked
    * Skip READ_BACKUP for TTL table
@@ -16759,13 +16780,12 @@ bool Dbtc::sendDihGetNodeReq(Signal *signal, ScanRecordPtr scanptr,
    * [CASE 2.2] Scan on TTL & READ_BACKUP table
    */
   if (!ttl_can_go_to_replica) {
-#ifdef TTL_DEBUG
-    g_eventLogger->info("Zart,  Dbtc::sendDihGetNodeReq(), ignore TR_READ_BACKUP "
-                         "for TTL table id: [%u], frag id: %u, TreadBackup before: %u",
-                          tabPtr.i,
-                          scanFragId,
-                          TreadBackup);
-#endif  // TTL_DEBUG
+    TTL_RONDB_TRACE(tabPtr.i,
+                    "Dbtc::sendDihGetNodeReq(), ignore TR_READ_BACKUP "
+                    "for TTL table id: [%u], frag id: %u, TreadBackup before: %u",
+                    tabPtr.i,
+                    scanFragId,
+                    TreadBackup);
     TreadBackup = false;
   }
 
@@ -16998,8 +17018,8 @@ void Dbtc::sendFragScansLab(Signal *signal, ScanRecordPtr scanptr,
            * If we are about to produce more, we have to continue later.
            */
 	  if ((cntLocSignals > 4) ||
-              (ERROR_INSERTED(8130)) ||
-              (ERROR_INSERTED(8131) && fragCnt >= 1))
+              (ERROR_INSERTED(8121)) ||
+              (ERROR_INSERTED(8122) && fragCnt >= 1))
           {
             jam();
             signal->theData[0] = TcContinueB::ZSEND_FRAG_SCANS;
@@ -17007,8 +17027,8 @@ void Dbtc::sendFragScansLab(Signal *signal, ScanRecordPtr scanptr,
             signal->theData[2] = apiConnectptr.p->transid[0];
             signal->theData[3] = apiConnectptr.p->transid[1];
 
-            if (ERROR_INSERTED(8130) ||
-                ERROR_INSERTED(8131))
+            if (ERROR_INSERTED(8121) ||
+                ERROR_INSERTED(8122))
             {
               jam();
               /* Delay CONTINUEB */
@@ -17239,6 +17259,14 @@ void Dbtc::execSCAN_FRAGCONF(Signal *signal) {
   const Uint32 activeMask =
       (sig_len >= ScanFragConf::SignalLength_ext) ? conf->activeMask : 0;
 
+  if (ERROR_INSERTED(8124)) {
+    jam();
+    g_eventLogger->info("TC %u : execSCAN_FRAGCONF delaying 0.5s", instance());
+    sendSignalWithDelay(reference(), GSN_SCAN_FRAGCONF, signal, 500,
+                        signal->getLength());
+    return;
+  }
+
   scanFragptr.i = conf->senderData;
   if (unlikely(!c_scan_frag_pool.getValidPtr(scanFragptr))) {
     jam();
@@ -17436,6 +17464,8 @@ void Dbtc::execSCAN_NEXTREQ(Signal *signal) {
     return;
   }
 
+  tc_clearbit(apiConnectptr.p->m_flags,
+    ApiConnectRecord::TF_NOT_OUTSTANDING_FLAG);
   /**
    * Check state of API connection
    */
@@ -17449,14 +17479,15 @@ void Dbtc::execSCAN_NEXTREQ(Signal *signal) {
        *  We will send a SCAN_TABREF to indicate a time-out occurred.
        *********************************************************************/
       DEBUG("scanTabRefLab: ZSCANTIME_OUT_ERROR2");
-      g_eventLogger->info("apiConnectptr(%d) -> abort", apiConnectptr.i);
-      ndbabort();  // B2 indication of strange things going on
+      g_eventLogger->info("apiConnectptr(%d) -> abort ZSCANTIMEOUT_ERROR2", apiConnectptr.i);
+      ndbassert(false);  // B2 indication of strange things going on
       scanTabRefLab(signal, ZSCANTIME_OUT_ERROR2, apiConnectptr.p);
       return;
     }
     DEBUG("scanTabRefLab: ZSTATE_ERROR");
     DEBUG("  apiConnectstate=" << apiConnectptr.p->apiConnectstate);
-    ndbabort();  // B2 indication of strange things going on
+    g_eventLogger->info("apiConnectptr(%d) -> abort ZSTATE_ERROR", apiConnectptr.i);
+    ndbassert(false);  // B2 indication of strange things going on
     scanTabRefLab(signal, ZSTATE_ERROR, apiConnectptr.p);
     return;
   }  // if
@@ -18078,6 +18109,19 @@ bool Dbtc::sendScanFragReq(Signal *signal, ScanRecordPtr scanptr,
   req->batch_size_rows = scanP->batch_size_rows;
   req->batch_size_bytes = scanP->batch_byte_size;
 
+  // set ttl_purge_window_size if needed;
+  Uint32 extra_len = 0;
+
+  if (ScanFragReq::getTTLOnlyExpiredFragFlag(requestInfo)) {
+    /*
+     * Based on the ndbassert below, it seems that getCorrFactorFlag
+     * won’t be set in this context. That means variableData[0] and
+     * variableData[1] are not used, so we can safely use variableData[0] here.
+     */
+    req->variableData[0] = scanP->m_ttl_purge_window_size;
+    extra_len = 1;
+  }
+
   // Encode variable part
   ndbassert(ScanFragReq::getCorrFactorFlag(requestInfo) == 0);
 
@@ -18175,7 +18219,7 @@ bool Dbtc::sendScanFragReq(Signal *signal, ScanRecordPtr scanptr,
     sendBatchedFragmentedSignal(NodeReceiverGroup(ref),
                                 GSN_SCAN_FRAGREQ,
                                 signal,
-                                ScanFragReq::SignalLength,
+                                ScanFragReq::SignalLength + extra_len,
                                 JBB,
                                 &sections,
                                 !isLastReq);  // Keep sent sections unless
@@ -18856,7 +18900,9 @@ void Dbtc::releaseAbortResources(Signal* signal,
   apiConnectptr.p->apiConnectstate = CS_ABORTING;
   apiConnectptr.p->abortState = AS_IDLE;
 
-  if (tc_testbit(apiConnectptr.p->m_flags, ApiConnectRecord::TF_EXEC_FLAG) ||
+  if (((tc_testbit(apiConnectptr.p->m_flags,
+                   ApiConnectRecord::TF_NOT_OUTSTANDING_FLAG) == false) &&
+        tc_testbit(apiConnectptr.p->m_flags, ApiConnectRecord::TF_EXEC_FLAG)) ||
       apiConnectptr.p->apiFailState != ApiConnectRecord::AFS_API_OK) {
     jam();
     bool ok = false;
@@ -19977,6 +20023,18 @@ void Dbtc::execDUMP_STATE_ORD(Signal *signal) {
     c_trans_error_loglevel = level;
     return;
   }
+
+  if (arg == DumpStateOrd::TcNdbInfoApiConnectRecFull) {
+    jam();
+    bool newVal = true;
+    if (signal->getLength() == 2) {
+      newVal = (signal->theData[1] != 0);
+    }
+    g_eventLogger->info(
+        "TC %u setting DBINFO ApiConnectRecord full from %u to %u", instance(),
+        m_dbinfo_full_apiconnectrecord, newVal);
+    m_dbinfo_full_apiconnectrecord = newVal;
+  }
 }  // Dbtc::execDUMP_STATE_ORD()
 
 void Dbtc::execDBINFO_SCANREQ(Signal *signal) {
@@ -20207,9 +20265,12 @@ void Dbtc::execDBINFO_SCANREQ(Signal *signal) {
 
       break;
     }
-    case Ndbinfo::TRANSACTIONS_TABLEID: {
+    case Ndbinfo::TRANSACTIONS_TABLEID:
+    case Ndbinfo::TRANSACTIONS_FULL_TABLEID: {
       Uint32 loop_count = 0;
       Uint32 api_ptr = cursor->data[0];
+      const bool full = (m_dbinfo_full_apiconnectrecord ||
+                         req.tableId == Ndbinfo::TRANSACTIONS_FULL_TABLEID);
       const Uint32 maxloop = 256;
       bool do_break = false;
       while (!do_break && api_ptr != RNIL && loop_count < maxloop) {
@@ -20224,7 +20285,7 @@ void Dbtc::execDBINFO_SCANREQ(Signal *signal) {
           }
           ApiConnectRecordPtr const &ptr = ptrs[i];
           Ndbinfo::Row row(signal, req);
-          if (ndbinfo_write_trans(row, ptr)) {
+          if (ndbinfo_write_trans(row, ptr, full)) {
             jam();
             ndbinfo_send_row(signal, req, row, rl);
           }
@@ -20251,8 +20312,8 @@ done:
   ndbinfo_send_scan_conf(signal, req, rl);
 }
 
-bool Dbtc::ndbinfo_write_trans(Ndbinfo::Row &row,
-                               ApiConnectRecordPtr transPtr) {
+bool Dbtc::ndbinfo_write_trans(Ndbinfo::Row &row, ApiConnectRecordPtr transPtr,
+                               const bool full) {
   Uint32 conState = transPtr.p->apiConnectstate;
 
   if (conState == CS_ABORTING && transPtr.p->abortState == AS_IDLE) {
@@ -20262,8 +20323,9 @@ bool Dbtc::ndbinfo_write_trans(Ndbinfo::Row &row,
     conState = CS_CONNECTED;
   }
 
-  if (conState == CS_CONNECTED || conState == CS_DISCONNECTED ||
-      conState == CS_RESTART) {
+  if ((conState == CS_CONNECTED || conState == CS_DISCONNECTED ||
+       conState == CS_RESTART) &
+      !full) {
     return false;
   }
 

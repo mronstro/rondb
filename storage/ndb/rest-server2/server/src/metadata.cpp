@@ -209,7 +209,7 @@ newFeatureViewMetadata(const std::string &featureStoreName,
 
     auto fgFeature = FeatureGroupFeatures();
     fgFeature.featureStoreName = feature.featureStoreName;
-    fgFeature.featureStoreId = featureStoreId;
+    fgFeature.featureStoreId = feature.featureStoreId;
     fgFeature.featureGroupName = feature.featureGroupName;
     fgFeature.featureGroupVersion = feature.featureGroupVersion;
     fgFeature.featureGroupId = feature.featureGroupId;
@@ -265,7 +265,7 @@ newFeatureViewMetadata(const std::string &featureStoreName,
         auto it = fgSchemaCache.find(feature.featureGroupId);
         if (it == fgSchemaCache.end()) {
           std::tie(projectId, status) =
-            GetProjectID(feature.featureStoreName);
+            GetProjectID(fgFeature.featureStoreId);
           if (status.http_code !=
               static_cast<HTTP_CODE>(drogon::HttpStatusCode::k200OK)) {
             return {nullptr, status};
@@ -470,6 +470,7 @@ std::tuple<FeatureViewMetadata*, std::shared_ptr<RestErrorCode>>
     feature.featureGroupName = featureGroup.name;
     feature.featureGroupVersion = featureGroup.version;
     feature.featureGroupId = tdf.featureGroupID;
+    feature.featureStoreId = featureGroup.featureStoreId;
     feature.id = tdf.featureID;
     feature.name = tdf.name;
     feature.type = tdf.type;

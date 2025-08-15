@@ -192,17 +192,14 @@ void Dbtup::execCREATE_TAB_REQ(Signal *signal) {
             regTabPtr.i,
             req->hashFunctionFlag));
 
-  // Zart
+  // TTL related
   regTabPtr.p->m_ttl_sec = req->ttlSec;
   regTabPtr.p->m_ttl_col_no = req->ttlColumnNo;
-#ifdef TTL_DEBUG
-  if (NEED_PRINT(regTabPtr.i)) { /*req->tableId */
-    g_eventLogger->info("Zart, [TUP]Gen Tablerec, table_id: %u, TTL sec: %u, "
-                        "TTL column no: %u", regTabPtr.i,
-                        regTabPtr.p->m_ttl_sec,
-                        regTabPtr.p->m_ttl_col_no);
-  }
-#endif  // TTL_DEBUG
+  TTL_RONDB_TRACE(regTabPtr.i, /* == req->tableId */
+                  "[TUP]Gen Tablerec, table_id: %u, TTL sec: %u, "
+                  "TTL column no: %u", regTabPtr.i,
+                  regTabPtr.p->m_ttl_sec,
+                  regTabPtr.p->m_ttl_col_no);
 
   regTabPtr.p->m_offsets[MM].m_disk_ref_offset = 0;
   regTabPtr.p->m_offsets[MM].m_null_words = 0;
@@ -2738,6 +2735,12 @@ void Dbtup::drop_fragment_fsremove_done(Signal *signal, TablerecPtr tabPtr,
     signal->theData[0] = ZREL_FRAG;
     signal->theData[1] = tabPtr.i;
     signal->theData[2] = logfile_group_id;
+    if (ERROR_INSERTED(4039)) {
+      jam();
+      // Delay fragment release
+      sendSignalWithDelay(cownref, GSN_CONTINUEB, signal, 1000, 3);
+      return;
+    }
     sendSignal(cownref, GSN_CONTINUEB, signal, 3, JBB);
   } else {
     jam();

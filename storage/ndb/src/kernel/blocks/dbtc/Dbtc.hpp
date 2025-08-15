@@ -96,10 +96,10 @@
 #define ZMAX_OUTSTANDING_COMMIT_OPS_RESTART 256
 #define ZMAX_RELEASE_PER_RT_BREAK 256
 #define ZMAX_TAKEOVER_RELEASE_PER_RT_BREAK 512
-#define ZMAX_OP_PER_RT_BREAK 64
-#define ZMAX_SETUP_PER_RT_BREAK 256
-#define ZMAX_COMMIT_PER_RT_BREAK 20
-#define ZMAX_ABORT_PER_RT_BREAK 512
+#define ZMAX_OP_PER_RT_BREAK 3
+#define ZMAX_SETUP_PER_RT_BREAK 3
+#define ZMAX_COMMIT_PER_RT_BREAK 3
+#define ZMAX_ABORT_PER_RT_BREAK 3
 #define ZMAX_TIMEOUT_COUNTER 5000
 
 #elif defined(VM_TRACE)
@@ -110,24 +110,24 @@
 #define ZMAX_OUTSTANDING_COMMIT_OPS_RESTART 1
 #define ZMAX_TAKEOVER_RELEASE_PER_RT_BREAK 1
 #define ZMAX_RELEASE_PER_RT_BREAK 1
-#define ZMAX_OP_PER_RT_BREAK 1
-#define ZMAX_SETUP_PER_RT_BREAK 1
-#define ZMAX_COMMIT_PER_RT_BREAK 1
-#define ZMAX_ABORT_PER_RT_BREAK 128
+#define ZMAX_OP_PER_RT_BREAK 3
+#define ZMAX_SETUP_PER_RT_BREAK 3
+#define ZMAX_COMMIT_PER_RT_BREAK 3
+#define ZMAX_ABORT_PER_RT_BREAK 3
 #define ZMAX_TIMEOUT_COUNTER 100
 
 #else
 
-#define ZMAX_OUTSTANDING_ABORT_OPS 8192
+#define ZMAX_OUTSTANDING_ABORT_OPS 4096
 #define ZMAX_OUTSTANDING_ABORT_OPS_RESTART 1024
-#define ZMAX_OUTSTANDING_COMMIT_OPS 16384
+#define ZMAX_OUTSTANDING_COMMIT_OPS 4096
 #define ZMAX_OUTSTANDING_COMMIT_OPS_RESTART 4096
 #define ZMAX_TAKEOVER_RELEASE_PER_RT_BREAK 2048
 #define ZMAX_RELEASE_PER_RT_BREAK 512
-#define ZMAX_OP_PER_RT_BREAK 256
-#define ZMAX_SETUP_PER_RT_BREAK 256
-#define ZMAX_COMMIT_PER_RT_BREAK 20
-#define ZMAX_ABORT_PER_RT_BREAK 512
+#define ZMAX_OP_PER_RT_BREAK 3
+#define ZMAX_SETUP_PER_RT_BREAK 3
+#define ZMAX_COMMIT_PER_RT_BREAK 3
+#define ZMAX_ABORT_PER_RT_BREAK 3
 #define ZMAX_TIMEOUT_COUNTER 5000
 #endif
 
@@ -1113,6 +1113,7 @@ class Dbtc : public SimulatedBlock {
       TF_LATE_COMMIT = 256 // Wait sending apiCommit until complete phase done
       ,TF_SINGLE_EXEC_FLAG = 512
       ,TF_REPLICA_APPLIER = 1024
+      ,TF_NOT_OUTSTANDING_FLAG = 2048
 
       ,TF_END = 0
     };
@@ -1560,8 +1561,8 @@ class Dbtc : public SimulatedBlock {
 
     Uint32 scanTakeOverInd;
     Uint32 unlockNodeId; /* NodeId for unlock operation */
-    /* Zart
-     * TTL
+    /*
+     * TTL related
      */
     Uint8 m_ttl_ignore;
     Uint8 m_ttl_only_expired;
@@ -1981,6 +1982,8 @@ class Dbtc : public SimulatedBlock {
     Uint32 m_scan_dist_key;
     Uint32 m_read_any_node;
     NDB_TICKS m_start_ticks;
+
+    Uint32 m_ttl_purge_window_size;
   };
   typedef Ptr<ScanRecord> ScanRecordPtr;
   typedef TransientPool<ScanRecord> ScanRecord_pool;
@@ -2507,20 +2510,20 @@ class Dbtc : public SimulatedBlock {
                              ApiConnectRecordPtr transPtr,
                              Uint32 error);
   // Generated statement blocks
-  void warningHandlerLab(Signal* signal, int line);
-  [[noreturn]] void systemErrorLab(Signal* signal, int line);
-  void sendSignalErrorRefuseLab(Signal* signal, ApiConnectRecordPtr apiConnectptr);
-  void scanTabRefLab(Signal* signal, Uint32 errCode, ApiConnectRecord* regApiPtr);
-  void diFcountReqLab(Signal* signal, ScanRecordPtr, ApiConnectRecordPtr);
-  void signalErrorRefuseLab(Signal* signal, ApiConnectRecordPtr apiConnectptr);
-  void abort080Lab(Signal* signal);
-  void abortScanLab(Signal* signal, ScanRecordPtr, Uint32 errCode, 
-		    bool not_started, ApiConnectRecordPtr apiConnectptr);
-  void abort010Lab(Signal* signal, ApiConnectRecordPtr apiConnectptr);
-  void abort015Lab(Signal* signal, ApiConnectRecordPtr apiConnectptr);
-  void packLqhkeyreq(Signal* signal, 
-                     BlockReference TBRef,
-                     CacheRecordPtr,
+  void warningHandlerLab(Signal *signal, int line);
+  [[noreturn]] void systemErrorLab(Signal *signal, int line);
+  void handleSignalStateProblem(Signal *signal,
+                                ApiConnectRecordPtr apiConnectptr,
+                                NodeId signalNodeId, Uint32 context);
+  void scanTabRefLab(Signal *signal, Uint32 errCode,
+                     ApiConnectRecord *regApiPtr);
+  void diFcountReqLab(Signal *signal, ScanRecordPtr, ApiConnectRecordPtr);
+  void abort080Lab(Signal *signal);
+  void abortScanLab(Signal *signal, ScanRecordPtr, Uint32 errCode,
+                    bool not_started, ApiConnectRecordPtr apiConnectptr);
+  void abort010Lab(Signal *signal, ApiConnectRecordPtr apiConnectptr);
+  void abort015Lab(Signal *signal, ApiConnectRecordPtr apiConnectptr);
+  void packLqhkeyreq(Signal *signal, BlockReference TBRef, CacheRecordPtr,
                      ApiConnectRecordPtr apiConnectptr);
   void packLqhkeyreq040Lab(Signal *signal, BlockReference TBRef, CacheRecordPtr,
                            ApiConnectRecordPtr apiConnectptr);
@@ -2633,6 +2636,8 @@ class Dbtc : public SimulatedBlock {
  private:
   Uint32 c_time_track_histogram_boundary[TIME_TRACK_HISTOGRAM_RANGES];
   bool c_time_track_activated;
+
+  Uint32 c_use_query_thread_for_locked_reads;
   // Transit signals
 
   alignas(64) ApiConnectRecord_pool c_apiConnectRecordPool;
@@ -3229,7 +3234,7 @@ class Dbtc : public SimulatedBlock {
 
   bool validate_filter(Signal *);
   bool match_and_print(Signal *, ApiConnectRecordPtr);
-  bool ndbinfo_write_trans(Ndbinfo::Row &, ApiConnectRecordPtr);
+  bool ndbinfo_write_trans(Ndbinfo::Row &, ApiConnectRecordPtr, bool);
 
 #ifdef ERROR_INSERT
   bool testFragmentDrop(Signal *signal);
@@ -3388,6 +3393,8 @@ class Dbtc : public SimulatedBlock {
   Uint32 m_max_writes_per_trans;
   Uint32 c_trans_error_loglevel;
   Uint32 m_take_over_operations;
+
+  bool m_dbinfo_full_apiconnectrecord;
 
   void dump_trans(ApiConnectRecordPtr transPtr);
   bool hasOp(ApiConnectRecordPtr transPtr, Uint32 op);

@@ -50,18 +50,18 @@ func newWithDefaults() AllConfigs {
 			BufferSize:          5 * 1024 * 1024,
 			GOMAXPROCS:          -1,
 			PreAllocatedBuffers: 32,
-			BatchMaxSize:        256,
+			BatchMaxSize:        128,
 			OperationIDMaxSize:  256,
 		},
 		GRPC: GRPC{
 			Enable:     false,
 			ServerIP:   "0.0.0.0",
-			ServerPort: 4406,
+			ServerPort: 5406,
 		},
 		REST: REST{
 			Enable:     true,
 			ServerIP:   "0.0.0.0",
-			ServerPort: 5406,
+			ServerPort: 4406,
 		},
 		RonDB: RonDB{
 			Mgmds: []Mgmd{

@@ -71,6 +71,13 @@ BatchKeyOperations::BatchKeyOperations() {
 }
 
 BatchKeyOperations::~BatchKeyOperations() {
+  if (!m_isSuccess) {
+    for (Uint32 i = 0; i < m_numOperations; i++) {
+      KeyOperation *key_op = &m_key_ops[i];
+      PKRRequest *req = &key_op->m_req;
+      req->resetReadColumns();
+    }
+  }
 }
 
 RS_Status
@@ -80,13 +87,13 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
                                           RS_Buffer *reqBuffer,
                                           Ndb *ndb_object) {
   RS_Status status = RS_OK;
+  m_isSuccess = false;
   m_isBatch = is_batch;
   m_ndb_object = ndb_object;
   m_numOperations = numOps;
   m_num_sent_operations = 0;
-  m_single_transaction = false;
-  m_key_ops = (KeyOperation*)amalloc->alloc_bytes(
-    sizeof(KeyOperation) * numOps, 8);
+  m_single_transaction = globalConfigs.rest.useSingleTransaction;
+  m_key_ops = amalloc->alloc<KeyOperation>(numOps);
   if (unlikely(m_key_ops == nullptr)) {
     RS_Status error = RS_SERVER_ERROR(
         std::string(rdrsErrorMessage(ERROR_MEMORY_ALLOCATION_FAILURE)));
@@ -100,7 +107,8 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
     PKRRequest *req = new (&key_op->m_req) PKRRequest(&reqBuffer[i]);
     if (unlikely(ndb_object->setCatalogName(req->DB()) != 0)) {
       RS_Status err = RS_CLIENT_404_WITH_MSG_ERROR(
-        std::string(rdrsErrorMessage(ERROR_DB_TABLE_NOT_EXIST)) + std::string(" Database: ") +
+        std::string(rdrsErrorMessage(ERROR_DB_TABLE_NOT_EXIST)) +
+        std::string(" Database: ") +
         std::string(req->DB()) + " Table: " + req->Table());
       if (m_isBatch) {
         req->MarkInvalidOp(err);
@@ -156,10 +164,10 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
     Uint32 num_bitmap_words = (numColumns + 31) / 32;
     Uint32 num_bitmap_bytes = 4 * num_bitmap_words;
     Uint8* bitmap_words = (Uint8*)amalloc->alloc_bytes(num_bitmap_bytes, 4);
-    m_key_ops[i].m_bitmap_read_columns = bitmap_words;
+    key_op->m_bitmap_read_columns = bitmap_words;
     Uint32 row_len = NdbDictionary::getRecordRowLength(ndb_record);
-    Uint8* row = (Uint8*)amalloc->alloc_bytes(row_len, 8);
     Uint32 row_len_aligned = ((row_len + 7) / 8) * 8;
+    Uint8* row = (Uint8*)amalloc->alloc_bytes(row_len_aligned, 8);
     /* Ensure no halfwritten words distort the rows for pk and reading */
     memset(row, 0, row_len_aligned);
     key_op->m_row = row;
@@ -181,7 +189,8 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
                  pkCols == nullptr ||
                  readCols == nullptr ||
                  row == nullptr)) {
-      status = RS_SERVER_ERROR(std::string(rdrsErrorMessage(ERROR_MEMORY_ALLOCATION_FAILURE)));
+      status = RS_SERVER_ERROR(
+        std::string(rdrsErrorMessage(ERROR_MEMORY_ALLOCATION_FAILURE)));
       return status;
     }
     Uint32 pk_bitmap_words[MAX_ATTRIBUTES_IN_TABLE/32];
@@ -336,51 +345,13 @@ BatchKeyOperations::init_batch_operations(ArenaMalloc *amalloc,
   return status;
 }
 
-RS_Status BatchKeyOperations::setup_transaction() {
-  if (unlikely(m_single_transaction)) {
-    KeyOperation *key_op = &m_key_ops[0];
-    key_op->m_ndbTransaction = m_ndb_object->startTransaction();
-    if (unlikely(key_op->m_ndbTransaction == nullptr)) {
-      return RS_RONDB_SERVER_ERROR(m_ndb_object->getNdbError(), 
-          std::string(rdrsErrorMessage(ERROR_TRANSACTION_START_FAILED)));
-    }
-  } else {
-    for (Uint32 i = 0; i < m_numOperations; i++) {
-      KeyOperation *key_op = &m_key_ops[i];
-      PKRRequest *req = &key_op->m_req;
-      if (req->IsInvalidOp()) {
-        continue;
-      }
-      const NdbDictionary::Table *table_dict = key_op->m_tableDict;
-      key_op->m_ndbTransaction = m_ndb_object->startTransaction(table_dict);
-      if (unlikely(key_op->m_ndbTransaction == nullptr)) {
-        return RS_RONDB_SERVER_ERROR(m_ndb_object->getNdbError(), 
-            std::string(rdrsErrorMessage(ERROR_TRANSACTION_START_FAILED)));
-      }
-    }
-  }
-  return RS_OK;
-}
-
-/**
- * Set up read operation
- *
- * @return status
- */
-RS_Status BatchKeyOperations::setup_read_operation() {
-
-  Uint32 opIdx = 0;
-start:
-  for (; opIdx < m_numOperations; opIdx++) {
+RS_Status BatchKeyOperations::setup_primary_keys() {
+  for (Uint32 opIdx = 0; opIdx < m_numOperations; opIdx++) {
     // this sub operation can not be processed
     KeyOperation *key_op = &m_key_ops[opIdx];
     PKRRequest *req = &key_op->m_req;
     if (unlikely(req->IsInvalidOp())) {
       continue;
-    }
-    NdbTransaction *trans = key_op->m_ndbTransaction;
-    if (unlikely(m_single_transaction)) {
-      trans = m_key_ops[0].m_ndbTransaction;
     }
     Uint32 numPrimaryKeys = key_op->m_num_pk_columns;
     for (Uint32 colIdx = 0; colIdx < numPrimaryKeys; colIdx++) {
@@ -395,17 +366,91 @@ start:
       if (unlikely(status.http_code != SUCCESS)) {
         if (m_isBatch) {
           req->MarkInvalidOp(status);
-          opIdx++;
-          goto start;
         } else {
           return status;
         }
       }
     }
+  }
+  return RS_OK;
+}
+
+RS_Status BatchKeyOperations::setup_transactions() {
+  Uint32 tmp[MAX_KEY_SIZE_IN_WORDS * MAX_XFRM_MULTIPLY];
+  char *buf = (char *)&tmp[0];
+  if (unlikely(m_single_transaction)) {
+    if (m_key_ops[0].m_ndbTransaction != nullptr) {
+      /* Transaction started already in previous loop */
+      return RS_OK;
+    }
+    KeyOperation *key_op = &m_key_ops[0];
+    KeyOperation *first_key_op = nullptr;
+    for (Uint32 i = m_first_key; i < m_last_key; i++) {
+      first_key_op = &m_key_ops[i];
+      PKRRequest *req = &first_key_op->m_req;
+      if (req->IsInvalidOp()) {
+        first_key_op = nullptr;
+        continue;
+      }
+      break;
+    }
+    /* Check that at least one operation is valid */
+    if (first_key_op != nullptr) {
+      key_op->m_ndbTransaction = m_ndb_object->startTransaction(
+        first_key_op->m_ndb_record,
+        (const char*)first_key_op->m_row,
+        buf,
+        sizeof(tmp));
+      if (unlikely(key_op->m_ndbTransaction == nullptr)) {
+        return RS_RONDB_SERVER_ERROR(m_ndb_object->getNdbError(), 
+          std::string(rdrsErrorMessage(ERROR_TRANSACTION_START_FAILED)));
+      }
+    }
+  } else {
+    for (Uint32 i = m_first_key; i < m_last_key; i++) {
+      KeyOperation *key_op = &m_key_ops[i];
+      PKRRequest *req = &key_op->m_req;
+      if (req->IsInvalidOp()) {
+        continue;
+      }
+      key_op->m_ndbTransaction = m_ndb_object->startTransaction(
+        key_op->m_ndb_record,
+        (const char*)key_op->m_row,
+        buf,
+        sizeof(tmp));
+      if (unlikely(key_op->m_ndbTransaction == nullptr)) {
+        return RS_RONDB_SERVER_ERROR(m_ndb_object->getNdbError(), 
+            std::string(rdrsErrorMessage(ERROR_TRANSACTION_START_FAILED)));
+      }
+    }
+  }
+  return RS_OK;
+}
+
+/**
+ * Set up read operation
+ *
+ * @return status
+ */
+RS_Status BatchKeyOperations::setup_read_operations() {
+  for (Uint32 opIdx = m_first_key; opIdx < m_last_key; opIdx++) {
+    KeyOperation *key_op = &m_key_ops[opIdx];
+    PKRRequest *req = &key_op->m_req;
+    if (unlikely(req->IsInvalidOp())) {
+      continue;
+    }
+    NdbTransaction *trans = key_op->m_ndbTransaction;
+    if (unlikely(m_single_transaction)) {
+      trans = m_key_ops[0].m_ndbTransaction;
+      require(trans);
+    }
     DEB_NDB_BE("readTuple: read_columns[%u]: 0x%x,0x%x",
               opIdx,
               key_op->m_bitmap_read_columns[0],
               key_op->m_bitmap_read_columns[1]);
+    NdbOperation::OperationOptions opts;
+    std::memset(&opts, 0, sizeof(opts));
+    opts.optionsPresent |= NdbOperation::OperationOptions::OO_BATCH_SAFE_FLAG;
     const NdbOperation *operation = trans->readTuple(
       key_op->m_ndb_record,
       (const char*)key_op->m_row,
@@ -413,8 +458,8 @@ start:
       (char*)key_op->m_row,
       NdbOperation::LM_CommittedRead,
       key_op->m_bitmap_read_columns,
-      nullptr,
-      0);
+      &opts,
+      sizeof(opts));
     if (unlikely(operation == nullptr)) {
       return RS_RONDB_SERVER_ERROR(trans->getNdbError(),
           std::string(rdrsErrorMessage(ERROR_READ_OPERATION_FAILED)));
@@ -447,7 +492,9 @@ start:
       }
     }
     if (likely(!m_single_transaction)) {
-      trans->executeAsynchPrepare(NdbTransaction::Commit, nullptr, (void*)key_op);
+      trans->executeAsynchPrepare(NdbTransaction::Commit,
+                                  nullptr,
+                                  (void*)key_op);
     }
     m_num_sent_operations++;
   }
@@ -455,19 +502,21 @@ start:
 }
 
 RS_Status BatchKeyOperations::execute() {
-  if (unlikely(m_single_transaction)) {
-    NdbTransaction *trans = m_key_ops[0].m_ndbTransaction;
-    if (unlikely(trans->execute(NdbTransaction::NoCommit) != 0)) {
-      return RS_RONDB_SERVER_ERROR(trans->getNdbError(),
-        std::string(rdrsErrorMessage(ERROR_TRANSACTION_EXEC_FAILED)));
-    }
-  } else {
-    if (m_ndb_object->sendPollNdb(
-        WAITFOR_RESPONSE_TIMEOUT, m_num_sent_operations) <
-          (int)m_num_sent_operations) {
-      return RS_RONDB_SERVER_ERROR(
-        m_ndb_object->getNdbError(),
-        std::string(rdrsErrorMessage(ERROR_TRANSACTION_EXEC_FAILED)));
+  if (m_num_sent_operations > 0) {
+    if (unlikely(m_single_transaction)) {
+      NdbTransaction *trans = m_key_ops[0].m_ndbTransaction;
+      if (unlikely(trans->execute(NdbTransaction::NoCommit) != 0)) {
+        return RS_RONDB_SERVER_ERROR(trans->getNdbError(),
+          std::string(rdrsErrorMessage(ERROR_TRANSACTION_EXEC_FAILED)));
+      }
+    } else {
+      if (m_ndb_object->sendPollNdb(
+          WAITFOR_RESPONSE_TIMEOUT, m_num_sent_operations) <
+            (int)m_num_sent_operations) {
+        return RS_RONDB_SERVER_ERROR(
+          m_ndb_object->getNdbError(),
+          std::string(rdrsErrorMessage(ERROR_TRANSACTION_EXEC_FAILED)));
+      }
     }
   }
   return RS_OK;
@@ -479,29 +528,33 @@ RS_Status BatchKeyOperations::create_response(RS_Buffer *respBuffs) {
   Uint32 response_buffer_limit = response_buffer_size / 2;
   Uint32 current_head = 0;
   Uint32 response_length = 0;
-  RS_Buffer current_response_buffer = respBuffs[0];;
+  Uint32 current_response_buffer_idx = 0;
   for (size_t i = 0; i < m_numOperations; i++) {
     current_head += response_length;
-    respBuffs[i] = getNextRespRS_Buffer(current_head,
-                                        response_buffer_limit,
-                                        current_response_buffer,
-                                        i);
+    if (i > 0)
+      respBuffs[i] = getNextRespRS_Buffer(
+        current_head,
+        response_buffer_limit,
+        respBuffs[current_response_buffer_idx],
+        current_response_buffer_idx,
+        i
+      );
     KeyOperation *key_op = &m_key_ops[i];
     PKRResponse *resp =
       new (&key_op->m_resp) PKRResponse(&respBuffs[i]);
     PKRRequest *req = &key_op->m_req;
     const NdbOperation *op = key_op->m_ndbOperation;
     resp->SetOperationID(req->OperationId());
-    resp->SetNoOfColumns(key_op->m_num_read_columns);
     if (unlikely(req->IsInvalidOp())) {
       resp->SetStatus(req->GetError().http_code, req->GetError().message);
       resp->Close(response_length);
       continue;
     }
+    resp->SetNoOfColumns(key_op->m_num_read_columns);
     if (req->ReadColumnsCount() == 0) {
       DEB_NDB_BE("Build request when all columns requested");
       Uint32 numColumns = key_op->m_num_table_columns;
-      if (unlikely(req->addReadColumns(numColumns))) {
+      if (unlikely(!req->addReadColumns(numColumns))) {
         return RS_SERVER_ERROR(std::string(
           rdrsErrorMessage(ERROR_MEMORY_ALLOCATION_FAILURE)));
       }
@@ -1145,23 +1198,65 @@ RS_Status BatchKeyOperations::perform_operation(
     handle_ndb_error(status);
     return status;
   }
-  DEB_NDB_BE("setup_transaction");
-  status = setup_transaction();
+  DEB_NDB_BE("setup_primary_keys");
+  status = setup_primary_keys();
   if (unlikely(status.http_code != SUCCESS)) {
     handle_ndb_error(status);
     return status;
   }
-  DEB_NDB_BE("setup_read_operation");
-  status = setup_read_operation();
-  if (unlikely(status.http_code != SUCCESS)) {
-    handle_ndb_error(status);
-    return status;
-  }
-  DEB_NDB_BE("execute");
-  status = execute();
-  if (unlikely(status.http_code != SUCCESS)) {
-    handle_ndb_error(status);
-    return status;
+  m_first_key = 0;
+  m_last_key = 0;
+  Uint32 last_key = 0;
+  static const Uint32 min_keys_for_last_loop = 50;
+  while (m_last_key < m_numOperations) {
+    /**
+     * Handle loop of operations.
+     * 1. Use batchMaxSize as a suggested maximum batch size although not
+     *    a hard limit. Preferrably this should be e.g. 128 and is configurable
+     * 2. We are allowed to add up to 50 operations to this batch size for the
+     *    last loop. The reason for this is to avoid a weird situation where we
+     *    have batchMaxSize and need to send 129 operations. In this case it is
+     *    preferrable to run all operations in one loop to avoid that the second
+     *    loop only runs one operation. We set the minimum operations to handle
+     *    in one loop to 50 as a hard coded constant here.
+     * 3. NDB API can handle at most 1024 transactions in parallel and this is
+     *    already way too much, we will set the maximum batchMaxSize to e.g.
+     *    512 to avoid even coming close to this. Experiments have shown that
+     *    optimal batch size is around 100 operations. Thus we set the default
+     *    to 128.
+     */
+    Uint32 numOps = m_numOperations;
+    Uint32 start = m_first_key;
+    Uint32 max_keys = globalConfigs.internal.batchMaxSize;
+    Uint32 keys_this_loop = std::min(max_keys, (numOps - start));
+    last_key += keys_this_loop;
+    Uint32 remaining_keys = numOps - last_key;
+    if (last_key < numOps &&
+        remaining_keys < min_keys_for_last_loop) {
+      last_key += remaining_keys;
+    }
+    m_last_key = last_key;
+
+    DEB_NDB_BE("setup_transactions");
+    status = setup_transactions();
+    if (unlikely(status.http_code != SUCCESS)) {
+      handle_ndb_error(status);
+      return status;
+    }
+    DEB_NDB_BE("setup_read_operations");
+    status = setup_read_operations();
+    if (unlikely(status.http_code != SUCCESS)) {
+      handle_ndb_error(status);
+      return status;
+    }
+    DEB_NDB_BE("execute");
+    status = execute();
+    if (unlikely(status.http_code != SUCCESS)) {
+      handle_ndb_error(status);
+      return status;
+    }
+    m_first_key = m_last_key;
+    m_num_sent_operations = 0;
   }
   DEB_NDB_BE("create_response");
   status = create_response(respBuffer);
@@ -1171,6 +1266,9 @@ RS_Status BatchKeyOperations::perform_operation(
   }
   DEB_NDB_BE("close_transaction");
   close_transaction();
+
+  m_isSuccess = true;
+
   return RS_OK;
 }
 
@@ -1195,5 +1293,6 @@ RS_Status BatchKeyOperations::handle_ndb_error(RS_Status status) {
     HandleSchemaErrors(m_ndb_object, status, tables);
   }
   close_transaction();
+
   return RS_OK;
 }
