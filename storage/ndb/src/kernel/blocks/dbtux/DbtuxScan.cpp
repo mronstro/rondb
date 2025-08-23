@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2003, 2024, Oracle and/or its affiliates.
-   Copyright (c) 2021, 2024, Hopsworks and/or its affiliates.
+   Copyright (c) 2021, 2025, Hopsworks and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -774,6 +774,7 @@ void Dbtux::continue_scan(Signal *signal, ScanOpPtr scanPtr, Frag &frag,
     release_c_free_scan_lock();
     jamLine(Uint16(scanPtr.i));
     relinkScan(*scanPtr.p, m_my_scan_instance, frag, true, __LINE__);
+    scan.m_lastSeen = __LINE__;
     NextScanConf *const conf = (NextScanConf *)signal->getDataPtrSend();
     conf->scanPtr = scan.m_userPtr;
     conf->accOperationPtr = RNIL;  // no tuple returned
