@@ -618,11 +618,23 @@ class NdbScanOperation : public NdbOperation {
   
   int fix_receivers(Uint32 parallel);
   void reset_receivers(Uint32 parallel, Uint32 ordered);
+  bool m_waiting_for_data;
   Uint32 *m_array;  // containing all arrays below
   Uint32 m_allocated_receivers;
   NdbReceiver **m_receivers;  // All receivers
 
-  Uint32 *m_prepared_receivers;  // These are to be sent
+  enum {
+    ReceiverEmpty = 0,
+    ReceiverPrepared = 1,
+    ReceiverSentWaitingForResponse = 2,
+    ReceiverDataAvailable = 3,
+    ReceiverDataReady = 4,
+    ReceiverClosed = 5
+  };
+  Uint8 *m_receiver_state;
+
+  Uint32 m_prepared_receivers_count;
+  NdbReceiver *m_prepared_receivers;  // These are to be sent
 
   /*
     Owned by API/user thread.
