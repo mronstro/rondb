@@ -633,8 +633,8 @@ class NdbScanOperation : public NdbOperation {
   };
   Uint8 *m_receiver_state;
 
+  Uint32 *m_prepared_receivers;  // These are to be sent
   Uint32 m_prepared_receivers_count;
-  NdbReceiver *m_prepared_receivers;  // These are to be sent
 
   /*
     Owned by API/user thread.
