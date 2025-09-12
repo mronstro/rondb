@@ -16113,6 +16113,13 @@ Uint32 Dbtc::initScanrec(ScanRecordPtr scanptr, const ScanTabReq *scanTabReq,
     if (par_ordered_scan_flag) {
       ptr.p->m_apiPtr[0] = apiPtr[2*i];
       ptr.p->m_apiPtr[1] = apiPtr[2*i + 1];
+      DEB_CONT_SCAN(("(%u) scanFragNextId: %u, scanFragPtrI: %u,"
+                     " apiPtr(0x%x,0x%x)",
+        instance(),
+        i,
+        ptr.i,
+        ptr.p->m_apiPtr[0],
+        ptr.p->m_apiPtr[1]));
     } else {
       ptr.p->m_apiPtr[0] = apiPtr[i];
     }
@@ -17403,8 +17410,9 @@ void Dbtc::execSCAN_FRAGCONF(Signal *signal) {
       return;
     } else {
       jam();
-      DEB_CONT_SCAN(("(%u) TC scanPtrI: %u, Completed  fragment scan",
-        instance(), scanptr.i));
+      DEB_CONT_SCAN(("(%u) TC scanPtrI: %u, scanFragPtrI: %u,"
+                     " Completed  fragment scan",
+        instance(), scanptr.i, scanFragptr.i));
       scanFragptr.p->stopFragTimer();
       scanFragptr.p->scanFragState = ScanFragRec::COMPLETED;
       {
@@ -18436,15 +18444,16 @@ void Dbtc::sendScanTabConf(Signal *signal, const ScanRecordPtr scanPtr,
       bool done = curr.p->m_scan_frag_conf_status && (left <= (int)booked);
       if (curr.p->m_scan_frag_conf_status) booked++;
 
-      Uint32 apiPtr_index = curr.p->m_apiPtr_index;
-      *ops++ = curr.p->m_apiPtr[apiPtr_index];
+      Uint32 apiPtr_index_used = curr.p->m_apiPtr_index;
+      Uint32 apiPtr = curr.p->m_apiPtr[apiPtr_index_used];
+      *ops++ = apiPtr;
       if (scanPtr.p->m_par_ordered_scan_flag) {
         /**
          * If we will continue scanning the same fragment, we need to swap
          * to the second receiver object.
          */
-        apiPtr_index ^= 1;
-        curr.p->m_apiPtr_index = apiPtr_index;
+        Uint32 apiPtr_index_new = apiPtr_index_used ^ 1;
+        curr.p->m_apiPtr_index = apiPtr_index_new;
       }
       *ops++ = done ? RNIL : curr.i;
       if (words_per_op == 5) {
@@ -18462,15 +18471,18 @@ void Dbtc::sendScanTabConf(Signal *signal, const ScanRecordPtr scanPtr,
         extra_words++;
       }
       DEB_CONT_SCAN(("(%u) TC scanPtrI: %u, done: %u,"
-                     " scan_frag_conf_status: %u,"
-                     " booked: %u, left: %d, apiPtr: 0x%x, words_per_op: %u",
+                     " scan_frag_conf_status: %u, scanFragPtrI: %u"
+                     " booked: %u, left: %d, apiPtr: 0x%x, apiPtr_index: %u,"
+                     " words_per_op: %u",
         instance(),
         scanPtr.i,
         done,
         curr.p->m_scan_frag_conf_status,
+        curr.i,
         booked,
         left,
-        curr.p->m_apiPtr[apiPtr_index],
+        apiPtr,
+        apiPtr_index_used,
         words_per_op));
 
       curr.p->stopFragTimer();

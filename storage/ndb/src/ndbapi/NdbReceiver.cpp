@@ -1364,8 +1364,8 @@ int NdbReceiver::execTRANSID_AI(const Uint32 *aDataPtr, Uint32 aLength) {
   const Uint32 tmp = m_received_result_length + aLength;
 
   DBUG_ENTER("NdbReceiver::execTRANSID_AI");
-  DBUG_PRINT("info", ("Expected: %u, recvd: %u, receiver index: %u",
-    exp, tmp, this->m_index));
+  DBUG_PRINT("info", ("Expected: %u, recvd: %u, receiver index: %u, len: %u",
+    exp, tmp, this->m_index, aLength));
   /*
    * Store received data unprocessed into receive buffer
    * in its packed format.
