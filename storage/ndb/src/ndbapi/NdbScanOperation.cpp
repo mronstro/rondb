@@ -4035,7 +4035,7 @@ int NdbIndexScanOperation::send_next_scan_ordered(Uint32 idx) {
       m_sent_receivers[last + i] = tRec;
       tRec->m_list_index = last + i;
       tRec->prepareSend();
-      assert(m_receiver_state[index] = ReceiverPrepared);
+      assert(m_receiver_state[index] == ReceiverPrepared);
       m_receiver_state[index] = ReceiverSentWaitingForResponse;
       DBUG_PRINT("info", ("theNdb(%p) send_next_scan_ordered(%u)",
         theNdb, tRec->m_index));
@@ -4063,7 +4063,7 @@ int NdbIndexScanOperation::send_next_scan_ordered(Uint32 idx) {
     /**
      * Prepare ops
      */
-    assert(m_receiver_state[index] = ReceiverPrepared);
+    assert(m_receiver_state[index] == ReceiverPrepared);
     m_receiver_state[index] = ReceiverSentWaitingForResponse;
     m_sent_receivers[last] = tRec;
     tRec->m_list_index = last;
