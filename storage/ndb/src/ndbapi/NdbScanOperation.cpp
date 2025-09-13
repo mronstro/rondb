@@ -3751,7 +3751,11 @@ int NdbIndexScanOperation::next_result_ord_ndbrecord_par(const char *&out_row,
       }
       m_current_api_receiver = current;
       m_waiting_for_data = false;
-      send_next_scan_ordered(Uint32(~0));
+      {
+        NdbImpl *impl = theNdb->theImpl;
+        PollGuard poll_guard(*impl);
+        send_next_scan_ordered(Uint32(~0));
+      }
       break;
     }
     /**
@@ -3826,7 +3830,11 @@ int NdbIndexScanOperation::next_result_ord_ndbrecord_par(const char *&out_row,
       if (!fetchAllowed) {
         DBUG_RETURN(2);
       }
-      send_next_scan_ordered(Uint32(~0));
+      {
+        NdbImpl *impl = theNdb->theImpl;
+        PollGuard poll_guard(*impl);
+        send_next_scan_ordered(Uint32(~0));
+      }
       continue;
     } else {
       NdbReceiver *other_receiver = m_receivers[other_index];
