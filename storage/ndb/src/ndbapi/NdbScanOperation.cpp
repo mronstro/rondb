@@ -3755,6 +3755,7 @@ int NdbIndexScanOperation::next_result_ord_ndbrecord_par(const char *&out_row,
         NdbImpl *impl = theNdb->theImpl;
         PollGuard poll_guard(*impl);
         send_next_scan_ordered(Uint32(~0));
+        poll_guard.flush_send();
       }
       break;
     }
@@ -3834,6 +3835,7 @@ int NdbIndexScanOperation::next_result_ord_ndbrecord_par(const char *&out_row,
         NdbImpl *impl = theNdb->theImpl;
         PollGuard poll_guard(*impl);
         send_next_scan_ordered(Uint32(~0));
+        poll_guard.flush_send();
       }
       continue;
     } else {
