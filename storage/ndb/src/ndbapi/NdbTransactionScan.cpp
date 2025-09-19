@@ -145,13 +145,14 @@ int NdbTransaction::receiveSCAN_TABCONF(const NdbApiSignal *aSignal,
           const Uint32 totalLen = ScanTabConf::getLength(info);
           DBUG_PRINT("info",
             ("SCAN_TABCONF rows: %u, totalLen: %u, tcPtrI: %u, receiver: %p,"
-             " index: %u",
-            opCount, totalLen, tcPtrI, tOp, tOp->m_index));
+             " index: %u, id: %u",
+            opCount, totalLen, tcPtrI, tOp, tOp->m_index, tOp->m_id));
           if (tcPtrI == RNIL && opCount == 0) {
             theScanningOp->receiver_completed(tOp);
             retVal = 0;
           } else if (tOp->execSCANOPCONF(tcPtrI, totalLen, opCount)) {
-            DBUG_PRINT("info", ("Receiver index: %u delivered", tOp->m_index));
+            DBUG_PRINT("info", ("Receiver index: %u, id: %u delivered",
+              tOp->m_index, tOp->m_id));
             theScanningOp->receiver_delivered(tOp);
             retVal = 0;
           }

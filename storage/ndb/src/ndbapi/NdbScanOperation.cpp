@@ -2577,6 +2577,7 @@ int NdbScanOperation::doSendScan(int aProcessorId) {
       setErrorCode(4002);
       DBUG_RETURN(-1);
     }
+    DBUG_PRINT("info", ("Sent SCAN_TABREQ to node %u", aProcessorId));
   } else {
     /* Send a 'short' SCANTABREQ - e.g. long SCANTABREQ
      * with signalIds as first section, followed by
@@ -3769,7 +3770,11 @@ int NdbIndexScanOperation::next_result_ord_ndbrecord_par(const char *&out_row,
     Uint32 other_index = get_other_index(current_index);
     Uint32 other_state = m_receiver_state[other_index];
     m_receiver_state[current_index] = ReceiverEmpty;
-    if (other_state != ReceiverDataReady && m_waiting_for_data) {
+    DBUG_PRINT("info", ("current_index: %u, other_state: %u, wait_for_data: %u",
+      current_index, other_state, m_waiting_for_data));
+    if (other_state != ReceiverDataReady &&
+        other_state != ReceiverDataReadyToBeClosed &&
+        m_waiting_for_data) {
       if (!fetchAllowed) return 2;  // No more data available now
       int count = ordered_send_scan_wait_for_all(forceSend);
       if (count == -1) { DBUG_RETURN(-1); }
@@ -3784,17 +3789,29 @@ int NdbIndexScanOperation::next_result_ord_ndbrecord_par(const char *&out_row,
         m_receiver_state[conf_receiver_index] = ReceiverDataReady;
         DBUG_PRINT("info", ("theNdb(%p) NdbReceiver: %u, DataReady",
           theNdb, conf_receiver_index));
-        require(m_receiver_state[other_receiver_index] == ReceiverEmpty ||
-               m_receiver_state[other_receiver_index] == ReceiverDataReady);
         if (m_receiver_state[other_receiver_index] == ReceiverEmpty) {
           DBUG_PRINT("info", ("theNdb(%p) Other NdbReceiver: %u, Empty",
             theNdb, other_receiver_index));
           require(conf_receiver->m_index ==  current_index);
           ordered_insert_receiver(m_current_api_receiver + 1, conf_receiver);
+          if (conf_receiver->m_tcPtrI == RNIL) {
+            m_receiver_state[other_receiver_index] = ReceiverClosed;
+          } else {
+            m_prepared_receivers[m_prepared_receivers_count++] =
+              m_receivers[other_receiver_index]->m_index;
+            m_receiver_state[other_receiver_index] = ReceiverPrepared;
+          }
+        } else {
+          require(m_receiver_state[other_receiver_index] == ReceiverDataReady);
+          if (conf_receiver->m_tcPtrI == RNIL) {
+            m_receiver_state[other_receiver_index] =
+              ReceiverDataReadyToBeClosed;
+          }
         }
       }
       theNdb->theImpl->incClientStat(Ndb::ScanBatchCount, count);
       other_state = m_receiver_state[other_index];
+      assert(!m_waiting_for_data);
     }
     /**
      * We cannot come here in the state ReceiverWaitingForResponse.
@@ -3805,23 +3822,21 @@ int NdbIndexScanOperation::next_result_ord_ndbrecord_par(const char *&out_row,
      * m_waiting_for_data is true. Thus we either get here with the state
      * ReceiverClosed or ReceiverDataReady or ReceiverEmpty.
      */
-    if (other_state == ReceiverDataAvailable) {
+    if (other_state == ReceiverDataReady) {
       NdbReceiver *other_receiver = m_receivers[other_index];
-      DBUG_PRINT("info", ("theNdb(%p) other_index: %u, state: %u",
-        theNdb, other_index, m_receiver_state[other_index]));
+      DBUG_PRINT("info", ("theNdb(%p) other_index: %u,"
+                 " state: ReceiverDataAvailable",
+        theNdb, other_index));
       m_api_receivers[m_current_api_receiver] = other_receiver;
-      if (m_receivers[current_index]->m_tcPtrI == RNIL) {
-        m_receiver_state[current_index] = ReceiverClosed;
-        DBUG_PRINT("info", ("theNdb(%p) Closed from other Ready(%u)",
-          theNdb, current_index));
-      } else {
-        m_prepared_receivers[m_prepared_receivers_count++] =
-          m_receivers[current_index]->m_index;
-        m_receiver_state[current_index] = ReceiverPrepared;
-        DBUG_PRINT("info", ("theNdb(%p) Prepared from other Ready(%u)",
-          theNdb, current_index));
-      }
-      assert(m_receiver_state[other_index] == ReceiverDataReady);
+      break;
+    } else if (other_state == ReceiverDataReadyToBeClosed) {
+      DBUG_PRINT("info", ("theNdb(%p) other_index: %u,"
+                 " state: ReceiverDataAvailableToBeClosed",
+        theNdb, other_index));
+      NdbReceiver *other_receiver = m_receivers[other_index];
+      m_receiver_state[other_index] = ReceiverDataAvailable;
+      m_receiver_state[current_index] = ReceiverClosed;
+      m_api_receivers[m_current_api_receiver] = other_receiver;
       break;
     } else if (other_state == ReceiverClosed) {
       assert(!m_waiting_for_data);
@@ -3838,7 +3853,7 @@ int NdbIndexScanOperation::next_result_ord_ndbrecord_par(const char *&out_row,
       break;
     } else if (other_state == ReceiverEmpty) {
       assert(!m_waiting_for_data);
-      assert(false);
+      require(false);
       data_available = false;
       m_prepared_receivers[m_prepared_receivers_count++] =
         m_receivers[current_index]->m_index;
@@ -3965,6 +3980,9 @@ int NdbIndexScanOperation::ordered_send_scan_wait_for_all(bool forceSend) {
                                          nodeId,
                                          forceSend,
                                          &impl->m_start_time);
+      DBUG_PRINT("info", ("wait_scan, ret_code: %d, seq: %u, node_seq: %u"
+                          ", m_sent_receivers_count: %u",
+        ret_code, seq, impl->getNodeSequence(nodeId), m_sent_receivers_count));
       if (ret_code == 0 && seq == impl->getNodeSequence(nodeId)) continue;
       if(ret_code == -1) {
         g_eventLogger->info(
@@ -4035,18 +4053,34 @@ int NdbIndexScanOperation::send_next_scan_ordered(Uint32 idx) {
       return 0;
     }
     Uint32 cnt = m_prepared_receivers_count;
-    Uint32 sent = 0;
     for (Uint32 i = 0; i < cnt; i++) {
       Uint32 index = m_prepared_receivers[i];
       NdbReceiver *tRec = m_receivers[index];
-      prep_array[i] = tRec->m_tcPtrI;
+      Uint32 tcPtrI = tRec->m_tcPtrI;
+      Uint32 other_index = get_other_index(index);
+      NdbReceiver *other_tRec = m_receivers[other_index];
+      if (tcPtrI == RNIL) {
+        /**
+         * The two NdbReceivers are sharing the same tcPtrI, get it from
+         * the other NdbReceiver.
+         */
+        tcPtrI = other_tRec->m_tcPtrI;
+        tRec->m_tcPtrI = tcPtrI;
+      }
+      prep_array[i] = tcPtrI;
       m_sent_receivers[last + i] = tRec;
       tRec->m_list_index = last + i;
-      tRec->prepareSend();
+      /**
+       * We are running 2 NdbReceiver for each fragment, this means that
+       * the NdbReceiver we are preparing for send can already have
+       * received TRANSID_AI. So here we should prepare the other
+       * NdbReceiver instead.
+       */
+      other_tRec->prepareSend();
       assert(m_receiver_state[index] == ReceiverPrepared);
       m_receiver_state[index] = ReceiverSentWaitingForResponse;
-      DBUG_PRINT("info", ("theNdb(%p) send_next_scan_ordered(%u)",
-        theNdb, tRec->m_index));
+      DBUG_PRINT("info", ("theNdb(%p) send_next_scan_ordered(%u), tcPtrI: %u",
+        theNdb, tRec->m_index, tRec->m_tcPtrI));
     }
     if (cnt > 21) {
       tSignal.setLength(ScanNextReq::SignalLength);
@@ -4055,9 +4089,11 @@ int NdbIndexScanOperation::send_next_scan_ordered(Uint32 idx) {
       ptr[0].sz = cnt;
       ret = impl->sendSignal(&tSignal, nodeId, ptr, 1);
     } else {
-      tSignal.setLength(ScanNextReq::SignalLength + sent);
+      tSignal.setLength(ScanNextReq::SignalLength + cnt);
       ret = impl->sendSignal(&tSignal, nodeId);
     }
+    DBUG_PRINT("info", ("Sent SCAN_NEXTREQ with %u receivers to node %u",
+      cnt, nodeId));
     m_sent_receivers_count = last + cnt;
   } else {
     NdbReceiver *tRec = m_api_receivers[idx];

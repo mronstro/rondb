@@ -629,7 +629,8 @@ class NdbScanOperation : public NdbOperation {
     ReceiverSentWaitingForResponse = 2,
     ReceiverDataAvailable = 3,
     ReceiverDataReady = 4,
-    ReceiverClosed = 5
+    ReceiverDataReadyToBeClosed = 5,
+    ReceiverClosed = 6
   };
   Uint8 *m_receiver_state;
 

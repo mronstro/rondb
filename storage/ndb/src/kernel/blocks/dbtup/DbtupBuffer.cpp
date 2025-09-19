@@ -36,6 +36,16 @@
 
 #define JAM_FILE_ID 410
 
+#if (defined(VM_TRACE) || defined(ERROR_INSERT))
+#define DEBUG_CONT_SCAN 1
+#endif
+
+#ifdef DEBUG_CONT_SCAN
+#define DEB_CONT_SCAN(arglist) do { g_eventLogger->info arglist ; } while (0)
+#else
+#define DEB_CONT_SCAN(arglist) do { } while (0)
+#endif
+
 void Dbtup::execSEND_PACKED(Signal *signal) {
   Uint16 hostId;
   Uint32 i;
@@ -257,6 +267,9 @@ void Dbtup::sendReadAttrinfo(Signal *signal, KeyReqStruct *req_struct,
     jam();
     connectedToNode = false;
   }
+
+  DEB_CONT_SCAN(("(%u) TUP Sending TRANSID_AI with api_ref: %u",
+    instance(), req_struct->tc_operation_ptr));
 
   Uint32 sig0 = req_struct->tc_operation_ptr;
   Uint32 sig1 = req_struct->trans_id1;

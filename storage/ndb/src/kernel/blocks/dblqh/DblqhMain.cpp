@@ -16545,14 +16545,16 @@ void Dblqh::execACC_CHECK_SCAN(Signal *signal) {
   if (scanPtr->scanCompletedStatus ||
       scanPtr->m_continous_scan_state != ScanRecord::CONTINOUS_SCAN_IDLE) {
     DEB_CONT_SCAN(("(%u) LQH scanPtrI: %u, scanState: %u, sig: %u, "
-                   "completed: %u, cont_state: %u, lastSeen: %u",
+                   "completed: %u, cont_state: %u, lastSeen: %u"
+                   ", api_ref: %u",
       instance(),
       scanptr.i,
       scanPtr->scanState,
       sig_number,
       scanPtr->scanCompletedStatus,
       scanPtr->m_continous_scan_state,
-      scanPtr->scan_lastSeen));
+      scanPtr->scan_lastSeen,
+      scanPtr->scanApiOpPtr[scanPtr->scanApiOpPtr_index]));
   }
 #endif
   if (sig_number == GSN_NEXT_SCANREQ) {
@@ -16780,7 +16782,8 @@ void Dblqh::execSCAN_NEXTREQ(Signal *signal) {
     }
     DEB_CONT_SCAN(("(%u) LQH: DBTC sent close flag on scanPtrI: %u"
                    ", transState: %u, scanState: %u, lastSeen: %u"
-                   ", cont_state: %u, tuptux_last_seen: %u, tup: %u",
+                   ", cont_state: %u, tuptux_last_seen: %u, tup: %u"
+                   ", api_ref: %u",
       instance(),
       scanptr.i,
       tcConnectptr.p->transactionState,
@@ -16788,7 +16791,8 @@ void Dblqh::execSCAN_NEXTREQ(Signal *signal) {
       scanptr.p->scan_lastSeen,
       scanptr.p->m_continous_scan_state,
       last_seen,
-      tup));
+      tup,
+      scanptr.p->scanApiOpPtr[scanptr.p->scanApiOpPtr_index]));
 #endif
     scanptr.p->m_continous_scan_state = ScanRecord::CONTINOUS_SCAN_IDLE;
     closeScanRequestLab(signal, tcConnectptr);
@@ -20760,16 +20764,22 @@ void Dblqh::sendScanFragConf(Signal *signal,
     scanPtr->m_continous_scan_state = ScanRecord::CONTINOUS_SCAN_ACTIVE;
     scanPtr->scanState = ScanRecord::WAIT_NEXT_SCAN;
 
-    DEB_CONT_SCAN(("(%u) LQH scanPtrI: %u, CONT_SCAN_IDLE -> CONT_SCAN_ACTIVE",
-      instance(), scanptr.i));
+    DEB_CONT_SCAN(("(%u) LQH SCAN_FRAGCONF sent scanPtrI: %u, "
+                   "CONT_SCAN_IDLE -> CONT_SCAN_ACTIVE"
+                   ", new api_ref: %u, completed_ops: %u",
+      instance(),
+      scanptr.i,
+      scanPtr->scanApiOpPtr_index,
+      completed_ops));
     signal->theData[0] = scanptr.i;
     signal->theData[1] = GSN_NEXT_SCANREQ;
     signal->theData[2] = RNIL;
     signal->theData[3] = NextScanReq::ZSCAN_NEXT;
     sendSignal(reference(), GSN_ACC_CHECK_SCAN, signal, 4, JBB);
   } else {
-    DEB_CONT_SCAN(("(%u) LQH scanPtrI: %u, send SCAN_FRAGCONF, no cs",
-      instance(), scanptr.i));
+    DEB_CONT_SCAN(("(%u) LQH scanPtrI: %u, send SCAN_FRAGCONF, no cs or"
+                   " completed: %u",
+      instance(), scanptr.i, scanCompleted));
   }
 }  // Dblqh::sendScanFragConf()
 
