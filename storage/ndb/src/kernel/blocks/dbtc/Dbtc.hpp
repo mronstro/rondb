@@ -1823,7 +1823,7 @@ class Dbtc : public SimulatedBlock {
     inline void stopFragTimer(void) { scanFragTimer = 0; }
 
     Uint32 m_ops;
-    Uint32 m_apiPtr[2];
+    Uint32 m_apiPtr[4];
     Uint32 m_totalLen;
     Uint32 m_hasMore;
     Uint32 nextList;

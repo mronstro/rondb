@@ -16774,9 +16774,7 @@ void Dblqh::execSCAN_NEXTREQ(Signal *signal) {
 #ifdef DEBUG_CONT_SCAN
     bool tup = false;
     Uint32 last_seen = 0;
-    if (scanptr.p->scanBlock == c_tux) {
-      //last_seen = c_tux->get_lastSeen(scanptr.p->scanAccPtr);
-    } else {
+    if (scanptr.p->scanBlock == c_tup) {
       last_seen = c_tup->get_lastSeen(scanptr.p->scanAccPtr);
       tup = true;
     }
@@ -18502,7 +18500,6 @@ Uint32 Dblqh::copyNextRange(Uint32 *dst, TcConnectionrec *tcPtrP) {
     if (ERROR_INSERTED(5112)) {
       jam();
       /* Scan with infinite results */
-      //g_eventLogger->info("LQH %u : Repeating range scan", instance());
       g_eventLogger->info("LQH : Repeating range scan");
       tcPtrP->primKeyLen += rangeLen;
       return rangeLen;
@@ -19650,6 +19647,8 @@ Uint32 Dblqh::initScanrec(const ScanFragReq *scanFragReq,
   scanPtr->scanTcWaiting = scanTcWaiting;
   scanPtr->scanApiOpPtr[0] = scanApiOpPtr;
   scanPtr->scanApiOpPtr[1] = RNIL;
+  scanPtr->scanApiOpPtr[2] = RNIL;
+  scanPtr->scanApiOpPtr[3] = RNIL;
   scanPtr->scanApiOpPtr_index = 0;
   scanPtr->m_par_ordered_scan_flag = false;
   scanPtr->m_max_batch_size_rows = max_rows;
@@ -19681,14 +19680,18 @@ Uint32 Dblqh::initScanrec(const ScanFragReq *scanFragReq,
       return ZSCAN_CONTINOUS_SCAN_LOCK_ERROR;
     }
     scanPtr->scanApiOpPtr[1] = scanFragReq->variableData[extra_len_index];
+    scanPtr->scanApiOpPtr[2] = scanFragReq->variableData[extra_len_index + 1];
+    scanPtr->scanApiOpPtr[3] = scanFragReq->variableData[extra_len_index + 2];
     scanPtr->m_par_ordered_scan_flag = true;
-    extra_len_index++;
+    extra_len_index += 3;
     DEB_CONT_SCAN(("(%u) LQH scanPtrI: %u, CONT_SCAN starting,"
-                   " apiPtr(0x%x,0x%x)",
+                   " apiPtr(0x%x,0x%x,0x%x,0x%x)",
       instance(),
       scanptr.i,
       scanPtr->scanApiOpPtr[0],
-      scanPtr->scanApiOpPtr[1]));
+      scanPtr->scanApiOpPtr[1],
+      scanPtr->scanApiOpPtr[2],
+      scanPtr->scanApiOpPtr[3]));
   }
   ndbassert(sig_len == extra_len_index + ScanFragReq::SignalLength);
   (void)sig_len;
@@ -20758,7 +20761,7 @@ void Dblqh::sendScanFragConf(Signal *signal,
   if (scanPtr->m_par_ordered_scan_flag && !scanCompleted) {
     jam();
     Uint32 new_index = scanPtr->scanApiOpPtr_index + 1;
-    scanPtr->scanApiOpPtr_index = (new_index & 1);
+    scanPtr->scanApiOpPtr_index = (new_index & 3);
     ndbrequire(scanPtr->m_continous_scan_state ==
                ScanRecord::CONTINOUS_SCAN_IDLE);
     scanPtr->m_continous_scan_state = ScanRecord::CONTINOUS_SCAN_ACTIVE;
@@ -21112,6 +21115,8 @@ void Dblqh::execCOPY_FRAGREQ(Signal *signal) {
     scanPtr->fragPtrI = fragPtrI;
     scanPtr->scanApiOpPtr[0] = tcPtrI;
     scanPtr->scanApiOpPtr[1] = RNIL;
+    scanPtr->scanApiOpPtr[2] = RNIL;
+    scanPtr->scanApiOpPtr[3] = RNIL;
     scanPtr->scanApiOpPtr_index = 0;
     scanPtr->m_par_ordered_scan_flag = false;
     scanPtr->scanSchemaVersion = schemaVersion;

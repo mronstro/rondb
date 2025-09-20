@@ -16023,7 +16023,7 @@ Uint32 Dbtc::initScanrec(ScanRecordPtr scanptr, const ScanTabReq *scanTabReq,
      * flag. In this case the impact might be very significant since we avoid
      * becoming single-threaded in this case.
      */
-    if (unlikely((scanParallel & 1) != 0 ||
+    if (unlikely((scanParallel & 3) != 0 ||
         scanParallel == 0)) {
       jam();
       return ZSCAN_PAR_RECEIVER_ID_ERROR;
@@ -16032,7 +16032,7 @@ Uint32 Dbtc::initScanrec(ScanRecordPtr scanptr, const ScanTabReq *scanTabReq,
       jam();
       return ZSCAN_CONTINOUS_SCAN_LOCK_ERROR;
     }
-    scanParallel /= 2;
+    scanParallel /= 4;
     par_ordered_scan_flag = true;
     DEB_CONT_SCAN(("(%u) TC scanPtrI: %u, Use Continous scan with"
                    " scanParallel: %u",
@@ -16111,15 +16111,19 @@ Uint32 Dbtc::initScanrec(ScanRecordPtr scanptr, const ScanTabReq *scanTabReq,
     ptr.p->lqhScanFragId = 0;
     ptr.p->m_apiPtr_index = 0;
     if (par_ordered_scan_flag) {
-      ptr.p->m_apiPtr[0] = apiPtr[2*i];
-      ptr.p->m_apiPtr[1] = apiPtr[2*i + 1];
+      ptr.p->m_apiPtr[0] = apiPtr[4*i];
+      ptr.p->m_apiPtr[1] = apiPtr[4*i + 1];
+      ptr.p->m_apiPtr[2] = apiPtr[4*i + 2];
+      ptr.p->m_apiPtr[3] = apiPtr[4*i + 3];
       DEB_CONT_SCAN(("(%u) scanFragNextId: %u, scanFragPtrI: %u,"
-                     " apiPtr(0x%x,0x%x)",
+                     " apiPtr(0x%x,0x%x,0x%x,0x%x)",
         instance(),
         i,
         ptr.i,
         ptr.p->m_apiPtr[0],
-        ptr.p->m_apiPtr[1]));
+        ptr.p->m_apiPtr[1],
+        ptr.p->m_apiPtr[2],
+        ptr.p->m_apiPtr[3]));
     } else {
       ptr.p->m_apiPtr[0] = apiPtr[i];
     }
@@ -17379,12 +17383,14 @@ void Dbtc::execSCAN_FRAGCONF(Signal *signal) {
   }  // if
 
   DEB_CONT_SCAN(("(%u) TC receive SCAN_FRAGCONF, status: %u, scanPtrI: %u"
-                 ", apiPtr(%u,%u)",
+                 ", apiPtr(0x%x,0x%x,0x%x,0x%x)",
     instance(),
     status,
     scanptr.i,
     scanFragptr.p->m_apiPtr[0],
-    scanFragptr.p->m_apiPtr[1]));
+    scanFragptr.p->m_apiPtr[1],
+    scanFragptr.p->m_apiPtr[2],
+    scanFragptr.p->m_apiPtr[3]));
 
   BlockReference lqhRef = scanFragptr.p->lqhBlockref;
   if (sig_len == ScanFragConf::SignalLength_query) {
@@ -18264,7 +18270,9 @@ bool Dbtc::sendScanFragReq(Signal *signal, ScanRecordPtr scanptr,
   }
   if (ScanFragReq::getParallelOrderedScanFlag(requestInfo)) {
     req->variableData[extra_len] = scanFragP.p->m_apiPtr[1];
-    extra_len++;
+    req->variableData[extra_len + 1] = scanFragP.p->m_apiPtr[2];
+    req->variableData[extra_len + 2] = scanFragP.p->m_apiPtr[3];
+    extra_len+= 3;
   }
 
   // Encode variable part
@@ -18463,9 +18471,9 @@ void Dbtc::sendScanTabConf(Signal *signal, const ScanRecordPtr scanPtr,
       if (scanPtr.p->m_par_ordered_scan_flag) {
         /**
          * If we will continue scanning the same fragment, we need to swap
-         * to the second receiver object.
+         * to the next receiver object.
          */
-        Uint32 apiPtr_index_new = apiPtr_index_used ^ 1;
+        Uint32 apiPtr_index_new = (apiPtr_index_used + 1) % 4;
         curr.p->m_apiPtr_index = apiPtr_index_new;
       }
       *ops++ = done ? RNIL : curr.i;

@@ -388,7 +388,6 @@ private:
       Last = 7,     // after last entry
       Aborting = 8
     };
-    Uint32 m_lastSeen;
     Uint32 m_errorCode;
     Uint64 m_fragPtrI;
     Uint32 m_lockwait;
@@ -1046,10 +1045,6 @@ private:
     scanPtr.i = scanPtrI;
     ndbrequire(c_scanOpPool.getValidPtr(scanPtr));
     return scanPtr.p;
-  }
-  Uint32 get_lastSeen(Uint32 scanPtrI) {
-    ScanOp *scanPtr = getScanOpPtrP(scanPtrI);
-    return scanPtr->m_lastSeen;
   }
   ScanOp *getScanOpPtrP(Uint32 scanPtrI, Uint32 scanInstance) {
     Dbtux *tux_block;

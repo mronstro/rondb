@@ -704,7 +704,7 @@ class Dblqh : public SimulatedBlock {
     UintR scan_acc_op_ptr[MaxScanAccSegments];
     Uint32 scan_acc_index;
     Uint32 scan_acc_segments;
-    Uint32 scanApiOpPtr[2];
+    Uint32 scanApiOpPtr[4];
     Uint32 scanApiOpPtr_index;
     Local_key m_row_id;
 
