@@ -140,6 +140,8 @@ int NdbScanOperation::init(const NdbTableImpl *tab,
 
   m_api_receivers_count = 0;
   m_current_api_receiver = 0;
+  DBUG_PRINT("info", ("New m_current_api_receiver: %u, line: %u",
+    m_current_api_receiver, __LINE__));
   m_sent_receivers_count = 0;
   m_conf_receivers_count = 0;
   m_kernel_error_code = 0;
@@ -1838,6 +1840,8 @@ int NdbScanOperation::nextResultNdbRecord(const char *&out_row,
       DBUG_RETURN(0);
     }
     m_current_api_receiver++;
+    DBUG_PRINT("info", ("New m_current_api_receiver: %u, line: %u",
+      m_current_api_receiver, __LINE__));
   }
 
   if (!fetchAllowed) {
@@ -1953,6 +1957,8 @@ int NdbScanOperation::nextResultNdbRecord(const char *&out_row,
 
     m_api_receivers_count = last;
     m_current_api_receiver = idx;
+    DBUG_PRINT("info", ("New m_current_api_receiver: %u, line: %u",
+      m_current_api_receiver, __LINE__));
   } else {
     retVal = -3;
   }
@@ -2036,6 +2042,8 @@ int NdbScanOperation::send_next_scan(Uint32 cnt, bool stopScanFlag) {
     m_sent_receivers_count = last + sent;
     m_api_receivers_count -= cnt;
     m_current_api_receiver = 0;
+    DBUG_PRINT("info", ("New m_current_api_receiver: %u, line: %u",
+      m_current_api_receiver, __LINE__));
 
     return ret;
   }
@@ -2312,6 +2320,8 @@ void NdbScanOperation::finaliseScan() {
   m_curr_row = nullptr;
   if (m_ordered) {
     m_current_api_receiver = theParallelism;
+    DBUG_PRINT("info", ("New m_current_api_receiver: %u, line: %u",
+      m_current_api_receiver, __LINE__));
     m_api_receivers_count = theParallelism;
   }
 
@@ -3550,6 +3560,8 @@ int NdbIndexScanOperation::processIndexScanDefs(LockMode lm, Uint32 scan_flags,
       Uint32 cnt = m_accessTable->getNoOfColumns() - 1;
       m_sort_columns = cnt;  // -1 for NDB$NODE
       m_current_api_receiver = m_sent_receivers_count;
+      DBUG_PRINT("info", ("New m_current_api_receiver: %u, line: %u",
+        m_current_api_receiver, __LINE__));
       m_api_receivers_count = m_sent_receivers_count;
     }
 
@@ -3663,6 +3675,8 @@ int NdbIndexScanOperation::next_result_ord_ndbrecord(const char *&out_row,
       ordered_insert_receiver(current--, m_conf_receivers[i]);
     }
     m_current_api_receiver = current;
+    DBUG_PRINT("info", ("New m_current_api_receiver: %u, line: %u",
+      m_current_api_receiver, __LINE__));
     theNdb->theImpl->incClientStat(Ndb::ScanBatchCount, count);
   } else {
     /*
@@ -3725,20 +3739,23 @@ int NdbIndexScanOperation::next_result_ord_ndbrecord_par(const char *&out_row,
         assert(nextRow != nullptr);
         ((void)nextRow);
         assert(m_receiver_state[conf_receiver_index] == ReceiverDataAvailable);
-        m_receiver_state[conf_receiver_index] = ReceiverDataReady;
         DBUG_PRINT("info", ("START: theNdb(%p) NdbReceiver: %u, DataReady"
                             ", tcPtrI: %u",
           theNdb, conf_receiver_index, conf_receiver->m_tcPtrI));
         if (conf_receiver->m_tcPtrI == RNIL) {
           m_receiver_state[other_receiver_index] = ReceiverClosed;
           m_receivers[other_receiver_index]->m_tcPtrI = RNIL;
-          DBUG_PRINT("info", ("Other receiver(%u) ReceiverClosed",
+          m_receiver_state[conf_receiver_index] = ReceiverDataReadyToBeClosed;
+          DBUG_PRINT("info", ("Other receiver(%u) ReceiverClosed, "
+                     "curr_state set to ReceiverDataReadyToBeClosed",
             other_receiver_index));
         } else {
           m_receiver_state[other_receiver_index] = ReceiverPrepared;
+          m_receiver_state[conf_receiver_index] = ReceiverDataReady;
           m_prepared_receivers[m_prepared_receivers_count++] =
             m_receivers[other_receiver_index]->m_index;
-          DBUG_PRINT("info", ("Other receiver(%u) ReceiverPrepared",
+          DBUG_PRINT("info", ("Other receiver(%u) ReceiverPrepared, "
+                     "curr_state set to ReceiverData Ready",
             other_receiver_index));
         }
         ordered_insert_receiver(current--, conf_receiver);
@@ -3751,11 +3768,13 @@ int NdbIndexScanOperation::next_result_ord_ndbrecord_par(const char *&out_row,
         DBUG_RETURN(1); // End of file
       }
       m_current_api_receiver = current;
+      DBUG_PRINT("info", ("New m_current_api_receiver: %u, line: %u",
+        m_current_api_receiver, __LINE__));
       m_waiting_for_data = false;
       {
         NdbImpl *impl = theNdb->theImpl;
         PollGuard poll_guard(*impl);
-        send_next_scan_ordered(Uint32(~0));
+        send_next_scan_ordered(0);
         poll_guard.flush_send();
       }
       break;
@@ -3769,26 +3788,49 @@ int NdbIndexScanOperation::next_result_ord_ndbrecord_par(const char *&out_row,
     Uint32 current_index = m_api_receivers[m_current_api_receiver]->m_index;
     Uint32 other_index = get_other_index(current_index);
     Uint32 other_state = m_receiver_state[other_index];
-    m_receiver_state[current_index] = ReceiverEmpty;
-    DBUG_PRINT("info", ("current_index: %u, other_state: %u, wait_for_data: %u",
-      current_index, other_state, m_waiting_for_data));
+    Uint32 curr_state = m_receiver_state[current_index];
+    if (curr_state == ReceiverDataReady) {
+      DBUG_PRINT("info", ("current_index: %u, curr_state: %u, wait_for_data: %u"
+                 ", new state: ReceiverEmpty",
+      current_index, curr_state, m_waiting_for_data));
+      m_receiver_state[current_index] = ReceiverEmpty;
+      if (other_state == ReceiverDataReady) {
+        /**
+         * This is a state where both NdbReceiver object had data and
+         * thus wasn't ready to prepare any new sends yet. Since the
+         * state is ReceiverDataReady there is more rows to be read.
+         * Thus prepare the current NdbReceiver to get more data.
+         */
+        m_receiver_state[current_index] = ReceiverPrepared;
+        m_prepared_receivers[m_prepared_receivers_count++] =
+          m_receivers[current_index]->m_index;
+      }
+    } else if (curr_state == ReceiverDataReadyToBeClosed) {
+      DBUG_PRINT("info", ("current_index: %u, curr_state: %u, wait_for_data: %u"
+                 ", new state: ReceiverClosed",
+      current_index, curr_state, m_waiting_for_data));
+      m_receiver_state[current_index] = ReceiverClosed;
+    } else {
+      DBUG_PRINT("info", ("theNdb(%p) current_index: %u, curr_state: %u",
+        theNdb, current_index, curr_state));
+      require(false);
+    }
     if (other_state != ReceiverDataReady &&
-        other_state != ReceiverDataReadyToBeClosed &&
-        m_waiting_for_data) {
+        other_state != ReceiverDataReadyToBeClosed) {
       if (!fetchAllowed) return 2;  // No more data available now
       int count = ordered_send_scan_wait_for_all(forceSend);
       if (count == -1) { DBUG_RETURN(-1); }
       for (int i = 0; i < count; i++) {
         NdbReceiver *conf_receiver = m_conf_receivers[i];
+        Uint32 conf_receiver_index = conf_receiver->m_index;
+        Uint32 other_receiver_index = get_other_index(conf_receiver_index);
+        DBUG_PRINT("info", ("theNdb(%p) NdbReceiver: %u, DataReady",
+          theNdb, conf_receiver_index));
         const char *nextRow = conf_receiver->getNextRow();  // Fetch first
         assert(nextRow != nullptr);
         ((void)nextRow);
-        Uint32 conf_receiver_index = conf_receiver->m_index;
-        Uint32 other_receiver_index = get_other_index(conf_receiver_index);
         assert(m_receiver_state[conf_receiver_index] == ReceiverDataAvailable);
         m_receiver_state[conf_receiver_index] = ReceiverDataReady;
-        DBUG_PRINT("info", ("theNdb(%p) NdbReceiver: %u, DataReady",
-          theNdb, conf_receiver_index));
         if (m_receiver_state[other_receiver_index] == ReceiverEmpty) {
           DBUG_PRINT("info", ("theNdb(%p) Other NdbReceiver: %u, Empty",
             theNdb, other_receiver_index));
@@ -3796,16 +3838,27 @@ int NdbIndexScanOperation::next_result_ord_ndbrecord_par(const char *&out_row,
           ordered_insert_receiver(m_current_api_receiver + 1, conf_receiver);
           if (conf_receiver->m_tcPtrI == RNIL) {
             m_receiver_state[other_receiver_index] = ReceiverClosed;
+            DBUG_PRINT("info", ("theNdb(%p) Other NdbReceiver: %u, Closed",
+              theNdb, other_receiver_index));
           } else {
             m_prepared_receivers[m_prepared_receivers_count++] =
               m_receivers[other_receiver_index]->m_index;
             m_receiver_state[other_receiver_index] = ReceiverPrepared;
+            DBUG_PRINT("info", ("theNdb(%p) Other NdbReceiver: %u, Prepared",
+              theNdb, other_receiver_index));
           }
         } else {
           require(m_receiver_state[other_receiver_index] == ReceiverDataReady);
           if (conf_receiver->m_tcPtrI == RNIL) {
             m_receiver_state[other_receiver_index] =
               ReceiverDataReadyToBeClosed;
+            DBUG_PRINT("info", ("theNdb(%p) Other NdbReceiver: %u,"
+                       " ReceiveDataReadyToBeClosed",
+              theNdb, other_receiver_index));
+          } else {
+            DBUG_PRINT("info", ("theNdb(%p) Other NdbReceiver: %u,"
+                       " ReceiveDataReady",
+              theNdb, other_receiver_index));
           }
         }
       }
@@ -3822,27 +3875,24 @@ int NdbIndexScanOperation::next_result_ord_ndbrecord_par(const char *&out_row,
      * m_waiting_for_data is true. Thus we either get here with the state
      * ReceiverClosed or ReceiverDataReady or ReceiverEmpty.
      */
-    if (other_state == ReceiverDataReady) {
+    if (other_state == ReceiverDataReady ||
+        other_state == ReceiverDataReadyToBeClosed) {
       NdbReceiver *other_receiver = m_receivers[other_index];
       DBUG_PRINT("info", ("theNdb(%p) other_index: %u,"
-                 " state: ReceiverDataAvailable",
-        theNdb, other_index));
-      m_api_receivers[m_current_api_receiver] = other_receiver;
-      break;
-    } else if (other_state == ReceiverDataReadyToBeClosed) {
-      DBUG_PRINT("info", ("theNdb(%p) other_index: %u,"
-                 " state: ReceiverDataAvailableToBeClosed",
-        theNdb, other_index));
-      NdbReceiver *other_receiver = m_receivers[other_index];
-      m_receiver_state[other_index] = ReceiverDataAvailable;
-      m_receiver_state[current_index] = ReceiverClosed;
+                 " state: %s",
+        theNdb,
+        other_index,
+        other_state == ReceiverDataReady ?
+          "ReceiverDataReady" : "ReceiverDataReadyToBeClosed"));
       m_api_receivers[m_current_api_receiver] = other_receiver;
       break;
     } else if (other_state == ReceiverClosed) {
       assert(!m_waiting_for_data);
       m_current_api_receiver++;
+      DBUG_PRINT("info", ("New m_current_api_receiver: %u, line: %u",
+        m_current_api_receiver, __LINE__));
       m_receiver_state[current_index] = ReceiverClosed;
-      DBUG_PRINT("info", ("theNdb(%p) Closed %u and %u, current: %u",
+      DBUG_PRINT("info", ("theNdb(%p) ReceiverClosed %u and %u, current: %u",
         theNdb, current_index, other_index, m_current_api_receiver));
       if (m_current_api_receiver == theParallelism) {
         theError.code = Err_scanAlreadyComplete;
@@ -3851,29 +3901,9 @@ int NdbIndexScanOperation::next_result_ord_ndbrecord_par(const char *&out_row,
         DBUG_RETURN(1); // End of file
       }
       break;
-    } else if (other_state == ReceiverEmpty) {
-      assert(!m_waiting_for_data);
-      require(false);
-      data_available = false;
-      m_prepared_receivers[m_prepared_receivers_count++] =
-        m_receivers[current_index]->m_index;
-      m_receiver_state[current_index] = ReceiverPrepared;
-      DBUG_PRINT("info", ("theNdb(%p) Prepared from other Empty(%u),"
-                          " fetch: %u",
-        theNdb, current_index, fetchAllowed));
-      if (!fetchAllowed) {
-        DBUG_RETURN(2);
-      }
-      {
-        NdbImpl *impl = theNdb->theImpl;
-        PollGuard poll_guard(*impl);
-        send_next_scan_ordered(Uint32(~0));
-        poll_guard.flush_send();
-      }
-      continue;
     } else {
       DBUG_PRINT("info", ("theNdb(%p) other_index: %u, state: %u",
-        theNdb, other_index, m_receiver_state[other_index]));
+        theNdb, other_index, other_state));
       require(false);
     }
   }
@@ -3896,7 +3926,7 @@ int NdbIndexScanOperation::next_result_ord_ndbrecord_par(const char *&out_row,
       (out_row = m_api_receivers[current]->getCurrentRow()) != nullptr) {
     DBUG_RETURN(0);
   } else {
-    DBUG_PRINT("info", ("theNdb(%p) Completed(1)",
+    DBUG_PRINT("info", ("theNdb(%p) Completed(2)",
       theNdb));
     theError.code = Err_scanAlreadyComplete;
     DBUG_RETURN(1);  // End-of-file
@@ -4046,7 +4076,7 @@ int NdbIndexScanOperation::send_next_scan_ordered(Uint32 idx) {
   Uint32 nodeId = theNdbCon->theDBnode;
   NdbImpl *impl = theNdb->theImpl;
   int ret = 0;
-  if (idx == Uint32(~0)) {
+  if (m_continousScan) {
     if (m_prepared_receivers_count == 0) {
       m_waiting_for_data = false;
       DBUG_PRINT("info", ("Nothing to send in send_next_scan_ordered"));
@@ -4099,6 +4129,8 @@ int NdbIndexScanOperation::send_next_scan_ordered(Uint32 idx) {
     NdbReceiver *tRec = m_api_receivers[idx];
     Uint32 index = tRec->m_index;
     m_current_api_receiver = idx + 1;
+    DBUG_PRINT("info", ("New m_current_api_receiver: %u, line: %u",
+      m_current_api_receiver, __LINE__));
     if ((prep_array[0] = tRec->m_tcPtrI) == RNIL) {
       DBUG_PRINT("info", ("receiver completed, don't send"));
       m_receiver_state[index] = ReceiverClosed;
@@ -4198,6 +4230,8 @@ int NdbScanOperation::close_impl(bool forceSend, PollGuard *poll_guard) {
      */
     m_api_receivers_count = 0;
     m_current_api_receiver = m_ordered ? theParallelism : 0;
+    DBUG_PRINT("info", ("New m_current_api_receiver: %u, line: %u",
+      m_current_api_receiver, __LINE__));
   }
 
   /**
@@ -4316,6 +4350,8 @@ void NdbScanOperation::reset_receivers(Uint32 parallell, Uint32 /*ordered*/) {
 
   m_api_receivers_count = 0;
   m_current_api_receiver = 0;
+  DBUG_PRINT("info", ("New m_current_api_receiver: %u, line: %u",
+    m_current_api_receiver, __LINE__));
   m_sent_receivers_count = 0;
   m_conf_receivers_count = 0;
   m_prepared_receivers_count = 0;
