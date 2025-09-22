@@ -184,7 +184,7 @@ class ScanTabReq {
  R = Read Committed base   - 1  Bit 30
  I = IgnoreTTL             - 1  Bit 3
  e = TTL only expired      - 1  Bit 4
- r = Two receiver/part     - 1  Bit 2
+ r = Four receiver/part    - 1  Bit 2
 
            1111111111222222222233
  01234567890123456789012345678901

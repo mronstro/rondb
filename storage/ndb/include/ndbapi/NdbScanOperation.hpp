@@ -622,7 +622,7 @@ class NdbScanOperation : public NdbOperation {
   Uint32 *m_array;  // containing all arrays below
   Uint32 m_allocated_receivers;
   NdbReceiver **m_receivers;  // All receivers
-
+  void close_ndb_receiver(Uint32 inx, Uint32 state);
   enum {
     ReceiverEmpty = 0,
     ReceiverPrepared = 1,

@@ -89,9 +89,9 @@ bool printSCAN_FRAGREQ(FILE *output, const Uint32 *theData, Uint32 len,
   if (ScanFragReq::getCorrFactorFlag(sig->requestInfo) ||
       ScanFragReq::getParallelOrderedScanFlag(sig->requestInfo) ||
       ScanFragReq::getTTLOnlyExpiredFragFlag(sig->requestInfo)) {
-    fprintf(output, " variableData[0]: 0x%x\n", sig->variableData[0]);
-    if (len > (ScanFragReq::SignalLength + 1)) {
-      fprintf(output, " variableData[0]: 0x%x\n", sig->variableData[1]);
+    Uint32 num_extra = len - ScanFragReq::SignalLength;
+    for (Uint32 i = 0; i < num_extra; i++) {
+      fprintf(output, " variableData[%u]: 0x%x\n", i, sig->variableData[i]);
     }
   }
   return true;
