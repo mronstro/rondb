@@ -268,8 +268,8 @@ void Dbtup::sendReadAttrinfo(Signal *signal, KeyReqStruct *req_struct,
     connectedToNode = false;
   }
 
-  DEB_CONT_SCAN(("(%u) TUP Sending TRANSID_AI with api_ref: %u",
-    instance(), req_struct->tc_operation_ptr));
+  DEB_CONT_SCAN(("(%u) TUP Sending TRANSID_AI with api_ref: %u, len: %u",
+    instance(), req_struct->tc_operation_ptr, ToutBufIndex));
 
   Uint32 sig0 = req_struct->tc_operation_ptr;
   Uint32 sig1 = req_struct->trans_id1;

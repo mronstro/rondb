@@ -18714,6 +18714,13 @@ void Dblqh::nextScanConfScanLab(Signal *signal, ScanRecord *const scanPtr,
       scanPtr->m_last_row = false;
       scanPtr->scanFlag = NextScanReq::ZSCAN_NEXT;
 
+      DEB_CONT_SCAN(("(%u):1 ScanPtrI: %u, readLen: %u, batch_bytes: %u,"
+                     " rows: %u",
+        scanptr.i,
+        readLength,
+        scanPtr->m_curr_batch_size_bytes,
+        scanPtr->m_curr_batch_size_rows));
+
       if (!scanPtr->check_scan_batch_completed()) {
         jam();
         scanNextLoopLab(signal, regTcPtr->clientConnectrec, RNIL, scanPtr,
@@ -19109,6 +19116,14 @@ void Dblqh::scanTupkeyConfLab(Signal* signal,
   scanPtr->m_curr_batch_size_bytes += read_len * sizeof(Uint32);
   scanPtr->m_curr_batch_size_rows = rows + 1;
   scanPtr->m_last_row = last_row;
+
+  DEB_CONT_SCAN(("(%u):2 ScanPtrI: %u, readLen: %u, batch_bytes: %u,"
+                 " rows: %u",
+    instance(),
+    scanptr.i,
+    read_len,
+    scanPtr->m_curr_batch_size_bytes,
+    scanPtr->m_curr_batch_size_rows));
 
   jamDebug();
   jamDataDebug(scanPtr->m_curr_batch_size_rows);
@@ -20769,11 +20784,14 @@ void Dblqh::sendScanFragConf(Signal *signal,
 
     DEB_CONT_SCAN(("(%u) LQH SCAN_FRAGCONF sent scanPtrI: %u, "
                    "CONT_SCAN_IDLE -> CONT_SCAN_ACTIVE"
-                   ", new api_ref: %u, completed_ops: %u",
+                   ", new api_ref: %u, completed_ops: %u"
+                   ", scanCompleted: %u, total_len: %u",
       instance(),
       scanptr.i,
       scanPtr->scanApiOpPtr_index,
-      completed_ops));
+      completed_ops,
+      scanCompleted,
+      total_len));
     signal->theData[0] = scanptr.i;
     signal->theData[1] = GSN_NEXT_SCANREQ;
     signal->theData[2] = RNIL;
