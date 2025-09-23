@@ -18716,6 +18716,7 @@ void Dblqh::nextScanConfScanLab(Signal *signal, ScanRecord *const scanPtr,
 
       DEB_CONT_SCAN(("(%u):1 ScanPtrI: %u, readLen: %u, batch_bytes: %u,"
                      " rows: %u",
+        instance(),
         scanptr.i,
         readLength,
         scanPtr->m_curr_batch_size_bytes,
