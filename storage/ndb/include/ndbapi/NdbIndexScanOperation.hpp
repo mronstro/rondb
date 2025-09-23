@@ -325,7 +325,7 @@ class NdbIndexScanOperation : public NdbScanOperation {
                                     bool forceSend);
   void ordered_insert_receiver(Uint32 start, NdbReceiver *receiver);
   int ordered_send_scan_wait_for_all(bool forceSend);
-  int send_next_scan_ordered(Uint32 idx);
+  int send_next_scan_ordered(Uint32 idx, bool stopFlag);
   int compare(Uint32 key, Uint32 cols, const NdbReceiver *,
               const NdbReceiver *);
   Uint32 m_sort_columns;

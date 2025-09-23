@@ -3793,7 +3793,10 @@ int NdbIndexScanOperation::next_result_ord_ndbrecord_par(const char *&out_row,
          */
         NdbImpl *impl = theNdb->theImpl;
         PollGuard poll_guard(*impl);
-        send_next_scan_ordered(0);
+        int ret = send_next_scan_ordered(0, false);
+        if (ret == -1) {
+          DBUG_RETURN(-1);
+        }
         poll_guard.flush_send();
       }
       break;
@@ -3870,7 +3873,10 @@ int NdbIndexScanOperation::next_result_ord_ndbrecord_par(const char *&out_row,
          */
         NdbImpl *impl = theNdb->theImpl;
         PollGuard poll_guard(*impl);
-        send_next_scan_ordered(0);
+        int ret = send_next_scan_ordered(0, false);
+        if (ret == -1) {
+          DBUG_RETURN(-1);
+        }
         poll_guard.flush_send();
       }
     }
@@ -4022,7 +4028,7 @@ int NdbIndexScanOperation::ordered_send_scan_wait_for_all(bool forceSend) {
   Uint32 seq = theNdbCon->theNodeSequence;
   Uint32 nodeId = theNdbCon->theDBnode;
   if (seq == impl->getNodeSequence(nodeId) &&
-      !send_next_scan_ordered(m_current_api_receiver)) {
+      !send_next_scan_ordered(m_current_api_receiver, false)) {
     impl->incClientStat(Ndb::WaitScanResultCount, 1);
     while (m_sent_receivers_count > 0 && (m_kernel_error_code == 0)) {      
       int ret_code= poll_guard.wait_scan(3*timeout,
@@ -4074,7 +4080,8 @@ int NdbIndexScanOperation::ordered_send_scan_wait_for_all(bool forceSend) {
 
   This method is called with the PollGuard mutex held on the transporter.
 */
-int NdbIndexScanOperation::send_next_scan_ordered(Uint32 idx) {
+int NdbIndexScanOperation::send_next_scan_ordered(Uint32 idx,
+                                                  bool stopFlag) {
   if (idx == theParallelism ||
       m_waiting_for_data) return 0;
 
@@ -4087,7 +4094,7 @@ int NdbIndexScanOperation::send_next_scan_ordered(Uint32 idx) {
   Uint32 *prep_array = theData + 4;
 
   theData[0] = theNdbCon->theTCConPtr;
-  theData[1] = 0;
+  theData[1] = stopFlag == true ? 1 : 0;
   Uint64 transId = theNdbCon->theTransactionId;
   theData[2] = (Uint32)transId;
   theData[3] = (Uint32)(transId >> 32);
@@ -4253,44 +4260,78 @@ int NdbScanOperation::close_impl(bool forceSend, PollGuard *poll_guard) {
       m_current_api_receiver, __LINE__));
   }
 
-  /**
-   * move all conf'ed into api
-   *   so that send_next_scan can check if they needs to be closed
-   */
-  Uint32 api = m_api_receivers_count;
-  Uint32 conf = m_conf_receivers_count;
-
-  if (m_ordered) {
-    /**
-     * Ordered scan, keep the m_api_receivers "to the right"
-     */
-    memmove(m_api_receivers, m_api_receivers + m_current_api_receiver,
-            (theParallelism - m_current_api_receiver) * sizeof(char *));
-    api = (theParallelism - m_current_api_receiver);
-    m_api_receivers_count = api;
-  }
-
-  DBUG_PRINT("info", ("close_impl: [order api conf sent"
-                      " curr parr] %d %d %d %d %d %d",
-    m_ordered, api, conf, m_sent_receivers_count, m_current_api_receiver,
-    theParallelism));
-
-  if (api + conf) {
-    /**
-     * There's potentially something to close on the kernel
-     *   setup m_api_receivers (for send_next_scan)
-     */
-    memcpy(m_api_receivers + api, m_conf_receivers, conf * sizeof(char *));
-    m_api_receivers_count = api + conf;
+  if (m_continousScan) {
+    DBUG_PRINT("info", ("close continous scan"));
+    Uint32 prep_count = 0;
+    m_prepared_receivers_count = 0;
+    for (Uint32 i = 0; i < (theParallelism / 4); i++) {
+      bool closed = false;
+      for (Uint32 j = 0; j < 4; j++) {
+        Uint32 inx = i * 4 + j;
+        if (m_receivers[inx]->m_tcPtrI == RNIL) {
+          closed = true;
+          break;
+        }
+      }
+      for (Uint32 j = 0; j < 4; j++) {
+        if (!closed && j == 0) {
+          m_api_receivers[prep_count++] = m_receivers[i * 4];
+          DBUG_PRINT("info", ("Still need to close receiver %u",
+            i * 4));
+          m_receiver_state[i * 4] = ReceiverSentWaitingForResponse;
+        } else {
+          Uint32 inx = i * 4 + j;
+          m_receivers[inx]->m_tcPtrI = RNIL;
+        }
+      }
+    }
+    m_api_receivers_count = 0;
     m_conf_receivers_count = 0;
-  }
+    if (prep_count > 0 &&
+        (send_next_scan(prep_count, true) == -1)) {
+      theNdbCon->theReleaseOnClose = true;
+      return -1;
+    }
+  } else {
+    /**
+     * move all conf'ed into api
+     *   so that send_next_scan can check if they needs to be closed
+     */
+    Uint32 api = m_api_receivers_count;
+    Uint32 conf = m_conf_receivers_count;
 
-  // Send close scan
-  //   If all api + conf receivers are already closed on the kernel
-  //   side this may be a no-op.
-  if (send_next_scan(api + conf, true) == -1) {
-    theNdbCon->theReleaseOnClose = true;
-    return -1;
+    if (m_ordered) {
+      /**
+       * Ordered scan, keep the m_api_receivers "to the right"
+       */
+      memmove(m_api_receivers, m_api_receivers + m_current_api_receiver,
+              (theParallelism - m_current_api_receiver) * sizeof(char *));
+      api = (theParallelism - m_current_api_receiver);
+      m_api_receivers_count = api;
+    }
+
+    DBUG_PRINT("info", ("close_impl: [order api conf sent"
+                        " curr parr] %d %d %d %d %d %d",
+      m_ordered, api, conf, m_sent_receivers_count, m_current_api_receiver,
+      theParallelism));
+
+    if (api + conf) {
+      /**
+       * There's potentially something to close on the kernel
+       *   setup m_api_receivers (for send_next_scan)
+       */
+      memcpy(m_api_receivers + api, m_conf_receivers, conf * sizeof(char *));
+      m_api_receivers_count = api + conf;
+      m_conf_receivers_count = 0;
+    }
+
+    // Send close scan
+    //   If all api + conf receivers are already closed on the kernel
+    //   side this may be a no-op.
+    if (send_next_scan(api + conf, true) == -1) {
+      theNdbCon->theReleaseOnClose = true;
+      return -1;
+    }
   }
 
   /**
