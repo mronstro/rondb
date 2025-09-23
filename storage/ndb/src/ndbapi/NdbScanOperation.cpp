@@ -1658,6 +1658,7 @@ void NdbScanOperation::receiver_delivered(NdbReceiver *tRec) {
  * Remove receiver as it's completed
  */
 void NdbScanOperation::receiver_completed(NdbReceiver *tRec) {
+  tRec->m_tcPtrI = RNIL;
   if (m_kernel_error_code == 0) {
     DBUG_PRINT("info", ("theNdb(%p) receiver_completed(%u),"
                " m_ordered: %u, id: %u",
@@ -4287,10 +4288,13 @@ int NdbScanOperation::close_impl(bool forceSend, PollGuard *poll_guard) {
     }
     m_api_receivers_count = 0;
     m_conf_receivers_count = 0;
-    if (prep_count > 0 &&
-        (send_next_scan(prep_count, true) == -1)) {
-      theNdbCon->theReleaseOnClose = true;
-      return -1;
+    if (prep_count > 0) {
+      int ret_code = send_next_scan(prep_count, true);
+      poll_guard->flush_send();
+      if (ret_code == -1) {
+        theNdbCon->theReleaseOnClose = true;
+        return -1;
+      }
     }
   } else {
     /**
