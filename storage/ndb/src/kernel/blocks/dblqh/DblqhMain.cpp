@@ -20568,7 +20568,7 @@ void Dblqh::sendScanFragConf(Signal *signal,
     if (continous_scan_state == ScanRecord::CONTINOUS_SCAN_ACTIVE) {
       jam();
       scanPtr->m_continous_scan_state = ScanRecord::CONTINOUS_SCAN_READY;
-      scanPtr->scanState = ScanRecord::WAIT_NEXT_SCAN;
+      scanPtr->scanState = ScanRecord::WAIT_SCAN_NEXTREQ;
       DEB_CONT_SCAN(("(%u) LQH ScanPtrI: %u,"
                      " CONT_SCAN_ACTIVE -> CONT_SCAN_READY",
         instance(), scanptr.i));
@@ -20583,7 +20583,7 @@ void Dblqh::sendScanFragConf(Signal *signal,
       return;
     } else {
       jam();
-      ndbassert(scanPtr->scanState == ScanRecord::WAIT_NEXT_SCAN);
+      ndbassert(scanPtr->scanState == ScanRecord::WAIT_SCAN_NEXTREQ);
       ndbrequire(continous_scan_state == ScanRecord::CONTINOUS_SCAN_READY);
       scanPtr->m_continous_scan_state = ScanRecord::CONTINOUS_SCAN_IDLE;
       DEB_CONT_SCAN(("(%u) LQH ScanPtrI: %u, CONT_SCAN_READY -> CONT_SCAN_IDLE",

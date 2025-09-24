@@ -3827,8 +3827,11 @@ int NdbIndexScanOperation::next_result_ord_ndbrecord_par(const char *&out_row,
         theNdb, current_index, curr_state));
       require(false);
     }
-    if (next_state != ReceiverDataReady &&
-        next_state != ReceiverDataReadyToBeClosed) {
+    while (next_state != ReceiverDataReady &&
+           next_state != ReceiverDataReadyToBeClosed) {
+      DBUG_PRINT("info", ("theNdb(%p), next_state: %u, m_waiting_for_data: %u, "
+                 "send and receive",
+        theNdb, next_state, m_waiting_for_data));
       if (!fetchAllowed) return 2;  // No more data available now
       int count = ordered_send_scan_wait_for_all(forceSend);
       if (count == -1) { DBUG_RETURN(-1); }
@@ -3879,6 +3882,11 @@ int NdbIndexScanOperation::next_result_ord_ndbrecord_par(const char *&out_row,
           DBUG_RETURN(-1);
         }
         poll_guard.flush_send();
+      }
+      if (next_state == ReceiverClosed) {
+        DBUG_PRINT("info", ("theNdb(%p), next_state: ReceiverClosed, break",
+          theNdb));
+        break;
       }
     }
     /**
@@ -4261,7 +4269,7 @@ int NdbScanOperation::close_impl(bool forceSend, PollGuard *poll_guard) {
       m_current_api_receiver, __LINE__));
   }
 
-  if (m_continousScan) {
+  if (m_ordered && m_continousScan) {
     DBUG_PRINT("info", ("close continous scan"));
     Uint32 prep_count = 0;
     m_prepared_receivers_count = 0;
