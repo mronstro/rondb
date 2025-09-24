@@ -3822,6 +3822,14 @@ int NdbIndexScanOperation::next_result_ord_ndbrecord_par(const char *&out_row,
                  ", new state: ReceiverClosed",
         current_index, curr_state, m_waiting_for_data));
       close_ndb_receiver(current_index, ReceiverClosed);
+      m_current_api_receiver++;
+      if (m_current_api_receiver == theParallelism) {
+        theError.code = Err_scanAlreadyComplete;
+        DBUG_PRINT("info", ("theNdb(%p) Completed(1)",
+          theNdb));
+        DBUG_RETURN(1); // End of file
+      }
+      break;
     } else {
       DBUG_PRINT("info", ("theNdb(%p) current_index: %u, curr_state: %u",
         theNdb, current_index, curr_state));
