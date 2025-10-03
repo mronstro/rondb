@@ -2039,8 +2039,6 @@ int NdbScanOperation::send_next_scan(Uint32 cnt, bool stopScanFlag) {
     theData[2] = (Uint32)transId;
     theData[3] = (Uint32)(transId >> 32);
 
-    DBUG_PRINT("info", ("Send SCAN_NEXTREQ: NdbScanOperation, cnt: %u", cnt));
-
     /**
      * Prepare ops
      */
@@ -2079,10 +2077,20 @@ int NdbScanOperation::send_next_scan(Uint32 cnt, bool stopScanFlag) {
     m_sent_receivers_count = last + sent;
     m_api_receivers_count -= cnt;
     m_current_api_receiver = 0;
+
+    DBUG_PRINT("info", ("Send SCAN_NEXTREQ: NdbScanOperation, cnt: %u"
+                        ", transid[0x%x,0x%x], ApiPtrI: %u, node: %u",
+      cnt,
+      theData[2],
+      theData[3],
+      theData[0],
+      theNdbCon->theDBnode));
     DBUG_PRINT("info", ("New m_current_api_receiver: %u, line: %u",
       m_current_api_receiver, __LINE__));
 
     return ret;
+  } else {
+    DBUG_PRINT("info", ("send_next_scan with cnt = 0"));
   }
   return 0;
 }
@@ -4286,6 +4294,7 @@ int NdbScanOperation::close_impl(bool forceSend, PollGuard *poll_guard) {
   Uint32 seq = theNdbCon->theNodeSequence;
   Uint32 nodeId = theNdbCon->theDBnode;
   bool scanTimeoutCase = (theError.code == 4008);
+  DBUG_ENTER("NdbScanOperation::close_impl");
 
   /* Rather nasty way to clean up IndexScan resources if
    * any
@@ -4306,11 +4315,12 @@ int NdbScanOperation::close_impl(bool forceSend, PollGuard *poll_guard) {
   if (seq != impl->getNodeSequence(nodeId)) {
     /* Data node has failed, scan has no kernel side resources anymore */
     theNdbCon->theReleaseOnClose = true;
-    return -1;
+    DBUG_RETURN(-1);
   }
 
   if (!m_executed) {
     /* Nothing sent, nothing to wait for */
+    DBUG_RETURN(0);
     return 0;
   }
 
@@ -4343,7 +4353,7 @@ int NdbScanOperation::close_impl(bool forceSend, PollGuard *poll_guard) {
         m_conf_receivers_count = 0;
         m_sent_receivers_count = 0;
         theNdbCon->theReleaseOnClose = true;
-        return -1;
+        DBUG_RETURN(-1);
     }
   }
 
@@ -4408,7 +4418,7 @@ int NdbScanOperation::close_impl(bool forceSend, PollGuard *poll_guard) {
   //   side this may be a no-op.
   if (send_next_scan(api + conf, true) == -1) {
     theNdbCon->theReleaseOnClose = true;
-    return -1;
+    DBUG_RETURN(-1);
   }
 
   /**
@@ -4439,7 +4449,7 @@ int NdbScanOperation::close_impl(bool forceSend, PollGuard *poll_guard) {
         m_conf_receivers_count = 0;
         m_sent_receivers_count = 0;
         theNdbCon->theForceReleaseOnClose = true;
-        return -1;
+        DBUG_RETURN(-1);
       case -2:
         /* Node failure */
         /**
@@ -4450,7 +4460,7 @@ int NdbScanOperation::close_impl(bool forceSend, PollGuard *poll_guard) {
         m_conf_receivers_count = 0;
         m_sent_receivers_count = 0;
         theNdbCon->theReleaseOnClose = true;
-        return -1;
+        DBUG_RETURN(-1);
     }
   }
 
@@ -4460,7 +4470,7 @@ int NdbScanOperation::close_impl(bool forceSend, PollGuard *poll_guard) {
         "connection %d after scan timeout",
         theNdbCon->ptr2int());
 
-  return 0;
+  DBUG_RETURN(0);
 }
 
 void NdbScanOperation::reset_receivers(Uint32 parallell, Uint32 /*ordered*/) {
