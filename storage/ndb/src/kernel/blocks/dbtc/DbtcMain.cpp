@@ -2454,6 +2454,7 @@ void Dbtc::handleSignalStateProblem(Signal *signal,
 
     if (acrOwnerNodeId == signalNodeId) {
       jam();
+      ndbabort();
       return;
     }
 
@@ -2473,7 +2474,7 @@ void Dbtc::handleSignalStateProblem(Signal *signal,
     signal->theData[1] = acrOwnerNodeId;
     sendSignal(QMGR_REF, GSN_DUMP_STATE_ORD, signal, 2, JBA);
   }
-
+  ndbabort();
   /* Do nothing more - API disconnection is responsible for cleanup */
 }  // Dbtc::handleSignalStateProblem
 
@@ -3819,6 +3820,7 @@ void Dbtc::execTCKEYREQ(Signal *signal) {
         jam();
         compare_transid1 = compare_transid1 | compare_transid2;
         if (unlikely(compare_transid1 != 0)) {
+          jam();
           releaseSections(handle);
           handleSignalStateProblem(signal, apiConnectptr,
                                    refToNode(sendersBlockRef), 2);
@@ -17722,6 +17724,7 @@ void Dbtc::execSCAN_NEXTREQ(Signal *signal) {
     }
 
     /* Disconnect sender, and record owner, if different */
+    jam();
     handleSignalStateProblem(signal, apiConnectptr,
                              refToNode(signal->senderBlockRef()), 4);
     return;
