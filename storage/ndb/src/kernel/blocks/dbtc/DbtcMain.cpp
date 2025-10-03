@@ -2454,7 +2454,10 @@ void Dbtc::handleSignalStateProblem(Signal *signal,
 
     if (acrOwnerNodeId == signalNodeId) {
       jam();
-      ndbabort();
+#ifdef VM_TRACE
+      dump_scan_state(apiConnectptr);
+      ndbassert(false);
+#endif
       return;
     }
 
@@ -2474,7 +2477,10 @@ void Dbtc::handleSignalStateProblem(Signal *signal,
     signal->theData[1] = acrOwnerNodeId;
     sendSignal(QMGR_REF, GSN_DUMP_STATE_ORD, signal, 2, JBA);
   }
-  ndbabort();
+#ifdef VM_TRACE
+  dump_scan_state(apiConnectptr);
+  ndbassert(false);
+#endif
   /* Do nothing more - API disconnection is responsible for cleanup */
 }  // Dbtc::handleSignalStateProblem
 

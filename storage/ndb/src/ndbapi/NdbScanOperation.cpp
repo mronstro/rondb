@@ -2034,7 +2034,7 @@ int NdbScanOperation::send_next_scan(Uint32 cnt, bool stopScanFlag) {
 
     Uint32 *theData = tSignal.getDataPtrSend();
     theData[0] = theNdbCon->theTCConPtr;
-    theData[1] = stopScanFlag == true ? 1 : 0;
+    theData[1] = (stopScanFlag == true) ? 1 : 0;
     Uint64 transId = theNdbCon->theTransactionId;
     theData[2] = (Uint32)transId;
     theData[3] = (Uint32)(transId >> 32);
@@ -2079,12 +2079,15 @@ int NdbScanOperation::send_next_scan(Uint32 cnt, bool stopScanFlag) {
     m_current_api_receiver = 0;
 
     DBUG_PRINT("info", ("Send SCAN_NEXTREQ: NdbScanOperation, cnt: %u"
-                        ", transid[0x%x,0x%x], ApiPtrI: %u, node: %u",
+                        ", transid[0x%x,0x%x], ApiPtrI: %u, node: %u, "
+                        "stopFlag: %u, sent: %u",
       cnt,
       theData[2],
       theData[3],
       theData[0],
-      theNdbCon->theDBnode));
+      theNdbCon->theDBnode,
+      theData[1],
+      sent));
     DBUG_PRINT("info", ("New m_current_api_receiver: %u, line: %u",
       m_current_api_receiver, __LINE__));
 
@@ -4385,17 +4388,6 @@ int NdbScanOperation::close_impl(bool forceSend, PollGuard *poll_guard) {
             (theParallelism - m_current_api_receiver) * sizeof(char *));
     api = (theParallelism - m_current_api_receiver);
     m_api_receivers_count = api;
-    if (m_continousScan) {
-      for (Uint32 i = 0; i < (theParallelism / 4); i++) {
-        for (Uint32 j = 0; j < 4; j++) {
-          Uint32 inx = i * 4 + j;
-          if (m_receivers[inx]->m_tcPtrI == RNIL) {
-            close_ndb_receiver(inx, ReceiverClosed);
-            break;
-          }
-        }
-      }
-    }
   }
 
   DBUG_PRINT("info", ("close_impl: [order api conf sent"
