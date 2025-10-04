@@ -2056,7 +2056,7 @@ int NdbScanOperation::send_next_scan(Uint32 cnt, bool stopScanFlag) {
     if (sent) {
       Uint32 nodeId = theNdbCon->theDBnode;
       NdbImpl *impl = theNdb->theImpl;
-      if (cnt > 21) {
+      if (sent > 21) {
         tSignal.setLength(ScanNextReq::SignalLength);
         LinearSectionPtr ptr[3];
         ptr[0].p = prep_array;
