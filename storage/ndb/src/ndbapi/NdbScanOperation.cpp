@@ -656,10 +656,6 @@ int NdbScanOperation::scanTableImpl(
       parallel = options->parallel;
     if (options->optionsPresent & ScanOptions::SO_BATCH) batch = options->batch;
   }
-  if (getNdbTransaction()->getBuddyConPtr() != 0xFFFFFFFF) {
-    DBUG_PRINT("info", ("Disable continous when buddy exists"));
-    allow_continous_scan = false;
-  }
 #if 0  // ToDo: this breaks optimize index, but maybe there is a better solution
   if (result_record->flags & NdbRecord::RecIsIndex)
   {
@@ -1213,9 +1209,6 @@ int NdbIndexScanOperation::scanIndexImpl(
       parallel = options->parallel;
     if (options->optionsPresent & ScanOptions::SO_BATCH) batch = options->batch;
   }
-
-  //allow_continous_scan = false;
-
   if (!(key_record->flags & NdbRecord::RecHasAllKeys)) {
     setErrorCodeAbort(4292);
     return -1;
