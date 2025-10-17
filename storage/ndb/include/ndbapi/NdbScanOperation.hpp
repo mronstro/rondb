@@ -683,6 +683,7 @@ class NdbScanOperation : public NdbOperation {
   NdbReceiver **m_sent_receivers;  // receive thread puts them here
   
   int send_next_scan(Uint32 cnt, bool close);
+  int send_next_scan_cont(Uint32 idx, Uint32 last);
   void receiver_delivered(NdbReceiver *);
   void receiver_completed(NdbReceiver *);
   void execCLOSE_SCAN_REP(Uint32 errorCode, bool needClose);
