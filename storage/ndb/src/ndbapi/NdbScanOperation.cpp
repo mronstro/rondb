@@ -1865,6 +1865,7 @@ int NdbScanOperation::nextResultNdbRecord(const char *&out_row,
   /* Return a row immediately if any is available. */
   while (m_current_api_receiver < m_api_receivers_count) {
     NdbReceiver *tRec = m_api_receivers[m_current_api_receiver];
+    DBUG_PRINT("info", ("tRec->getNextRow on index: %u", tRec->m_index));
     out_row = tRec->getNextRow();
     if (out_row != nullptr) {
       DBUG_RETURN(0);
@@ -1994,8 +1995,8 @@ int NdbScanOperation::nextResultNdbRecord(const char *&out_row,
 
     m_api_receivers_count = last;
     m_current_api_receiver = idx;
-    DBUG_PRINT("info", ("line: %u, New m_current_api_receiver: %u",
-      __LINE__, m_current_api_receiver));
+    DBUG_PRINT("info", ("line: %u, New m_current_api_receiver: %u, count: %u",
+      __LINE__, m_current_api_receiver, last));
     if (m_continousScan) {
       if (send_next_scan_cont(idx, last) != 0) {
         retVal = -1;
@@ -2130,22 +2131,35 @@ int NdbScanOperation::send_next_scan_cont(Uint32 idx, Uint32 last) {
        * signal to the next NdbReceiver object and when this
        * NdbReceiver receives TRANSID_AI it will set the
        * m_tcPtrI. All 4 NdbReceiver objects use the same
-       * m_tcPtrI (refers to a ScanFragRec record.
+       * m_tcPtrI (refers to a ScanFragRec record).
+       *
+       * Calling prepareSend has to happen on next next NdbReceiver object
+       * since we already starting receiving on next object. So we get the
+       * current NdbReceiver from the currently receiving, the next one is
+       * the one we can currently receive on and which we ask DBTC to send
+       * the next SCAN_TABCONF for when done and the one after that is the
+       * one to call prepareSend on since it is the next to receive on.
        */
-      NdbReceiver *tRec = m_api_receivers[i];
+      NdbReceiver *tCurrentRec = m_api_receivers[i];
+      Uint32 index = tCurrentRec->m_index;
+      Uint32 index_high = index & 0xFFFFFFFC;
+      Uint32 index_low = ((index + 1) & 3);
+      index = index_high + index_low;
+      Uint32 next_index_low = ((index + 2) & 3);
+      NdbReceiver *tRec = m_receivers[index];
+      Uint32 next_index = index_high + next_index_low;
+      NdbReceiver *tNextRec = m_receivers[next_index];
+      tRec->m_tcPtrI = tCurrentRec->m_tcPtrI;
+      tNextRec->m_tcPtrI = tCurrentRec->m_tcPtrI;
       if ((prep_array[sent] = tRec->m_tcPtrI) != RNIL) {
         m_sent_receivers[sent_count + sent] = tRec;
         tRec->m_list_index = sent_count + sent;
-        tRec->prepareSend();
+        tNextRec->prepareSend();
         sent++;
 #ifdef VM_TRACE
-        Uint32 index = tRec->m_index;
-        Uint32 index_high = index & 0xFFFFFFFC;
-        Uint32 index_low = ((index + 1) & 3);
-        index = index_high + index_low;
         DBUG_PRINT("info",
           ("theNdb(%p) use index %u to send_next_scan_cont(%u), m_tcPtrI: %u",
-          theNdb, tRec->m_index, index, tRec->m_tcPtrI));
+          theNdb, tCurrentRec->m_index, index, tRec->m_tcPtrI));
 #endif
       }
     }
