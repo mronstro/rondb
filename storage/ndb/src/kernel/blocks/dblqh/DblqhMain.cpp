@@ -19722,16 +19722,19 @@ Uint32 Dblqh::initScanrec(const ScanFragReq *scanFragReq,
     scanPtr->scanApiOpPtr[1] = scanFragReq->variableData[extra_len_index];
     scanPtr->scanApiOpPtr[2] = scanFragReq->variableData[extra_len_index + 1];
     scanPtr->scanApiOpPtr[3] = scanFragReq->variableData[extra_len_index + 2];
+    scanPtr->scanApiOpPtr_index =
+      scanFragReq->variableData[extra_len_index + 3];
     scanPtr->m_par_ordered_scan_flag = true;
-    extra_len_index += 3;
+    extra_len_index += 4;
     DEB_CONT_SCAN(("(%u) LQH scanPtrI: %u, CONT_SCAN starting,"
-                   " apiPtr(0x%x,0x%x,0x%x,0x%x)",
+                   " apiPtr(0x%x,0x%x,0x%x,0x%x)i, index: %u",
       instance(),
       scanptr.i,
       scanPtr->scanApiOpPtr[0],
       scanPtr->scanApiOpPtr[1],
       scanPtr->scanApiOpPtr[2],
-      scanPtr->scanApiOpPtr[3]));
+      scanPtr->scanApiOpPtr[3],
+      scanPtr->scanApiOpPtr_index));
   }
   ndbassert(sig_len == extra_len_index + ScanFragReq::SignalLength);
   (void)sig_len;
