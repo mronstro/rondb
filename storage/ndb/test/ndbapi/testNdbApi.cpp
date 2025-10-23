@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2003, 2024, Oracle and/or its affiliates.
-   Copyright (c) 2021, 2024, Hopsworks and/or its affiliates.
+   Copyright (c) 2021, 2025, Hopsworks and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -4834,7 +4834,7 @@ int runTestUnlockScan(NDBT_Context *ctx, NDBT_Step *step) {
 }
 
 class NodeIdReservations {
-  bool m_ids[MAX_NODES];
+  bool m_ids[ABS_MAX_NODES];
   NdbMutex m_mutex;
 
  public:
@@ -7788,7 +7788,7 @@ TESTCASE("UnlockScan", "Check unlock behaviour with scan lock-takeover") {
 TESTCASE("NdbClusterConnect",
          "Make sure that every Ndb_cluster_connection get a unique nodeid") {
   INITIALIZER(runNdbClusterConnectInit);
-  STEPS(runNdbClusterConnect, MAX_NODES);
+  STEPS(runNdbClusterConnect, ABS_MAX_NODES);
 }
 TESTCASE("NdbClusterConnectionConnect",
          "Test Ndb_cluster_connection::connect()") {
@@ -7798,7 +7798,7 @@ TESTCASE("NdbClusterConnectNR",
          "Make sure that every Ndb_cluster_connection get a unique nodeid") {
   TC_PROPERTY("TimeoutAfterFirst", (Uint32)0);
   INITIALIZER(runNdbClusterConnectInit);
-  STEPS(runNdbClusterConnect, MAX_NODES);
+  STEPS(runNdbClusterConnect, ABS_MAX_NODES);
   STEP(runRestarts);  // Note after runNdbClusterConnect or else counting wrong
 }
 TESTCASE("NdbClusterConnectNR_master",
@@ -7806,7 +7806,7 @@ TESTCASE("NdbClusterConnectNR_master",
   TC_PROPERTY("Master", 1);
   TC_PROPERTY("TimeoutAfterFirst", (Uint32)0);
   INITIALIZER(runNdbClusterConnectInit);
-  STEPS(runNdbClusterConnect, MAX_NODES);
+  STEPS(runNdbClusterConnect, ABS_MAX_NODES);
   STEP(runRestarts);  // Note after runNdbClusterConnect or else counting wrong
 }
 TESTCASE("NdbClusterConnectNR_non_master",
@@ -7814,7 +7814,7 @@ TESTCASE("NdbClusterConnectNR_non_master",
   TC_PROPERTY("Master", 2);
   TC_PROPERTY("TimeoutAfterFirst", (Uint32)0);
   INITIALIZER(runNdbClusterConnectInit);
-  STEPS(runNdbClusterConnect, MAX_NODES);
+  STEPS(runNdbClusterConnect, ABS_MAX_NODES);
   STEP(runRestarts);  // Note after runNdbClusterConnect or else counting wrong
 }
 TESTCASE("NdbClusterConnectNR_slow",
@@ -7823,14 +7823,14 @@ TESTCASE("NdbClusterConnectNR_slow",
   TC_PROPERTY("TimeoutAfterFirst", (Uint32)0);
   TC_PROPERTY("SlowNR", 1);
   INITIALIZER(runNdbClusterConnectInit);
-  STEPS(runNdbClusterConnect, MAX_NODES);
+  STEPS(runNdbClusterConnect, ABS_MAX_NODES);
   STEP(runRestarts);  // Note after runNdbClusterConnect or else counting wrong
 }
 TESTCASE("NdbClusterConnectSR",
          "Make sure that every Ndb_cluster_connection get a unique nodeid") {
   TC_PROPERTY("ClusterRestart", (Uint32)1);
   INITIALIZER(runNdbClusterConnectInit);
-  STEPS(runNdbClusterConnect, MAX_NODES);
+  STEPS(runNdbClusterConnect, ABS_MAX_NODES);
   STEP(runRestarts);  // Note after runNdbClusterConnect or else counting wrong
 }
 TESTCASE("NdbClusterConnectNR_slow_nostart",
@@ -7847,7 +7847,7 @@ TESTCASE("NdbClusterConnectNR_slow_nostart",
   TC_PROPERTY("SlowNoStart", 1);
   INITIALIZER(runMaybeRestartMaster);
   INITIALIZER(runNdbClusterConnectInit);
-  STEPS(runNdbClusterConnect, MAX_NODES);
+  STEPS(runNdbClusterConnect, ABS_MAX_NODES);
   STEP(runRestarts);  // Note after runNdbClusterConnect or else counting wrong
 }
 TESTCASE("TestFragmentedSend", "Test fragmented send behaviour") {

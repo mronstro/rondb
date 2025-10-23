@@ -1104,4 +1104,21 @@ ndbd_support_lcp_wait_flag(Uint32 x) {
   }
   return false;
 }
+
+static inline
+bool
+ndbd_support_2k_api_nodes(Uint32 x) {
+  const Uint32 major = (x >> 16) & 0xFF;
+  const Uint32 minor = (x >>  8) & 0xFF;
+  const Uint32 rel = x & 0xFF;
+  if (major > 24)
+  {
+    return true;
+  }
+  if ((major == 24) && (minor == 10) && (rel >= 15))
+  {
+    return true;
+  }
+  return false;
+}
 #endif

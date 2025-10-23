@@ -1,5 +1,5 @@
 /* Copyright (c) 2004, 2024, Oracle and/or its affiliates.
-   Copyright (c) 2022, 2023, Hopsworks and/or its affiliates.
+   Copyright (c) 2022, 2025, Hopsworks and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -18398,7 +18398,7 @@ static MYSQL_SYSVAR_ULONG(
     ndb_data_node_neighbour_update_func, /* update func. */
     0,                                   /* default      */
     0,                                   /* min          */
-    MAX_NDB_NODES,                       /* max          */
+    ABS_MAX_NDB_NODES,                   /* max          */
     0                                    /* block        */
 );
 
