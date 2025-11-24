@@ -749,7 +749,13 @@ AsyncFile::closeReq(Request *request)
     int r = m_xfile.close(abort);
     if (r != 0)
     {
-      NDBFS_SET_REQUEST_ERROR(request, FsRef::fsErrUnknown); // TODO better error
+      int err = errno;
+      if (errno != 0) {
+        NDBFS_SET_REQUEST_ERROR(request, err);
+        g_eventLogger->info("Close did writes that failed with err: %d", err);
+      } else {
+        NDBFS_SET_REQUEST_ERROR(request, FsRef::fsErrUnknown);
+      }
     }
   }
   if (m_file.is_open())
