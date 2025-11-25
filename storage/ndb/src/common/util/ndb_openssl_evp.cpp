@@ -834,6 +834,7 @@ int ndb_openssl_evp::operation::encrypt(output_iterator* out,
                             inl);
       if (r != 1)
       {
+        fprintf(stderr, "Failed r: %d, LINE: %u\n", r, __LINE__);
         RETURN(-1);
       }
 
@@ -853,6 +854,7 @@ int ndb_openssl_evp::operation::encrypt(output_iterator* out,
       r = EVP_EncryptFinal_ex(m_evp_context, out->begin(), &outl);
       if (r != 1)
       {
+        fprintf(stderr, "Failed r: %d, LINE: %u\n", r, __LINE__);
         RETURN(-1);
       }
       if (m_context->m_padding)
@@ -917,6 +919,7 @@ int ndb_openssl_evp::operation::encrypt(output_iterator* out,
       }
       if (setup_encrypt_key_iv(m_input_position) == -1)
       {
+        fprintf(stderr, "Failed LINE: %u\n", __LINE__);
         RETURN(-1);
       }
 
@@ -928,6 +931,7 @@ int ndb_openssl_evp::operation::encrypt(output_iterator* out,
                                 inl);
       if (r != 1)
       {
+        fprintf(stderr, "Failed r: %d, LINE: %u\n", r, __LINE__);
         RETURN(-1);
       }
 
@@ -941,6 +945,7 @@ int ndb_openssl_evp::operation::encrypt(output_iterator* out,
       r = EVP_EncryptFinal_ex(m_evp_context, out->begin(), &outl);
       if (r != 1)
       {
+        fprintf(stderr, "Failed r: %d, LINE: %u\n", r, __LINE__);
         RETURN(-1);
       }
 
