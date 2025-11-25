@@ -932,8 +932,9 @@ int ndb_openssl_evp::operation::encrypt(output_iterator* out,
                                 inl);
       if (r != 1)
       {
-        unsigned long err = ERR_get_error();
-        fprintf(stderr, "Failed r: %d, err: %lu, LINE: %u\n", r, err, __LINE__);
+        fprintf(stderr, "Failed r: %d, LINE: %u, inl: %d, in_begin: 0x%p, outl: %d, out_begin: 0x%p\n", r, __LINE__, inl, in->cbegin(), outl, out->begin());
+        fflush(stderr);
+        abort();
         RETURN(-1);
       }
 
