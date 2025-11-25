@@ -175,6 +175,7 @@ int ndb_openssl_evp::reset()
   m_has_key_iv = false;
   m_mix_key_iv_pair = false;
   m_data_unit_size = 0;
+  memset(m_key_iv, 0, sizeof(m_key_iv));
   return 0;
 }
 
