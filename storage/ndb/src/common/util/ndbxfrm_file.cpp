@@ -432,8 +432,10 @@ int ndbxfrm_file::close(bool abort)
    * will be discarded.
    */
 
+  errno = 0;
   if (!is_open())
   {
+    fprintf(stderr, "File isn't open, Line: %u\n", __LINE__);
     RETURN(-1);
   }
   if (m_file_op == OP_WRITE_FORW)
@@ -441,6 +443,7 @@ int ndbxfrm_file::close(bool abort)
     {
       if (flush_payload() == -1)
       {
+        fprintf(stderr, "flush_payload, Line: %u\n", __LINE__);
         RETURN(-1);
       }
     }
@@ -494,6 +497,7 @@ int ndbxfrm_file::close(bool abort)
       }
       if (r == -1)
       {
+        fprintf(stderr, "write_trailer failed, Line: %u\n", __LINE__);
         RETURN(-1);
       }
       m_file_buffer.update_write(out);
@@ -508,10 +512,12 @@ int ndbxfrm_file::close(bool abort)
         int n = m_file->append(in.cbegin(), in.size());
         if (n == -1)
         {
+          fprintf(stderr, "append failed, Line: %u\n", __LINE__);
           RETURN(-1);
         }
         if (n == 0)
         {
+          fprintf(stderr, "append  == 0, Line: %u\n", __LINE__);
           RETURN(-1);
         }
         in.advance(n);
@@ -526,10 +532,12 @@ int ndbxfrm_file::close(bool abort)
         int n = m_file->append(extra_page, len);
         if (n == -1)
         {
+          fprintf(stderr, "append  == -1, Line: %u\n", __LINE__);
           RETURN(-1);
         }
         if (n < 0 || size_t(n) != len)
         {
+          fprintf(stderr, "append  n: %u, len: %zu, Line: %u\n", n, len, __LINE__);
           RETURN(-1);
         }
       }
@@ -540,10 +548,12 @@ int ndbxfrm_file::close(bool abort)
     if (m_data_pos != m_data_size)
     {
       // Whole file was not consumed
+      fprintf(stderr, "Whole file not consumed, LINE: %u\n", __LINE__);
       return -1;
     }
     if (m_have_data_crc32 && m_data_crc32 != m_crc32)
     {
+      fprintf(stderr, "checksum error, LINE: %u\n", __LINE__);
       return -1;
     }
   }
