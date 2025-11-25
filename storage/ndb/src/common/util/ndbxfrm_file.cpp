@@ -417,7 +417,10 @@ int ndbxfrm_file::flush_payload()
     // Mark that there will be no more payload.
     ndbxfrm_input_iterator in(nullptr, nullptr, true);
     int r = write_forward(&in);
-    if (r == -1) return -1;
+    if (r == -1) {
+      fprintf(stderr, "Failed write_forward\n");
+      return -1;
+    }
     require(m_decrypted_buffer.read_size() == 0);
   }
 
@@ -1323,6 +1326,7 @@ int ndbxfrm_file::write_forward(ndbxfrm_input_iterator *in)
         int rv = zlib.deflate(&out, in);
         if (rv == -1)
         {
+          fprintf(stderr, "zlib.deflate failed\n");
           RETURN(-1);
         }
         if (!in->last()) require(!out.last());
@@ -1378,6 +1382,7 @@ int ndbxfrm_file::write_forward(ndbxfrm_input_iterator *in)
           int rv = openssl_evp_op.encrypt(&out, &c_in);
           if (rv == -1)
           {
+            fprintf(stderr, "openssl_evp_op.encrypt failed\n");
             RETURN(-1);
           }
         }
@@ -1414,6 +1419,7 @@ int ndbxfrm_file::write_forward(ndbxfrm_input_iterator *in)
     // Fail if not all written and no buffer is used.
     if (n == -1 || (file_bufp == nullptr && !file_in.empty()))
     {
+      fprintf(stderr, "Fail if not all written\n");
       RETURN(-1);
     }
     if (file_bufp != nullptr)
