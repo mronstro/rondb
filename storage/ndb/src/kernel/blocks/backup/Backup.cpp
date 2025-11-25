@@ -10907,6 +10907,7 @@ Backup::checkFile(Signal* signal, BackupFilePtr filePtr)
     if(likely(!skip_write))
     {
       jam();
+      jamLine(sz);
       ndbassert((Uint64(tmp - c_startOfPages) >> 32) == 0); // 4Gb buffers!
       FsAppendReq * req = (FsAppendReq *)signal->getDataPtrSend();
       req->filePointer   = filePtr.p->filePointer;
@@ -11568,6 +11569,7 @@ Backup::execFSCLOSEREF(Signal* signal)
       ndbabort();
       file_type_str = NULL;
     }
+    ndbabort();
   }
   else
   {

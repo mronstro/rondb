@@ -1382,7 +1382,8 @@ int ndbxfrm_file::write_forward(ndbxfrm_input_iterator *in)
           int rv = openssl_evp_op.encrypt(&out, &c_in);
           if (rv == -1)
           {
-            fprintf(stderr, "openssl_evp_op.encrypt failed\n");
+            fprintf(stderr, "openssl_evp_op.encrypt failed, out.size: %lu, in.size: %lu\n",
+              out.size(), c_in.size());
             RETURN(-1);
           }
         }

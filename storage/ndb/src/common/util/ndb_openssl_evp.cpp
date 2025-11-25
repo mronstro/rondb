@@ -811,6 +811,7 @@ int ndb_openssl_evp::operation::encrypt(output_iterator* out,
 {
   require(m_op_mode == ENCRYPT);
   bool progress = false;
+  Uint32 in_size = in->size();
   const size_t data_unit_size = m_context->m_data_unit_size;
   if (data_unit_size == 0)
   {
@@ -932,9 +933,8 @@ int ndb_openssl_evp::operation::encrypt(output_iterator* out,
                                 inl);
       if (r != 1)
       {
-        fprintf(stderr, "Failed r: %d, LINE: %u, inl: %d, in_begin: 0x%p, outl: %d, out_begin: 0x%p\n", r, __LINE__, inl, in->cbegin(), outl, out->begin());
+        fprintf(stderr, "Failed r: %d, LINE: %u, inl: %d, in_begin: 0x%p, outl: %d, out_begin: 0x%p, in.size(): %lu, orig_in_size: %u\n", r, __LINE__, inl, in->cbegin(), outl, out->begin(), in->size(), in_size);
         fflush(stderr);
-        abort();
         RETURN(-1);
       }
 
