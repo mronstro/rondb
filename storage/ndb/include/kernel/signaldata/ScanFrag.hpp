@@ -106,6 +106,7 @@ class ScanFragReq {
   static Uint32 getLcpScanFlag(const Uint32 &requestInfo);
   static Uint32 getStatScanFlag(const Uint32 &requestInfo);
   static Uint32 getPrioAFlag(const Uint32 &requestInfo);
+  static Uint32 getUserIdFlag(const Uint32 &requestInfo);
   /**
    * To ensure backwards compatibility we set the flag when NOT using
    * interpreted mode, previously scans always used interpreted mode. Now
@@ -131,6 +132,7 @@ class ScanFragReq {
   static void setStatScanFlag(Uint32 &requestInfo, Uint32 val);
   static void setPrioAFlag(Uint32 &requestInfo, Uint32 val);
   static void setNotInterpretedFlag(Uint32 &requestInfo, Uint32 val);
+  static void setUserIdFlag(Uint32 &requestInfo, Uint32 val);
 
   static void setReorgFlag(Uint32 &requestInfo, Uint32 val);
   static Uint32 getReorgFlag(const Uint32 &requestInfo);
@@ -363,11 +365,12 @@ class ScanFragNextReq {
  * g = Aggregation flag      - 1  Bit 23
  * I = TTL ignore flag       - 1  Bit 24
  * e = TTL only expired flag - 1  Bit 25
+ * u = User Id flag          - 1  Bit 26
  *
  *           1111111111222222222233
  * 01234567890123456789012345678901
  *  rrcdlxhkrztppppaaaaaaaaaaaaaaaa   Short variant ( < 6.4.0)
- *  rrcdlxhkrztppppCsaim  gIe         Long variant (6.4.0 +)
+ *  rrcdlxhkrztppppCsaim  gIeu        Long variant (6.4.0 +)
  */
 #define SF_LOCK_MODE_SHIFT (5)
 #define SF_LOCK_MODE_MASK (1)
@@ -401,6 +404,7 @@ class ScanFragNextReq {
 #define SF_AGGREGATION_SHIFT (23)
 #define SF_TTL_IGNORE_SHIFT (24)
 #define SF_TTL_ONLY_EXPIRED_SHIFT (25)
+#define SF_USER_ID_SHIFT (26)
 
 inline Uint32 ScanFragReq::getLockMode(const Uint32 &requestInfo) {
   return (requestInfo >> SF_LOCK_MODE_SHIFT) & SF_LOCK_MODE_MASK;
@@ -592,9 +596,18 @@ inline Uint32 ScanFragReq::getPrioAFlag(const Uint32 &requestInfo) {
   return (requestInfo >> SF_PRIO_A_SHIFT) & 1;
 }
 
+inline Uint32 ScanFragReq::getUserIdFlag(const Uint32 &requestInfo) {
+  return (requestInfo >> SF_USER_ID_SHIFT) & 1;
+}
+
 inline void ScanFragReq::setPrioAFlag(UintR &requestInfo, UintR val) {
   ASSERT_BOOL(val, "ScanFragReq::setPrioAFlag");
   requestInfo |= (val << SF_PRIO_A_SHIFT);
+}
+
+inline void ScanFragReq::setUserIdFlag(UintR &requestInfo, UintR val) {
+  ASSERT_BOOL(val, "ScanFragReq::setUserIdFlag");
+  requestInfo |= (val << SF_USER_ID_SHIFT);
 }
 
 inline Uint32 ScanFragReq::getNotInterpretedFlag(const Uint32 &requestInfo) {
