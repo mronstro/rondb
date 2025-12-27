@@ -92,7 +92,7 @@
 #define JAM_FILE_ID 458
 
 #if (defined(VM_TRACE) || defined(ERROR_INSERT))
-// #define DEBUG_NODE_STOP 1
+#define DEBUG_NODE_STOP 1
 // #define DEBUG_LOCAL_SYSFILE 1
 // #define DEBUG_UNDO 1
 // #define DEBUG_REDO_CONTROL 1
@@ -4238,6 +4238,66 @@ void Ndbcntr::execRESUME_REQ(Signal *signal) {
   send_node_started_rep(signal);
 }
 
+/**
+ * Description of Graceful shutdown
+ *
+ * 1. Set state to SL_STOPPING_1
+ *   This state will be communicated to each of the APIs in the
+ *   API_REGREQ signal. This signal is sent every 100 ms.
+ *   The node will ensure no new transactions are started on the
+ *   stopping node when it sees this.
+ *
+ *   The node will wait for 5 seconds before moving to the state
+ *   SL_STOPPING_2.
+ * 2. Set state to SL_STOPPING_2
+ *   In this state we will stop allowing new transactions to start
+ *   in the data node.
+ * 3. Send STOP_PERM_REQ to DBDIH
+ *   This will make sure that the stopping node is no longer primary
+ *   replica for any table fragment.
+ *   This switch will continue until it is done without consideration
+ *   of the time it takes.
+ *   When the switch replica is finished we move immediately to abort
+ *   transactions still ongoing in the DBTCs of the node.
+ *   Also this phase will continue without timeouts.
+ * 4. Set state to SL_STOPPING_3
+ *   This state will ensure that key read operations are no longer
+ *   permissible from DBLQH. It stays in this state for 1 second.
+ *   After this second it will set the state to SL_STOPPING_4, but
+ *   only in the DBLQHs local node state. After setting the state
+ *   in the DBLQHs, it sends the STOP_ME_REQ signal to first SUMA
+ *   and then to DBDIH.
+ * 5. It will set the state to SL_STOPPING_4 in all blocks finally.
+ *   SL_STOPPING_4 means that the node no longer participates in
+ *   the GCP protocol. It won't update the restorable GCI.
+ *   STOP_ME_REQ in DBDIH ensure that the node is no longer
+ *   participating in the transactions. STOP_ME_REQ to SUMA ensures
+ *   that the SUMA handover is completed.
+ *
+ * In order for the graceful shutdown to have a restorable memory
+ * layout we need to add a few steps.
+ * 1. We need to decide on which GCI is the last GCI that the node
+ *    will fully participate in. All transactions from newer GCIs
+ *    than this need to be aborted in the node, but from DBTCs
+ *    point of view it should be committed. This avoids a lot of
+ *    unnecessary aborts. This is similar to the behaviour in
+ *    node startup when a node participates in updates although
+ *    it doesn't have the data that requires the update.
+ *
+ *    We need to first switch replicas and abort all transactions
+ *    where the stopping node is coordinator of the transaction.
+ *    After that we need to wait for a GCP to complete and assign
+ *    this to be the last. This means that DBLQH needs to know
+ *    that this is the last GCI to handle even before it is
+ *    created as a new restorable GCI.
+ *
+ *    When the GCI is fully completed, we can move on to the
+ *    STOP_ME_REQ part. At this point it is ok to stop participating
+ *    in transactions. The transactions we are already part of
+ *    that will finish in a non-restorable GCI we will simply
+ *    abort it locally, but from DBTCs point of view we will
+ *    commit the request.
+ */
 void Ndbcntr::execSTOP_REQ(Signal *signal) {
   StopReq *const req = (StopReq *)&signal->theData[0];
   StopRef *const ref = (StopRef *)&signal->theData[0];
@@ -4593,6 +4653,7 @@ void Ndbcntr::StopRecord::checkTcTimeout(Signal *signal) {
       }
     } else {
       jam();
+      DEB_NODE_STOP(("Send STOP_PERM_REQ to DBDIH"));
       StopPermReq *req = (StopPermReq *)&signal->theData[0];
       req->senderRef = cntr.reference();
       req->senderData = 12;
@@ -4608,6 +4669,7 @@ void Ndbcntr::StopRecord::checkTcTimeout(Signal *signal) {
 void Ndbcntr::execSTOP_PERM_REF(Signal *signal) {
   // StopPermRef* const ref = (StopPermRef*)&signal->theData[0];
 
+  DEB_NODE_STOP(("Receive STOP_PERM_REF from DBDIH"));
   jamEntry();
 
   signal->theData[0] = ZSHUTDOWN;
@@ -4616,6 +4678,8 @@ void Ndbcntr::execSTOP_PERM_REF(Signal *signal) {
 
 void Ndbcntr::execSTOP_PERM_CONF(Signal *signal) {
   jamEntry();
+  DEB_NODE_STOP(("Receive STOP_PERM_CONF from DBDIH"));
+  DEB_NODE_STOP(("Send ABORT_ALL_REQ to all DBTCs"));
 
   AbortAllReq *req = (AbortAllReq *)&signal->theData[0];
   req->senderRef = reference();
