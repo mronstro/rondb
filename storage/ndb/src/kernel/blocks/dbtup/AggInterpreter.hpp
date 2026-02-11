@@ -40,6 +40,8 @@
 
 #define READ_BUF_WORD_SIZE 2048
 #define DECIMAL_BUFF_LENGTH 9
+#define AGG_EVICT_NEEDED 1
+
 class AggInterpreter {
  public:
 #ifdef PA_MALLOC
@@ -56,7 +58,7 @@ class AggInterpreter {
     buf_pos_(0), processed_rows_(0),
     result_size_(0), frag_id_(frag_id),
     m_linked_attr_data(nullptr), m_linked_attr_len(0),
-    m_use_mutex(false)/*, pcount_(0)*/ {
+    m_use_mutex(false), m_max_groups(0)/*, pcount_(0)*/ {
 #ifdef PA_MALLOC
       assert(prog_len_ <= MAX_AGG_PROGRAM_WORD_SIZE);
       prog_ = prog_buf_;
@@ -137,6 +139,10 @@ class AggInterpreter {
   Uint32 n_agg_results() const { return n_agg_results_; }
   const AggResItem* agg_results() const { return agg_results_; }
   void setUseMutex(bool v) { m_use_mutex = v; }
+  void setMaxGroups(Uint32 v) { m_max_groups = v; }
+  Uint32 maxGroups() const { return m_max_groups; }
+  Int32 evictOneGroup(Uint32* buf, Uint32 buf_words,
+                      Uint32* words_written);
   Int64 frag_id() {
     return frag_id_;
   }
@@ -188,6 +194,11 @@ class AggInterpreter {
   // concurrent access from multiple LDM threads.
   bool m_use_mutex;                   // true for MUTEX_BASED strategy
   std::mutex m_mutex;
+
+  // Group eviction: when m_max_groups > 0 and gb_map_ reaches this
+  // limit, processRecWithLinkedAttrs returns AGG_EVICT_NEEDED so the
+  // caller can evict a group before retrying.
+  Uint32 m_max_groups;                // 0 = unlimited
 
 #ifdef PA_MALLOC
   /* For using Ndbd_mem_manager */
