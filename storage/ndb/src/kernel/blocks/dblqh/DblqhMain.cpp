@@ -18063,9 +18063,7 @@ void Dblqh::continueJoinAggSend(Signal* signal, Uint32 aggStateKey,
       total_bytes += pos * sizeof(Uint32);
       batch_count++;
 
-#ifndef PA_MALLOC
-      delete[] iter->first.ptr;
-#endif
+      interp->freeGroupData(iter->first.ptr);
       gb_map->erase(iter++);
 
       if (batch_count >= GROUPS_PER_BATCH && iter != gb_map->end()) {
@@ -20539,11 +20537,7 @@ void Dblqh::init_release_scanrec(ScanRecord *scanPtr) {
      * (CHECKED).
      */
     ndbrequire(ptr->gb_map()->empty());
-#ifdef PA_MALLOC
     AggInterpreter::Destruct(ptr);
-#else
-    delete ptr;
-#endif // PA_MALLOC
     scanPtr->m_agg_interpreter = nullptr;
   }
 }
@@ -38076,11 +38070,7 @@ Dblqh::ScanRecord::~ScanRecord() {
 
   AggInterpreter* ptr = m_agg_interpreter;
   if (ptr != nullptr) {
-#ifdef PA_MALLOC
     AggInterpreter::Destruct(ptr);
-#else
-    delete ptr;
-#endif // PA_MALLOC
   }
   m_agg_interpreter = nullptr;
 }

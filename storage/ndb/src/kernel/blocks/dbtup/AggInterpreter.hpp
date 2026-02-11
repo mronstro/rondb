@@ -30,26 +30,22 @@
 #include "Dbtup.hpp"
 #include "NdbAggregationCommon.hpp"
 
-/*
- * PA related
- * Turn off the PA_MALLOC to use new instead
- * of AggInterpreter's memory alloctor
- */
-// #undef PA_MALLOC
-#define PA_MALLOC 1
-
 #define READ_BUF_WORD_SIZE 2048
 #define DECIMAL_BUFF_LENGTH 9
 #define AGG_EVICT_NEEDED 1
+#define MEM_CHUNK_SIZE 32768
+
+struct MemChunk {
+  char* data;
+  Uint32 capacity;
+  Uint32 used;
+  Uint32 live_groups;
+  MemChunk* next;
+};
 
 class AggInterpreter {
  public:
-#ifdef PA_MALLOC
-  AggInterpreter(const Uint32* prog, Uint32 prog_len, Int64 frag_id/*,
-                 Ndbd_mem_manager* mm, void* page_addr, Uint32 page_ref*/):
-#else
   AggInterpreter(const Uint32* prog, Uint32 prog_len, Int64 frag_id):
-#endif // PA_MALLOC
     prog_len_(prog_len), cur_pos_(0),
     inited_(false), n_gb_cols_(0), gb_cols_(nullptr),
     n_agg_results_(0),
@@ -58,53 +54,20 @@ class AggInterpreter {
     buf_pos_(0), processed_rows_(0),
     result_size_(0), frag_id_(frag_id),
     m_linked_attr_data(nullptr), m_linked_attr_len(0),
-    m_use_mutex(false), m_max_groups(0)/*, pcount_(0)*/ {
-#ifdef PA_MALLOC
+    m_use_mutex(false), m_max_groups(0),
+    m_chunks(nullptr),
+    m_current_chunk(nullptr), m_total_chunk_bytes(0),
+    m_memory_budget(0), m_thread_id(0) {
       assert(prog_len_ <= MAX_AGG_PROGRAM_WORD_SIZE);
       prog_ = prog_buf_;
-#else
-      prog_ = new Uint32[prog_len];
-#endif // PA_MALLOC
       memcpy(prog_, prog, prog_len * sizeof(Uint32));
       memset(buf_, 0, READ_BUF_WORD_SIZE * sizeof(Uint32));
       memset(decimal_buf_, 0, sizeof(decimal_digit_t) * DECIMAL_BUFF_LENGTH);
       decimal_.buf = decimal_buf_;
       decimal_.len = DECIMAL_BUFF_LENGTH;
-#ifdef PA_MALLOC
-      /* For using Ndbd_mem_manager*/
-      /*
-      mm_ = mm;
-      page_addr_ = page_addr;
-      page_ref_ = page_ref;
-      */
-      alloc_len_ = 0;
-#endif // PA_MALLOC
   }
   ~AggInterpreter() {
-#ifdef PA_MALLOC
-#else
-    delete[] prog_;
-    delete[] gb_cols_;
-    delete[] agg_results_;
-    if (gb_map_) {
-      // MOZ debug
-      if (!gb_map_->empty()) {
-        /*
-         * Moz
-         * TODO (Zhao)
-         * potential crash here if the API closes scan
-         * while lqh is processing, double check.
-         *
-         * (CHECKED)
-         */
-        assert(gb_map_->empty());
-      }
-      for (auto iter = gb_map_->begin(); iter != gb_map_->end(); iter++) {
-        delete[] iter->first.ptr;
-      }
-      delete gb_map_;
-    }
-#endif // PA_MALLOC
+    freeAllChunks();
   }
 
   bool Init();
@@ -143,21 +106,14 @@ class AggInterpreter {
   Uint32 maxGroups() const { return m_max_groups; }
   Int32 evictOneGroup(Uint32* buf, Uint32 buf_words,
                       Uint32* words_written);
+  void initChunkAllocator(Uint32 thread_id, Uint32 budget_pages);
+  char* allocGroupData(Uint32 len);
+  void freeGroupData(char* ptr);
+  void freeAllChunks();
   Int64 frag_id() {
     return frag_id_;
   }
-#ifdef PA_MALLOC
   static void Destruct(AggInterpreter* ptr);
-  /* For using Ndbd_mem_manager*/
-  /*
-  Ndbd_mem_manager* mm() {
-    return mm_;
-  }
-  Uint32 page_ref() {
-    return page_ref_;
-  }
-  */
-#endif // PA_MALLOC
 
  private:
   Uint32* prog_;
@@ -200,22 +156,22 @@ class AggInterpreter {
   // caller can evict a group before retrying.
   Uint32 m_max_groups;                // 0 = unlimited
 
-#ifdef PA_MALLOC
-  /* For using Ndbd_mem_manager */
-  /*
-  Ndbd_mem_manager* mm_;
-  void* page_addr_;
-  Uint32 page_ref_;
-  */
+  // Chunk-based allocator for group data.
+  // Allocates from 32KB chunks via lc_ndbd_pool_malloc,
+  // with per-chunk reference counting so eviction can free memory.
+  MemChunk* m_chunks;                 // linked list head
+  MemChunk* m_current_chunk;          // chunk currently bump-allocating from
+  Uint32 m_total_chunk_bytes;         // total bytes across all chunks
+  Uint32 m_memory_budget;             // max total chunk bytes allowed
+  Uint32 m_thread_id;                 // for lc_ndbd_pool_malloc calls
+
+  MemChunk* allocNewChunk();
+  MemChunk* findChunk(const char* ptr) const;
 
   Uint32 prog_buf_[MAX_AGG_PROGRAM_WORD_SIZE];
   Uint32 gb_cols_buf_[MAX_AGG_N_GROUPBY_COLS];
   AggResItem agg_results_buf_[MAX_AGG_N_RESULTS];
   std::map<GBHashEntry, GBHashEntry, GBHashEntryCmp> gb_map_buf_;
 
-  char mem_buf_[MAX_AGG_RESULT_BATCH_BYTES];
-  Uint32 alloc_len_;
-  char* MemAlloc(Uint32 len);
-#endif // PA_MALLOC
 };
 #endif  // AGGINTERPRETER_H_

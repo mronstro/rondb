@@ -1000,33 +1000,18 @@ Uint32 Dbtup::copyAttrinfo(Uint32 storedProcId,
         ndbrequire((cinBuffer[proc_start] >> 16) == 0x0721);
 
         // 3. construct agg_interpreter
-#ifdef PA_MALLOC
-        /*
-         * Use Ndbd_mem_manager
-         */
-        // Uint32 allocPageRef = 0;
-        // void* page_ptr = m_ctx.m_mm.alloc_page(RT_DBTUP_PAGE,
-        //                                 &allocPageRef,
-        //                                 Ndbd_mem_manager::NDB_ZONE_LE_30,
-        //                                 true);
-
         void* page_ptr = lc_ndbd_pool_malloc(32 * 1024, RG_DATAMEM,
                                              getThreadId(), false);
         if (page_ptr == nullptr) {
           g_eventLogger->error("Alloc mem for pushdown aggregation interpreter failed");
         }
         ndbrequire(page_ptr != nullptr);
-        ndbrequire(page_ptr != nullptr);
         scan_rec_ptr->m_agg_interpreter =
           new(page_ptr) AggInterpreter(&cinBuffer[proc_start], proc_len,
-                              prepare_fragptr.p->fragmentId/*,
-                              &m_ctx.m_mm, page_ptr, allocPageRef*/);
-#else
-        scan_rec_ptr->m_agg_interpreter =
-          new AggInterpreter(&cinBuffer[proc_start], proc_len,
                               prepare_fragptr.p->fragmentId);
-#endif // PA_MALLOC
         ndbrequire(scan_rec_ptr->m_agg_interpreter->Init());
+        scan_rec_ptr->m_agg_interpreter->initChunkAllocator(
+            getThreadId(), 4 /* budget_pages = 128KB */);
       }
     }
   } else {
@@ -5342,6 +5327,18 @@ int Dbtup::interpreterStartLab(Signal *signal, KeyReqStruct *req_struct) {
          * req_struct->read_length would be updated in ProcessRec().
          */
         int ret = scan_rec_ptr->m_agg_interpreter->ProcessRec(this, req_struct);
+        if (ret == AGG_EVICT_NEEDED) {
+          Uint32 flush_len = scan_rec_ptr->m_agg_interpreter->
+                                PrepareAggResIfNeeded(signal, true);
+          if (flush_len != 0) {
+            TransIdAI * flushAI = (TransIdAI *)signal->getDataPtrSend();
+            flushAI->connectPtr = req_struct->tc_operation_ptr;
+            flushAI->transId[0] = req_struct->trans_id1;
+            flushAI->transId[1] = req_struct->trans_id2;
+            SendAggregationResult(signal, flush_len, req_struct->rec_blockref);
+          }
+          ret = scan_rec_ptr->m_agg_interpreter->ProcessRec(this, req_struct);
+        }
         if (ret != 0) {
           return TUPKEY_abort(req_struct, ret);
         }
