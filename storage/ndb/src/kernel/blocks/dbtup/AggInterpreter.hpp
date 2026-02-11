@@ -55,7 +55,8 @@ class AggInterpreter {
     gb_map_(nullptr), n_groups_(0),
     buf_pos_(0), processed_rows_(0),
     result_size_(0), frag_id_(frag_id),
-    m_linked_attr_data(nullptr), m_linked_attr_len(0)/*, pcount_(0)*/ {
+    m_linked_attr_data(nullptr), m_linked_attr_len(0),
+    m_use_mutex(false)/*, pcount_(0)*/ {
 #ifdef PA_MALLOC
       assert(prog_len_ <= MAX_AGG_PROGRAM_WORD_SIZE);
       prog_ = prog_buf_;
@@ -135,6 +136,7 @@ class AggInterpreter {
   Uint32 n_gb_cols() const { return n_gb_cols_; }
   Uint32 n_agg_results() const { return n_agg_results_; }
   const AggResItem* agg_results() const { return agg_results_; }
+  void setUseMutex(bool v) { m_use_mutex = v; }
   Int64 frag_id() {
     return frag_id_;
   }
@@ -181,6 +183,11 @@ class AggInterpreter {
   // Linked attribute buffer for join aggregation
   const Uint32* m_linked_attr_data;   // Points to current row's linked attrs
   Uint32 m_linked_attr_len;           // Current length in words
+
+  // MUTEX_BASED locking: protects gb_map_ and accumulators during
+  // concurrent access from multiple LDM threads.
+  bool m_use_mutex;                   // true for MUTEX_BASED strategy
+  std::mutex m_mutex;
 
 #ifdef PA_MALLOC
   /* For using Ndbd_mem_manager */
