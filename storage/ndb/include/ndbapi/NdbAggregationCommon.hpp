@@ -39,7 +39,7 @@
 #define MAX_AGG_N_RESULTS 256
 #define MAX_AGG_PROGRAM_WORD_SIZE 1024
 
-#define PUSHDOWN_AGGREGATION_VERSION 1
+#define PUSHDOWN_AGGREGATION_VERSION 2
 enum InterpreterOp {
   kOpUnknown = 0,
   kOpPlus,
@@ -73,6 +73,10 @@ enum InterpreterOp {
   kOpMulDouble,
   kOpDivDouble,       // Floating point division (result is always double)
   kOpDivIntBigint,    // Integer division for BIGINT
+
+  // Embedded interpreter support for CASE expressions
+  kOpEmbeddedInterp,  // Invoke embedded old-interpreter code block
+  kOpSkip,            // Unconditional forward skip in aggregation program
 
   kOpTotal
 };
