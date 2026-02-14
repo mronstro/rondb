@@ -18416,6 +18416,11 @@ bool Dbtc::sendScanFragReq(Signal *signal, ScanRecordPtr scanptr,
     sections.m_cnt = 2;  // and sometimes keyinfo
   }
 
+  if (scanP->m_joinAgg) {
+    jam();
+    sections.m_ptr[sections.m_cnt++].i = scanP->m_aggKeysSectionPtrI;
+  }
+
   if (ScanFragReq::getMultiFragFlag(scanP->scanRequestInfo)) {
     jam();
     /**
@@ -18509,6 +18514,7 @@ bool Dbtc::sendScanFragReq(Signal *signal, ScanRecordPtr scanptr,
     jamDebug();
     scanP->scanKeyInfoPtr = RNIL;
     scanP->scanAttrInfoPtr = RNIL;
+    if (scanP->m_joinAgg) scanP->m_aggKeysSectionPtrI = RNIL;
   }
 
   getSections(sections.m_cnt, sections.m_ptr);
