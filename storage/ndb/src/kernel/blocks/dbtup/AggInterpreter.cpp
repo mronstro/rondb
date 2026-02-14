@@ -52,9 +52,9 @@ static const Uint32 GROUP_LINK_OVERHEAD = 24;
 #if (defined(VM_TRACE) || defined(ERROR_INSERT))
 #undef DEBUG_PA_INTERP
 // #define DEBUG_PA_INTERP 1
-#define DEBUG_PA_INTERP_PART_ID 0
 //#define DEBUG_AGG 1
 #endif
+#define DEBUG_PA_INTERP_PART_ID 0
 
 #ifdef DEBUG_PA_INTERP
 #define PA_INTERP_TRACE(part_id, format, ...) \
