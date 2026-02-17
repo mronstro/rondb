@@ -52,7 +52,7 @@ static const Uint32 GROUP_LINK_OVERHEAD = 24;
 #if (defined(VM_TRACE) || defined(ERROR_INSERT))
 #undef DEBUG_PA_INTERP
 // #define DEBUG_PA_INTERP 1
-//#define DEBUG_AGG 1
+#define DEBUG_AGG 1
 #endif
 #define DEBUG_PA_INTERP_PART_ID 0
 
@@ -1255,8 +1255,9 @@ static Int32 Count(const Register& a, AggResItem* res, bool print) {
 Int32 AggInterpreter::ProcessRec(Dbtup* block_tup,
         Dbtup::KeyReqStruct* req_struct) {
   if (!inited_ || req_struct->read_length != 0) {
-    DEB_AGG(("AggInterpreter::ProcessRec error, inited: %d, read_length: %u",
-            inited_, req_struct->read_length));
+    g_eventLogger->info("AggInterpreter::ProcessRec ZAGG_OTHER_ERROR at entry: "
+            "inited=%d, read_length=%u",
+            inited_, req_struct->read_length);
     return ZAGG_OTHER_ERROR;
   }
 
@@ -1285,8 +1286,9 @@ Int32 AggInterpreter::ProcessRec(Dbtup* block_tup,
           pos_count++;
         }
         if (p >= p_end) {
-          DEB_AGG(("Linked GROUP BY position %u not found in buffer",
-              position));
+          g_eventLogger->info("AggInterpreter::ProcessRec ZAGG_OTHER_ERROR: "
+              "Linked GROUP BY position %u not found in linked buffer "
+              "(linked_len=%u)", position, m_linked_attr_len);
           return ZAGG_OTHER_ERROR;
         }
         Uint32 words = 1 + AttributeHeader::getDataSize(*p);
@@ -1583,7 +1585,9 @@ Int32 AggInterpreter::ProcessRec(Dbtup* block_tup,
               pos_count++;
             }
             if (p >= p_end) {
-              DEB_AGG(("Linked position %u not found in buffer", position));
+              g_eventLogger->info("AggInterpreter::ProcessRec ZAGG_OTHER_ERROR: "
+                  "kOpLoadCol linked position %u not found in buffer "
+                  "(linked_len=%u)", position, m_linked_attr_len);
               return ZAGG_OTHER_ERROR;
             }
             Uint32 words = 1 + AttributeHeader::getDataSize(*p);
@@ -1613,8 +1617,9 @@ Int32 AggInterpreter::ProcessRec(Dbtup* block_tup,
         if (type == NDB_TYPE_DECIMAL ||
             type == NDB_TYPE_DECIMALUNSIGNED) {
           if (unlikely(exec_pos >= prog_len_)) {
-            g_eventLogger->warning("Pushdown aggregation program ended in the"
-                                   " middle of an instruction.");
+            g_eventLogger->info("AggInterpreter::ProcessRec ZAGG_OTHER_ERROR: "
+                "kOpLoadCol DECIMAL overflow exec_pos=%u prog_len=%u",
+                exec_pos, prog_len_);
             return ZAGG_OTHER_ERROR;
           }
           decimal_info =
@@ -1866,8 +1871,9 @@ Int32 AggInterpreter::ProcessRec(Dbtup* block_tup,
         registers_[reg_index].is_unsigned = IsUnsigned(type);
         registers_[reg_index].is_null = false;
         if (unlikely(exec_pos + 2 > prog_len_)) {
-          g_eventLogger->warning("Pushdown aggregation program ended in the"
-                                 " middle of an instruction.");
+          g_eventLogger->info("AggInterpreter::ProcessRec ZAGG_OTHER_ERROR: "
+              "kOpLoadConst overflow exec_pos=%u prog_len=%u",
+              exec_pos, prog_len_);
           return ZAGG_OTHER_ERROR;
         }
         switch (type) {
@@ -1995,7 +2001,9 @@ Int32 AggInterpreter::ProcessRec(Dbtup* block_tup,
       {
         Uint32 emb_len = value & 0xFFFF;
         if (exec_pos + emb_len > prog_len_) {
-          DEB_AGG(("embedded interp len overflow"));
+          g_eventLogger->info("AggInterpreter::ProcessRec ZAGG_OTHER_ERROR: "
+              "embedded interp len overflow exec_pos=%u emb_len=%u "
+              "prog_len=%u", exec_pos, emb_len, prog_len_);
           return ZAGG_OTHER_ERROR;
         }
 
