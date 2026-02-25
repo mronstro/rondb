@@ -11413,6 +11413,7 @@ void Dblqh::execACCKEYCONF(Signal *signal) {
      */
     ndbrequire(regTcPtr->abortState == TcConnectionrec::ABORT_IDLE);
     regTcPtr->abortState = TcConnectionrec::ABORT_FROM_LQH;
+    regTcPtr->errorCode = ZTIME_OUT_ERROR;
     handlePendingAbort(signal, regTcPtr);
     return;
   }
