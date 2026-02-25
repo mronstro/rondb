@@ -84,7 +84,6 @@ MaxNoOfSavedMessages= 5
 SendBufferMemory = 2M
 NoOfFragmentLogFiles = 4
 FragmentLogFileSize = 256M
->>>>>>> 0896fcd61dec11a0904166911a0126f59daaa1bf
 CompressedLCP=1
 CompressedBackup=1
 ODirect=1
@@ -143,8 +142,8 @@ ndb_mgmd = CHOOSE_host1
 ndbd = CHOOSE_host2,CHOOSE_host3,CHOOSE_host4
 ndbapi= CHOOSE_host1,,,,
 
-NoOfReplicas = 2
-DataMemory = 400M
+NoOfReplicas = 3
+DataMemory = 500M
 BackupMemory = 64M
 MaxNoOfConcurrentScans = 100
 MaxNoOfSavedMessages= 5
@@ -155,7 +154,7 @@ CompressedBackup=1
 ODirect=1
 MaxNoOfAttributes=2000
 Checksum=1
-ThreadConfig=main={count=1},rep={count=1},ldm={count=2},tc={count=2},recv={count=2},send={count=2}
+NumCPUs=6
 SendBufferMemory=4M
 PartitionsPerNode=2
 
@@ -546,4 +545,3 @@ FragmentLogFileSize = 128M
 Checksum=1
 HeartbeatIntervalDbApi=5000
 TransactionDeadlockDetectionTimeout=2500
->>>>>>> 0896fcd61dec11a0904166911a0126f59daaa1bf
