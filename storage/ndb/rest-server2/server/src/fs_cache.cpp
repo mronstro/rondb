@@ -33,6 +33,8 @@
 #include <unordered_map>
 #include <functional>
 #include <algorithm>
+#include <tuple>
+#include <vector>
 #include <NdbThread.h>
 #include <NdbApi.hpp>
 #include <util/require.h>
@@ -432,7 +434,8 @@ void FSMetadataCache::cache_entry_updater(Uint32 key_cache_id) {
   }
 }
 
-void FSMetadataCache::load_single_feature_view(const std::string &fsName,
+bool FSMetadataCache::load_single_feature_view(Ndb *ndb_object,
+                                               const std::string &fsName,
                                                const std::string &fvName,
                                                int fvVersion) {
   std::string cacheKey =
@@ -448,7 +451,7 @@ void FSMetadataCache::load_single_feature_view(const std::string &fsName,
   NdbMutex_Lock(m_rwLock[key_cache_id]);
   if (m_stopped) {
     NdbMutex_Unlock(m_rwLock[key_cache_id]);
-    return;
+    return false;
   }
   auto existing_it = m_fs_cache[key_cache_id].find(cacheKey);
   if (existing_it != m_fs_cache[key_cache_id].end()) {
@@ -459,7 +462,7 @@ void FSMetadataCache::load_single_feature_view(const std::string &fsName,
       NdbMutex_Unlock(existing->m_waitLock);
       NdbMutex_Unlock(m_rwLock[key_cache_id]);
       DEB_FS("Feature view %s already cached, skipping", cacheKey.c_str());
-      return;
+      return true;
     }
     // IS_INVALID entry (e.g., left over from a DELETE event) — remove it
     // so we can reload fresh metadata.
@@ -467,7 +470,7 @@ void FSMetadataCache::load_single_feature_view(const std::string &fsName,
       // Still in use — can't remove yet, skip
       NdbMutex_Unlock(existing->m_waitLock);
       NdbMutex_Unlock(m_rwLock[key_cache_id]);
-      return;
+      return false;
     }
     m_fs_cache[key_cache_id].erase(existing_it);
     NdbMutex_Unlock(existing->m_waitLock);
@@ -485,20 +488,60 @@ void FSMetadataCache::load_single_feature_view(const std::string &fsName,
 
   // Release the lock before doing the slow metadata fetch. We intentionally
   // do NOT create a cache entry here: if the load fails (e.g., dependent rows
-  // not yet inserted), we simply return without caching the error. The
-  // lazy-load path triggered by actual requests will retry later.
+  // not yet inserted), we return false so the caller can retry later.
   NdbMutex_Unlock(m_rwLock[key_cache_id]);
 
   auto [data, errorCode] =
     metadata::GetFeatureViewMetadata(fsName, fvName, fvVersion);
 
   if (data == nullptr) {
-    g_eventLogger->warning("[FS Cache] Failed to preload feature view %s: %s",
-                           cacheKey.c_str(),
-                           errorCode ? errorCode->ToString().c_str()
-                                     : "unknown error");
     DEB_FS("Preload failed for %s, not caching error", cacheKey.c_str());
-    return;
+    return false;
+  }
+
+  // Verify that each non-spine feature group has its complete set of
+  // serving keys by comparing against the NDB table's actual PK columns.
+  // This catches the race where the event watcher fires on feature_view
+  // INSERT before all related serving_key rows have been committed —
+  // some but not all keys may be present.
+  {
+    NdbDictionary::Dictionary *dict = ndb_object->getDictionary();
+    for (const auto &fg : data->featureGroupFeatures) {
+      if (fg.isSpine()) continue;
+      std::string tableName = fg.featureGroupName + "_" +
+                              std::to_string(fg.featureGroupVersion);
+      if (ndb_object->setDatabaseName(fg.featureStoreName.c_str()) != 0) {
+        DEB_FS("Preload incomplete for %s: cannot set DB %s",
+               cacheKey.c_str(), fg.featureStoreName.c_str());
+        delete data;
+        return false;
+      }
+      // Use a temporary Ndb + Dictionary lookup so we don't pollute
+      // the caller's dictionary cache with a table version that may go
+      // stale before the real request arrives.
+      dict->invalidateTable(tableName.c_str());
+      const NdbDictionary::Table *tab = dict->getTable(tableName.c_str());
+      if (tab == nullptr) {
+        DEB_FS("Preload incomplete for %s: table %s.%s not found",
+               cacheKey.c_str(), fg.featureStoreName.c_str(),
+               tableName.c_str());
+        delete data;
+        return false;
+      }
+      int expected_pk_count = tab->getNoOfPrimaryKeys();
+      // Drop the table from the local dictionary cache immediately so a
+      // later request path will fetch the current schema version.
+      dict->removeCachedTable(tableName.c_str());
+      int actual_pk_count = (int)fg.primaryKeyMap.size();
+      if (actual_pk_count < expected_pk_count) {
+        DEB_FS("Preload incomplete for %s: table %s.%s has %d PK columns"
+               " but only %d serving keys loaded",
+               cacheKey.c_str(), fg.featureStoreName.c_str(),
+               tableName.c_str(), expected_pk_count, actual_pk_count);
+        delete data;
+        return false;
+      }
+    }
   }
 
   // Load succeeded — insert into cache if no one else created an entry
@@ -507,7 +550,7 @@ void FSMetadataCache::load_single_feature_view(const std::string &fsName,
   if (m_stopped) {
     NdbMutex_Unlock(m_rwLock[key_cache_id]);
     delete data;
-    return;
+    return false;
   }
   auto race_it = m_fs_cache[key_cache_id].find(cacheKey);
   if (race_it != m_fs_cache[key_cache_id].end()) {
@@ -516,7 +559,7 @@ void FSMetadataCache::load_single_feature_view(const std::string &fsName,
     delete data;
     DEB_FS("Feature view %s populated by another path, discarding",
            cacheKey.c_str());
-    return;
+    return true;
   }
 
   auto *newEntry = new FSCacheEntry();
@@ -535,6 +578,7 @@ void FSMetadataCache::load_single_feature_view(const std::string &fsName,
   NdbMutex_Unlock(m_rwLock[key_cache_id]);
 
   DEB_FS("Preloaded feature view: %s", cacheKey.c_str());
+  return true;
 }
 
 void FSMetadataCache::preload_all_feature_views() {
@@ -551,6 +595,14 @@ void FSMetadataCache::preload_all_feature_views() {
     globalConfigs.featureStore.featureStoreMetadataCache.preloadThreads;
   if (num_threads <= 1 || count <= 1) {
     num_threads = 1;
+    Ndb *ndb_obj = nullptr;
+    RS_Status ndb_rs = rdrsRonDBConnectionPool->GetMetadataNdbObject(&ndb_obj);
+    if (ndb_rs.http_code != SUCCESS) {
+      g_eventLogger->warning(
+        "[FS Cache] Failed to get NDB object for preload");
+      free(entries);
+      return;
+    }
     for (int i = 0; i < count; i++) {
       char fs_name_buf[FEATURE_STORE_NAME_SIZE];
       RS_Status rs = find_feature_store_data(entries[i].feature_store_id,
@@ -565,8 +617,9 @@ void FSMetadataCache::preload_all_feature_views() {
       std::string fsName(fs_name_buf);
       std::string fvName(entries[i].name);
       int fvVersion = entries[i].version;
-      load_single_feature_view(fsName, fvName, fvVersion);
+      load_single_feature_view(ndb_obj, fsName, fvName, fvVersion);
     }
+    rdrsRonDBConnectionPool->ReturnMetadataNdbObject(ndb_obj, &ndb_rs);
   } else {
     if (num_threads > (Uint32)count) {
       num_threads = (Uint32)count;
@@ -575,6 +628,14 @@ void FSMetadataCache::preload_all_feature_views() {
     threads.reserve(num_threads);
     for (Uint32 t = 0; t < num_threads; t++) {
       threads.emplace_back([this, entries, count, t, num_threads]() {
+        Ndb *ndb_obj = nullptr;
+        RS_Status ndb_rs =
+          rdrsRonDBConnectionPool->GetMetadataNdbObject(&ndb_obj);
+        if (ndb_rs.http_code != SUCCESS) {
+          g_eventLogger->warning(
+            "[FS Cache] Failed to get NDB object for preload thread %u", t);
+          return;
+        }
         for (int i = (int)t; i < count; i += (int)num_threads) {
           char fs_name_buf[FEATURE_STORE_NAME_SIZE];
           RS_Status rs = find_feature_store_data(
@@ -589,8 +650,9 @@ void FSMetadataCache::preload_all_feature_views() {
           std::string fsName(fs_name_buf);
           std::string fvName(entries[i].name);
           int fvVersion = entries[i].version;
-          load_single_feature_view(fsName, fvName, fvVersion);
+          load_single_feature_view(ndb_obj, fsName, fvName, fvVersion);
         }
+        rdrsRonDBConnectionPool->ReturnMetadataNdbObject(ndb_obj, &ndb_rs);
       });
     }
     for (auto &th : threads) {
@@ -688,6 +750,24 @@ void FSMetadataCache::event_watcher_job() {
   NdbRecAttr *name_pre_val = nullptr;
   NdbRecAttr *fs_id_pre_val = nullptr;
   NdbRecAttr *version_pre_val = nullptr;
+
+  // Pending INSERT events whose dependent metadata (serving_key rows etc.)
+  // has not yet been committed.  Each entry carries a poll-cycle counter
+  // and a backoff threshold so we don't hammer the DB when many incomplete
+  // feature views are queued.
+  struct PendingInsert {
+    std::string fsName;
+    std::string fvName;
+    int version;
+    Uint32 attempts;        // total attempts so far
+    Uint32 poll_cycles;     // poll cycles since last attempt
+    Uint32 next_retry;      // retry after this many poll cycles (exponential)
+  };
+  static const Uint32 INITIAL_RETRY_CYCLES = 1;  // first retry after 1 cycle
+  static const Uint32 MAX_RETRY_CYCLES     = 60; // cap at ~60 s between retries
+  static const Uint32 PENDING_LOG_INTERVAL = 10; // log every N attempts
+
+  std::vector<PendingInsert> pending_inserts;
 
 retry:
   ndb = nullptr;
@@ -811,6 +891,50 @@ retry:
       g_eventLogger->info("[FS Cache Event] Forced reconnect requested");
       goto err;
     }
+
+    // Try to load pending feature views whose backoff has elapsed.
+    if (!pending_inserts.empty()) {
+      Ndb *pk_ndb = nullptr;
+      RS_Status pk_rs =
+        rdrsRonDBConnectionPool->GetMetadataNdbObject(&pk_ndb);
+      if (pk_rs.http_code != SUCCESS) {
+        g_eventLogger->warning(
+          "[FS Cache Event] Failed to get NDB object for pending loads");
+      } else {
+        auto it = pending_inserts.begin();
+        while (it != pending_inserts.end()) {
+          it->poll_cycles++;
+          if (it->poll_cycles < it->next_retry) {
+            ++it;
+            continue;
+          }
+          it->attempts++;
+          it->poll_cycles = 0;
+          if (load_single_feature_view(pk_ndb,
+                                       it->fsName, it->fvName, it->version)) {
+            g_eventLogger->info(
+              "[FS Cache Event] Pending load succeeded for %s|%s|%d"
+              " after %u attempts",
+              it->fsName.c_str(), it->fvName.c_str(), it->version,
+              it->attempts);
+            it = pending_inserts.erase(it);
+          } else {
+            // Exponential backoff: 1, 2, 4, 8, … capped at MAX_RETRY_CYCLES
+            it->next_retry = std::min(it->next_retry * 2, MAX_RETRY_CYCLES);
+            if (it->attempts % PENDING_LOG_INTERVAL == 0) {
+              g_eventLogger->warning(
+                "[FS Cache Event] Feature view %s|%s|%d still pending"
+                " after %u attempts -- dependent rows may be missing",
+                it->fsName.c_str(), it->fvName.c_str(), it->version,
+                it->attempts);
+            }
+            ++it;
+          }
+        }
+        rdrsRonDBConnectionPool->ReturnMetadataNdbObject(pk_ndb, &pk_rs);
+      }
+    }
+
     int res = ndb->pollEvents(1000);
     if (res < 0) {
       g_eventLogger->warning(
@@ -852,7 +976,10 @@ retry:
           g_eventLogger->info(
             "[FS Cache Event] INSERT detected for %s|%s|%d",
             fsName.c_str(), fvName.c_str(), version);
-          load_single_feature_view(fsName, fvName, version);
+          // Defer loading — dependent rows (serving_key etc.) may not yet
+          // be committed.  Will retry on next poll cycle with backoff.
+          pending_inserts.push_back(
+            {fsName, fvName, version, 0, 0, INITIAL_RETRY_CYCLES});
           break;
         }
         case NdbDictionary::Event::TE_DELETE: {
@@ -877,6 +1004,15 @@ retry:
           g_eventLogger->info(
             "[FS Cache Event] DELETE detected for %s", cacheKey.c_str());
           evict_entry(cacheKey);
+          // Also remove from pending list if present
+          pending_inserts.erase(
+            std::remove_if(pending_inserts.begin(), pending_inserts.end(),
+              [&](const PendingInsert &p) {
+                return p.fsName == fsName &&
+                       p.fvName == fvName &&
+                       p.version == version;
+              }),
+            pending_inserts.end());
           break;
         }
         case NdbDictionary::Event::TE_CLUSTER_FAILURE:
