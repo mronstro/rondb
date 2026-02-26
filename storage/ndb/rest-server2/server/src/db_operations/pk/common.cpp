@@ -868,6 +868,10 @@ bool UnloadSchema(RS_Status status) {
                (status.mysql_code == HA_ERR_NO_SUCH_TABLE &&
                 status.code == 1226)) {
       unload = true;
+    } else if (/*Invalid usage of blob attribute - stale dictionary cache
+                 has mismatched column type info (blob vs non-blob)*/
+               status.code == 4264) {
+      unload = true;
     }
   }
   return unload;
