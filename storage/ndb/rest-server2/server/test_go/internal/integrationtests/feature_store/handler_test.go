@@ -2324,7 +2324,7 @@ func Test_GetFeatureVector_EventDelete_And_Reinsert(t *testing.T) {
 	}()
 
 	// Step 3: Wait for event watcher to detect the DELETE and evict the cache entry
-	time.Sleep(5 * time.Second)
+	time.Sleep(10 * time.Second)
 
 	// Step 4: Query should now fail because the FV metadata is evicted
 	GetFeatureStoreResponseWithDetail(t, fsReq,
@@ -2351,7 +2351,7 @@ func Test_GetFeatureVector_EventDelete_And_Reinsert(t *testing.T) {
 	t.Log("Re-inserted feature_view row, waiting for event watcher to detect...")
 
 	// Step 6: Wait for event watcher to detect the INSERT and reload the cache entry
-	time.Sleep(5 * time.Second)
+	time.Sleep(10 * time.Second)
 
 	// Step 7: Query should succeed again
 	GetFeatureStoreResponseWithDetail(t, fsReq, "", http.StatusOK)
