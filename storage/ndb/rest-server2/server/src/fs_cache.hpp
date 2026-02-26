@@ -138,7 +138,8 @@ class FSMetadataCache {
   void insert_last(FSCacheEntry*, Uint32);
   void remove_entry(FSCacheEntry*, Uint32);
 
-  void load_single_feature_view(const std::string &fsName,
+  bool load_single_feature_view(Ndb *ndb_object,
+                                const std::string &fsName,
                                 const std::string &fvName,
                                 int fvVersion);
   void evict_entry(const std::string &cacheKey);
