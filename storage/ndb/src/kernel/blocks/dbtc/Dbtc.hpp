@@ -1997,8 +1997,10 @@ class Dbtc : public SimulatedBlock {
      *
      */
     bool m_scan_dist_key_flag;
+    bool m_scan_partition_range_flag;
     bool m_par_ordered_scan_flag;
     Uint32 m_scan_dist_key;
+    Uint32 m_scan_frag_offset;
     Uint32 m_read_any_node;
     NDB_TICKS m_start_ticks;
 

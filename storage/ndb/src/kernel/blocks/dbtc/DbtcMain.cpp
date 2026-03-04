@@ -16147,6 +16147,8 @@ void Dbtc::execSCAN_TABREQ(Signal *signal) {
 
   scanptr.p->m_scan_dist_key = scanTabReq->distributionKey;
   scanptr.p->m_scan_dist_key_flag = ScanTabReq::getDistributionKeyFlag(ri);
+  scanptr.p->m_scan_partition_range_flag =
+      ScanTabReq::getPartitionRangeFlag(ri);
 
   if (ERROR_INSERTED(8119)) {
     jam();
@@ -16331,6 +16333,8 @@ Uint32 Dbtc::initScanrec(ScanRecordPtr scanptr, const ScanTabReq *scanTabReq,
   scanptr.p->batch_size_rows = batchSizeRows;
   scanptr.p->m_scan_block_no = DBLQH;
   scanptr.p->m_scan_dist_key_flag = 0;
+  scanptr.p->m_scan_partition_range_flag = 0;
+  scanptr.p->m_scan_frag_offset = 0;
   scanptr.p->m_start_ticks = getHighResTimer();
   scanptr.p->m_aggProgramPtrI = RNIL;
   scanptr.p->m_aggKeysSectionPtrI = RNIL;
@@ -16655,11 +16659,22 @@ void Dbtc::execDIH_SCAN_TAB_CONF(Signal *signal, ScanRecordPtr scanptr,
                is_ttl_table(tabPtr.p));
     */
 
-    /**
-     * Prepare for sendDihGetNodeReq to request DBDIH info for
-     * the single pruned-to fragId we got from NDB API.
-     */
-    tfragCount = 1;
+    if (scanptr.p->m_scan_partition_range_flag) {
+      jam();
+      /**
+       * Multi-partition range pruning: distributionKey contains
+       * packed (firstPartitionId << 16 | numPartitions).
+       */
+      Uint32 packed = scanptr.p->m_scan_dist_key;
+      scanptr.p->m_scan_frag_offset = packed >> 16;
+      tfragCount = packed & 0xFFFF;
+    } else {
+      /**
+       * Prepare for sendDihGetNodeReq to request DBDIH info for
+       * the single pruned-to fragId we got from NDB API.
+       */
+      tfragCount = 1;
+    }
   }
   ndbassert(scanptr.p->scanNextFragId == 0);
 
@@ -17050,7 +17065,11 @@ bool Dbtc::sendDihGetNodeReq(Signal *signal, ScanRecordPtr scanptr,
   DiGetNodesReq *const req = (DiGetNodesReq *)&signal->theData[0];
 
   req->tableId = scanptr.p->scanTableref;
-  req->hashValue = scanFragId;
+  /**
+   * Apply fragment offset for multi-partition range pruning.
+   * For normal scans and single-partition pruning, offset is 0.
+   */
+  req->hashValue = scanFragId + scanptr.p->m_scan_frag_offset;
   Uint32 distr_key_indicator = ZTRUE;
   req->scan_indicator = ZTRUE;
   req->anyNode = scanptr.p->m_read_any_node;
@@ -17071,7 +17090,8 @@ bool Dbtc::sendDihGetNodeReq(Signal *signal, ScanRecordPtr scanptr,
   req->get_next_fragid_indicator = 0;
   req->only_readable_nodes = 1;
 
-  if (scanptr.p->m_scan_dist_key_flag)  // Scan pruned to specific fragment
+  if (scanptr.p->m_scan_dist_key_flag &&
+      !scanptr.p->m_scan_partition_range_flag)
   {
     jamDebug();
     ndbassert(scanFragId == 0); /* Pruned to 1 fragment */

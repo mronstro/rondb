@@ -135,6 +135,8 @@ class ScanTabReq {
   static Uint32 getTTLOnlyExpiredFlag(const Uint32 &requestInfo);
   static Uint32 getParallelOrderedScanFlag(const Uint32 &requestInfo);
   static Uint32 getUserIdFlag(const Uint32 &requestInfo);
+  static Uint8 getJoinAggFlag(const UintR &requestInfo);
+  static Uint32 getPartitionRangeFlag(const Uint32 &requestInfo);
 
   /**
    * Set:ers for requestInfo
@@ -162,8 +164,8 @@ class ScanTabReq {
   static void setTTLOnlyExpiredFlag(Uint32 &requestInfo, Uint32 val);
   static void setParallelOrderedScanFlag(Uint32 &requestInfo, Uint32 val);
   static void setUserIdFlag(Uint32 &requestInfo, Uint32 val);
-  static Uint8 getJoinAggFlag(const UintR &requestInfo);
   static void setJoinAggFlag(UintR &requestInfo, Uint32 val);
+  static void setPartitionRangeFlag(Uint32 &requestInfo, Uint32 val);
 };
 
 /**
@@ -199,11 +201,12 @@ class ScanTabReq {
  e = TTL only expired      - 1  Bit 4
  r = Four receiver/part    - 1  Bit 2
  u = User Id flag          - 1  Bit 5
+ F = Partition range flag  - 1  Bit 1
 
            1111111111222222222233
  01234567890123456789012345678901
  pppppppplnhcktzxbbbbbbbbbbdjafR
-    IeuPg
+   FIeuPg
 */
 
 #define PARALLEL_SHIFT (0)
@@ -260,6 +263,9 @@ class ScanTabReq {
 #define SCAN_USER_ID_SHIFT     (5)
 
 #define SCAN_JOIN_AGG_SHIFT    (1)
+
+#define SCAN_PARTITION_RANGE_SHIFT (2)
+#define SCAN_PARTITION_RANGE_MASK  (1)
 
 inline Uint8 ScanTabReq::getReadCommittedBaseFlag(const UintR &requestInfo) {
   return (Uint8)((requestInfo >> SCAN_READ_COMMITTED_BASE_SHIFT) & 1);
@@ -511,6 +517,26 @@ inline void ScanTabReq::setJoinAggFlag(UintR &requestInfo, Uint32 val) {
   ASSERT_BOOL(val, "ScanTabReq::setJoinAggFlag");
   requestInfo = (requestInfo & ~(Uint32(1) << SCAN_JOIN_AGG_SHIFT)) |
                 (val << SCAN_JOIN_AGG_SHIFT);
+}
+
+/*
+ * Partition range flag: when set together with distribution key flag,
+ * distributionKey contains packed (firstPartitionId << 16 | numPartitions)
+ * for multi-partition range pruning.
+ */
+inline Uint32
+ScanTabReq::getPartitionRangeFlag(const UintR &requestInfo) {
+  return (requestInfo >> SCAN_PARTITION_RANGE_SHIFT) &
+         SCAN_PARTITION_RANGE_MASK;
+}
+
+inline void
+ScanTabReq::setPartitionRangeFlag(UintR &requestInfo, Uint32 flag) {
+  ASSERT_BOOL(flag, "ScanTabReq::setPartitionRangeFlag");
+  requestInfo =
+      (requestInfo & ~(SCAN_PARTITION_RANGE_MASK
+                        << SCAN_PARTITION_RANGE_SHIFT)) |
+      ((flag & SCAN_PARTITION_RANGE_MASK) << SCAN_PARTITION_RANGE_SHIFT);
 }
 
 /**

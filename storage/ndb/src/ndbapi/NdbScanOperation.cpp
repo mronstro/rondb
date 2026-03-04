@@ -365,6 +365,26 @@ int NdbScanOperation::handleScanOptions(const ScanOptions *options) {
                ("Set distribution key from partition spec to %u", partValue));
   }
 
+  /* Multi-partition range pruning */
+  if (options->optionsPresent & ScanOptions::SO_PARTITION_RANGE) {
+    assert(m_pruneState == SPS_UNKNOWN);
+    if (unlikely(!(m_attribute_record->flags &
+                   NdbRecord::RecHasUserDefinedPartitioning))) {
+      /* Explicit partitioning info not allowed for table and operation */
+      setErrorCodeAbort(4546);
+      return -1;
+    }
+    m_pruneState = SPS_FIXED_RANGE;
+    theDistributionKey =
+        (options->firstPartitionId << 16) | options->numPartitions;
+    theDistrKeyIndicator_ = 1;
+    DBUG_PRINT("info",
+               ("NdbScanOperation::handleScanOptions(partition range): "
+                "first=%u count=%u packed=0x%x",
+                options->firstPartitionId, options->numPartitions,
+                theDistributionKey));
+  }
+
   return 0;
 }
 
@@ -899,7 +919,7 @@ int NdbScanOperation::validatePartInfoPtr(const Ndb::PartitionSpec *&partInfo,
   }
 
   if (partInfo->type != Ndb::PartitionSpec::PS_NONE) {
-    if (m_pruneState == SPS_FIXED) {
+    if (m_pruneState == SPS_FIXED || m_pruneState == SPS_FIXED_RANGE) {
       /* 4543 : Duplicate partitioning information supplied */
       setErrorCodeAbort(4543);
       return -1;
@@ -2610,6 +2630,8 @@ int NdbScanOperation::prepareSendScan(Uint32 /*aTC_ConnectPtr*/,
 
   /* Set distribution key info if required */
   ScanTabReq::setDistributionKeyFlag(reqInfo, theDistrKeyIndicator_);
+  ScanTabReq::setPartitionRangeFlag(
+      reqInfo, m_pruneState == SPS_FIXED_RANGE ? 1 : 0);
 
   /* Set aggregation information */
   if (m_aggregation_code != nullptr) {

@@ -169,6 +169,7 @@ class NdbScanOperation : public NdbOperation {
                 SO_SET_INPUT_PARAM = 0x400,
                 SO_USE_STANDARD_SCAN = 0x800,
                 SO_AGGREGATION = 0x1000
+                SO_PARTITION_RANGE = 0x2000
     };
 
     /* Flags controlling scan behaviour
@@ -216,6 +217,13 @@ class NdbScanOperation : public NdbOperation {
 
     /* Aggregation program to execute as part of the scan */
     const NdbAggregator *aggregationCode;
+
+    /* Multi-partition range pruning: scan partitions
+     * [firstPartitionId .. firstPartitionId + numPartitions - 1].
+     * Only for user-defined (RANGE) partitioned tables.
+     */
+    Uint32 firstPartitionId;
+    Uint32 numPartitions;
   };
 
   /**
@@ -748,7 +756,8 @@ class NdbScanOperation : public NdbOperation {
     SPS_UNKNOWN,           // Initial state
     SPS_FIXED,             // Explicit partitionId passed in ScanOptions
     SPS_ONE_PARTITION,     // Scan pruned to one partition by previous range
-    SPS_MULTI_PARTITION    // Scan cannot be pruned due to previous ranges
+    SPS_MULTI_PARTITION,   // Scan cannot be pruned due to previous ranges
+    SPS_FIXED_RANGE        // Multi-partition range: packed (first, count)
   };
   
   ScanPruningState m_pruneState;

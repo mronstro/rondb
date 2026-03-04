@@ -3889,11 +3889,20 @@ int ha_ndbcluster::ordered_index_scan(const key_range *start_key,
 
     /* Partition pruning */
     if (m_use_partition_pruning && m_user_defined_partitioning &&
-        part_spec != nullptr && part_spec->start_part == part_spec->end_part) {
-      /* Explicitly set partition id when pruning User-defined partitioned scan
-       */
-      options.partitionId = part_spec->start_part;
-      options.optionsPresent |= NdbScanOperation::ScanOptions::SO_PARTITION_ID;
+        part_spec != nullptr) {
+      if (part_spec->start_part == part_spec->end_part) {
+        /* Explicitly set partition id when pruning to single partition */
+        options.partitionId = part_spec->start_part;
+        options.optionsPresent |=
+            NdbScanOperation::ScanOptions::SO_PARTITION_ID;
+      } else if (part_spec->start_part < part_spec->end_part) {
+        /* Multi-partition range pruning */
+        options.firstPartitionId = part_spec->start_part;
+        options.numPartitions =
+            part_spec->end_part - part_spec->start_part + 1;
+        options.optionsPresent |=
+            NdbScanOperation::ScanOptions::SO_PARTITION_RANGE;
+      }
     }
 
     /*
@@ -3975,6 +3984,7 @@ int ha_ndbcluster::full_table_scan(const KEY *key_info,
   NdbTransaction *trans = m_thd_ndb->trans;
   part_id_range part_spec;
   bool use_set_part_id = false;
+  bool use_partition_range = false;
   NdbOperation::GetValueSpec gets[2];
 
   DBUG_TRACE;
@@ -4013,6 +4023,11 @@ int ha_ndbcluster::full_table_scan(const KEY *key_info,
         if (unlikely(!(
                 trans = get_transaction_part_id(part_spec.start_part, error))))
           return error;
+    } else {
+      /* Multi-partition range pruning: scan only the partitions
+       * [start_part .. end_part] instead of all fragments.
+       */
+      use_partition_range = true;
     }
   }
   if (!trans)
@@ -4047,7 +4062,12 @@ int ha_ndbcluster::full_table_scan(const KEY *key_info,
     assert(m_user_defined_partitioning);
     options.optionsPresent |= NdbScanOperation::ScanOptions::SO_PARTITION_ID;
     options.partitionId = part_spec.start_part;
-  };
+  } else if (use_partition_range) {
+    options.optionsPresent |=
+        NdbScanOperation::ScanOptions::SO_PARTITION_RANGE;
+    options.firstPartitionId = part_spec.start_part;
+    options.numPartitions = part_spec.end_part - part_spec.start_part + 1;
+  }
 
   if (table_share->primary_key == MAX_KEY)
     get_hidden_fields_scan(&options, gets);
