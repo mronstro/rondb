@@ -234,6 +234,7 @@ class NdbTableImpl : public NdbDictionary::Table, public NdbDictObjectImpl {
   UtilBuffer m_frm;
   Vector<Uint32> m_fd;
   Vector<Int32> m_range;
+  Uint32 m_range_boundary_type;
   NdbDictionary::Object::FragmentType m_fragmentType;
 
   int getDbName(char *buf, size_t len) const;

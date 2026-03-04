@@ -15582,8 +15582,29 @@ static int create_table_set_up_partition_info(partition_info *part_info,
       ndbtab.setRangeListData(list_data.get(), values * 2);
     }
 
-    DBUG_PRINT("info", ("Using UserDefined fragmentation type"));
-    ndbtab.setFragmentType(NDBTAB::UserDefined);
+    if (part_info->part_type == partition_type::RANGE) {
+      DBUG_PRINT("info", ("Using RangePartition fragmentation type"));
+      ndbtab.setFragmentType(NDBTAB::RangePartition);
+
+      /* Set RangeBoundaryType based on partition expression type.
+       * Currently only Int32 boundaries supported (from range_int_array).
+       */
+      ndbtab.setRangeBoundaryType(NDB_TYPE_INT);
+
+      /* Mark partition expression column as distribution key (DKey)
+       * so DBTC can extract it via create_distr_key().
+       */
+      if (part_info->part_field_array != nullptr) {
+        Field **fields = part_info->part_field_array;
+        for (uint i = 0; i < part_info->num_part_fields; i++) {
+          NDBCOL *pk_col = colIdMap.getColumn(ndbtab, fields[i]->field_index());
+          pk_col->setPartitionKey(true);
+        }
+      }
+    } else {
+      DBUG_PRINT("info", ("Using UserDefined fragmentation type"));
+      ndbtab.setFragmentType(NDBTAB::UserDefined);
+    }
   }
 
   const bool use_default_num_parts = part_info->use_default_num_partitions;

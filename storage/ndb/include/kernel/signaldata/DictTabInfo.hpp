@@ -173,6 +173,8 @@ class DictTabInfo {
     TTLSec = 164,
     TTLColumnNo = 165,
 
+    RangeBoundaryType = 166,
+
     TableEnd           = 999,
     
     AttributeName          = 1000, // String, Mandatory
@@ -215,7 +217,8 @@ class DictTabInfo {
     DistrKeyLin = 5,
     UserDefined = 6,
     DistrKeyOrderedIndex = 8,  // alias
-    HashMapPartition = 9
+    HashMapPartition = 9,
+    RangePartition = 10
   };
 
   // TableType constants + objects
@@ -400,6 +403,8 @@ class DictTabInfo {
 
     Uint32 TTLSec;
     Uint32 TTLColumnNo;
+
+    Uint32 RangeBoundaryType;
 
     Table() {}
     void init();

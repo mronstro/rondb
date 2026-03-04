@@ -76,7 +76,8 @@ class DiGetNodesReq {
    */
   friend class Dbdih;
 public:
-  static constexpr Uint32 SignalLength = 7 + (sizeof(void*) / sizeof(Uint32));
+  static constexpr Uint32 SignalLength = 7 + (sizeof(void*) / sizeof(Uint32))
+    + (sizeof(void*) / sizeof(Uint32)) + 1;  // +rangeKeyPtr +rangeKeyLen
   static constexpr Uint32 MAX_DIGETNODESREQS = 16;
 
  private:
@@ -91,6 +92,16 @@ public:
     void *jamBufferPtr;
     Uint32 jamBufferStorage[2];
   };
+  /**
+   * Range partition key pointer and length.
+   * Only valid via EXECUTE_DIRECT (never sent over wire).
+   * Set by DBTC/DBSPJ for range-partitioned tables.
+   */
+  union {
+    const void *rangeKeyPtr;
+    Uint32 rangeKeyStorage[2];
+  };
+  Uint32 rangeKeyLen;
 };
 
 #undef JAM_FILE_ID

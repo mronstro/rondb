@@ -958,6 +958,7 @@ void NdbTableImpl::init() {
   m_frm.clear();
   m_fd.clear();
   m_range.clear();
+  m_range_boundary_type = 0;
   m_fragmentType = NdbDictionary::Object::HashMapPartition;
   m_hashValueMask = 0;
   m_hashpointerValue = 0;
@@ -1237,6 +1238,7 @@ int NdbTableImpl::assign(const NdbTableImpl &org) {
   m_frm.assign(org.m_frm.get_data(), org.m_frm.length());
   m_fd.assign(org.m_fd);
   m_range.assign(org.m_range);
+  m_range_boundary_type = org.m_range_boundary_type;
 
   m_fragmentType = org.m_fragmentType;
   if (m_fragmentType == NdbDictionary::Object::HashMapPartition) {
@@ -3659,6 +3661,7 @@ static const ApiKernelMapping fragmentTypeMapping[] = {
     {DictTabInfo::DistrKeyLin, NdbDictionary::Object::DistrKeyLin},
     {DictTabInfo::UserDefined, NdbDictionary::Object::UserDefined},
     {DictTabInfo::HashMapPartition, NdbDictionary::Object::HashMapPartition},
+    {DictTabInfo::RangePartition, NdbDictionary::Object::RangePartition},
     {-1, -1}};
 
 static const ApiKernelMapping objectTypeMapping[] = {
@@ -3780,6 +3783,7 @@ NdbDictInterface::parseTableInfo(NdbTableImpl ** ret,
     free(tableDesc);
     DBUG_RETURN(4000);
   }
+  impl->m_range_boundary_type = tableDesc->RangeBoundaryType;
 
   {
     /**
@@ -4741,6 +4745,8 @@ int NdbDictInterface::serializeTableDesc(NdbTableImpl &impl,
     memcpy(tmpTab->RangeListData, impl.m_range.getBase(),
            4 * impl.m_range.size());
   }
+
+  tmpTab->RangeBoundaryType = impl.m_range_boundary_type;
 
   tmpTab->PartitionBalance = (Uint32)impl.m_partitionBalance;
   tmpTab->FragmentCount = impl.m_fragmentCount;

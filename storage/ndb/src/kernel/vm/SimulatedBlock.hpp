@@ -33,6 +33,7 @@
 #include <NdbTick.h>
 #include <kernel_types.h>
 #include <ndb_limits.h>
+#include <ndb_constants.h>
 #include <util/version.h>
 #include "portlib/ndb_compiler.h"
 
@@ -2779,6 +2780,139 @@ struct Hash2FragmentMap {
 typedef ArrayPool<Hash2FragmentMap> Hash2FragmentMap_pool;
 
 extern Hash2FragmentMap_pool g_hash_map;
+
+/**
+ * Range2FragmentMap — fixed-size boundaries (≤ 8 bytes each).
+ *
+ * Allocated via lc_ndbd_pool_malloc, NOT ArrayPool.
+ * Freed via lc_ndbd_pool_free.
+ *
+ * Layout in memory (single allocation):
+ *   Header (m_cnt, m_boundary_len, m_boundary_type, ...)
+ *   Uint16 frag_ids[m_cnt]          — fragment IDs
+ *   char boundaries[m_cnt * m_boundary_len] — packed boundary values (8-aligned)
+ *
+ * Entry i is the EXCLUSIVE upper bound for partition i.
+ * The last entry is the maximum possible value (catch-all).
+ * frag_ids[i] is the fragment ID for values in partition i.
+ */
+struct Range2FragmentMap {
+  Uint32 m_cnt;            // number of partitions (= number of range entries)
+  Uint32 m_boundary_len;   // byte length of each boundary (fixed, all same)
+  Uint32 m_boundary_type;  // NDB attribute type of the partition key column
+  Uint32 m_num_columns;    // number of partition key columns (1 for Phase 1)
+  Uint32 m_object_id;      // associated table object ID
+
+  Uint16 *frag_ids() {
+    return reinterpret_cast<Uint16 *>(
+      reinterpret_cast<char *>(this) + sizeof(Range2FragmentMap));
+  }
+  const Uint16 *frag_ids() const {
+    return reinterpret_cast<const Uint16 *>(
+      reinterpret_cast<const char *>(this) + sizeof(Range2FragmentMap));
+  }
+
+  char *boundaries() {
+    char *after_frags = reinterpret_cast<char *>(frag_ids() + m_cnt);
+    Uint64 addr = reinterpret_cast<Uint64>(after_frags);
+    addr = (addr + 7) & ~Uint64(7);
+    return reinterpret_cast<char *>(addr);
+  }
+  const char *boundaries() const {
+    const char *after_frags =
+      reinterpret_cast<const char *>(frag_ids() + m_cnt);
+    Uint64 addr = reinterpret_cast<Uint64>(after_frags);
+    addr = (addr + 7) & ~Uint64(7);
+    return reinterpret_cast<const char *>(addr);
+  }
+
+  const char *boundary(Uint32 i) const {
+    return boundaries() + i * m_boundary_len;
+  }
+
+  /** Total allocation size needed for cnt partitions with blen-byte bounds */
+  static Uint32 alloc_size(Uint32 cnt, Uint32 blen) {
+    Uint32 sz = sizeof(Range2FragmentMap);
+    sz += cnt * sizeof(Uint16);    // frag_ids
+    sz = (sz + 7) & ~Uint32(7);   // align to 8
+    sz += cnt * blen;              // boundaries
+    return sz;
+  }
+};
+
+/**
+ * Compare a partition key value against a range boundary value.
+ * Both are in native endian format (NOT big-endian / network order).
+ * Returns negative if bound < key, 0 if equal, positive if bound > key.
+ */
+static inline int range_compare(const char *bound, const char *key,
+                                Uint32 boundary_type) {
+  switch (boundary_type) {
+    case NDB_TYPE_INT: {
+      Int32 b = *reinterpret_cast<const Int32 *>(bound);
+      Int32 k = *reinterpret_cast<const Int32 *>(key);
+      return (b < k) ? -1 : (b > k) ? 1 : 0;
+    }
+    case NDB_TYPE_UNSIGNED: {
+      Uint32 b = *reinterpret_cast<const Uint32 *>(bound);
+      Uint32 k = *reinterpret_cast<const Uint32 *>(key);
+      return (b < k) ? -1 : (b > k) ? 1 : 0;
+    }
+    case NDB_TYPE_BIGINT: {
+      Int64 b = *reinterpret_cast<const Int64 *>(bound);
+      Int64 k = *reinterpret_cast<const Int64 *>(key);
+      return (b < k) ? -1 : (b > k) ? 1 : 0;
+    }
+    case NDB_TYPE_BIGUNSIGNED: {
+      Uint64 b = *reinterpret_cast<const Uint64 *>(bound);
+      Uint64 k = *reinterpret_cast<const Uint64 *>(key);
+      return (b < k) ? -1 : (b > k) ? 1 : 0;
+    }
+    case NDB_TYPE_DATE:
+    case NDB_TYPE_TIMESTAMP: {
+      Uint32 b = *reinterpret_cast<const Uint32 *>(bound);
+      Uint32 k = *reinterpret_cast<const Uint32 *>(key);
+      return (b < k) ? -1 : (b > k) ? 1 : 0;
+    }
+    case NDB_TYPE_DATETIME:
+    case NDB_TYPE_TIMESTAMP2:
+    case NDB_TYPE_DATETIME2: {
+      Int64 b = *reinterpret_cast<const Int64 *>(bound);
+      Int64 k = *reinterpret_cast<const Int64 *>(key);
+      return (b < k) ? -1 : (b > k) ? 1 : 0;
+    }
+    default:
+      ndbassert(false);  // Unsupported type for Tier 1 range compare
+      return 0;
+  }
+}
+
+/**
+ * Binary search: find first entry where boundary[i] > partitionKey.
+ * @param map       Range map (Tier 1, fixed-size boundaries)
+ * @param key       Partition key bytes (native endian)
+ * @param key_len   Length of partition key in bytes
+ * @return fragment ID for the matching partition
+ */
+static inline Uint32 range_lookup(const Range2FragmentMap *map,
+                                  const char *key, Uint32 key_len) {
+  Uint32 lo = 0;
+  Uint32 hi = map->m_cnt;
+  const Uint32 btype = map->m_boundary_type;
+
+  while (lo < hi) {
+    Uint32 mid = (lo + hi) >> 1;
+    const char *bound = map->boundary(mid);
+    int cmp = range_compare(bound, key, btype);
+    if (cmp <= 0)    // boundary <= key, search right
+      lo = mid + 1;
+    else             // boundary > key, search left
+      hi = mid;
+  }
+  // lo = index of first boundary > key = the partition for this key
+  ndbassert(lo < map->m_cnt);  // last entry is MAX, always > any key
+  return map->frag_ids()[lo];
+}
 
 /**
  * Guard class for auto release of segmentedsectionptr's

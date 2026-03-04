@@ -1541,6 +1541,8 @@ class Dbtc : public SimulatedBlock {
     Uint8 m_no_hash;       // Hash not required for LQH (special variant)
     Uint8 m_no_disk_flag;
     Uint8 m_op_queue;
+    const char *m_range_key_ptr;  // extracted partition key for range tables
+    Uint32 m_range_key_len;       // length in bytes
     Uint8 lenAiInTckeyreq; /* LENGTH OF ATTRIBUTE INFORMATION IN TCKEYREQ */
 
     Uint8 fragmentDistributionKey; /* DIH generation no */
@@ -1660,6 +1662,7 @@ class Dbtc : public SimulatedBlock {
       ,TR_FULLY_REPLICATED = (1<<6)
       ,TR_DELAY_COMMIT = (1 << 7)
       ,TR_HASH_FUNCTION = (1 << 8)
+      ,TR_RANGE_PARTITION = (1 << 9)
     };
     Uint8 get_enabled() const { return (m_flags & TR_ENABLED) != 0; }
     Uint8 get_dropping() const { return (m_flags & TR_DROPPING) != 0; }
@@ -2715,6 +2718,7 @@ class Dbtc : public SimulatedBlock {
 
   UintR thashValue;
   UintR tdistrHashValue;
+  Uint32 c_range_key_buf[MAX_KEY_SIZE_IN_WORDS];
 
   UintR ttransid_ptr;
   UintR cfailure_nr;

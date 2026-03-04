@@ -37,6 +37,7 @@
 
 #include <ndb_limits.h>
 #include <ndb_math.h>
+#include <ndbd_malloc.hpp>
 #include <AttributeHeader.hpp>
 #include <Checksum.hpp>
 #include <Configuration.hpp>
@@ -6009,6 +6010,81 @@ void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
       tablePtr.p->partitionCount = mapptr.p->m_fragments;
     }
   }
+  if (tablePtr.p->fragmentType == DictTabInfo::RangePartition) {
+    jam();
+    /**
+     * Build Range2FragmentMap from RangeListData.
+     * RangeListData contains int32 boundary values, one per partition.
+     * RangeBoundaryType tells us what NDB type to use for comparison.
+     */
+    const Uint32 nParts = tablePtr.p->fragmentCount;
+    const Uint32 btype = c_tableDesc.RangeBoundaryType;
+    tabRequire(nParts > 0, CreateTableRef::InvalidFormat);
+    tabRequire(c_tableDesc.RangeListDataLen > 0,
+               CreateTableRef::InvalidFormat);
+
+    /* Determine boundary byte length from the NDB type */
+    Uint32 blen;
+    switch (btype) {
+      case NDB_TYPE_INT:
+      case NDB_TYPE_UNSIGNED:
+      case NDB_TYPE_DATE:
+      case NDB_TYPE_TIMESTAMP:
+        blen = 4;
+        break;
+      case NDB_TYPE_BIGINT:
+      case NDB_TYPE_BIGUNSIGNED:
+      case NDB_TYPE_DATETIME:
+      case NDB_TYPE_DATETIME2:
+      case NDB_TYPE_TIMESTAMP2:
+        blen = 8;
+        break;
+      default:
+        tabRequire(false, CreateTableRef::InvalidFormat);
+        blen = 0;  // unreachable
+    }
+
+    Uint32 alloc_sz = Range2FragmentMap::alloc_size(nParts, blen);
+    void *mem = lc_ndbd_pool_malloc(alloc_sz, RG_SCHEMA_MEMORY,
+                                    getThreadId(), true);
+    tabRequire(mem != nullptr, CreateTableRef::NoMoreTableRecords);
+
+    Range2FragmentMap *rmap = reinterpret_cast<Range2FragmentMap *>(mem);
+    rmap->m_cnt = nParts;
+    rmap->m_boundary_len = blen;
+    rmap->m_boundary_type = btype;
+    rmap->m_num_columns = 1;
+    rmap->m_object_id = tablePtr.p->tableId;
+
+    /* Set sequential fragment IDs */
+    Uint16 *fids = rmap->frag_ids();
+    for (Uint32 i = 0; i < nParts; i++) {
+      fids[i] = (Uint16)i;
+    }
+
+    /* Copy boundary values from RangeListData.
+     * RangeListData is stored as int32 values from ha_ndbcluster.
+     * We need to convert to the target boundary type.
+     */
+    const Int32 *range_src =
+      reinterpret_cast<const Int32 *>(c_tableDesc.RangeListData);
+    char *bounds = rmap->boundaries();
+    for (Uint32 i = 0; i < nParts; i++) {
+      if (blen == 4) {
+        Int32 val = range_src[i];
+        memcpy(bounds + i * blen, &val, sizeof(Int32));
+      } else {
+        /* 8-byte boundary: sign-extend int32 to int64 */
+        Int64 val = (Int64)range_src[i];
+        memcpy(bounds + i * blen, &val, sizeof(Int64));
+      }
+    }
+
+    tablePtr.p->m_range_ptr = rmap;
+    tablePtr.p->m_range_boundary_type = btype;
+    tablePtr.p->partitionCount = nParts;
+  }
+
   tablePtr.p->frmData = frmData;
   {
     LcLocalRope range(tablePtr.p->rangeData);
@@ -7728,6 +7804,9 @@ void Dbdict::createTab_dih(Signal *signal, SchemaOpPtr op_ptr) {
     req->hashMapPtrI = RNIL;
   }
 
+  /* Pass range map pointer to DBDIH (same node, pointer is safe) */
+  req->rangeMapPtr = tabPtr.p->m_range_ptr;
+
   // fragmentation in long signal section
   {
     Uint32 page[MAX_FRAGMENT_DATA_WORDS];
@@ -8047,6 +8126,8 @@ void Dbdict::execTAB_COMMITCONF(Signal *signal) {
           (Uint32) !!(tabPtr.p->m_bits & TableRecord::TR_ReadBackup);
       req->fullyReplicated =
           (Uint32)((tabPtr.p->m_bits & TableRecord::TR_FullyReplicated) != 0);
+      req->rangePartition =
+          (Uint32)(tabPtr.p->fragmentType == DictTabInfo::RangePartition);
     } else {
       jam();
       TableRecordPtr basePtr;
@@ -8059,6 +8140,8 @@ void Dbdict::execTAB_COMMITCONF(Signal *signal) {
           (Uint32) !!(basePtr.p->m_bits & TableRecord::TR_ReadBackup);
       req->fullyReplicated =
           (Uint32)((basePtr.p->m_bits & TableRecord::TR_FullyReplicated) != 0);
+      req->rangePartition =
+          (Uint32)(basePtr.p->fragmentType == DictTabInfo::RangePartition);
     }
 
     sendSignal(DBSPJ_REF, GSN_TC_SCHVERREQ, signal, TcSchVerReq::SignalLength,
@@ -8320,12 +8403,16 @@ void Dbdict::execTC_SCHVERCONF(Signal *signal) {
           (Uint32) !!(basePtr.p->m_bits & TableRecord::TR_ReadBackup);
       req->fullyReplicated =
           (Uint32)((basePtr.p->m_bits & TableRecord::TR_FullyReplicated) != 0);
+      req->rangePartition =
+          (Uint32)(basePtr.p->fragmentType == DictTabInfo::RangePartition);
     } else {
       jam();
       req->readBackup =
           (Uint32) !!(tabPtr.p->m_bits & TableRecord::TR_ReadBackup);
       req->fullyReplicated =
           (Uint32)((tabPtr.p->m_bits & TableRecord::TR_FullyReplicated) != 0);
+      req->rangePartition =
+          (Uint32)(tabPtr.p->fragmentType == DictTabInfo::RangePartition);
     }
 
     /*

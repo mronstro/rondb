@@ -183,7 +183,8 @@ class NdbDictionary {
       DistrKeyHash = 5,
       DistrKeyLin = 6,
       UserDefined = 7,
-      HashMapPartition = 9
+      HashMapPartition = 9,
+      RangePartition = 10
     };
 
     /**
@@ -1166,6 +1167,13 @@ class NdbDictionary {
      */
     const Int32 *getRangeListData() const;
     Uint32 getRangeListDataLen() const;
+
+    /**
+     * Set/Get NDB type used for range boundary comparison.
+     * Only relevant for RangePartition fragment type.
+     */
+    void setRangeBoundaryType(Uint32 ndbType);
+    Uint32 getRangeBoundaryType() const;
 
     /**
      * Get list of nodes storing given fragment, primary

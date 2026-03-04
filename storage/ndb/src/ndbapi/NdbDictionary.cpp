@@ -610,6 +610,14 @@ int NdbDictionary::Table::setRangeListData(const Int32 *data, Uint32 len) {
   return m_impl.setRangeListData(data, len);
 }
 
+void NdbDictionary::Table::setRangeBoundaryType(Uint32 ndbType) {
+  m_impl.m_range_boundary_type = ndbType;
+}
+
+Uint32 NdbDictionary::Table::getRangeBoundaryType() const {
+  return m_impl.m_range_boundary_type;
+}
+
 Uint32 NdbDictionary::Table::getFragmentNodes(Uint32 fragmentId,
                                               Uint32 *nodeIdArrayPtr,
                                               Uint32 arraySize) const {
@@ -775,6 +783,11 @@ Uint32 NdbDictionary::Table::getPartitionId(Uint32 hashValue) const {
     case NdbDictionary::Object::HashMapPartition: {
     Uint32 cnt = m_impl.m_hash_map.size();
     return m_impl.m_hash_map[hashValue % cnt];
+  }
+    case NdbDictionary::Object::RangePartition: {
+    /* No client-side range resolution yet (Phase 6).
+     * Return 0; server-side DBDIH does the actual range lookup. */
+    return 0;
   }
   default:
     return 0;
@@ -3286,6 +3299,9 @@ NdbOut &operator<<(NdbOut &ndbout,
     break;
   case NdbDictionary::Object::HashMapPartition:
     ndbout << "HashMapPartition";
+    break;
+  case NdbDictionary::Object::RangePartition:
+    ndbout << "RangePartition";
     break;
   default:
       ndbout << "Unknown(" << (unsigned)fragtype << ")";

@@ -713,7 +713,8 @@ class Dbdih : public SimulatedBlock {
       NOTDEFINED = 1,
       NORMAL_HASH = 2,
       USER_DEFINED = 3,
-      HASH_MAP = 4
+      HASH_MAP = 4,
+      RANGE_PARTITION = 5
     };
     enum Storage {
       ST_NOLOGGING = 0,  // Table is not logged, but survives SR
@@ -763,6 +764,9 @@ class Dbdih : public SimulatedBlock {
       Uint32 m_new_map_ptr_i;
     };
     Method method;
+
+    Range2FragmentMap *m_range_ptr;      // current range map (RANGE_PARTITION)
+    Range2FragmentMap *m_new_range_ptr;  // new map during ALTER (nullptr normally)
 
     Uint32 startFidSize;
     Uint64 *startFid;

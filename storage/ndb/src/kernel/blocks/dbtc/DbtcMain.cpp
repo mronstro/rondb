@@ -1089,6 +1089,10 @@ void Dbtc::execTC_SCHVERREQ(Signal *signal) {
     jam();
     tabptr.p->m_flags |= TableRecord::TR_FULLY_REPLICATED;
   }
+  if (req->rangePartition) {
+    jam();
+    tabptr.p->m_flags |= TableRecord::TR_RANGE_PARTITION;
+  }
   /*
    * TTL related
    */
@@ -3212,6 +3216,23 @@ void Dbtc::hash(Signal *signal, CacheRecord *const regCachePtr) {
     jamDebug();
     tdistrHashValue = tmp[1];
   }//if
+
+  /* For range-partitioned tables, extract partition key columns.
+   * The partition key bytes are passed by pointer to DBDIH via
+   * DiGetNodesReq (EXECUTE_DIRECT, same thread).
+   */
+  regCachePtr->m_range_key_ptr = nullptr;
+  regCachePtr->m_range_key_len = 0;
+  if (tabPtrP->m_flags & TableRecord::TR_RANGE_PARTITION) {
+    jam();
+    Uint32 rangeKeyWords = create_distr_key(regCachePtr->tableref,
+                                            Tdata32,
+                                            c_range_key_buf,
+                                            nullptr);
+    regCachePtr->m_range_key_ptr =
+      reinterpret_cast<const char *>(c_range_key_buf);
+    regCachePtr->m_range_key_len = rangeKeyWords << 2;  // words to bytes
+  }
 }//Dbtc::hash()
 
 bool
@@ -4790,6 +4811,8 @@ void Dbtc::tckeyreq050Lab(Signal *signal, CacheRecordPtr const cachePtr,
   req->get_next_fragid_indicator = 0;
   req->only_readable_nodes = (regTcPtr->operation == ZREAD);
   req->jamBufferPtr = jamBuffer();
+  req->rangeKeyPtr = regCachePtr->m_range_key_ptr;
+  req->rangeKeyLen = regCachePtr->m_range_key_len;
 
   if (localTabptr.p->m_flags & TableRecord::TR_FULLY_REPLICATED) {
     if (regTcPtr->operation == ZREAD) {

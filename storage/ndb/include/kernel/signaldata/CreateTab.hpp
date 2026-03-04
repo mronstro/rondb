@@ -122,8 +122,9 @@ struct TcSchVerReq {
   Uint32 ttlSec;
   Uint32 ttlColumnNo;
   Uint32 primaryTableId;
+  Uint32 rangePartition;
 
-  static constexpr Uint32 SignalLength = 16;
+  static constexpr Uint32 SignalLength = 17;
 };
 
 struct TcSchVerConf {

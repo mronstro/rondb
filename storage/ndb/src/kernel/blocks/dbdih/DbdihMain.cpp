@@ -12846,7 +12846,9 @@ void Dbdih::execCREATE_FRAGMENTATION_REQ(Signal *signal) {
     if (primaryTableId == RNIL && !m_use_classic_fragmentation &&
         ((DictTabInfo::FragmentType)fragType == DictTabInfo::UserDefined ||
          (DictTabInfo::FragmentType)fragType ==
-             DictTabInfo::HashMapPartition)) {
+             DictTabInfo::HashMapPartition ||
+         (DictTabInfo::FragmentType)fragType ==
+             DictTabInfo::RangePartition)) {
       jam();
       switch ((DictTabInfo::FragmentType)fragType) {
         case DictTabInfo::UserDefined: {
@@ -12892,6 +12894,15 @@ void Dbdih::execCREATE_FRAGMENTATION_REQ(Signal *signal) {
             default: {
               ndbabort();
             }
+          }
+          break;
+        }
+        case DictTabInfo::RangePartition: {
+          jam();
+          use_specific_fragment_count = true;
+          if (noOfFragments == 0) {
+            jam();
+            err = CreateFragmentationRef::InvalidFragmentationType;
           }
           break;
         }
@@ -13939,6 +13950,10 @@ void Dbdih::execDIADDTABREQ(Signal *signal) {
       jam();
       tabPtr.p->method = TabRecord::USER_DEFINED;
       break;
+    case DictTabInfo::RangePartition:
+      jam();
+      tabPtr.p->method = TabRecord::RANGE_PARTITION;
+      break;
     default:
       ndbabort();
   }
@@ -13994,6 +14009,16 @@ void Dbdih::execDIADDTABREQ(Signal *signal) {
     Ptr<Hash2FragmentMap> mapPtr;
     ndbrequire(g_hash_map.getPtr(mapPtr, tabPtr.p->m_map_ptr_i));
     ndbrequire(tabPtr.p->totalfragments >= mapPtr.p->m_fragments);
+  }
+
+  if (tabPtr.p->method == TabRecord::RANGE_PARTITION) {
+    jam();
+    Range2FragmentMap *rmap =
+      reinterpret_cast<Range2FragmentMap *>(req->rangeMapPtr);
+    ndbrequire(rmap != nullptr);
+    tabPtr.p->m_range_ptr = rmap;
+    tabPtr.p->m_new_range_ptr = nullptr;
+    ndbrequire(tabPtr.p->totalfragments == rmap->m_cnt);
   }
 
   Uint32 index = 2;
@@ -14644,6 +14669,17 @@ void Dbdih::releaseTable(TabRecordPtr tabPtr) {
     releaseFile(tabPtr.p->tabFile[1]);
     tabPtr.p->tabFile[0] = tabPtr.p->tabFile[1] = RNIL;
   }//if
+  /* Free range map if this was a range-partitioned table */
+  if (tabPtr.p->m_range_ptr != nullptr) {
+    jam();
+    lc_ndbd_pool_free(tabPtr.p->m_range_ptr);
+    tabPtr.p->m_range_ptr = nullptr;
+  }
+  if (tabPtr.p->m_new_range_ptr != nullptr) {
+    jam();
+    lc_ndbd_pool_free(tabPtr.p->m_new_range_ptr);
+    tabPtr.p->m_new_range_ptr = nullptr;
+  }
   tabPtr.p->totalfragments = 0;
   tabPtr.p->schemaVersion = Uint32(~0);
 }//Dbdih::releaseTable()
@@ -15828,6 +15864,25 @@ loop:
   } else if (tabPtr.p->method == TabRecord::NORMAL_HASH) {
     thrjam(jambuf);
     fragId = hashValue % tabPtr.p->partitionCount;
+  } else if (tabPtr.p->method == TabRecord::RANGE_PARTITION) {
+    thrjam(jambuf);
+    const Range2FragmentMap *range_map = tabPtr.p->m_range_ptr;
+    ndbassert(range_map != nullptr);
+    const char *rangeKey =
+      reinterpret_cast<const char *>(req->rangeKeyPtr);
+    Uint32 rangeKeyLen = req->rangeKeyLen;
+    fragId = range_lookup(range_map, rangeKey, rangeKeyLen);
+
+    /* Check new map during ALTER TABLE transition */
+    if (unlikely(tabPtr.p->m_new_range_ptr != nullptr)) {
+      thrjam(jambuf);
+      newFragId = range_lookup(tabPtr.p->m_new_range_ptr,
+                               rangeKey, rangeKeyLen);
+      if (newFragId == fragId) {
+        thrjam(jambuf);
+        newFragId = RNIL;
+      }
+    }
   } else {
     thrjam(jambuf);
     ndbassert(tabPtr.p->method == TabRecord::USER_DEFINED);
@@ -24615,6 +24670,8 @@ void Dbdih::initTable(TabRecordPtr tabPtr) {
   tabPtr.p->m_dropTab.tabUserPtr = RNIL;
   tabPtr.p->startFid = nullptr;
   tabPtr.p->startFidSize = 0;
+  tabPtr.p->m_range_ptr = nullptr;
+  tabPtr.p->m_new_range_ptr = nullptr;
   Uint32 i;
   for (i = 0; i < NDB_ARRAY_SIZE(tabPtr.p->pageRef); i++) {
     tabPtr.p->pageRef[i] = RNIL;
