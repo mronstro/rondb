@@ -176,6 +176,7 @@ class Dbspj : public SimulatedBlock {
       ,TR_READ_BACKUP = (1 << 5)
       ,TR_FULLY_REPLICATED = (1 << 6)
       ,TR_HASH_FUNCTION = (1 << 7)
+      ,TR_RANGE_PARTITION = (1 << 8)
     };
     Uint8 get_enabled() const { return (m_flags & TR_ENABLED) != 0; }
     Uint8 get_dropping() const { return (m_flags & TR_DROPPING) != 0; }
@@ -1492,6 +1493,8 @@ class Dbspj : public SimulatedBlock {
     Uint32 fragId;
     Uint32 fragDistKey;
     Uint32 receiverRef;  // NodeId + InstanceNo
+    const char *rangeKeyPtr;  // Partition key bytes for range tables
+    Uint32 rangeKeyLen;       // Length in bytes
   };
 
   /**
@@ -1773,6 +1776,13 @@ class Dbspj : public SimulatedBlock {
 
   Uint32 m_location_domain_id[ABS_MAX_NODES];
   Uint32 m_load_balancer_location;
+
+  /**
+   * Buffer for extracted partition key (range-partitioned tables).
+   * Filled by computeHash()/computePartitionHash(), consumed by getNodes().
+   */
+  Uint32 c_range_key_buf[MAX_KEY_SIZE_IN_WORDS];
+
   /**
    * Scratch buffers...
    */

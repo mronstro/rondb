@@ -3225,13 +3225,25 @@ void Dbtc::hash(Signal *signal, CacheRecord *const regCachePtr) {
   regCachePtr->m_range_key_len = 0;
   if (tabPtrP->m_flags & TableRecord::TR_RANGE_PARTITION) {
     jam();
-    Uint32 rangeKeyWords = create_distr_key(regCachePtr->tableref,
-                                            Tdata32,
-                                            c_range_key_buf,
-                                            nullptr);
-    regCachePtr->m_range_key_ptr =
-      reinterpret_cast<const char *>(c_range_key_buf);
-    regCachePtr->m_range_key_len = rangeKeyWords << 2;  // words to bytes
+    const KeyDescriptor *desc =
+      g_key_descriptor_pool.getPtr(regCachePtr->tableref);
+    if (desc->noOfDistrKeys > 0) {
+      jam();
+      Uint32 rangeKeyWords = create_distr_key(regCachePtr->tableref,
+                                              Tdata32,
+                                              c_range_key_buf,
+                                              nullptr);
+      regCachePtr->m_range_key_ptr =
+        reinterpret_cast<const char *>(c_range_key_buf);
+      regCachePtr->m_range_key_len = rangeKeyWords << 2;
+    } else {
+      jam();
+      /* All PK columns are partition key — full key IS the partition key */
+      memcpy(c_range_key_buf, Tdata32, keylen << 2);
+      regCachePtr->m_range_key_ptr =
+        reinterpret_cast<const char *>(c_range_key_buf);
+      regCachePtr->m_range_key_len = keylen << 2;
+    }
   }
 }//Dbtc::hash()
 

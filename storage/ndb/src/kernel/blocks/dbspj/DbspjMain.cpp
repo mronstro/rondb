@@ -376,6 +376,12 @@ void Dbspj::execTC_SCHVERREQ(Signal *signal) {
     tablePtr.p->m_flags |= TableRecord::TR_HASH_FUNCTION;
   }
 
+  if (req->rangePartition)
+  {
+    jam();
+    tablePtr.p->m_flags |= TableRecord::TR_RANGE_PARTITION;
+  }
+
   DEB_HASH(("(%u) spj_index(%u) hashFunctionFlag: %u",
             instance(),
             tableId,
@@ -6665,6 +6671,30 @@ Dbspj::computeHash(Signal* signal,
   const KeyDescriptor *desc = g_key_descriptor_pool.getPtr(tableId);
   ndbrequire(desc != NULL);
 
+  /**
+   * For range-partitioned tables, extract the partition key from
+   * the raw (non-xfrm'd) primary key data.  This is stored in
+   * c_range_key_buf and referenced via dst for getNodes().
+   */
+  if (tablePtr.p->m_flags & TableRecord::TR_RANGE_PARTITION) {
+    jam();
+    if (desc->noOfDistrKeys > 0) {
+      jam();
+      Uint32 rangeKeyWords =
+          create_distr_key(tableId, tmp32, c_range_key_buf, nullptr);
+      dst.rangeKeyPtr = reinterpret_cast<const char *>(c_range_key_buf);
+      dst.rangeKeyLen = rangeKeyWords << 2;
+    } else {
+      jam();
+      memcpy(c_range_key_buf, tmp32, ptr.sz << 2);
+      dst.rangeKeyPtr = reinterpret_cast<const char *>(c_range_key_buf);
+      dst.rangeKeyLen = ptr.sz << 2;
+    }
+  } else {
+    dst.rangeKeyPtr = nullptr;
+    dst.rangeKeyLen = 0;
+  }
+
   bool need_special_hash = desc->hasCharAttr | (desc->noOfDistrKeys > 0);
   if (need_special_hash) {
     jam();
@@ -6707,6 +6737,21 @@ Dbspj::computePartitionHash(Signal* signal,
   bool use_new_hash_function =
     ((tablePtr.p->m_flags & TableRecord::TR_HASH_FUNCTION) != 0);
   copy(tmp32, ptr);
+
+  /**
+   * For range-partitioned tables, the input section already contains
+   * only the partition key columns.  Copy the raw (non-xfrm'd) bytes
+   * for the range lookup in getNodes().
+   */
+  if (tablePtr.p->m_flags & TableRecord::TR_RANGE_PARTITION) {
+    jam();
+    memcpy(c_range_key_buf, tmp32, sz << 2);
+    dst.rangeKeyPtr = reinterpret_cast<const char *>(c_range_key_buf);
+    dst.rangeKeyLen = sz << 2;
+  } else {
+    dst.rangeKeyPtr = nullptr;
+    dst.rangeKeyLen = 0;
+  }
 
   const KeyDescriptor *desc = g_key_descriptor_pool.getPtr(tableId);
   ndbrequire(desc != NULL);
@@ -6799,11 +6844,22 @@ Uint32 Dbspj::getNodes(Signal *signal, BuildKeyReq &dst, Uint32 tableId) {
   DiGetNodesReq *req = (DiGetNodesReq *)&signal->theData[0];
   req->tableId = tableId;
   req->hashValue = dst.hashInfo[1];
-  req->distr_key_indicator = 0;  // userDefinedPartitioning not supported!
+  req->distr_key_indicator = 0;
   req->scan_indicator = 0;
   req->anyNode = (tablePtr.p->m_flags & TableRecord::TR_FULLY_REPLICATED) != 0;
   req->get_next_fragid_indicator = 0;
   req->jamBufferPtr = jamBuffer();
+
+  /**
+   * For range-partitioned tables, pass the partition key bytes
+   * to DBDIH so it can do a range lookup instead of hash-based
+   * fragment resolution.
+   */
+  if (tablePtr.p->m_flags & TableRecord::TR_RANGE_PARTITION) {
+    jam();
+    req->rangeKeyPtr = dst.rangeKeyPtr;
+    req->rangeKeyLen = dst.rangeKeyLen;
+  }
 
   EXECUTE_DIRECT_MT(DBDIH, GSN_DIGETNODESREQ, signal,
                     DiGetNodesReq::SignalLength, 0);
