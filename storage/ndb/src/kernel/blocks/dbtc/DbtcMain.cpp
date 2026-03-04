@@ -17081,7 +17081,12 @@ bool Dbtc::sendDihGetNodeReq(Signal *signal, ScanRecordPtr scanptr,
     tabPtr.i = scanptr.p->scanTableref;
     ptrCheckGuard(tabPtr, ctabrecFilesize, tableRecord);
 
-    distr_key_indicator = tabPtr.p->get_user_defined_partitioning();
+    if (tabPtr.p->m_flags & TableRecord::TR_RANGE_PARTITION) {
+      jamDebug();
+      distr_key_indicator = ZTRUE;
+    } else {
+      distr_key_indicator = tabPtr.p->get_user_defined_partitioning();
+    }
   }
   req->distr_key_indicator = distr_key_indicator;
   c_dih->execDIGETNODESREQ(signal);

@@ -8297,7 +8297,8 @@ NdbRecord *NdbDictionaryImpl::createRecordInternal(
   if (isIndex) rec->flags |= NdbRecord::RecIsIndex;
   rec->m_keyLenInWords = table->m_keyLenInWords;
 
-  if (table->m_fragmentType == NdbDictionary::Object::UserDefined)
+  if (table->m_fragmentType == NdbDictionary::Object::UserDefined ||
+      table->m_fragmentType == NdbDictionary::Object::RangePartition)
     rec->flags |= NdbRecord::RecHasUserDefinedPartitioning;
 
   return rec;
