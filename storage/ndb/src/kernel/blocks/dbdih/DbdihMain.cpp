@@ -14776,10 +14776,23 @@ void Dbdih::execALTER_TAB_REQ(Signal *signal) {
       connectPtr.p->m_alter.m_partitionCount = tabPtr.p->partitionCount;
       connectPtr.p->m_alter.m_changeMask = req->changeMask;
       connectPtr.p->m_alter.m_new_map_ptr_i = req->new_map_ptr_i;
+      connectPtr.p->m_alter.m_new_range_ptr =
+        reinterpret_cast<Range2FragmentMap *>(req->newRangeMapPtr);
       connectPtr.p->userpointer = senderData;
       connectPtr.p->userblockref = senderRef;
       connectPtr.p->connectState = ConnectRecord::ALTER_TABLE;
       connectPtr.p->table = tabPtr.i;
+
+      /* For range-partitioned tables: install new range map for
+       * dual-map lookup during transition (DIGETNODES will use
+       * m_new_range_ptr to determine row migration).
+       */
+      if (tabPtr.p->method == TabRecord::RANGE_PARTITION &&
+          connectPtr.p->m_alter.m_new_range_ptr != nullptr) {
+        jam();
+        tabPtr.p->m_new_range_ptr = connectPtr.p->m_alter.m_new_range_ptr;
+      }
+
       tabPtr.p->connectrec = connectPtr.i;
       break;
     case AlterTabReq::AlterTableRevert:
@@ -16451,8 +16464,8 @@ void Dbdih::make_new_table_writeable(TabRecordPtr tabPtr,
  * data, so the new table distribution is completely ok to use. We thus
  * change the totalfragments to make the new fragments available for
  * both read and write.
- * We swap in the new hash map (so far only hash-map tables have support
- * for on-line table reorg), the old still exists for a while more.
+ * We swap in the new hash map or range map (both hash-map and range
+ * tables support on-line table reorg), the old still exists for a while more.
  *
  * At this point we need to start waiting for old scans using the old
  * number of fragments to complete.
@@ -16468,9 +16481,18 @@ void Dbdih::make_new_table_read_and_writeable(TabRecordPtr tabPtr,
   tabPtr.p->partitionCount = connectPtr.p->m_alter.m_partitionCount;
   if (AlterTableReq::getReorgFragFlag(connectPtr.p->m_alter.m_changeMask)) {
     jam();
-    Uint32 save = tabPtr.p->m_map_ptr_i;
-    tabPtr.p->m_map_ptr_i = tabPtr.p->m_new_map_ptr_i;
-    tabPtr.p->m_new_map_ptr_i = save;
+    if (tabPtr.p->method == TabRecord::RANGE_PARTITION) {
+      jam();
+      /* Swap range maps: activate new, save old for later free */
+      Range2FragmentMap *save_range = tabPtr.p->m_range_ptr;
+      tabPtr.p->m_range_ptr = tabPtr.p->m_new_range_ptr;
+      tabPtr.p->m_new_range_ptr = save_range;
+    } else {
+      jam();
+      Uint32 save = tabPtr.p->m_map_ptr_i;
+      tabPtr.p->m_map_ptr_i = tabPtr.p->m_new_map_ptr_i;
+      tabPtr.p->m_new_map_ptr_i = save;
+    }
 
     for (Uint32 i = 0; i < tabPtr.p->totalfragments; i++) {
       jam();
@@ -16549,6 +16571,15 @@ bool Dbdih::make_old_table_non_writeable(TabRecordPtr tabPtr,
       << " m_scan_reorg_flag = 0");
     wait_flag = true;
   }
+
+  /* Free old range map after reorg is complete */
+  if (tabPtr.p->method == TabRecord::RANGE_PARTITION &&
+      tabPtr.p->m_new_range_ptr != nullptr) {
+    jam();
+    lc_ndbd_pool_free(tabPtr.p->m_new_range_ptr);
+    tabPtr.p->m_new_range_ptr = nullptr;
+  }
+
   DIH_TAB_WRITE_UNLOCK(tabPtr.p);
   NdbMutex_Unlock(&tabPtr.p->theMutex);
 
@@ -16675,12 +16706,18 @@ Dbdih::make_table_use_new_node_order(Signal *signal,
 }
 
 /**
- * Remove new hash map during rollback of ALTER TABLE REORG.
+ * Remove new hash/range map during rollback of ALTER TABLE REORG.
  */
 void Dbdih::make_new_table_non_writeable(TabRecordPtr tabPtr) {
   D("make_new_table_non_writeable: tableId = " << tabPtr.i);
   DIH_TAB_WRITE_LOCK(tabPtr.p);
   tabPtr.p->m_new_map_ptr_i = RNIL;
+  /* Free and clear new range map on revert */
+  if (tabPtr.p->m_new_range_ptr != nullptr) {
+    jam();
+    lc_ndbd_pool_free(tabPtr.p->m_new_range_ptr);
+    tabPtr.p->m_new_range_ptr = nullptr;
+  }
   DIH_TAB_WRITE_UNLOCK(tabPtr.p);
 }
 

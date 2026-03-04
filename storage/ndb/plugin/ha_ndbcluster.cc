@@ -447,7 +447,14 @@ static uint ndbcluster_partition_flags() {
 uint ha_ndbcluster::alter_flags(uint flags) const {
   const uint f = HA_PARTITION_FUNCTION_SUPPORTED | 0;
 
-  if (flags & Alter_info::ALTER_DROP_PARTITION) return 0;
+  if (flags & Alter_info::ALTER_DROP_PARTITION) {
+    /* Allow DROP PARTITION for range-partitioned tables */
+    if (m_table != nullptr &&
+        m_table->getFragmentType() == NDBTAB::RangePartition) {
+      return f;
+    }
+    return 0;
+  }
 
   return f;
 }
@@ -16463,6 +16470,32 @@ enum_alter_inplace_result ha_ndbcluster::check_inplace_alter_supported(
         return inplace_unsupported(
             ha_alter_info, "Can't add partition to fully replicated table");
       }
+
+      /* For range-partitioned tables: set updated range boundaries */
+      if (old_tab->getFragmentType() == NDBTAB::RangePartition) {
+        const uint parts = part_info->num_parts;
+        std::unique_ptr<int32[]> range_data(new (std::nothrow) int32[parts]);
+        if (!range_data) {
+          my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR),
+                   parts * sizeof(int32));
+          return HA_ALTER_ERROR;
+        }
+        for (uint i = 0; i < parts; i++) {
+          longlong range_val = part_info->range_int_array[i];
+          if (part_info->part_expr->unsigned_flag)
+            range_val -= 0x8000000000000000ULL;
+          if (range_val < INT_MIN32 || range_val >= INT_MAX32) {
+            if ((i != parts - 1) || (range_val != LLONG_MAX)) {
+              my_error(ER_LIMITED_PART_RANGE, MYF(0), "NDB");
+              return HA_ALTER_ERROR;
+            }
+            range_val = INT_MAX32;
+          }
+          range_data[i] = (int32)range_val;
+        }
+        new_tab.setRangeListData(range_data.get(), parts);
+        new_tab.setRangeBoundaryType(old_tab->getRangeBoundaryType());
+      }
     }
 
     if (comment_changed) {
@@ -17036,6 +17069,32 @@ bool ha_ndbcluster::prepare_inplace_alter_table(
       new_tab->setFragmentCount(part_info->num_parts);
       new_tab->setPartitionBalance(
           NdbDictionary::Object::PartitionBalance_Specific);
+
+      /* For range tables: set updated range boundaries */
+      if (old_tab->getFragmentType() == NDBTAB::RangePartition) {
+        const uint parts = part_info->num_parts;
+        std::unique_ptr<int32[]> range_data(new (std::nothrow) int32[parts]);
+        if (!range_data) {
+          my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR),
+                   parts * sizeof(int32));
+          goto abort;
+        }
+        for (uint i = 0; i < parts; i++) {
+          longlong range_val = part_info->range_int_array[i];
+          if (part_info->part_expr->unsigned_flag)
+            range_val -= 0x8000000000000000ULL;
+          if (range_val < INT_MIN32 || range_val >= INT_MAX32) {
+            if ((i != parts - 1) || (range_val != LLONG_MAX)) {
+              my_error(ER_LIMITED_PART_RANGE, MYF(0), "NDB");
+              goto abort;
+            }
+            range_val = INT_MAX32;
+          }
+          range_data[i] = (int32)range_val;
+        }
+        new_tab->setRangeListData(range_data.get(), parts);
+        new_tab->setRangeBoundaryType(old_tab->getRangeBoundaryType());
+      }
     } else if (max_rows_changed) {
       ulonglong rows = create_info->max_rows;
       uint no_fragments = get_no_fragments(rows);
@@ -17058,9 +17117,13 @@ bool ha_ndbcluster::prepare_inplace_alter_table(
           NdbDictionary::Object::PartitionBalance_Specific);
     }
 
-    if (dict->prepareHashMap(*old_tab, *new_tab) == -1) {
-      thd_ndb->set_ndb_error(dict->getNdbError(), "Failed to prepare hash map");
-      goto abort;
+    /* Range tables don't use hash maps — skip prepareHashMap */
+    if (old_tab->getFragmentType() != NDBTAB::RangePartition) {
+      if (dict->prepareHashMap(*old_tab, *new_tab) == -1) {
+        thd_ndb->set_ndb_error(dict->getNdbError(),
+                               "Failed to prepare hash map");
+        goto abort;
+      }
     }
   }
 

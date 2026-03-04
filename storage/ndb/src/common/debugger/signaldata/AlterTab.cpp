@@ -49,6 +49,10 @@ bool printALTER_TAB_REQ(FILE *output, const Uint32 *theData, Uint32 len,
   fprintf(output, " newNoOfCharsets: %u", sig->newNoOfCharsets);
   fprintf(output, " newNoOfKeyAttrs: %u", sig->newNoOfKeyAttrs);
   fprintf(output, "\n");
+  fprintf(output, " ttlSec: %u", sig->ttlSec);
+  fprintf(output, " ttlColumnNo: %u", sig->ttlColumnNo);
+  fprintf(output, " newRangeMapPtr: %p", sig->newRangeMapPtr);
+  fprintf(output, "\n");
   return true;
 }
 

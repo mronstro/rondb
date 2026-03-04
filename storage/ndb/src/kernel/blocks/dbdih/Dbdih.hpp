@@ -179,6 +179,7 @@ class Dbdih : public SimulatedBlock {
         Uint32 m_partitionCount;
         Uint32 m_org_totalfragments;
         Uint32 m_new_map_ptr_i;
+        Range2FragmentMap *m_new_range_ptr;  // new range map during ALTER
       } m_alter;
       struct {
         Uint32 m_map_ptr_i;
