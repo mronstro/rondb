@@ -636,6 +636,26 @@ emalformedstring:
 NdbTransaction *Ndb::startTransaction(const NdbRecord *keyRec,
                                       const char *keyData, void *xfrmbuf,
                                       Uint32 xfrmbuflen) {
+  NdbTableImpl *impl = keyRec->table;
+
+  // Range tables: extract partition key value, binary search for fragment ID
+  if (impl->m_fragmentType == NdbDictionary::Object::RangePartition) {
+    const void *keyValue = nullptr;
+    for (Uint32 i = 0; i < keyRec->distkey_index_length; i++) {
+      const NdbRecord::Attr &attr =
+          keyRec->columns[keyRec->distkey_indexes[i]];
+      keyValue = keyData + attr.offset;
+      break;  // Single partition key column
+    }
+    if (keyValue == nullptr) {
+      theError.code = 4316;  // Key is NULL
+      return nullptr;
+    }
+    Uint32 partitionId = impl->getRangePartitionId(keyValue);
+    return startTransaction(impl->m_facade, partitionId);
+  }
+
+  // Existing hash path for non-range tables
   int ret;
   Uint32 hash;
   if ((ret = computeHash(&hash, keyRec, keyData, xfrmbuf, xfrmbuflen)) == 0) {
@@ -648,6 +668,20 @@ NdbTransaction *Ndb::startTransaction(const NdbRecord *keyRec,
 NdbTransaction *Ndb::startTransaction(const NdbDictionary::Table *table,
                                       const struct Key_part_ptr *keyData,
                                       void *xfrmbuf, Uint32 xfrmbuflen) {
+  const NdbTableImpl *impl = &NdbTableImpl::getImpl(*table);
+
+  // Range tables: extract partition key value, binary search for fragment ID
+  if (impl->m_fragmentType == NdbDictionary::Object::RangePartition) {
+    const void *keyValue = keyData[0].ptr;  // First dist key column
+    if (keyValue == nullptr) {
+      theError.code = 4316;  // Key is NULL
+      return nullptr;
+    }
+    Uint32 partitionId = impl->getRangePartitionId(keyValue);
+    return startTransaction(table, partitionId);
+  }
+
+  // Existing hash path for non-range tables
   int ret;
   Uint32 hash;
   if ((ret = computeHash(&hash, table, keyData, xfrmbuf, xfrmbuflen)) == 0) {

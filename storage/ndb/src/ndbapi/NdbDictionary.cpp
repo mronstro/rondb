@@ -785,8 +785,9 @@ Uint32 NdbDictionary::Table::getPartitionId(Uint32 hashValue) const {
     return m_impl.m_hash_map[hashValue % cnt];
   }
     case NdbDictionary::Object::RangePartition: {
-    /* No client-side range resolution yet (Phase 6).
-     * Return 0; server-side DBDIH does the actual range lookup. */
+    /* Range tables need the actual key value, not a hash.
+     * Use NdbTableImpl::getRangePartitionId() instead.
+     * This hash-based path returns 0 as fallback. */
     return 0;
   }
   default:

@@ -215,6 +215,14 @@ class NdbTableImpl : public NdbDictionary::Table, public NdbDictObjectImpl {
   const Int32 *getRangeListData() const;
   Uint32 getRangeListDataLen() const;
 
+  /**
+   * For range-partitioned tables: binary search on m_range boundaries
+   * to find the fragment ID for the given partition key value.
+   * @param keyValue Pointer to the raw partition key bytes (native endian)
+   * @return Fragment ID (= partition index, sequential assignment)
+   */
+  Uint32 getRangePartitionId(const void *keyValue) const;
+
   Uint32 getFragmentNodes(Uint32 fragmentId, 
                           Uint32* nodeIdArrayPtr,
                           Uint32 arraySize);
