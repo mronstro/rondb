@@ -257,6 +257,8 @@ class NdbQueryImpl {
    */
   int isPrunable(bool &pruned);
 
+  void setPartitionRange(Uint32 firstPartitionId, Uint32 numPartitions);
+
   /** Get the number of SPJ workers involved in this query. */
   Uint32 getWorkerCount() const { return m_workerCount; }
 
@@ -579,13 +581,17 @@ class NdbQueryImpl {
   enum {
     /** Call NdbQueryOperationDef::checkPrunable() to determine prunability.*/
     Prune_Unknown,
-    Prune_Yes,  // The root is a prunable range scan.
-    Prune_No    // The root is not a prunable range scan.
+    Prune_Yes,    // The root is a prunable range scan.
+    Prune_No,     // The root is not a prunable range scan.
+    Prune_Range   // Multi-partition range pruning.
   } m_prunability;
 
   /** If m_prunability==Prune_Yes, this is the hash value of the single
    * fragment that should be scanned.*/
   Uint32 m_pruneHashVal;
+
+  /** If m_prunability==Prune_Range, packed (firstPartitionId << 16 | numPartitions). */
+  Uint32 m_partitionRangePacked;
 
   /** Allocator for NdbQueryOperationImpl objects.*/
   NdbBulkAllocator m_operationAlloc;

@@ -241,6 +241,13 @@ class NdbQuery {
    */
   int isPrunable(bool &pruned) const;
 
+  /**
+   * Set multi-partition range for root scan pruning on
+   * range-partitioned tables. Scan only partitions
+   * [firstPartitionId .. firstPartitionId + numPartitions - 1].
+   */
+  void setPartitionRange(Uint32 firstPartitionId, Uint32 numPartitions);
+
  private:
   /** Opaque implementation NdbQuery interface.*/
   NdbQueryImpl &m_impl;

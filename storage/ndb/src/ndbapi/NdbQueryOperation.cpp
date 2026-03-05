@@ -1876,6 +1876,11 @@ int NdbQueryImpl::processAggResults() {
   return 0;
 }
 
+void NdbQuery::setPartitionRange(Uint32 firstPartitionId,
+                                 Uint32 numPartitions) {
+  m_impl.setPartitionRange(firstPartitionId, numPartitions);
+}
+
 NdbQueryOperation::NdbQueryOperation(NdbQueryOperationImpl &impl)
     : m_impl(impl) {}
 NdbQueryOperation::~NdbQueryOperation() {}
@@ -2215,6 +2220,7 @@ NdbQueryImpl::NdbQueryImpl(NdbTransaction &trans,
       m_commitIndicator(false),
       m_prunability(Prune_No),
       m_pruneHashVal(0),
+      m_partitionRangePacked(0),
       m_operationAlloc(sizeof(NdbQueryOperationImpl)),
       m_tupleSetAlloc(sizeof(NdbResultStream::TupleSet)),
       m_resultStreamAlloc(sizeof(NdbResultStream)),
@@ -3033,6 +3039,11 @@ int NdbQueryImpl::prepareSend() {
       // Scan pruned to single fragment
       rootFragments = 1;
       m_fragsPerWorker = 1;
+    } else if (m_prunability == Prune_Range) {
+      // Multi-partition range pruning
+      const Uint32 numParts = m_partitionRangePacked & 0xFFFF;
+      rootFragments = numParts;
+      m_fragsPerWorker = numParts;
     } else if (rootOp.getOrdering() !=
                NdbQueryOptions::ScanOrdering_unordered) {
       // Merge-sort need one result set from each fragment
@@ -3603,6 +3614,11 @@ int NdbQueryImpl::doSend(int nodeId, bool lastFlag) {
       ScanTabReq::setDistributionKeyFlag(reqInfo, 1);
       scanTabReq->distributionKey = m_pruneHashVal;
       tSignal.setLength(ScanTabReq::StaticLength + 1);
+    } else if (m_prunability == Prune_Range) {
+      ScanTabReq::setDistributionKeyFlag(reqInfo, 1);
+      ScanTabReq::setPartitionRangeFlag(reqInfo, 1);
+      scanTabReq->distributionKey = m_partitionRangePacked;
+      tSignal.setLength(ScanTabReq::StaticLength + 1);
     } else {
       tSignal.setLength(ScanTabReq::StaticLength);
     }
@@ -4021,8 +4037,15 @@ int NdbQueryImpl::isPrunable(bool &prunable) {
     }
     m_prunability = prunable ? Prune_Yes : Prune_No;
   }
+  // Prune_Range is not overridden by single-partition pruning check
   prunable = (m_prunability == Prune_Yes);
   return 0;
+}
+
+void NdbQueryImpl::setPartitionRange(Uint32 firstPartitionId,
+                                     Uint32 numPartitions) {
+  m_prunability = Prune_Range;
+  m_partitionRangePacked = (firstPartitionId << 16) | numPartitions;
 }
 
 /****************

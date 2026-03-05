@@ -3871,6 +3871,14 @@ int ha_ndbcluster::ordered_index_scan(const key_range *start_key,
       ERR_RETURN(query->getNdbError());
     if (prunable) m_thd_ndb->m_pruned_scan_count++;
 
+    if (!prunable && m_use_partition_pruning && m_user_defined_partitioning &&
+        part_spec != nullptr &&
+        part_spec->start_part < part_spec->end_part) {
+      m_active_query->setPartitionRange(
+          part_spec->start_part,
+          part_spec->end_part - part_spec->start_part + 1);
+    }
+
     // Can't have BLOB in pushed joins (yet)
     assert(!uses_blob_value(table->read_set));
   } else {
@@ -4075,6 +4083,12 @@ int ha_ndbcluster::full_table_scan(const KEY *key_info,
   if (check_if_pushable(NdbQueryOperationDef::TableScan)) {
     const int error = create_pushed_join();
     if (unlikely(error)) return error;
+
+    if (use_partition_range) {
+      m_active_query->setPartitionRange(
+          part_spec.start_part,
+          part_spec.end_part - part_spec.start_part + 1);
+    }
 
     m_thd_ndb->m_scan_count++;
     // Can't have BLOB in pushed joins (yet)
