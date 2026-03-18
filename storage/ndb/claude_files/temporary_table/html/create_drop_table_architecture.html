@@ -1,0 +1,1365 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NDB CREATE/DROP TABLE Architecture — Signal Flow &amp; Optimization Plan</title>
+<style>
+  :root {
+    --bg: #1a1a2e;
+    --surface: #16213e;
+    --surface2: #0f3460;
+    --accent: #e94560;
+    --accent2: #53d8fb;
+    --text: #eee;
+    --text-dim: #aab;
+    --green: #4ec9b0;
+    --yellow: #dcdcaa;
+    --blue: #569cd6;
+    --orange: #ce9178;
+    --purple: #c586c0;
+    --red: #f44747;
+    --border: #334;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    padding: 2rem;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 2.2rem; color: var(--accent2); border-bottom: 3px solid var(--accent); padding-bottom: 0.5rem; margin-bottom: 0.5rem; }
+  .subtitle { color: var(--text-dim); font-size: 1.1rem; margin-bottom: 2rem; }
+  h2 { font-size: 1.6rem; color: var(--accent2); margin-top: 3rem; margin-bottom: 1rem; padding-left: 0.5rem; border-left: 4px solid var(--accent); }
+  h3 { font-size: 1.2rem; color: var(--green); margin-top: 2rem; margin-bottom: 0.5rem; }
+  h4 { font-size: 1.05rem; color: var(--yellow); margin-top: 1.5rem; margin-bottom: 0.4rem; }
+  p { margin-bottom: 1rem; }
+  a { color: var(--accent2); }
+  ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+  li { margin-bottom: 0.3rem; }
+  code { font-family: 'Cascadia Code', 'Fira Code', 'Menlo', monospace; background: var(--surface); padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.88rem; }
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.2rem 1.5rem; margin: 1rem 0 1.5rem; font-family: 'Cascadia Code', 'Fira Code', 'Menlo', monospace; font-size: 0.85rem; line-height: 1.5; overflow-x: auto; white-space: pre; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0 1.5rem; font-size: 0.9rem; }
+  th { background: var(--surface2); color: var(--accent2); padding: 0.7rem 1rem; text-align: left; border-bottom: 2px solid var(--accent); }
+  td { padding: 0.6rem 1rem; border-bottom: 1px solid var(--border); }
+  tr:hover td { background: rgba(83, 216, 251, 0.05); }
+
+  .diagram-box { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1.5rem; margin: 1.5rem 0; overflow-x: auto; }
+  .diagram-box .caption { color: var(--text-dim); font-size: 0.85rem; text-align: center; margin-top: 0.5rem; font-style: italic; }
+  .callout { background: var(--surface2); border-left: 4px solid var(--accent); border-radius: 0 8px 8px 0; padding: 1rem 1.5rem; margin: 1rem 0; }
+  .callout.info { border-left-color: var(--blue); }
+  .callout.warn { border-left-color: var(--yellow); }
+  .callout.success { border-left-color: var(--green); }
+  svg text { font-family: 'Segoe UI', system-ui, sans-serif; }
+
+  .toc { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1.5rem 2rem; margin: 1.5rem 0; }
+  .toc h3 { color: var(--accent2); margin-top: 0; }
+  .toc ol { margin: 0.5rem 0 0 1.5rem; }
+  .toc li { margin-bottom: 0.3rem; }
+  .toc a { text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  .toc .toc-sub { margin-left: 1.5rem; font-size: 0.9rem; }
+
+  .phase-tag {
+    display: inline-block;
+    padding: 0.1rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    font-weight: bold;
+    margin-right: 0.3rem;
+  }
+  .phase-parse { background: var(--purple); color: white; }
+  .phase-prepare { background: var(--blue); color: white; }
+  .phase-commit { background: var(--green); color: #111; }
+  .phase-complete { background: var(--orange); color: #111; }
+  .phase-skip { background: var(--red); color: white; }
+  .phase-flush { background: #555; color: white; }
+  .phase-start { background: #2a6e3f; color: white; }
+  .phase-end { background: #6e2a2a; color: white; }
+
+  .signal-flow {
+    font-family: 'Cascadia Code', 'Fira Code', 'Menlo', monospace;
+    font-size: 0.82rem;
+    line-height: 1.6;
+  }
+  .signal-flow .arrow { color: var(--accent2); }
+  .signal-flow .block { color: var(--green); font-weight: bold; }
+  .signal-flow .signal { color: var(--yellow); }
+  .signal-flow .note { color: var(--text-dim); font-style: italic; }
+  .signal-flow .skip { color: var(--red); text-decoration: line-through; }
+  .signal-flow .rt { color: var(--accent); font-weight: bold; }
+  .signal-flow .flush { color: #888; }
+
+  .opt-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.2rem 1.5rem;
+    margin: 1rem 0;
+  }
+  .opt-card .opt-title {
+    color: var(--accent2);
+    font-size: 1.05rem;
+    font-weight: bold;
+    margin-bottom: 0.5rem;
+  }
+  .opt-card .opt-impact {
+    color: var(--green);
+    font-size: 0.85rem;
+    margin-top: 0.5rem;
+  }
+
+  .phase-band {
+    border-left: 4px solid;
+    padding-left: 1rem;
+    margin: 1rem 0;
+  }
+  .phase-band.parse-band { border-color: var(--purple); }
+  .phase-band.prepare-band { border-color: var(--blue); }
+  .phase-band.commit-band { border-color: var(--green); }
+  .phase-band.complete-band { border-color: var(--orange); }
+  .phase-band.flush-band { border-color: #666; }
+  .phase-band.start-band { border-color: #2a6e3f; }
+  .phase-band.end-band { border-color: #6e2a2a; }
+</style>
+</head>
+<body>
+
+<h1>NDB CREATE/DROP TABLE Architecture</h1>
+<p class="subtitle">Signal flow between DBDICT, DBDIH, DBLQH, DBTUP, DBACC, DBTC, and DBSPJ &mdash;
+with the SchemaTransaction coordination layer and optimization opportunities for temporary tables (RONDB-1034).</p>
+
+<!-- Table of Contents -->
+<div class="toc">
+  <h3>Table of Contents</h3>
+  <ol>
+    <li><a href="#overview">Overview: Block Roles</a></li>
+    <li><a href="#schema-trans">SchemaTransaction Framework</a>
+      <div class="toc-sub">
+        <a href="#schema-trans-lifecycle">Full Lifecycle</a> &middot;
+        <a href="#schema-trans-rt">Request Types (RT_)</a> &middot;
+        <a href="#schema-trans-flush">FLUSH Phases &amp; Schema File Writes</a> &middot;
+        <a href="#schema-trans-master-slave">Master-Slave Coordination</a>
+      </div>
+    </li>
+    <li><a href="#create-table">CREATE TABLE: Complete Signal Flow</a>
+      <div class="toc-sub">
+        <a href="#create-begin">BEGIN</a> &middot;
+        <a href="#create-parse">PARSE</a> &middot;
+        <a href="#create-flush-prepare">FLUSH_PREPARE</a> &middot;
+        <a href="#create-prepare">PREPARE</a> &middot;
+        <a href="#create-flush-commit">FLUSH_COMMIT</a> &middot;
+        <a href="#create-commit">COMMIT</a> &middot;
+        <a href="#create-flush-complete">FLUSH_COMPLETE</a> &middot;
+        <a href="#create-complete">COMPLETE</a> &middot;
+        <a href="#create-end">END</a>
+      </div>
+    </li>
+    <li><a href="#drop-table">DROP TABLE: Complete Signal Flow</a>
+      <div class="toc-sub">
+        <a href="#drop-parse">PARSE</a> &middot;
+        <a href="#drop-prepare">PREPARE</a> &middot;
+        <a href="#drop-commit">COMMIT</a> &middot;
+        <a href="#drop-complete">COMPLETE</a>
+      </div>
+    </li>
+    <li><a href="#data-structures">Key Data Structures per Block</a></li>
+    <li><a href="#existing-temp">Existing Temporary Table Support</a></li>
+    <li><a href="#optimizations">Optimization Opportunities</a>
+      <div class="toc-sub">
+        <a href="#opt-generic">Generic</a> &middot;
+        <a href="#opt-temp">Temporary-Table Specific</a>
+      </div>
+    </li>
+    <li><a href="#signal-comparison">Signal Flow Comparison: Current vs Optimized</a></li>
+    <li><a href="#source-files">Critical Source Files</a></li>
+  </ol>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="overview">1. Overview: Block Roles</h2>
+
+<p>NDB Cluster uses a distributed block architecture where each functional unit (block) handles a
+specific aspect of the system. Table creation and dropping involves six main blocks:</p>
+
+<div class="diagram-box">
+<svg viewBox="0 0 900 340" xmlns="http://www.w3.org/2000/svg">
+  <!-- DBDICT -->
+  <rect x="340" y="20" width="220" height="60" rx="10" fill="#0f3460" stroke="#53d8fb" stroke-width="2"/>
+  <text x="450" y="48" text-anchor="middle" fill="#53d8fb" font-size="16" font-weight="bold">DBDICT</text>
+  <text x="450" y="66" text-anchor="middle" fill="#aab" font-size="11">Schema Manager &amp; Orchestrator</text>
+
+  <!-- DBDIH -->
+  <rect x="50" y="140" width="200" height="60" rx="10" fill="#0f3460" stroke="#4ec9b0" stroke-width="2"/>
+  <text x="150" y="168" text-anchor="middle" fill="#4ec9b0" font-size="16" font-weight="bold">DBDIH</text>
+  <text x="150" y="186" text-anchor="middle" fill="#aab" font-size="11">Distribution Handler</text>
+
+  <!-- DBLQH -->
+  <rect x="340" y="140" width="220" height="60" rx="10" fill="#0f3460" stroke="#dcdcaa" stroke-width="2"/>
+  <text x="450" y="168" text-anchor="middle" fill="#dcdcaa" font-size="16" font-weight="bold">DBLQH</text>
+  <text x="450" y="186" text-anchor="middle" fill="#aab" font-size="11">Local Query Handler (per LDM)</text>
+
+  <!-- DBTC -->
+  <rect x="650" y="140" width="200" height="60" rx="10" fill="#0f3460" stroke="#c586c0" stroke-width="2"/>
+  <text x="750" y="168" text-anchor="middle" fill="#c586c0" font-size="16" font-weight="bold">DBTC / DBSPJ</text>
+  <text x="750" y="186" text-anchor="middle" fill="#aab" font-size="11">Transaction &amp; SPJ Coordinator</text>
+
+  <!-- DBTUP -->
+  <rect x="280" y="260" width="160" height="60" rx="10" fill="#0f3460" stroke="#ce9178" stroke-width="2"/>
+  <text x="360" y="288" text-anchor="middle" fill="#ce9178" font-size="16" font-weight="bold">DBTUP</text>
+  <text x="360" y="306" text-anchor="middle" fill="#aab" font-size="11">Tuple Storage</text>
+
+  <!-- DBACC -->
+  <rect x="470" y="260" width="160" height="60" rx="10" fill="#0f3460" stroke="#ce9178" stroke-width="2"/>
+  <text x="550" y="288" text-anchor="middle" fill="#ce9178" font-size="16" font-weight="bold">DBACC</text>
+  <text x="550" y="306" text-anchor="middle" fill="#aab" font-size="11">Hash Index</text>
+
+  <!-- Arrows -->
+  <line x1="360" y1="80" x2="220" y2="140" stroke="#53d8fb" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <text x="270" y="105" fill="#aab" font-size="10">DIADDTABREQ</text>
+  <line x1="450" y1="80" x2="450" y2="140" stroke="#53d8fb" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <text x="460" y="118" fill="#aab" font-size="10">CREATE_TAB_REQ</text>
+  <line x1="540" y1="80" x2="680" y2="140" stroke="#53d8fb" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <text x="620" y="105" fill="#aab" font-size="10">TAB_COMMITREQ</text>
+  <line x1="250" y1="170" x2="340" y2="170" stroke="#4ec9b0" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#arrowhead)"/>
+  <text x="295" y="163" fill="#aab" font-size="10">AddFragReq</text>
+  <line x1="400" y1="200" x2="370" y2="260" stroke="#dcdcaa" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <text x="370" y="235" fill="#aab" font-size="10">TUPFRAGREQ</text>
+  <line x1="500" y1="200" x2="540" y2="260" stroke="#dcdcaa" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <text x="530" y="235" fill="#aab" font-size="10">ACCFRAGREQ</text>
+
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#aab"/>
+    </marker>
+  </defs>
+</svg>
+<div class="caption">Block interaction during CREATE TABLE. DBDICT orchestrates, DBDIH distributes fragments,
+DBLQH manages local fragments with DBTUP/DBACC storage, DBTC/DBSPJ learn about new tables.</div>
+</div>
+
+<table>
+  <tr><th>Block</th><th>Role in CREATE/DROP TABLE</th></tr>
+  <tr><td><code>DBDICT</code></td><td>Schema manager and DDL orchestrator. Owns the <code>SchemaTransaction</code> framework. Coordinates all other blocks via <code>SCHEMA_TRANS_IMPL_REQ</code> broadcasts. Writes schema files to disk. One instance per node, with one elected as <strong>master</strong>.</td></tr>
+  <tr><td><code>DBDIH</code></td><td>Distribution handler. Manages fragment-to-node assignment, replica placement, and fragment metadata. DBTC uses DBDIH to route operations to the correct DBLQH instance. Persists table/fragment data to disk.</td></tr>
+  <tr><td><code>DBLQH</code></td><td>Local query handler. One instance per LDM thread (via <code>DblqhProxy</code>). Creates local fragment storage by coordinating DBTUP (tuples) and DBACC (hash index). Manages redo logging and LCP for fragments.</td></tr>
+  <tr><td><code>DBTUP</code></td><td>Tuple storage manager. Allocates and manages row storage (fixed + variable-length parts). Creates fragment-level storage structures.</td></tr>
+  <tr><td><code>DBACC</code></td><td>Hash index manager. Creates and manages the hash index structure used for primary key lookups on each fragment.</td></tr>
+  <tr><td><code>DBTC / DBSPJ</code></td><td>Transaction coordinator and pushed-join coordinator. Need to know about tables to route operations. Maintain <code>TableRecord</code> with enabled/dropping flags.</td></tr>
+</table>
+
+<!-- ================================================================== -->
+<h2 id="schema-trans">2. SchemaTransaction Framework</h2>
+
+<p>All DDL operations in NDB run within a <strong>SchemaTransaction</strong> coordinated by the DBDICT master.
+The master sends <code>SCHEMA_TRANS_IMPL_REQ</code> signals to all DBDICT instances (including itself) to
+drive each phase. This provides distributed atomicity: either all nodes complete the DDL or all abort.</p>
+
+<h3 id="schema-trans-lifecycle">2.1 Full SchemaTransaction Lifecycle</h3>
+
+<p>A complete CREATE TABLE goes through <strong>11 SCHEMA_TRANS_IMPL_REQ rounds</strong> between the master
+and all nodes, plus the actual DDL work within each phase. Here is the complete sequence:</p>
+
+<div class="diagram-box">
+<svg viewBox="0 0 900 820" xmlns="http://www.w3.org/2000/svg">
+  <!-- Title -->
+  <text x="450" y="30" text-anchor="middle" fill="#53d8fb" font-size="16" font-weight="bold">SchemaTransaction Lifecycle: SCHEMA_TRANS_IMPL_REQ Phases</text>
+  <text x="450" y="50" text-anchor="middle" fill="#aab" font-size="11">(Each phase = master broadcasts to all nodes, waits for all CONF replies)</text>
+
+  <!-- Column headers -->
+  <text x="120" y="80" text-anchor="middle" fill="#53d8fb" font-size="13" font-weight="bold">NDB API</text>
+  <text x="350" y="80" text-anchor="middle" fill="#53d8fb" font-size="13" font-weight="bold">DBDICT Master</text>
+  <text x="650" y="80" text-anchor="middle" fill="#53d8fb" font-size="13" font-weight="bold">All DBDICT Nodes</text>
+  <line x1="10" y1="88" x2="890" y2="88" stroke="#334" stroke-width="1"/>
+
+  <!-- Vertical lifelines -->
+  <line x1="120" y1="92" x2="120" y2="800" stroke="#334" stroke-width="1" stroke-dasharray="4,4"/>
+  <line x1="350" y1="92" x2="350" y2="800" stroke="#334" stroke-width="1" stroke-dasharray="4,4"/>
+  <line x1="650" y1="92" x2="650" y2="800" stroke="#334" stroke-width="1" stroke-dasharray="4,4"/>
+
+  <!-- 1. BEGIN -->
+  <rect x="10" y="96" width="880" height="48" rx="4" fill="rgba(42,110,63,0.15)" stroke="#2a6e3f" stroke-width="1"/>
+  <line x1="120" y1="110" x2="340" y2="110" stroke="#4ec9b0" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="230" y="106" text-anchor="middle" fill="#4ec9b0" font-size="10">SCHEMA_TRANS_BEGIN_REQ</text>
+  <line x1="350" y1="125" x2="640" y2="125" stroke="#e94560" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="495" y="121" text-anchor="middle" fill="#e94560" font-size="10" font-weight="bold">RT_START</text>
+  <text x="780" y="121" fill="#aab" font-size="9">Alloc SchemaTrans on all nodes</text>
+
+  <!-- 2. PARSE -->
+  <rect x="10" y="150" width="880" height="60" rx="4" fill="rgba(197,134,192,0.12)" stroke="#c586c0" stroke-width="1"/>
+  <line x1="120" y1="166" x2="340" y2="166" stroke="#4ec9b0" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="230" y="162" text-anchor="middle" fill="#4ec9b0" font-size="10">CREATE_TABLE_REQ</text>
+  <line x1="350" y1="181" x2="640" y2="181" stroke="#e94560" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="495" y="177" text-anchor="middle" fill="#e94560" font-size="10" font-weight="bold">RT_PARSE</text>
+  <text x="780" y="177" fill="#aab" font-size="9">createTable_parse() on all nodes</text>
+  <text x="780" y="190" fill="#aab" font-size="9">Validate, alloc TableRecord</text>
+
+  <!-- 3. endSchemaTrans -->
+  <rect x="10" y="216" width="880" height="30" rx="4" fill="rgba(83,216,251,0.08)" stroke="#334" stroke-width="1"/>
+  <line x1="120" y1="235" x2="340" y2="235" stroke="#4ec9b0" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="230" y="231" text-anchor="middle" fill="#4ec9b0" font-size="10">SCHEMA_TRANS_END_REQ (Commit)</text>
+
+  <!-- 4. FLUSH_PREPARE -->
+  <rect x="10" y="252" width="880" height="48" rx="4" fill="rgba(100,100,100,0.15)" stroke="#666" stroke-width="1"/>
+  <line x1="350" y1="268" x2="640" y2="268" stroke="#e94560" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="495" y="264" text-anchor="middle" fill="#e94560" font-size="10" font-weight="bold">RT_FLUSH_PREPARE</text>
+  <text x="780" y="264" fill="#888" font-size="9">Write schema file (if needed)</text>
+  <text x="780" y="277" fill="#888" font-size="9">TS_STARTED &rarr; TS_FLUSH_PREPARE</text>
+
+  <!-- 5. PREPARE -->
+  <rect x="10" y="306" width="880" height="60" rx="4" fill="rgba(86,156,214,0.12)" stroke="#569cd6" stroke-width="1"/>
+  <line x1="350" y1="322" x2="640" y2="322" stroke="#e94560" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="495" y="318" text-anchor="middle" fill="#e94560" font-size="10" font-weight="bold">RT_PREPARE</text>
+  <text x="780" y="318" fill="#569cd6" font-size="9">createTable_prepare() on all nodes</text>
+  <text x="780" y="331" fill="#569cd6" font-size="9">DBLQH, DBDIH fragment creation</text>
+  <text x="780" y="344" fill="#569cd6" font-size="9">(heaviest phase &mdash; see Section 3)</text>
+
+  <!-- 6. FLUSH_COMMIT -->
+  <rect x="10" y="372" width="880" height="48" rx="4" fill="rgba(100,100,100,0.15)" stroke="#666" stroke-width="1"/>
+  <line x1="350" y1="388" x2="640" y2="388" stroke="#e94560" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="495" y="384" text-anchor="middle" fill="#e94560" font-size="10" font-weight="bold">RT_FLUSH_COMMIT</text>
+  <text x="780" y="384" fill="#888" font-size="9">Write schema file, acquire commit mutex</text>
+  <text x="780" y="397" fill="#888" font-size="9">TS_PREPARING &rarr; TS_FLUSH_COMMIT</text>
+
+  <!-- 7. COMMIT -->
+  <rect x="10" y="426" width="880" height="60" rx="4" fill="rgba(78,201,176,0.12)" stroke="#4ec9b0" stroke-width="1"/>
+  <line x1="350" y1="442" x2="640" y2="442" stroke="#e94560" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="495" y="438" text-anchor="middle" fill="#e94560" font-size="10" font-weight="bold">RT_COMMIT</text>
+  <text x="780" y="438" fill="#4ec9b0" font-size="9">createTable_commit() on all nodes</text>
+  <text x="780" y="451" fill="#4ec9b0" font-size="9">Activate: DBTC, DBSPJ, DBDIH, SUMA</text>
+  <text x="780" y="464" fill="#4ec9b0" font-size="9">(sent to slaves first, master last)</text>
+
+  <!-- 8. FLUSH_COMPLETE -->
+  <rect x="10" y="492" width="880" height="48" rx="4" fill="rgba(100,100,100,0.15)" stroke="#666" stroke-width="1"/>
+  <line x1="350" y1="508" x2="640" y2="508" stroke="#e94560" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="495" y="504" text-anchor="middle" fill="#e94560" font-size="10" font-weight="bold">RT_FLUSH_COMPLETE</text>
+  <text x="780" y="504" fill="#888" font-size="9">Write schema file, release commit mutex</text>
+  <text x="780" y="517" fill="#888" font-size="9">TS_COMMITTING &rarr; TS_FLUSH_COMPLETE</text>
+
+  <!-- 9. COMPLETE -->
+  <rect x="10" y="546" width="880" height="48" rx="4" fill="rgba(206,145,120,0.12)" stroke="#ce9178" stroke-width="1"/>
+  <line x1="350" y1="562" x2="640" y2="562" stroke="#e94560" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="495" y="558" text-anchor="middle" fill="#e94560" font-size="10" font-weight="bold">RT_COMPLETE</text>
+  <text x="780" y="558" fill="#ce9178" font-size="9">createTable_complete() on all nodes</text>
+  <text x="780" y="571" fill="#ce9178" font-size="9">(just confirms, no work)</text>
+
+  <!-- WAIT_GCP -->
+  <rect x="10" y="600" width="880" height="40" rx="4" fill="rgba(244,71,71,0.08)" stroke="#f44747" stroke-width="1" stroke-dasharray="4,2"/>
+  <text x="350" y="624" text-anchor="middle" fill="#f44747" font-size="10">WAIT_GCP_REQ &rarr; DBDIH (if m_wait_gcp_on_commit)</text>
+  <text x="780" y="624" fill="#f44747" font-size="9">Wait up to ~2 seconds for GCP boundary</text>
+
+  <!-- 10. END -->
+  <rect x="10" y="646" width="880" height="48" rx="4" fill="rgba(110,42,42,0.15)" stroke="#6e2a2a" stroke-width="1"/>
+  <line x1="350" y1="662" x2="640" y2="662" stroke="#e94560" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="495" y="658" text-anchor="middle" fill="#e94560" font-size="10" font-weight="bold">RT_END</text>
+  <text x="780" y="658" fill="#aab" font-size="9">Write schema file, release SchemaTrans</text>
+  <text x="780" y="671" fill="#aab" font-size="9">Release schema lock</text>
+
+  <!-- Final reply -->
+  <rect x="10" y="700" width="880" height="35" rx="4" fill="rgba(42,110,63,0.15)" stroke="#2a6e3f" stroke-width="1"/>
+  <line x1="340" y1="720" x2="130" y2="720" stroke="#4ec9b0" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="230" y="716" text-anchor="middle" fill="#4ec9b0" font-size="10">SCHEMA_TRANS_END_CONF</text>
+
+  <!-- Count annotation -->
+  <rect x="30" y="750" width="840" height="40" rx="6" fill="var(--surface2)"/>
+  <text x="450" y="770" text-anchor="middle" fill="#e94560" font-size="12" font-weight="bold">
+    Total: 11 SCHEMA_TRANS_IMPL_REQ broadcast rounds + WAIT_GCP
+  </text>
+  <text x="450" y="786" text-anchor="middle" fill="#aab" font-size="10">
+    Each round = master sends to N nodes, waits for N CONF replies (2 &times; N messages per round)
+  </text>
+
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#aab"/>
+    </marker>
+  </defs>
+</svg>
+<div class="caption">Complete SchemaTransaction lifecycle for CREATE TABLE. The three FLUSH phases (grey) write schema files
+to disk for crash recovery. The WAIT_GCP (red dashed) can add up to ~2 seconds of latency.</div>
+</div>
+
+<h3 id="schema-trans-rt">2.2 Request Types (RT_)</h3>
+
+<p>The <code>requestInfo</code> field of <code>SCHEMA_TRANS_IMPL_REQ</code> carries the request type
+(SchemaTransImpl.hpp:34-46):</p>
+
+<table>
+  <tr><th>RT_ Value</th><th>Hex</th><th>Trans State</th><th>Schema File Write?</th><th>Purpose</th></tr>
+  <tr>
+    <td><code>RT_START</code></td><td>0x0</td>
+    <td>TS_STARTING</td><td>No</td>
+    <td>Allocate <code>SchemaTrans</code> on all nodes. Set <code>m_isMaster</code> flag.</td>
+  </tr>
+  <tr>
+    <td><code>RT_PARSE</code></td><td>0x1</td>
+    <td>TS_PARSING</td><td>No</td>
+    <td>Execute operation-specific parse handler on all nodes. Carries <code>gsn</code> of the DDL signal (e.g., <code>GSN_CREATE_TABLE_REQ</code>) and serialized table definition.</td>
+  </tr>
+  <tr>
+    <td><code>RT_FLUSH_PREPARE</code></td><td>0x2</td>
+    <td>TS_FLUSH_PREPARE</td><td>Conditional</td>
+    <td>If <code>m_flush_prepare</code>: write schema file with operation state. Synchronize all nodes before entering PREPARE.</td>
+  </tr>
+  <tr>
+    <td><code>RT_PREPARE</code></td><td>0x3</td>
+    <td>TS_PREPARING</td><td>No</td>
+    <td>Execute operation-specific prepare handler. <strong>This is where the heavy work happens</strong> (DBLQH fragment creation, DBDIH distribution).</td>
+  </tr>
+  <tr>
+    <td><code>RT_FLUSH_COMMIT</code></td><td>0x6</td>
+    <td>TS_FLUSH_COMMIT</td><td>Conditional</td>
+    <td>If <code>m_flush_commit</code>: write schema file. Acquire commit mutex. Synchronize before commit.</td>
+  </tr>
+  <tr>
+    <td><code>RT_COMMIT</code></td><td>0x7</td>
+    <td>TS_COMMITTING</td><td>No</td>
+    <td>Execute operation-specific commit handler. Sent to <strong>slaves first, master last</strong> (ensures slaves see commit before master completes).</td>
+  </tr>
+  <tr>
+    <td><code>RT_FLUSH_COMPLETE</code></td><td>0x8</td>
+    <td>TS_FLUSH_COMPLETE</td><td>Conditional</td>
+    <td>If <code>m_flush_complete</code>: write schema file. Release commit mutex.</td>
+  </tr>
+  <tr>
+    <td><code>RT_COMPLETE</code></td><td>0x9</td>
+    <td>TS_COMPLETING</td><td>No</td>
+    <td>Execute operation-specific complete handler. Usually no-op for CREATE TABLE.</td>
+  </tr>
+  <tr>
+    <td><code>RT_END</code></td><td>0xa</td>
+    <td>TS_ENDING</td><td>Conditional</td>
+    <td>Write final schema file state. Release <code>SchemaTrans</code> on all nodes. Release schema lock.</td>
+  </tr>
+  <tr style="color: var(--text-dim);">
+    <td><code>RT_ABORT_PARSE</code></td><td>0x4</td>
+    <td>TS_ABORTING_PARSE</td><td>No</td>
+    <td>Rollback parse phase. Called on error during PARSE.</td>
+  </tr>
+  <tr style="color: var(--text-dim);">
+    <td><code>RT_ABORT_PREPARE</code></td><td>0x5</td>
+    <td>TS_ABORTING_PREPARE</td><td>No</td>
+    <td>Rollback prepare phase. Called on error during PREPARE.</td>
+  </tr>
+</table>
+
+<h3 id="schema-trans-flush">2.3 FLUSH Phases &amp; Schema File Writes</h3>
+
+<p>The three FLUSH phases (FLUSH_PREPARE, FLUSH_COMMIT, FLUSH_COMPLETE) exist to persist the
+schema transaction state to disk before entering the next phase. This ensures crash recovery:
+if a node crashes mid-DDL, the schema file records which phase was reached, allowing recovery
+to either complete or abort the operation.</p>
+
+<div class="callout info">
+  <strong>When are schema files written?</strong> Each FLUSH phase checks a flag
+  (<code>m_flush_prepare</code>, <code>m_flush_commit</code>, <code>m_flush_complete</code>).
+  If set, the slave calls <code>trans_log()</code> followed by <code>startWriteSchemaFile()</code>
+  (Dbdict.cpp:30433-30475). The CONF reply is sent only after the disk write completes
+  (callback: <code>slave_writeSchema_conf()</code>). If the flag is not set, the slave skips
+  the write and replies immediately.
+</div>
+
+<div class="callout warn">
+  <strong>Commit mutex:</strong> During <code>RT_FLUSH_COMMIT</code>, each node acquires a commit
+  mutex (<code>m_commit_mutex</code>) that serializes commit phases across concurrent schema
+  transactions. This mutex is held until <code>RT_FLUSH_COMPLETE</code> releases it. For temporary
+  tables, this serialization may be unnecessary.
+</div>
+
+<h3 id="schema-trans-master-slave">2.4 Master-Slave Coordination</h3>
+
+<div class="diagram-box">
+<pre class="signal-flow">
+<span class="block">DBDICT Master</span> (node with c_masterNodeId):
+  &bull; Controls the state machine, drives phase transitions
+  &bull; Sends <span class="signal">SCHEMA_TRANS_IMPL_REQ</span> to all alive nodes (including self)
+  &bull; Uses SafeCounter to track CONF replies from each node
+  &bull; Calls <span class="note">trans_recv_reply()</span> when all nodes have replied
+  &bull; Only proceeds to next phase when ALL nodes confirm current phase
+  &bull; Holds the global schema lock (<span class="note">dict_lock_trylock()</span>) for entire transaction
+
+<span class="block">DBDICT Slaves</span> (all other nodes):
+  &bull; Maintain local SchemaTrans copy with <span class="note">m_isMaster = false</span>
+  &bull; Execute operation handlers when master sends RT_PARSE/PREPARE/COMMIT/COMPLETE
+  &bull; Each handler runs independently on local data (DBLQH, DBDIH on same node)
+  &bull; Schema file writes happen locally during FLUSH phases
+  &bull; Reply with SCHEMA_TRANS_IMPL_CONF (or REF on error)
+
+<span class="note">Key invariant: The master never advances to the next phase until ALL nodes
+have confirmed the current phase. This is what provides distributed atomicity.</span>
+</pre>
+</div>
+
+<h3>2.5 NDB API Side</h3>
+<p>From the NDB API perspective (NdbDictionaryImpl.cpp), a CREATE TABLE involves three API calls
+that map to the schema transaction phases:</p>
+
+<div class="diagram-box">
+<pre class="signal-flow">
+<span class="block">NdbDictInterface::beginSchemaTrans()</span>   <span class="note">(line 9972)</span>
+  &rarr; GSN_SCHEMA_TRANS_BEGIN_REQ &rarr; DBDICT
+  &rarr; triggers <span class="rt">RT_START</span> broadcast
+  &larr; SCHEMA_TRANS_BEGIN_CONF (with transId, transKey)
+
+<span class="block">NdbDictInterface::sendCreateTable()</span>    <span class="note">(line 4977)</span>
+  &rarr; GSN_CREATE_TABLE_REQ (with serialized table descriptor)
+  &rarr; triggers <span class="rt">RT_PARSE</span> broadcast
+  &larr; CREATE_TABLE_CONF (with tableId, tableVersion)
+
+<span class="block">NdbDictInterface::endSchemaTrans()</span>     <span class="note">(line 10018)</span>
+  &rarr; GSN_SCHEMA_TRANS_END_REQ (flags=Commit)
+  &rarr; triggers the full phase sequence:
+     <span class="rt">RT_FLUSH_PREPARE</span> &rarr; <span class="rt">RT_PREPARE</span> &rarr; <span class="rt">RT_FLUSH_COMMIT</span> &rarr; <span class="rt">RT_COMMIT</span>
+     &rarr; <span class="rt">RT_FLUSH_COMPLETE</span> &rarr; <span class="rt">RT_COMPLETE</span> &rarr; WAIT_GCP &rarr; <span class="rt">RT_END</span>
+  &larr; SCHEMA_TRANS_END_CONF
+</pre>
+<div class="caption">The endSchemaTrans(Commit) call triggers 7 broadcast rounds plus WAIT_GCP.
+This is where most of the latency lives.</div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="create-table">3. CREATE TABLE: Complete Signal Flow</h2>
+
+<p>Below is the complete end-to-end signal flow for CREATE TABLE, showing exactly where each
+<code>SCHEMA_TRANS_IMPL_REQ</code> phase wraps the actual DDL work. Each phase band shows what
+happens on <strong>every node</strong> when the master broadcasts that phase.</p>
+
+<h3 id="create-begin">3.1 <span class="phase-tag phase-start">RT_START</span> Begin Transaction</h3>
+
+<div class="phase-band start-band">
+<div class="diagram-box">
+<pre class="signal-flow">
+<span class="block">NDB API</span> <span class="arrow">&rarr;</span> <span class="signal">SCHEMA_TRANS_BEGIN_REQ</span> <span class="arrow">&rarr;</span> <span class="block">DBDICT master</span>
+  &boxv;
+  &boxvr;&HorizontalLine; dict_lock_trylock() <span class="note">&mdash; acquire global schema lock (blocks other DDL)</span>
+  &boxvr;&HorizontalLine; Allocate SchemaTrans (state = TS_STARTING)
+  &boxv;
+  &boxvr;&HorizontalLine; <span class="rt">SCHEMA_TRANS_IMPL_REQ(RT_START)</span> <span class="arrow">&rarr;</span> <span class="note">all nodes</span>
+  &boxv;     Each slave: allocate local SchemaTrans, m_isMaster=false
+  &boxv;     Each slave <span class="arrow">&rarr;</span> <span class="signal">SCHEMA_TRANS_IMPL_CONF</span>
+  &boxv;
+  &boxur;&HorizontalLine; <span class="signal">SCHEMA_TRANS_BEGIN_CONF</span> <span class="arrow">&rarr;</span> <span class="block">NDB API</span>
+       State: TS_STARTED
+</pre>
+</div>
+</div>
+
+<h3 id="create-parse">3.2 <span class="phase-tag phase-parse">RT_PARSE</span> Parse &amp; Validate</h3>
+
+<div class="phase-band parse-band">
+<div class="diagram-box">
+<pre class="signal-flow">
+<span class="block">NDB API</span> <span class="arrow">&rarr;</span> <span class="signal">CREATE_TABLE_REQ</span> <span class="arrow">&rarr;</span> <span class="block">DBDICT master</span>
+  &boxv;
+  &boxvr;&HorizontalLine; handleClientReq(): allocate SchemaOp + CreateTableRec
+  &boxv;
+  &boxvr;&HorizontalLine; <span class="note">Master-only parse work:</span>
+  &boxv;     <span class="signal">CREATE_FRAGMENTATION_REQ</span> <span class="arrow">&rarr;</span> <span class="block">DBDIH</span>  <span class="note">(calculate fragment distribution)</span>
+  &boxv;     <span class="block">DBDIH</span> <span class="arrow">&rarr;</span> <span class="signal">CREATE_FRAGMENTATION_CONF</span>   <span class="note">(returns fragment list, NO side effects)</span>
+  &boxv;     getFreeObjId() <span class="note">&mdash; scan schema file for free table ID</span>
+  &boxv;     seizeTableRecord() <span class="note">&mdash; allocate TableRecord + DictObject</span>
+  &boxv;     handleTabInfoInit() <span class="note">&mdash; populate metadata from DICTTABINFO</span>
+  &boxv;     Build KeyDescriptor
+  &boxv;
+  &boxvr;&HorizontalLine; <span class="rt">SCHEMA_TRANS_IMPL_REQ(RT_PARSE)</span> <span class="arrow">&rarr;</span> <span class="note">all nodes</span>
+  &boxv;     Contains: gsn=GSN_CREATE_TABLE_REQ + serialized table definition
+  &boxv;     Each node: slave_run_parse() &rarr; createTable_parse()
+  &boxv;       &bull; Allocate local SchemaOp + CreateTableRec
+  &boxv;       &bull; seizeTableRecord(), handleTabInfoInit()
+  &boxv;       &bull; Build local KeyDescriptor
+  &boxv;       &bull; <span class="note">BUG: TR_Temporary bit NOT set (#ifdef DOES_NOT_WORK_CURRENTLY)</span>
+  &boxv;     Each node <span class="arrow">&rarr;</span> <span class="signal">SCHEMA_TRANS_IMPL_CONF</span>
+  &boxv;
+  &boxur;&HorizontalLine; <span class="signal">CREATE_TABLE_CONF</span> <span class="arrow">&rarr;</span> <span class="block">NDB API</span> (with tableId, tableVersion)
+       State: TS_STARTED, OS_PARSED
+</pre>
+</div>
+</div>
+
+<p>At this point the NDB API has the table ID but the table is not yet usable. The API now calls
+<code>endSchemaTrans(Commit)</code> which triggers the remaining phases:</p>
+
+<h3 id="create-flush-prepare">3.3 <span class="phase-tag phase-flush">RT_FLUSH_PREPARE</span> Synchronize Before Prepare</h3>
+
+<div class="phase-band flush-band">
+<div class="diagram-box">
+<pre class="signal-flow">
+<span class="block">NDB API</span> <span class="arrow">&rarr;</span> <span class="signal">SCHEMA_TRANS_END_REQ(Commit)</span> <span class="arrow">&rarr;</span> <span class="block">DBDICT master</span>
+  &boxv;
+  &boxvr;&HorizontalLine; trans_prepare_start()
+  &boxv;
+  &boxvr;&HorizontalLine; <span class="rt">SCHEMA_TRANS_IMPL_REQ(RT_FLUSH_PREPARE)</span> <span class="arrow">&rarr;</span> <span class="note">all nodes</span>
+  &boxv;     Each node: slave_run_flush()
+  &boxv;       &bull; State: TS_STARTED &rarr; TS_FLUSH_PREPARE
+  &boxv;       &bull; trans_log() <span class="note">&mdash; log operation state</span>
+  &boxv;       <span class="flush">&bull; if m_flush_prepare: startWriteSchemaFile() [DISK I/O]</span>
+  &boxv;       <span class="flush">&bull;   slave_writeSchema_conf() callback after write completes</span>
+  &boxv;       &bull; else: skip write, reply immediately
+  &boxv;     Each node <span class="arrow">&rarr;</span> <span class="signal">SCHEMA_TRANS_IMPL_CONF</span>
+  &boxv;
+  &boxur;&HorizontalLine; trans_prepare_first() <span class="note">&mdash; begin iterating operations</span>
+       State: TS_FLUSH_PREPARE &rarr; TS_PREPARING
+</pre>
+</div>
+</div>
+
+<h3 id="create-prepare">3.4 <span class="phase-tag phase-prepare">RT_PREPARE</span> Create Table in DBLQH &amp; DBDIH</h3>
+
+<p>This is the <strong>heaviest phase</strong>. The master sends <code>RT_PREPARE</code> to all nodes, and each node
+independently runs <code>createTable_prepare()</code> which orchestrates fragment creation locally.</p>
+
+<div class="phase-band prepare-band">
+<div class="diagram-box">
+<pre class="signal-flow">
+<span class="rt">SCHEMA_TRANS_IMPL_REQ(RT_PREPARE)</span> <span class="arrow">&rarr;</span> <span class="note">all nodes</span>
+
+<span class="note">On each node, createTable_prepare() executes this sequence:</span>
+
+<span class="note">Step 1: Write table descriptor to disk</span>
+  &boxvr;&HorizontalLine; savetodisk = !(m_bits &amp; TR_Temporary)
+  &boxvr;&HorizontalLine; if savetodisk: writeTableFile() <span class="flush">[DISK I/O]</span>
+  &boxur;&HorizontalLine; else (temp table): skip directly to callback
+
+<span class="note">Step 2: Create table structure in DBLQH</span>
+  &boxvr;&HorizontalLine; createTab_local() <span class="arrow">&rarr;</span> <span class="signal">CREATE_TAB_REQ</span> <span class="arrow">&rarr;</span> <span class="block">DBLQH</span> (via DblqhProxy &rarr; all LDM instances)
+  &boxv;     <span class="block">DBLQH</span>: allocate Tablerec, status = ADD_TABLE_ONGOING
+  &boxv;     <span class="block">DBLQH</span> <span class="arrow">&rarr;</span> <span class="signal">CREATE_TAB_REQ</span> <span class="arrow">&rarr;</span> <span class="block">DBTUP</span> (create table-level storage)
+  &boxv;     <span class="note">(For ordered indexes: also sends to DBTUX)</span>
+  &boxv;     <span class="block">DBTUP</span> <span class="arrow">&rarr;</span> <span class="signal">CREATE_TAB_CONF</span> <span class="arrow">&rarr;</span> <span class="block">DBLQH</span>
+  &boxur;&HorizontalLine; <span class="block">DBLQH</span> <span class="arrow">&rarr;</span> <span class="signal">CREATE_TAB_CONF</span> <span class="arrow">&rarr;</span> <span class="block">DBDICT</span>
+
+<span class="note">Step 3: Add attributes to DBLQH</span>
+  &boxvr;&HorizontalLine; sendLQHADDATTRREQ(): batched attribute definitions
+  &boxv;     <span class="signal">LQHADDATTREQ</span> <span class="arrow">&rarr;</span> <span class="block">DBLQH</span> (via DblqhProxy &rarr; all LDM instances)
+  &boxv;     <span class="block">DBLQH</span>: forwards to <span class="block">DBTUP</span> + <span class="block">DBTUX</span> for attribute metadata
+  &boxur;&HorizontalLine; <span class="block">DBLQH</span> <span class="arrow">&rarr;</span> <span class="signal">LQHADDATTCONF</span> <span class="arrow">&rarr;</span> <span class="block">DBDICT</span>
+
+<span class="note">Step 4: Register table in DBDIH</span>
+  &boxvr;&HorizontalLine; createTab_dih() <span class="arrow">&rarr;</span> <span class="signal">DIADDTABREQ</span> <span class="arrow">&rarr;</span> <span class="block">DBDIH</span> (with fragmentation section)
+  &boxv;     <span class="block">DBDIH</span>: prepare_add_table() &mdash; allocate TabRecord, set metadata
+  &boxv;     <span class="block">DBDIH</span>: allocFragments() &mdash; seize Fragmentstore records
+  &boxv;     <span class="block">DBDIH</span>: allocStoredReplica() &mdash; for each replica per fragment
+  &boxv;     <span class="block">DBDIH</span>: CONTINUEB(ZPACK_TABLE_INTO_PAGES) &mdash; serialize to pages <span class="flush">[DISK I/O]</span>
+  &boxv;     <span class="block">DBDIH</span>: initTableFile(), write table file to disk <span class="flush">[DISK I/O]</span>
+  &boxv;
+  &boxv;     <span class="note">For each local fragment (fragment loop):</span>
+  &boxv;     <span class="block">DBDIH</span> <span class="arrow">&rarr;</span> <span class="signal">ADD_FRAGREQ</span> <span class="arrow">&rarr;</span> <span class="block">DBDICT</span> <span class="arrow">&rarr;</span> <span class="signal">LQHFRAGREQ</span> <span class="arrow">&rarr;</span> <span class="block">DBLQH</span>
+  &boxv;       <span class="block">DBLQH</span>: insertFragrec() &mdash; seize Fragrecord from pool
+  &boxv;       <span class="block">DBLQH</span>: initFragrec():
+  &boxv;           if tempTable: logFlag=STATE_FALSE, lcpFlag=LCP_STATE_FALSE
+  &boxv;       <span class="block">DBLQH</span> <span class="arrow">&rarr;</span> <span class="signal">ACCFRAGREQ</span> <span class="arrow">&rarr;</span> <span class="block">DBACC</span> (create hash index fragment)
+  &boxv;       <span class="block">DBACC</span> <span class="arrow">&rarr;</span> <span class="signal">ACCFRAGCONF</span> <span class="arrow">&rarr;</span> <span class="block">DBLQH</span>
+  &boxv;       <span class="block">DBLQH</span> <span class="arrow">&rarr;</span> <span class="signal">TUPFRAGREQ</span> <span class="arrow">&rarr;</span> <span class="block">DBTUP</span> (create tuple storage fragment)
+  &boxv;       <span class="block">DBTUP</span> <span class="arrow">&rarr;</span> <span class="signal">TUPFRAGCONF</span> <span class="arrow">&rarr;</span> <span class="block">DBLQH</span>
+  &boxv;       <span class="block">DBLQH</span> <span class="arrow">&rarr;</span> <span class="signal">LQHFRAGCONF</span> <span class="arrow">&rarr;</span> <span class="block">DBDICT</span> <span class="arrow">&rarr;</span> <span class="signal">ADD_FRAGCONF</span> <span class="arrow">&rarr;</span> <span class="block">DBDIH</span>
+  &boxv;       <span class="note">(DBDIH calls sendAddFragreq() recursively for next fragment)</span>
+  &boxv;
+  &boxur;&HorizontalLine; <span class="block">DBDIH</span> <span class="arrow">&rarr;</span> <span class="signal">DIADDTABCONF</span> <span class="arrow">&rarr;</span> <span class="block">DBDICT</span>
+
+<span class="note">Step 5: Local commit to DBLQH</span>
+  &boxvr;&HorizontalLine; <span class="signal">TAB_COMMITREQ</span> <span class="arrow">&rarr;</span> <span class="block">DBLQH</span> (via DblqhProxy &rarr; all LDM instances)
+  &boxv;     <span class="block">DBLQH</span>: set tableStatus = TABLE_DEFINED
+  &boxur;&HorizontalLine; <span class="block">DBLQH</span> <span class="arrow">&rarr;</span> <span class="signal">TAB_COMMITCONF</span> <span class="arrow">&rarr;</span> <span class="block">DBDICT</span>
+
+Each node <span class="arrow">&rarr;</span> <span class="signal">SCHEMA_TRANS_IMPL_CONF</span> <span class="arrow">&rarr;</span> master
+State: OS_PREPARING &rarr; OS_PREPARED
+</pre>
+<div class="caption">PREPARE phase on each node: 5 sequential steps with N fragment-creation loops.
+Each fragment requires a 3-hop routing: DBDIH &rarr; DBDICT &rarr; DBLQH and back.</div>
+</div>
+</div>
+
+<div class="callout info">
+  <strong>Signal count in PREPARE (per node):</strong>
+  CREATE_TAB_REQ (1) + LQHADDATTREQ (1-2 batches) + DIADDTABREQ (1) +
+  per-fragment: ADD_FRAGREQ + LQHFRAGREQ + ACCFRAGREQ + TUPFRAGREQ (4 &times; N) +
+  TAB_COMMITREQ (1). For a table with 8 fragments on 2 nodes (4 local):
+  ~3 + 4&times;4 = <strong>19 signals per node</strong>, each fanned through DblqhProxy to all LDM instances.
+</div>
+
+<h3 id="create-flush-commit">3.5 <span class="phase-tag phase-flush">RT_FLUSH_COMMIT</span> Synchronize Before Commit</h3>
+
+<div class="phase-band flush-band">
+<div class="diagram-box">
+<pre class="signal-flow">
+<span class="rt">SCHEMA_TRANS_IMPL_REQ(RT_FLUSH_COMMIT)</span> <span class="arrow">&rarr;</span> <span class="note">all nodes</span>
+  Each node: slave_run_flush()
+    &bull; State: TS_PREPARING &rarr; TS_FLUSH_COMMIT
+    &bull; trans_log()
+    <span class="flush">&bull; if m_flush_commit: startWriteSchemaFile() [DISK I/O]</span>
+    &bull; slave_writeSchema_conf():
+        <span class="note">Acquire commit mutex (m_commit_mutex)</span>
+        <span class="note">State &rarr; TS_COMMITTING</span>
+  Each node <span class="arrow">&rarr;</span> <span class="signal">SCHEMA_TRANS_IMPL_CONF</span>
+
+Master: trans_commit_first()
+  &bull; Acquire commit mutex (may wait for GCI)
+  &bull; Callback: trans_commit_mutex_locked()
+  &bull; State: TS_FLUSH_COMMIT &rarr; TS_COMMITTING
+</pre>
+</div>
+</div>
+
+<h3 id="create-commit">3.6 <span class="phase-tag phase-commit">RT_COMMIT</span> Activate Table in DBTC, DBSPJ, DBDIH</h3>
+
+<div class="phase-band commit-band">
+<div class="diagram-box">
+<pre class="signal-flow">
+<span class="rt">SCHEMA_TRANS_IMPL_REQ(RT_COMMIT)</span> <span class="arrow">&rarr;</span> <span class="note">slaves first, then master</span>
+
+<span class="note">On each node, createTable_commit() executes:</span>
+
+<span class="note">Step 1: Database tracking</span>
+  &boxvr;&HorizontalLine; createTab_activate() <span class="arrow">&rarr;</span> <span class="signal">CONNECT_TABLE_DB_REQ</span> <span class="arrow">&rarr;</span> <span class="block">DBLQH</span> + <span class="block">DBTC</span>
+  &boxv;     <span class="note">Register table in database quota tracking</span>
+
+<span class="note">Step 2: Activate in DBDIH</span>
+  &boxvr;&HorizontalLine; <span class="signal">TAB_COMMITREQ</span> <span class="arrow">&rarr;</span> <span class="block">DBDIH</span>
+  &boxv;     <span class="block">DBDIH</span>: tabStatus = TS_ACTIVE <span class="note">&mdash; table now routable by DBTC</span>
+
+<span class="note">Step 3: Activate in DBSPJ</span>
+  &boxvr;&HorizontalLine; <span class="signal">TC_SCHVERREQ</span> <span class="arrow">&rarr;</span> <span class="block">DBSPJ</span> <span class="note">(schema version notification)</span>
+  &boxvr;&HorizontalLine; <span class="signal">TAB_COMMITREQ</span> <span class="arrow">&rarr;</span> <span class="block">DBSPJ</span>
+  &boxv;     <span class="block">DBSPJ</span>: enabled = true
+
+<span class="note">Step 4: Activate in DBTC</span>
+  &boxvr;&HorizontalLine; <span class="signal">TAB_COMMITREQ</span> <span class="arrow">&rarr;</span> <span class="block">DBTC</span>
+  &boxv;     <span class="block">DBTC</span>: enabled = true <span class="note">&mdash; table now accepts transactions</span>
+
+<span class="note">Step 5: Notify replication</span>
+  &boxur;&HorizontalLine; <span class="signal">CREATE_TAB_CONF</span> <span class="arrow">&rarr;</span> <span class="block">SUMA</span>
+       <span class="note">SUMA distributes to replication subscribers</span>
+
+Each node <span class="arrow">&rarr;</span> <span class="signal">SCHEMA_TRANS_IMPL_CONF</span> <span class="arrow">&rarr;</span> master
+State: OS_COMMITTING &rarr; OS_COMMITTED
+</pre>
+</div>
+</div>
+
+<h3 id="create-flush-complete">3.7 <span class="phase-tag phase-flush">RT_FLUSH_COMPLETE</span> Synchronize After Commit</h3>
+
+<div class="phase-band flush-band">
+<div class="diagram-box">
+<pre class="signal-flow">
+<span class="rt">SCHEMA_TRANS_IMPL_REQ(RT_FLUSH_COMPLETE)</span> <span class="arrow">&rarr;</span> <span class="note">all nodes</span>
+  Each node: slave_run_flush()
+    &bull; State: TS_COMMITTING &rarr; TS_FLUSH_COMPLETE
+    &bull; trans_log()
+    <span class="flush">&bull; if m_flush_complete: startWriteSchemaFile() [DISK I/O]</span>
+    &bull; slave_writeSchema_conf():
+        <span class="note">Release commit mutex (m_commit_mutex)</span>
+        <span class="note">State &rarr; TS_COMPLETING</span>
+  Each node <span class="arrow">&rarr;</span> <span class="signal">SCHEMA_TRANS_IMPL_CONF</span>
+</pre>
+</div>
+</div>
+
+<h3 id="create-complete">3.8 <span class="phase-tag phase-complete">RT_COMPLETE</span> Finalize</h3>
+
+<div class="phase-band complete-band">
+<div class="diagram-box">
+<pre class="signal-flow">
+<span class="rt">SCHEMA_TRANS_IMPL_REQ(RT_COMPLETE)</span> <span class="arrow">&rarr;</span> <span class="note">all nodes</span>
+
+  Each node: createTable_complete()
+    &bull; <span class="note">No-op for CREATE TABLE &mdash; just confirms</span>
+  Each node <span class="arrow">&rarr;</span> <span class="signal">SCHEMA_TRANS_IMPL_CONF</span>
+
+State: OS_COMPLETING &rarr; OS_COMPLETED
+</pre>
+</div>
+</div>
+
+<h3 id="create-end">3.9 <span class="phase-tag phase-end">WAIT_GCP + RT_END</span> Transaction Cleanup</h3>
+
+<div class="phase-band end-band">
+<div class="diagram-box">
+<pre class="signal-flow">
+<span class="note">After all operations complete, the master finalizes the transaction:</span>
+
+<span class="note">Optional GCP wait:</span>
+  if m_wait_gcp_on_commit:
+    <span class="signal">WAIT_GCP_REQ</span> <span class="arrow">&rarr;</span> <span class="block">DBDIH</span>
+    <span class="note">Wait for Global Checkpoint boundary (up to ~2 seconds)</span>
+    <span class="note">Ensures committed schema change is durable even if all nodes crash</span>
+    <span class="block">DBDIH</span> <span class="arrow">&rarr;</span> <span class="signal">WAIT_GCP_CONF</span>
+
+<span class="rt">SCHEMA_TRANS_IMPL_REQ(RT_END)</span> <span class="arrow">&rarr;</span> <span class="note">all nodes</span>
+  Each node: slave_run_flush() for RT_END
+    &bull; State: TS_COMPLETING &rarr; TS_ENDING
+    &bull; trans_log()
+    <span class="flush">&bull; Write final schema file state [DISK I/O]</span>
+    &bull; sendTransConfRelease() &mdash; release local SchemaTrans
+  Each node <span class="arrow">&rarr;</span> <span class="signal">SCHEMA_TRANS_IMPL_CONF</span>
+
+Master: trans_end_recv_reply()
+  &bull; dict_lock_unlock() <span class="note">&mdash; release global schema lock</span>
+  &bull; <span class="signal">SCHEMA_TRANS_END_CONF</span> <span class="arrow">&rarr;</span> <span class="block">NDB API</span>
+  &bull; Release SchemaTrans object
+</pre>
+</div>
+</div>
+
+<div class="callout warn">
+  <strong>Total CREATE TABLE cost:</strong>
+  <ul>
+    <li><strong>11 SCHEMA_TRANS_IMPL_REQ broadcast rounds</strong> (START, PARSE, FLUSH_PREPARE, PREPARE, FLUSH_COMMIT, COMMIT, FLUSH_COMPLETE, COMPLETE, END) &mdash; each is a round-trip to all N nodes</li>
+    <li><strong>Up to 4 schema file writes</strong> (FLUSH_PREPARE, FLUSH_COMMIT, FLUSH_COMPLETE, END) &mdash; disk I/O on every node</li>
+    <li><strong>PREPARE phase internal signals</strong>: ~19 signals per node for an 8-fragment table</li>
+    <li><strong>COMMIT phase internal signals</strong>: ~6 signals per node (DBTC, DBSPJ, DBDIH, SUMA)</li>
+    <li><strong>WAIT_GCP</strong>: up to ~2 seconds</li>
+    <li><strong>Commit mutex</strong>: serialization with concurrent DDL</li>
+  </ul>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="drop-table">4. DROP TABLE: Complete Signal Flow</h2>
+
+<p>DROP TABLE follows the same SchemaTransaction phases. The DDL-specific work is distributed
+differently across phases compared to CREATE TABLE.</p>
+
+<h3 id="drop-parse">4.1 <span class="phase-tag phase-start">BEGIN</span> + <span class="phase-tag phase-parse">RT_PARSE</span> Parse &amp; Validate</h3>
+
+<div class="phase-band parse-band">
+<div class="diagram-box">
+<pre class="signal-flow">
+<span class="note">(BEGIN: same as CREATE TABLE &mdash; RT_START broadcast, alloc SchemaTrans)</span>
+
+<span class="block">NDB API</span> <span class="arrow">&rarr;</span> <span class="signal">DROP_TABLE_REQ</span> <span class="arrow">&rarr;</span> <span class="block">DBDICT master</span>
+
+<span class="rt">SCHEMA_TRANS_IMPL_REQ(RT_PARSE)</span> <span class="arrow">&rarr;</span> <span class="note">all nodes</span>
+  Each node: dropTable_parse()
+    &bull; Validate tableId and version match
+    &bull; Check m_read_locked (not locked for backup)
+    &bull; Log schema operation as SF_DROP in schema file
+    &bull; Sets up sub-operations (drop triggers, remove from index list)
+  Each node <span class="arrow">&rarr;</span> <span class="signal">SCHEMA_TRANS_IMPL_CONF</span>
+
+<span class="signal">DROP_TABLE_CONF</span> <span class="arrow">&rarr;</span> <span class="block">NDB API</span>
+</pre>
+</div>
+</div>
+
+<h3 id="drop-prepare">4.2 <span class="phase-tag phase-flush">RT_FLUSH_PREPARE</span> + <span class="phase-tag phase-prepare">RT_PREPARE</span></h3>
+
+<div class="phase-band prepare-band">
+<div class="diagram-box">
+<pre class="signal-flow">
+<span class="rt">SCHEMA_TRANS_IMPL_REQ(RT_FLUSH_PREPARE)</span> <span class="arrow">&rarr;</span> <span class="note">all nodes</span>
+  <span class="flush">Schema file write (conditional)</span>
+
+<span class="rt">SCHEMA_TRANS_IMPL_REQ(RT_PREPARE)</span> <span class="arrow">&rarr;</span> <span class="note">all nodes</span>
+  Each node: dropTable_prepare()
+    &bull; <span class="note">Acquire backup mutex</span> <span class="note">&mdash; prevents concurrent backup reading this table</span>
+    &bull; dropTable_backup_mutex_locked():
+        Verify table still not locked for backup
+    &bull; Release mutex, confirm prepare
+  Each node <span class="arrow">&rarr;</span> <span class="signal">SCHEMA_TRANS_IMPL_CONF</span>
+</pre>
+</div>
+</div>
+
+<h3 id="drop-commit">4.3 <span class="phase-tag phase-flush">RT_FLUSH_COMMIT</span> + <span class="phase-tag phase-commit">RT_COMMIT</span> Sequential Block Drop</h3>
+
+<p><span class="phase-tag phase-commit">COMMIT</span> is where the actual drop coordination happens.
+Blocks are notified <strong>sequentially</strong> with <code>PREP_DROP_TAB_REQ</code>:</p>
+
+<div class="phase-band commit-band">
+<div class="diagram-box">
+<pre class="signal-flow">
+<span class="rt">SCHEMA_TRANS_IMPL_REQ(RT_FLUSH_COMMIT)</span> <span class="arrow">&rarr;</span> <span class="note">all nodes</span>
+  <span class="flush">Schema file write + acquire commit mutex</span>
+
+<span class="rt">SCHEMA_TRANS_IMPL_REQ(RT_COMMIT)</span> <span class="arrow">&rarr;</span> <span class="note">slaves first, master last</span>
+
+<span class="note">On each node, dropTable_commit() executes:</span>
+
+  &boxvr;&HorizontalLine; Remove index from base table's index list (if index)
+  &boxvr;&HorizontalLine; Send event NDB_LE_DropSchemaObject
+  &boxv;
+  &boxvr;&HorizontalLine; dropTable_commit_nextStep() <span class="note">&mdash; SEQUENTIAL block iteration:</span>
+  &boxv;
+  &boxv;  <span class="note">Step 1:</span> <span class="signal">PREP_DROP_TAB_REQ</span> <span class="arrow">&rarr;</span> <span class="block">DBLQH</span> (via DblqhProxy, all LDM instances)
+  &boxv;     <span class="block">DBLQH</span>: mark table dropping, wait for active operations to drain
+  &boxv;     <span class="block">DBLQH</span> <span class="arrow">&rarr;</span> <span class="signal">PREP_DROP_TAB_CONF</span> <span class="arrow">&rarr;</span> <span class="block">DBDICT</span>
+  &boxv;     <span class="note">&darr; wait for CONF before sending next &darr;</span>
+  &boxv;
+  &boxv;  <span class="note">Step 2:</span> <span class="signal">PREP_DROP_TAB_REQ</span> <span class="arrow">&rarr;</span> <span class="block">DBSPJ</span>
+  &boxv;     <span class="block">DBSPJ</span>: mark table dropping
+  &boxv;     <span class="block">DBSPJ</span> <span class="arrow">&rarr;</span> <span class="signal">PREP_DROP_TAB_CONF</span> <span class="arrow">&rarr;</span> <span class="block">DBDICT</span>
+  &boxv;
+  &boxv;  <span class="note">Step 3:</span> <span class="signal">PREP_DROP_TAB_REQ</span> <span class="arrow">&rarr;</span> <span class="block">DBTC</span>
+  &boxv;     <span class="block">DBTC</span>: mark table dropping, reject new transactions
+  &boxv;     <span class="block">DBTC</span> <span class="arrow">&rarr;</span> <span class="signal">PREP_DROP_TAB_CONF</span> <span class="arrow">&rarr;</span> <span class="block">DBDICT</span>
+  &boxv;
+  &boxv;  <span class="note">Step 4:</span> <span class="signal">PREP_DROP_TAB_REQ</span> <span class="arrow">&rarr;</span> <span class="block">DBDIH</span>
+  &boxv;     <span class="block">DBDIH</span>: tabStatus = TS_DROPPING
+  &boxv;     <span class="block">DBDIH</span> <span class="arrow">&rarr;</span> <span class="signal">PREP_DROP_TAB_CONF</span> <span class="arrow">&rarr;</span> <span class="block">DBDICT</span>
+  &boxv;
+  &boxur;&HorizontalLine; dropTable_commit_done()
+
+Each node <span class="arrow">&rarr;</span> <span class="signal">SCHEMA_TRANS_IMPL_CONF</span> <span class="arrow">&rarr;</span> master
+</pre>
+<div class="caption">COMMIT phase sends PREP_DROP_TAB_REQ sequentially. The order DBLQH &rarr; DBSPJ &rarr; DBTC &rarr; DBDIH
+ensures in-flight DBLQH operations complete before DBTC stops accepting new ones.</div>
+</div>
+</div>
+
+<h3 id="drop-complete">4.4 <span class="phase-tag phase-flush">RT_FLUSH_COMPLETE</span> + <span class="phase-tag phase-complete">RT_COMPLETE</span> Resource Deallocation</h3>
+
+<p><span class="phase-tag phase-complete">COMPLETE</span> is where actual resources are freed.
+Again <strong>sequential</strong> block processing:</p>
+
+<div class="phase-band complete-band">
+<div class="diagram-box">
+<pre class="signal-flow">
+<span class="rt">SCHEMA_TRANS_IMPL_REQ(RT_FLUSH_COMPLETE)</span> <span class="arrow">&rarr;</span> <span class="note">all nodes</span>
+  <span class="flush">Schema file write + release commit mutex</span>
+
+<span class="rt">SCHEMA_TRANS_IMPL_REQ(RT_COMPLETE)</span> <span class="arrow">&rarr;</span> <span class="note">all nodes</span>
+
+<span class="note">On each node, dropTable_complete() executes:</span>
+
+  &boxvr;&HorizontalLine; dropTable_complete_nextStep() <span class="note">&mdash; SEQUENTIAL block iteration:</span>
+  &boxv;
+  &boxv;  <span class="note">Step 1:</span> <span class="signal">DROP_TAB_REQ</span> <span class="arrow">&rarr;</span> <span class="block">DBTC</span>
+  &boxv;     <span class="block">DBTC</span>: release TableRecord
+  &boxv;     <span class="block">DBTC</span> <span class="arrow">&rarr;</span> <span class="signal">DROP_TAB_CONF</span> <span class="arrow">&rarr;</span> <span class="block">DBDICT</span>
+  &boxv;
+  &boxv;  <span class="note">Step 2:</span> <span class="signal">DROP_TAB_REQ</span> <span class="arrow">&rarr;</span> <span class="block">DBSPJ</span>
+  &boxv;     <span class="block">DBSPJ</span>: release TableRecord
+  &boxv;     <span class="block">DBSPJ</span> <span class="arrow">&rarr;</span> <span class="signal">DROP_TAB_CONF</span> <span class="arrow">&rarr;</span> <span class="block">DBDICT</span>
+  &boxv;
+  &boxv;  <span class="note">Step 3:</span> <span class="signal">DROP_TAB_REQ</span> <span class="arrow">&rarr;</span> <span class="block">DBLQH</span> (via DblqhProxy)
+  &boxv;     <span class="block">DBLQH</span>: wait for usage to drain + LCP to finish
+  &boxv;     <span class="block">DBLQH</span> <span class="arrow">&rarr;</span> <span class="signal">DROP_TAB_CONF</span> <span class="arrow">&rarr;</span> <span class="block">DBDICT</span>
+  &boxv;
+  &boxv;  <span class="note">Step 4:</span> <span class="signal">DROP_TAB_REQ</span> <span class="arrow">&rarr;</span> <span class="block">DBDIH</span>
+  &boxv;     <span class="block">DBDIH</span>: update m_used_log_parts, remove from LCP queues
+  &boxv;     <span class="block">DBDIH</span>: wait for I/O completion (tabLcpStatus)
+  &boxv;     <span class="block">DBDIH</span>: releaseFragments() &mdash; free Fragmentstore + ReplicaRecord
+  &boxv;     <span class="block">DBDIH</span>: delete table file from disk <span class="flush">[DISK I/O]</span>
+  &boxv;     <span class="block">DBDIH</span> <span class="arrow">&rarr;</span> <span class="signal">DROP_TAB_CONF</span> <span class="arrow">&rarr;</span> <span class="block">DBDICT</span>
+  &boxv;
+  &boxv;  <span class="note">Step 5:</span> <span class="signal">DROP_TAB_REQ</span> <span class="arrow">&rarr;</span> <span class="block">DBLQH</span> (release pass, via DblqhProxy)
+  &boxv;     <span class="block">DBLQH</span>: dropTable_nextStep() state machine:
+  &boxv;       DROP_TABLE_WAIT_DONE &rarr; DROP_TABLE_ACC &rarr; DROP_TABLE_TUP &rarr; DROP_TABLE_TUX
+  &boxv;       <span class="signal">DROP_TAB_REQ</span> <span class="arrow">&rarr;</span> <span class="block">DBACC</span> (release hash index)
+  &boxv;       <span class="signal">DROP_TAB_REQ</span> <span class="arrow">&rarr;</span> <span class="block">DBTUP</span> (release tuple storage)
+  &boxv;       <span class="signal">DROP_TAB_REQ</span> <span class="arrow">&rarr;</span> <span class="block">DBTUX</span> (if ordered index)
+  &boxv;     removeTable() &mdash; release Fragrecords, free fragrec/fragid arrays
+  &boxv;     <span class="block">DBLQH</span> <span class="arrow">&rarr;</span> <span class="signal">DROP_TAB_CONF</span> <span class="arrow">&rarr;</span> <span class="block">DBDICT</span>
+  &boxv;
+  &boxur;&HorizontalLine; dropTable_complete_done():
+       unlinkDictObject(), releaseTableObject()
+       <span class="signal">DROP_TAB_CONF</span> <span class="arrow">&rarr;</span> <span class="block">SUMA</span> <span class="note">&mdash; replication notification</span>
+
+Each node <span class="arrow">&rarr;</span> <span class="signal">SCHEMA_TRANS_IMPL_CONF</span> <span class="arrow">&rarr;</span> master
+
+<span class="note">Then: WAIT_GCP (if applicable) + RT_END (same as CREATE TABLE)</span>
+</pre>
+<div class="caption">COMPLETE phase: 5 sequential steps. DBLQH is visited twice &mdash; first to wait for operations
+to drain, then to actually release fragment storage via ACC/TUP/TUX.</div>
+</div>
+</div>
+
+<div class="callout warn">
+  <strong>Total DROP TABLE cost:</strong>
+  <ul>
+    <li><strong>11 SCHEMA_TRANS_IMPL_REQ broadcast rounds</strong> (same as CREATE)</li>
+    <li><strong>COMMIT phase</strong>: 4 sequential PREP_DROP_TAB_REQ round-trips per node</li>
+    <li><strong>COMPLETE phase</strong>: 5 sequential DROP_TAB_REQ round-trips per node</li>
+    <li><strong>Total sequential internal signals</strong>: 9 round-trips per node (not parallelized)</li>
+    <li><strong>Schema file writes + WAIT_GCP + commit mutex</strong> (same overhead as CREATE)</li>
+  </ul>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="data-structures">5. Key Data Structures per Block</h2>
+
+<h3>DBDICT</h3>
+<table>
+  <tr><th>Structure</th><th>Purpose</th><th>Key Fields</th></tr>
+  <tr><td><code>SchemaTrans</code></td><td>Distributed DDL transaction</td><td><code>trans_key</code>, <code>m_state</code> (TS_*), <code>m_isMaster</code>, <code>m_masterRef</code>, <code>m_nodes</code> (bitmask), <code>m_wait_gcp_on_commit</code>, <code>m_flush_prepare/commit/complete</code>, <code>m_commit_mutex</code></td></tr>
+  <tr><td><code>SchemaOp</code></td><td>Single DDL operation</td><td><code>op_key</code>, <code>m_state</code> (OS_*), <code>m_oprec_ptr</code>, callbacks per phase</td></tr>
+  <tr><td><code>TableRecord</code></td><td>Table metadata</td><td><code>m_bits</code> (TR_Temporary=0x8, TR_Logged=0x1), <code>tableVersion</code>, <code>fragmentCount</code></td></tr>
+  <tr><td><code>DictObject</code></td><td>Generic schema object</td><td><code>m_id</code>, <code>m_type</code>, <code>m_ref_count</code></td></tr>
+</table>
+
+<h3>DBDIH</h3>
+<table>
+  <tr><th>Structure</th><th>Purpose</th><th>Key Fields</th></tr>
+  <tr><td><code>TabRecord</code></td><td>Table distribution info</td><td><code>tabStatus</code> (TS_IDLE/ACTIVE/CREATING/DROPPING), <code>totalfragments</code>, <code>tabStorage</code> (ST_NORMAL/TEMPORARY/NOLOGGING), <code>startFid[]</code> (fragment pointers), <code>noOfBackups</code></td></tr>
+  <tr><td><code>Fragmentstore</code></td><td>Per-fragment placement</td><td><code>fragId</code>, <code>preferredPrimary</code>, <code>activeNodes[]</code>, <code>m_log_part_id</code>, <code>storedReplicas</code>, <code>oldStoredReplicas</code>, <code>partition_id</code></td></tr>
+  <tr><td><code>ReplicaRecord</code></td><td>Per-replica state</td><td><code>procNode</code>, <code>createGci[]</code>, <code>initialGci</code>, <code>lcpId[]</code>, <code>lcpStatus[]</code>, <code>nextLcp</code></td></tr>
+  <tr><td><code>ConnectRecord</code></td><td>Operation tracking</td><td><code>connectState</code> (CREATE/ALTER/DROP), <code>table</code>, <code>m_alter</code></td></tr>
+</table>
+
+<h3>DBLQH</h3>
+<table>
+  <tr><th>Structure</th><th>Purpose</th><th>Key Fields</th></tr>
+  <tr><td><code>Tablerec</code></td><td>Local table state</td><td><code>fragrec[]</code> (Uint64 fragment pointers), <code>fragid[]</code> (Uint16 fragment IDs), <code>num_fragments</code>, <code>tableStatus</code> (NOT_DEFINED/ADD_TABLE_ONGOING/TABLE_DEFINED/PREP_DROP_TABLE_DONE)</td></tr>
+  <tr><td><code>Fragrecord</code></td><td>Local fragment state</td><td><code>fragId</code>, <code>accFragptr</code>, <code>tupFragptr</code>, <code>tuxFragptr</code>, <code>logFlag</code>, <code>lcpFlag</code>, <code>fragStatus</code> (FSACTIVE), <code>m_log_part_ptr_p</code>, <code>m_scanNumberMask</code></td></tr>
+  <tr><td><code>AddFragRecord</code></td><td>Fragment creation tracking</td><td><code>addfragStatus</code> (ACC_ADDFRAG/WAIT_TUP/WAIT_TUX), stored CreateTabReq</td></tr>
+</table>
+
+<h3>DBTUP / DBACC</h3>
+<table>
+  <tr><th>Structure</th><th>Purpose</th><th>Key Fields</th></tr>
+  <tr><td><code>DBTUP::Fragrecord</code></td><td>Tuple storage per fragment</td><td>Row storage, variable-length parts, tablespace info</td></tr>
+  <tr><td><code>DBACC::Fragment</code></td><td>Hash index per fragment</td><td>Hash buckets, load factors, key length, hash function</td></tr>
+</table>
+
+<h3>DBTC / DBSPJ</h3>
+<table>
+  <tr><th>Structure</th><th>Purpose</th><th>Key Fields</th></tr>
+  <tr><td><code>TableRecord</code></td><td>Table routing state</td><td><code>enabled</code> (bool), <code>dropping</code> (bool), <code>schemaVersion</code></td></tr>
+</table>
+
+<!-- ================================================================== -->
+<h2 id="existing-temp">6. Existing Temporary Table Support</h2>
+
+<p>NDB already has partial support for temporary tables, but it is incomplete:</p>
+
+<table>
+  <tr><th>Feature</th><th>Status</th><th>Location</th></tr>
+  <tr>
+    <td>NDB API: <code>setTemporary(true)</code></td>
+    <td style="color: var(--green);">Working</td>
+    <td><code>NdbDictionary.hpp</code>, <code>NdbDictionaryImpl.cpp:4749</code></td>
+  </tr>
+  <tr>
+    <td><code>TableTemporaryFlag</code> in DictTabInfo signal</td>
+    <td style="color: var(--green);">Working</td>
+    <td><code>DictTabInfo.hpp:121</code> (KeyValue 28)</td>
+  </tr>
+  <tr>
+    <td><code>DiAddTabReq.temporaryTable</code> field</td>
+    <td style="color: var(--green);">Working</td>
+    <td><code>DiAddTab.hpp:59</code></td>
+  </tr>
+  <tr>
+    <td>DBDIH: <code>tabStorage = ST_TEMPORARY</code></td>
+    <td style="color: var(--green);">Working</td>
+    <td><code>DbdihMain.cpp:13904-13909</code></td>
+  </tr>
+  <tr>
+    <td>DBLQH: <code>logFlag=STATE_FALSE, lcpFlag=LCP_STATE_FALSE</code></td>
+    <td style="color: var(--green);">Working</td>
+    <td><code>DblqhMain.cpp:3364-3371</code></td>
+  </tr>
+  <tr>
+    <td>DBDICT: skip <code>writeTableFile()</code> in PREPARE</td>
+    <td style="color: var(--green);">Working</td>
+    <td><code>Dbdict.cpp:7395-7405</code></td>
+  </tr>
+  <tr>
+    <td>DBDICT: <code>TR_Temporary</code> bit in TableRecord</td>
+    <td style="color: var(--red);">BROKEN</td>
+    <td><code>Dbdict.cpp:5843</code> &mdash; disabled by <code>#ifdef DOES_NOT_WORK_CURRENTLY</code></td>
+  </tr>
+</table>
+
+<div class="callout warn">
+  <strong>What still happens for temporary tables today (all unnecessary):</strong>
+  <ul>
+    <li><strong>11 SCHEMA_TRANS_IMPL_REQ broadcast rounds</strong> with multi-node coordination</li>
+    <li><strong>Up to 4 schema file writes</strong> during FLUSH phases (FLUSH_PREPARE, FLUSH_COMMIT, FLUSH_COMPLETE, END)</li>
+    <li><strong>Commit mutex</strong> acquisition/release (serializes with other DDL)</li>
+    <li>DBDIH allocates full ReplicaRecords with LCP tracking arrays</li>
+    <li>DBDIH packs table into pages (ZPACK_TABLE_INTO_PAGES) for disk persistence</li>
+    <li>WAIT_GCP at schema transaction complete</li>
+    <li>SUMA notifications (replication)</li>
+    <li>Backup mutex acquisition during DROP PREPARE</li>
+    <li>Sequential PREP_DROP_TAB_REQ / DROP_TAB_REQ to all blocks</li>
+  </ul>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="optimizations">7. Optimization Opportunities</h2>
+
+<h3 id="opt-generic">7.1 Generic Optimizations (All Tables)</h3>
+
+<div class="opt-card">
+  <div class="opt-title">G1: Parallelize DROP TABLE Block Notifications</div>
+  <p>Currently <code>PREP_DROP_TAB_REQ</code> is sent sequentially: DBLQH &rarr; DBSPJ &rarr; DBTC &rarr; DBDIH.
+  The sequential ordering ensures DBLQH drains in-flight operations before DBTC stops accepting new ones.
+  However, this can be relaxed: send to all blocks in parallel, then verify drain conditions after all respond.</p>
+  <p>Similarly, <code>DROP_TAB_REQ</code> in COMPLETE could be partially parallelized.</p>
+  <div class="opt-impact">Impact: Reduces DROP internal signals from 9 sequential to ~3 parallel rounds.</div>
+</div>
+
+<div class="opt-card">
+  <div class="opt-title">G2: Batch LQHADDATTREQ with CREATE_TAB_REQ</div>
+  <p>For tables with few attributes, the separate <code>LQHADDATTREQ</code> signal(s) could be combined
+  with the initial <code>CREATE_TAB_REQ</code> to eliminate a round-trip.</p>
+  <div class="opt-impact">Impact: Saves 1 proxy-fanned round-trip per table creation.</div>
+</div>
+
+<div class="opt-card">
+  <div class="opt-title">G3: Inline DBDIH Table Packing</div>
+  <p>The <code>ZPACK_TABLE_INTO_PAGES</code> continuation in DBDIH serializes table metadata into pages
+  via deferred signals (CONTINUEB). For simple tables, this could be done inline without the continuation overhead.</p>
+  <div class="opt-impact">Impact: Saves 1-2 continuation signal delays in DBDIH.</div>
+</div>
+
+<h3 id="opt-temp">7.2 Temporary Table Specific Optimizations</h3>
+
+<div class="opt-card">
+  <div class="opt-title">T1: Fix TR_Temporary Bit <span class="phase-tag phase-skip">PREREQUISITE</span></div>
+  <p>Remove <code>#ifdef DOES_NOT_WORK_CURRENTLY</code> at Dbdict.cpp:5843 to enable the
+  <code>TR_Temporary</code> bit in <code>TableRecord::m_bits</code>. Investigate why it was disabled.
+  This gates all DBDICT-level optimizations.</p>
+  <div class="opt-impact">Impact: Enables further optimizations. Low risk.</div>
+</div>
+
+<div class="opt-card">
+  <div class="opt-title">T2: Skip SUMA Notifications</div>
+  <p>Temporary tables need no replication. Skip <code>CREATE_TAB_CONF</code> to SUMA during
+  <code>createTab_alterComplete()</code> and <code>DROP_TAB_CONF</code> to SUMA during
+  <code>dropTable_complete_done()</code>.</p>
+  <div class="opt-impact">Impact: Saves 1 signal per CREATE and DROP.</div>
+</div>
+
+<div class="opt-card">
+  <div class="opt-title">T3: Skip WAIT_GCP</div>
+  <p>Temporary tables don't need durability guarantees. When a SchemaTransaction contains only
+  temporary table operations, clear <code>m_wait_gcp_on_commit</code> to skip the
+  <code>WAIT_GCP_REQ</code> at transaction complete.</p>
+  <div class="opt-impact">Impact: Saves up to ~2 seconds of latency.</div>
+</div>
+
+<div class="opt-card">
+  <div class="opt-title">T4: Skip Backup Mutex in DROP</div>
+  <p>Temporary tables cannot be part of backups. Skip the backup mutex acquisition in
+  <code>dropTable_prepare()</code> for temporary tables.</p>
+  <div class="opt-impact">Impact: Eliminates potential blocking wait during DROP.</div>
+</div>
+
+<div class="opt-card">
+  <div class="opt-title">T5: Simplify DBDIH Processing</div>
+  <p>DBDIH must remain in the flow (DBTC uses it for fragment routing), but its work can be greatly simplified:</p>
+  <ul>
+    <li>Skip <code>ZPACK_TABLE_INTO_PAGES</code> &mdash; no disk persistence needed</li>
+    <li>Skip table file writes to disk</li>
+    <li>Skip <code>ReplicaRecord</code> allocation &mdash; no replicas for temp tables (single copy)</li>
+    <li>Simplify fragment allocation &mdash; default single fragment, local node only</li>
+    <li>Skip LCP queue management and log part tracking</li>
+  </ul>
+  <div class="opt-impact">Impact: Eliminates all disk I/O in DBDIH + reduces memory allocation. Major speedup.</div>
+</div>
+
+<div class="opt-card">
+  <div class="opt-title">T6: Parallelize DROP Block Notifications for Temp Tables</div>
+  <p>Since temp tables have no concurrent users from other sessions, the sequential ordering
+  constraint (drain DBLQH before stopping DBTC) can be relaxed. Send <code>PREP_DROP_TAB_REQ</code>
+  and <code>DROP_TAB_REQ</code> to all blocks in parallel.</p>
+  <div class="opt-impact">Impact: Reduces DROP from ~9 sequential round-trips to ~2 parallel rounds.</div>
+</div>
+
+<div class="opt-card">
+  <div class="opt-title">T7: Lightweight Schema Transaction</div>
+  <p>For temporary tables, the full SchemaTransaction with multi-node FLUSH broadcasts is unnecessary.
+  A lightweight path could:</p>
+  <ul>
+    <li>Skip all three <code>RT_FLUSH_*</code> phases &mdash; no schema file writes needed (saves 3 broadcast rounds + disk I/O)</li>
+    <li>Skip commit mutex acquisition/release &mdash; no serialization with other DDL needed</li>
+    <li>Allocate table IDs from a reserved temp-table range (avoid schema file scan in <code>getFreeObjId()</code>)</li>
+    <li>Potentially skip <code>RT_START</code>/<code>RT_END</code> for single-node temp tables</li>
+  </ul>
+  <div class="opt-impact">Impact: Reduces from 11 broadcast rounds to ~5 (START, PARSE, PREPARE, COMMIT, COMPLETE, END minus FLUSHes).
+  Eliminates all schema file disk I/O during DDL.</div>
+</div>
+
+<div class="opt-card">
+  <div class="opt-title">T8: Session Isolation</div>
+  <p>Temp tables should be invisible to other NDB API sessions. Natural isolation from:</p>
+  <ul>
+    <li>No SUMA notifications &rarr; other sessions don't learn via replication</li>
+    <li>Reserved table ID range &rarr; other sessions won't stumble on the ID</li>
+    <li>Filter temp tables from <code>listTables()</code> for non-owning sessions</li>
+    <li>Auto-drop all session temp tables on disconnect</li>
+  </ul>
+  <div class="opt-impact">Impact: Enables safe multi-session usage.</div>
+</div>
+
+<div class="opt-card">
+  <div class="opt-title">T9: Pre-allocation and Pooling</div>
+  <p>For very rapid create/drop cycles, pre-allocate resources:</p>
+  <ul>
+    <li>Pre-allocate a pool of table IDs reserved for temp tables</li>
+    <li>Pre-allocate Fragrecord slots in DBLQH</li>
+    <li>"Template table" concept: define schema once, rapidly instantiate copies</li>
+  </ul>
+  <div class="opt-impact">Impact: Reduces allocation latency for rapid create/drop patterns.</div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="signal-comparison">8. Signal Flow Comparison: Current vs Optimized</h2>
+
+<h3>CREATE TABLE</h3>
+
+<div class="diagram-box">
+<h4 style="color: var(--text-dim);">Current (~20+ signals + 11 broadcast rounds):</h4>
+<pre class="signal-flow">
+<span class="rt">RT_START</span>     <span class="arrow">&rarr;</span> all nodes          <span class="note">Alloc SchemaTrans</span>
+<span class="rt">RT_PARSE</span>     <span class="arrow">&rarr;</span> all nodes          <span class="note">createTable_parse()</span>
+<span class="rt">RT_FLUSH_PREPARE</span> <span class="arrow">&rarr;</span> all nodes  <span class="flush">[SCHEMA FILE WRITE]</span>
+<span class="rt">RT_PREPARE</span>   <span class="arrow">&rarr;</span> all nodes          <span class="note">createTable_prepare():</span>
+  <span class="flush">&bull; writeTableFile()                              [DISK I/O]</span>
+  &bull; CREATE_TAB_REQ &rarr; DBLQH(proxy) &rarr; DBTUP
+  &bull; LQHADDATTREQ &rarr; DBLQH(proxy)
+  &bull; DIADDTABREQ &rarr; DBDIH:
+      allocFragments + allocStoredReplica (full replicas)
+      <span class="flush">ZPACK_TABLE_INTO_PAGES                        [DISK I/O + continuations]</span>
+      <span class="flush">write table file                               [DISK I/O]</span>
+      For each fragment (N):
+        DBDIH &rarr; DBDICT &rarr; LQHFRAGREQ &rarr; DBLQH &rarr; DBACC + DBTUP
+        DBLQH &rarr; DBDICT &rarr; DBDIH                  <span class="note">[3 hops &times; N]</span>
+  &bull; TAB_COMMITREQ &rarr; DBLQH(proxy)
+<span class="rt">RT_FLUSH_COMMIT</span>  <span class="arrow">&rarr;</span> all nodes  <span class="flush">[SCHEMA FILE WRITE + COMMIT MUTEX]</span>
+<span class="rt">RT_COMMIT</span>    <span class="arrow">&rarr;</span> all nodes          <span class="note">createTable_commit():</span>
+  &bull; CONNECT_TABLE_DB_REQ &rarr; DBLQH + DBTC
+  &bull; TAB_COMMITREQ &rarr; DBDIH, DBSPJ, DBTC
+  &bull; TC_SCHVERREQ &rarr; DBSPJ
+  &bull; CREATE_TAB_CONF &rarr; SUMA
+<span class="rt">RT_FLUSH_COMPLETE</span> <span class="arrow">&rarr;</span> all nodes <span class="flush">[SCHEMA FILE WRITE + RELEASE MUTEX]</span>
+<span class="rt">RT_COMPLETE</span>  <span class="arrow">&rarr;</span> all nodes          <span class="note">createTable_complete() (no-op)</span>
+<span class="note">WAIT_GCP                                          [up to ~2 sec]</span>
+<span class="rt">RT_END</span>       <span class="arrow">&rarr;</span> all nodes          <span class="flush">[SCHEMA FILE WRITE]</span>
+</pre>
+
+<h4 style="color: var(--green); margin-top: 2rem;">Optimized Temp Table (no disk I/O, no FLUSH rounds):</h4>
+<pre class="signal-flow">
+<span class="rt">RT_START</span>     <span class="arrow">&rarr;</span> all nodes          <span class="note">Alloc SchemaTrans</span>
+<span class="rt">RT_PARSE</span>     <span class="arrow">&rarr;</span> all nodes          <span class="note">createTable_parse()</span>
+<span class="skip">RT_FLUSH_PREPARE &rarr; SKIPPED (no schema file needed)</span>
+<span class="rt">RT_PREPARE</span>   <span class="arrow">&rarr;</span> all nodes          <span class="note">createTable_prepare() (simplified):</span>
+  <span class="skip">&bull; writeTableFile()                 SKIPPED (already done for temp)</span>
+  &bull; CREATE_TAB_REQ &rarr; DBLQH(proxy) &rarr; DBTUP
+  &bull; LQHADDATTREQ &rarr; DBLQH(proxy)
+  &bull; DIADDTABREQ &rarr; DBDIH <span class="note">(simplified: no replicas, no disk pack, 1 fragment)</span>
+      DBDIH &rarr; DBDICT &rarr; LQHFRAGREQ &rarr; DBLQH &rarr; DBACC + DBTUP  <span class="note">[&times;1]</span>
+  &bull; TAB_COMMITREQ &rarr; DBLQH(proxy)
+<span class="skip">RT_FLUSH_COMMIT  &rarr; SKIPPED (no schema file, no commit mutex)</span>
+<span class="rt">RT_COMMIT</span>    <span class="arrow">&rarr;</span> all nodes          <span class="note">createTable_commit() (simplified):</span>
+  &bull; TAB_COMMITREQ &rarr; DBTC, DBSPJ, DBDIH
+  <span class="skip">&bull; CREATE_TAB_CONF &rarr; SUMA         SKIPPED (no replication)</span>
+<span class="skip">RT_FLUSH_COMPLETE &rarr; SKIPPED (no schema file, no mutex release)</span>
+<span class="rt">RT_COMPLETE</span>  <span class="arrow">&rarr;</span> all nodes          <span class="note">createTable_complete() (no-op)</span>
+<span class="skip">WAIT_GCP                            SKIPPED (no durability needed)</span>
+<span class="rt">RT_END</span>       <span class="arrow">&rarr;</span> all nodes          <span class="note">Release SchemaTrans (no schema file write)</span>
+</pre>
+<div class="caption">Optimized path: 7 broadcast rounds (vs 11), zero disk I/O (vs up to 8 writes),
+no WAIT_GCP (vs ~2 sec), single fragment (vs N fragment loops).</div>
+</div>
+
+<h3>DROP TABLE</h3>
+
+<div class="diagram-box">
+<h4 style="color: var(--text-dim);">Current (~12 signals + 11 broadcast rounds, sequential):</h4>
+<pre class="signal-flow">
+<span class="rt">RT_START</span> + <span class="rt">RT_PARSE</span>              <span class="note">Validate table</span>
+<span class="rt">RT_FLUSH_PREPARE</span>               <span class="flush">[SCHEMA FILE WRITE]</span>
+<span class="rt">RT_PREPARE</span>                     <span class="note">Acquire backup mutex</span>
+<span class="rt">RT_FLUSH_COMMIT</span>                <span class="flush">[SCHEMA FILE WRITE + COMMIT MUTEX]</span>
+<span class="rt">RT_COMMIT</span>                      <span class="note">dropTable_commit():</span>
+  Sequential: PREP_DROP &rarr; DBLQH &rarr; DBSPJ &rarr; DBTC &rarr; DBDIH <span class="note">[4 sequential]</span>
+<span class="rt">RT_FLUSH_COMPLETE</span>              <span class="flush">[SCHEMA FILE WRITE + RELEASE MUTEX]</span>
+<span class="rt">RT_COMPLETE</span>                    <span class="note">dropTable_complete():</span>
+  Sequential: DROP_TAB &rarr; DBTC &rarr; DBSPJ &rarr; DBLQH &rarr; DBDIH &rarr; DBLQH(rel) <span class="note">[5 sequential]</span>
+  SUMA notification
+<span class="note">WAIT_GCP</span>                       <span class="note">[up to ~2 sec]</span>
+<span class="rt">RT_END</span>                         <span class="flush">[SCHEMA FILE WRITE]</span>
+</pre>
+
+<h4 style="color: var(--green); margin-top: 2rem;">Optimized Temp Table (parallel, no disk I/O):</h4>
+<pre class="signal-flow">
+<span class="rt">RT_START</span> + <span class="rt">RT_PARSE</span>              <span class="note">Validate table</span>
+<span class="skip">RT_FLUSH_PREPARE                SKIPPED</span>
+<span class="rt">RT_PREPARE</span>                     <span class="skip">No backup mutex</span>
+<span class="skip">RT_FLUSH_COMMIT                 SKIPPED</span>
+<span class="rt">RT_COMMIT</span>                      <span class="note">dropTable_commit():</span>
+  <span class="note">Parallel:</span> PREP_DROP &rarr; DBLQH + DBSPJ + DBTC + DBDIH <span class="note">[1 parallel round]</span>
+<span class="skip">RT_FLUSH_COMPLETE               SKIPPED</span>
+<span class="rt">RT_COMPLETE</span>                    <span class="note">dropTable_complete():</span>
+  <span class="note">Parallel:</span> DROP_TAB &rarr; DBLQH(&rarr;ACC+TUP) + DBSPJ + DBTC + DBDIH <span class="note">[1 parallel round]</span>
+  <span class="skip">SUMA notification              SKIPPED</span>
+<span class="skip">WAIT_GCP                        SKIPPED</span>
+<span class="rt">RT_END</span>                         <span class="note">Release SchemaTrans (no schema file)</span>
+</pre>
+<div class="caption">Optimized path: 7 broadcast rounds (vs 11), 2 parallel internal rounds (vs 9 sequential),
+zero disk I/O, no WAIT_GCP, no backup/commit mutex.</div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="source-files">9. Critical Source Files</h2>
+
+<table>
+  <tr><th>File</th><th>Key Lines</th><th>Relevance</th></tr>
+  <tr>
+    <td><code>storage/ndb/src/kernel/blocks/dbdict/Dbdict.cpp</code></td>
+    <td>5843, 6777, 7354, 7395, 8135, 8660, 8922, 9005, 9123, 27862, 28057, 28662, 29323, 29745, 29914, 30153</td>
+    <td>TR_Temporary guard, CREATE/DROP phases, SchemaTransaction machinery (trans_prepare_start, trans_commit_start, trans_complete_start, trans_end_start), SCHEMA_TRANS_IMPL_REQ dispatcher</td>
+  </tr>
+  <tr>
+    <td><code>storage/ndb/src/kernel/blocks/dbdict/Dbdict.hpp</code></td>
+    <td>334-344, 1874, 1972, 2281</td>
+    <td>TR_Temporary bit (0x8), OpInfo structure, SchemaOp states (OS_*), SchemaTrans states (TS_*)</td>
+  </tr>
+  <tr>
+    <td><code>storage/ndb/include/kernel/signaldata/SchemaTransImpl.hpp</code></td>
+    <td>34-46</td>
+    <td>RT_ request type enum (RT_START=0x0 through RT_END=0xa)</td>
+  </tr>
+  <tr>
+    <td><code>storage/ndb/src/kernel/blocks/dblqh/DblqhMain.cpp</code></td>
+    <td>2698, 3214, 3282, 3364, 3488, 3567, 4370, 4546, 4629</td>
+    <td>CREATE_TAB_REQ, LQHFRAGREQ, temp flag, log/lcp flags, ACCFRAG, TUPFRAG, DROP_TAB, removeTable</td>
+  </tr>
+  <tr>
+    <td><code>storage/ndb/src/kernel/blocks/dblqh/Dblqh.hpp</code></td>
+    <td>903</td>
+    <td>Fragrecord (accFragptr, tupFragptr, logFlag, lcpFlag)</td>
+  </tr>
+  <tr>
+    <td><code>storage/ndb/src/kernel/blocks/dbdih/DbdihMain.cpp</code></td>
+    <td>12807, 13815, 13904, 14082, 14405, 16203, 16702, 19789, 23613, 27511</td>
+    <td>CREATE_FRAGMENTATION_REQ, DIADDTABREQ, storage type, sendAddFragreq, DROP_TAB, prepare_add_table, allocFragments, packTableIntoPagesLab, allocStoredReplica, PREP_DROP_TAB</td>
+  </tr>
+  <tr>
+    <td><code>storage/ndb/src/kernel/blocks/dbdih/Dbdih.hpp</code></td>
+    <td>266, 542, 664, 718</td>
+    <td>Fragmentstore, ReplicaRecord, TabRecord, Storage enum (ST_TEMPORARY)</td>
+  </tr>
+  <tr>
+    <td><code>storage/ndb/src/ndbapi/NdbDictionaryImpl.cpp</code></td>
+    <td>4081, 4749, 4977, 9972, 10018</td>
+    <td>createTable, temp flag, sendCreateTable, beginSchemaTrans, endSchemaTrans</td>
+  </tr>
+  <tr>
+    <td><code>storage/ndb/include/kernel/signaldata/LqhFrag.hpp</code></td>
+    <td>52</td>
+    <td>TemporaryTable flag (0x00000010) in LqhFragReq::RequestInfo</td>
+  </tr>
+  <tr>
+    <td><code>storage/ndb/include/kernel/signaldata/DictTabInfo.hpp</code></td>
+    <td>121</td>
+    <td>TableTemporaryFlag = 28 in DictTabInfo serialization</td>
+  </tr>
+  <tr>
+    <td><code>storage/ndb/include/kernel/signaldata/DiAddTab.hpp</code></td>
+    <td>59</td>
+    <td>temporaryTable field in DiAddTabReq signal to DBDIH</td>
+  </tr>
+</table>
+
+<div class="callout success">
+  <strong>Next steps:</strong> See <code>storage/ndb/claude_files/temporary_table/CLAUDE.md</code>
+  for the phased implementation plan, starting with fixing TR_Temporary and progressively
+  optimizing CREATE/DROP for temporary tables.
+</div>
+
+</body>
+</html>

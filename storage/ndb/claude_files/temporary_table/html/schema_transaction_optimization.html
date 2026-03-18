@@ -1,0 +1,954 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Schema Transaction Optimization — Reducing the 11 Phases for Temporary Tables</title>
+<style>
+  :root {
+    --bg: #1a1a2e;
+    --surface: #16213e;
+    --surface2: #0f3460;
+    --accent: #e94560;
+    --accent2: #53d8fb;
+    --text: #eee;
+    --text-dim: #aab;
+    --green: #4ec9b0;
+    --yellow: #dcdcaa;
+    --blue: #569cd6;
+    --orange: #ce9178;
+    --purple: #c586c0;
+    --red: #f44747;
+    --border: #334;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    padding: 2rem;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 2.2rem; color: var(--accent2); border-bottom: 3px solid var(--accent); padding-bottom: 0.5rem; margin-bottom: 0.5rem; }
+  .subtitle { color: var(--text-dim); font-size: 1.1rem; margin-bottom: 2rem; }
+  h2 { font-size: 1.6rem; color: var(--accent2); margin-top: 3rem; margin-bottom: 1rem; padding-left: 0.5rem; border-left: 4px solid var(--accent); }
+  h3 { font-size: 1.2rem; color: var(--green); margin-top: 2rem; margin-bottom: 0.5rem; }
+  h4 { font-size: 1.05rem; color: var(--yellow); margin-top: 1.5rem; margin-bottom: 0.4rem; }
+  p { margin-bottom: 1rem; }
+  a { color: var(--accent2); }
+  ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+  li { margin-bottom: 0.3rem; }
+  code { font-family: 'Cascadia Code', 'Fira Code', 'Menlo', monospace; background: var(--surface); padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.88rem; }
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.2rem 1.5rem; margin: 1rem 0 1.5rem; font-family: 'Cascadia Code', 'Fira Code', 'Menlo', monospace; font-size: 0.85rem; line-height: 1.5; overflow-x: auto; white-space: pre; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0 1.5rem; font-size: 0.9rem; }
+  th { background: var(--surface2); color: var(--accent2); padding: 0.7rem 1rem; text-align: left; border-bottom: 2px solid var(--accent); }
+  td { padding: 0.6rem 1rem; border-bottom: 1px solid var(--border); }
+  tr:hover td { background: rgba(83, 216, 251, 0.05); }
+
+  .diagram-box { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1.5rem; margin: 1.5rem 0; overflow-x: auto; }
+  .diagram-box .caption { color: var(--text-dim); font-size: 0.85rem; text-align: center; margin-top: 0.5rem; font-style: italic; }
+  .callout { background: var(--surface2); border-left: 4px solid var(--accent); border-radius: 0 8px 8px 0; padding: 1rem 1.5rem; margin: 1rem 0; }
+  .callout.info { border-left-color: var(--blue); }
+  .callout.warn { border-left-color: var(--yellow); }
+  .callout.success { border-left-color: var(--green); }
+  .callout.danger { border-left-color: var(--red); }
+
+  .toc { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1.5rem 2rem; margin: 1.5rem 0; }
+  .toc h3 { color: var(--accent2); margin-top: 0; }
+  .toc ol { margin: 0.5rem 0 0 1.5rem; }
+  .toc li { margin-bottom: 0.3rem; }
+  .toc a { text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  .toc .toc-sub { margin-left: 1.5rem; font-size: 0.9rem; }
+
+  .signal-flow {
+    font-family: 'Cascadia Code', 'Fira Code', 'Menlo', monospace;
+    font-size: 0.82rem;
+    line-height: 1.6;
+  }
+  .signal-flow .arrow { color: var(--accent2); }
+  .signal-flow .block { color: var(--green); font-weight: bold; }
+  .signal-flow .signal { color: var(--yellow); }
+  .signal-flow .note { color: var(--text-dim); font-style: italic; }
+  .signal-flow .skip { color: var(--red); text-decoration: line-through; }
+  .signal-flow .rt { color: var(--accent); font-weight: bold; }
+  .signal-flow .new { color: var(--green); font-weight: bold; }
+  .signal-flow .flush { color: #888; }
+  .signal-flow .kept { color: var(--accent2); }
+
+  .phase-tag {
+    display: inline-block;
+    padding: 0.1rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    font-weight: bold;
+    margin-right: 0.3rem;
+  }
+  .phase-remove { background: var(--red); color: white; }
+  .phase-keep { background: var(--green); color: #111; }
+  .phase-merge { background: var(--purple); color: white; }
+  .phase-new { background: var(--accent2); color: #111; }
+  .phase-simplify { background: var(--orange); color: #111; }
+
+  .comparison-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+    margin: 1.5rem 0;
+  }
+  .comparison-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.2rem 1.5rem;
+  }
+  .comparison-card h4 { margin-top: 0; }
+
+  @media (max-width: 800px) {
+    .comparison-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Schema Transaction Optimization</h1>
+<p class="subtitle">Reducing the 11 broadcast phases for temporary tables, eliminating the schema mutex,
+and merging phases for normal tables &mdash; a concrete design for RONDB-1034.</p>
+
+<div class="toc">
+  <h3>Table of Contents</h3>
+  <ol>
+    <li><a href="#problem">The Problem: 11 Phases &amp; the Schema Mutex</a></li>
+    <li><a href="#phase-analysis">Phase-by-Phase Dependency Analysis</a></li>
+    <li><a href="#table-id">Table ID Allocation Without the Schema Mutex</a></li>
+    <li><a href="#temp-design">Temporary Table Design: 3 Phases</a>
+      <div class="toc-sub">
+        <a href="#temp-phase1">Phase 1: PARSE+PREPARE</a> &middot;
+        <a href="#temp-phase2">Phase 2: COMMIT</a> &middot;
+        <a href="#temp-phase3">Phase 3: END</a>
+      </div>
+    </li>
+    <li><a href="#normal-design">Normal Table Optimization: 7 Phases</a>
+      <div class="toc-sub">
+        <a href="#normal-merge1">Merge START+PARSE</a> &middot;
+        <a href="#normal-merge2">Merge FLUSH_COMMIT+COMMIT</a> &middot;
+        <a href="#normal-merge3">Merge FLUSH_COMPLETE+COMPLETE</a> &middot;
+        <a href="#normal-merge4">Merge WAIT_GCP into END</a>
+      </div>
+    </li>
+    <li><a href="#signal-comparison">Signal Flow Comparison</a></li>
+    <li><a href="#implementation">Implementation Strategy</a></li>
+    <li><a href="#risks">Risks &amp; Mitigations</a></li>
+  </ol>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="problem">1. The Problem: 11 Phases &amp; the Schema Mutex</h2>
+
+<p>Today, creating a table requires <strong>11 SCHEMA_TRANS_IMPL_REQ broadcast rounds</strong>,
+each a full round-trip to every data node. For a 2-node cluster, that is 44 messages
+just for phase coordination, before counting the actual DDL work (fragment creation, etc.).</p>
+
+<div class="diagram-box">
+<pre class="signal-flow">
+<span class="rt">Current 11 phases:</span>
+
+ 1. <span class="rt">RT_START</span>           Alloc SchemaTrans on all nodes
+ 2. <span class="rt">RT_PARSE</span>           Execute parse handler on all nodes
+ 3. <span class="rt">RT_FLUSH_PREPARE</span>   Write schema file before prepare
+ 4. <span class="rt">RT_PREPARE</span>         Execute prepare handler (heavy: DBLQH/DBDIH fragment creation)
+ 5. <span class="rt">RT_FLUSH_COMMIT</span>    Write schema file + acquire commit mutex (DIH_START_LCP_MUTEX)
+ 6. <span class="rt">RT_COMMIT</span>          Execute commit handler (activate in DBTC/DBSPJ/DBDIH/SUMA)
+ 7. <span class="rt">RT_FLUSH_COMPLETE</span>  Write schema file + release commit mutex
+ 8. <span class="rt">RT_COMPLETE</span>        Execute complete handler (usually no-op)
+ 9. <span class="note">WAIT_GCP</span>           Wait for Global Checkpoint (~2 seconds worst case)
+10. <span class="rt">RT_END</span>             Write schema file + release SchemaTrans
+11. <span class="note">dict_lock_unlock</span>   Release schema lock
+</pre>
+<div class="caption">Plus: dict_lock_trylock() at the start serializes all DDL.
+Two concurrent CREATE TABLE requests run sequentially, not in parallel.</div>
+</div>
+
+<h3>The Schema Mutex Problem</h3>
+
+<p>The <code>dict_lock</code> (a <code>SchemaTransLock</code>) is acquired at the very start of
+<code>beginSchemaTrans()</code> and held until <code>RT_END</code> completes. It is:</p>
+
+<ul>
+  <li><strong>Node-local</strong> to the DBDICT master (not a distributed lock)</li>
+  <li><strong>Exclusive</strong>: only one schema transaction can run at a time</li>
+  <li>Implemented as a FIFO <code>LockQueue</code> &mdash; other DDL requests wait in line</li>
+  <li>Also blocks during node restart (<code>NodeRestartLock</code> is shared, but conflicts with <code>SchemaTransLock</code>)</li>
+</ul>
+
+<p>For temporary tables, holding this lock for the entire transaction duration means:</p>
+<ul>
+  <li>Creating a temp table blocks all other DDL on the entire cluster</li>
+  <li>Rapid temp table create/drop cycles serialize, can't be concurrent</li>
+  <li>A slow temp table creation (e.g., many fragments) blocks unrelated DDL</li>
+</ul>
+
+<div class="callout danger">
+  <strong>Why does the lock exist?</strong> It protects two things:
+  <ol>
+    <li><strong>Table ID allocation</strong>: <code>getFreeObjId()</code> does a linear scan of the schema file
+    to find an unused slot. Without the lock, two concurrent creates could claim the same ID.</li>
+    <li><strong>Schema file consistency</strong>: The schema file has OLD and NEW copies. Concurrent
+    writes to both could corrupt state transitions used for crash recovery.</li>
+  </ol>
+  For temporary tables, <strong>neither concern applies</strong> if we allocate IDs from a reserved
+  range and skip schema file writes entirely.
+</div>
+
+<!-- ================================================================== -->
+<h2 id="phase-analysis">2. Phase-by-Phase Dependency Analysis</h2>
+
+<p>To reduce the 11 phases, we need to understand what each phase does, what it depends on,
+and whether it can be removed, merged with an adjacent phase, or simplified.</p>
+
+<table>
+  <tr>
+    <th>Phase</th>
+    <th>What it Does</th>
+    <th>Why it Exists</th>
+    <th>Temp Table?</th>
+    <th>Normal Table?</th>
+  </tr>
+  <tr>
+    <td><code>RT_START</code></td>
+    <td>Allocate SchemaTrans on all nodes. Set <code>m_isMaster</code>/<code>m_masterRef</code>.</td>
+    <td>Participants need local state to track the transaction.</td>
+    <td><span class="phase-tag phase-merge">MERGE</span> into PARSE</td>
+    <td><span class="phase-tag phase-merge">MERGE</span> into PARSE</td>
+  </tr>
+  <tr>
+    <td><code>RT_PARSE</code></td>
+    <td>Execute <code>createTable_parse()</code> on all nodes. Validate table definition, allocate TableRecord, build KeyDescriptor.</td>
+    <td>Must validate on all nodes before committing resources. Errors here are cheap to abort.</td>
+    <td><span class="phase-tag phase-merge">MERGE</span> with PREPARE</td>
+    <td><span class="phase-tag phase-keep">KEEP</span></td>
+  </tr>
+  <tr>
+    <td><code>RT_FLUSH_PREPARE</code></td>
+    <td>Write schema file state <code>SF_STARTED</code>. Synchronize nodes before PREPARE.</td>
+    <td>Crash recovery: if node crashes after PREPARE, schema file tells us to roll back. Without it, half-prepared tables are invisible to recovery.</td>
+    <td><span class="phase-tag phase-remove">REMOVE</span></td>
+    <td><span class="phase-tag phase-keep">KEEP</span> (crash safety)</td>
+  </tr>
+  <tr>
+    <td><code>RT_PREPARE</code></td>
+    <td>Execute <code>createTable_prepare()</code>: write table file, create fragments in DBLQH, register in DBDIH.</td>
+    <td>The actual work. Must complete before commit makes the table visible.</td>
+    <td><span class="phase-tag phase-merge">MERGE</span> with PARSE</td>
+    <td><span class="phase-tag phase-keep">KEEP</span></td>
+  </tr>
+  <tr>
+    <td><code>RT_FLUSH_COMMIT</code></td>
+    <td>Write schema file state <code>SF_PREPARE</code>. Acquire <code>DIH_START_LCP_MUTEX</code> (commit mutex).</td>
+    <td>Crash recovery: node knows prepare succeeded. Mutex: prevent LCP from starting while schema changes are in flight.</td>
+    <td><span class="phase-tag phase-remove">REMOVE</span></td>
+    <td><span class="phase-tag phase-merge">MERGE</span> into COMMIT</td>
+  </tr>
+  <tr>
+    <td><code>RT_COMMIT</code></td>
+    <td>Execute <code>createTable_commit()</code>: activate table in DBTC, DBSPJ, DBDIH. Notify SUMA.</td>
+    <td>Makes the table visible and usable. Point of no return.</td>
+    <td><span class="phase-tag phase-keep">KEEP</span></td>
+    <td><span class="phase-tag phase-keep">KEEP</span></td>
+  </tr>
+  <tr>
+    <td><code>RT_FLUSH_COMPLETE</code></td>
+    <td>Write schema file state <code>SF_COMMIT</code>. Release commit mutex.</td>
+    <td>Crash recovery: node knows commit succeeded. Mutex release: let LCP proceed.</td>
+    <td><span class="phase-tag phase-remove">REMOVE</span></td>
+    <td><span class="phase-tag phase-merge">MERGE</span> into COMPLETE</td>
+  </tr>
+  <tr>
+    <td><code>RT_COMPLETE</code></td>
+    <td>Execute <code>createTable_complete()</code>. Usually no-op for CREATE TABLE.</td>
+    <td>For operations with cleanup work after commit (e.g., ALTER TABLE). Also: sub-operation completion.</td>
+    <td><span class="phase-tag phase-remove">REMOVE</span></td>
+    <td><span class="phase-tag phase-merge">MERGE</span> into END</td>
+  </tr>
+  <tr>
+    <td><code>WAIT_GCP</code></td>
+    <td>Wait for next Global Checkpoint.</td>
+    <td>Durability: ensures committed schema change survives a full cluster crash.</td>
+    <td><span class="phase-tag phase-remove">REMOVE</span></td>
+    <td><span class="phase-tag phase-merge">MERGE</span> into END</td>
+  </tr>
+  <tr>
+    <td><code>RT_END</code></td>
+    <td>Write final schema file state <code>SF_COMPLETE</code>. Release SchemaTrans. Release schema lock.</td>
+    <td>Cleanup: free memory, unlock for next DDL.</td>
+    <td><span class="phase-tag phase-keep">KEEP</span> (cleanup)</td>
+    <td><span class="phase-tag phase-keep">KEEP</span></td>
+  </tr>
+</table>
+
+<!-- ================================================================== -->
+<h2 id="table-id">3. Table ID Allocation Without the Schema Mutex</h2>
+
+<p>The schema mutex exists primarily to protect <code>getFreeObjId()</code>, which does a linear scan
+of the schema file for an unused table ID. For temporary tables, we can bypass this entirely.</p>
+
+<h3>Current Mechanism</h3>
+
+<div class="diagram-box">
+<pre class="signal-flow">
+<span class="block">getFreeObjId()</span> (Dbdict.cpp:2707-2724):
+
+  for i = 0 to (noOfPages * 127):       <span class="note">// Linear scan of ALL schema file entries</span>
+    if newSchemaFile[i].state == SF_UNUSED:
+      if !both || oldSchemaFile[i].state == SF_UNUSED:
+        return i                          <span class="note">// First free slot</span>
+  return RNIL                             <span class="note">// No free IDs!</span>
+
+<span class="note">Problems:</span>
+  &bull; O(n) scan time where n = total table capacity (up to 20,320)
+  &bull; Requires schema lock to prevent two callers finding the same free slot
+  &bull; Checks BOTH old and new schema file copies (for crash recovery safety)
+</pre>
+</div>
+
+<h3>Proposed: Reserved Range with Atomic Counter</h3>
+
+<div class="diagram-box">
+<pre class="signal-flow">
+<span class="new">Temp Table ID Allocation (no schema mutex needed):</span>
+
+  <span class="note">Configuration:</span>
+    c_tempTableIdBase  = c_noOfMetaTables - c_tempTableIdPoolSize
+    c_tempTableIdPoolSize = 2048           <span class="note">// configurable</span>
+    c_nextTempTableId  = atomic counter    <span class="note">// starts at c_tempTableIdBase</span>
+
+  <span class="block">getTempTableId()</span>:
+    loop:
+      id = atomic_fetch_add(&amp;c_nextTempTableId, 1)
+      if id >= c_noOfMetaTables:
+        c_nextTempTableId = c_tempTableIdBase  <span class="note">// wrap around</span>
+        continue
+      entry = getTableEntry(id)
+      if entry.state == SF_UNUSED &amp;&amp; !tableRecordInUse(id):
+        return id                           <span class="note">// O(1) in common case</span>
+    return RNIL                             <span class="note">// pool exhausted</span>
+
+<span class="note">Why this is safe without the schema lock:</span>
+  &bull; Normal tables never allocate from the temp range (getFreeObjId stops before it)
+  &bull; Atomic counter ensures two concurrent temp creates get different IDs
+  &bull; No schema file entries written for temp tables, so old/new copy conflict impossible
+  &bull; The only shared state is the atomic counter itself
+</pre>
+</div>
+
+<div class="callout info">
+  <strong>Alternative: Per-API-node ID pools.</strong> The master could pre-assign ranges of temp
+  table IDs to each API node (e.g., node 100 gets IDs 16000-16255, node 101 gets 16256-16511).
+  This eliminates even the atomic counter contention. The API node picks the next ID locally
+  and sends it in the CREATE_TABLE_REQ. The master validates it falls in the correct range.
+  This maps naturally to session isolation (each API node's temp tables are in its own range).
+</div>
+
+<div class="callout success">
+  <strong>Impact on normal tables:</strong> <code>getFreeObjId()</code> can be modified to stop scanning
+  before the reserved temp range: <code>for i = 0; i &lt; c_tempTableIdBase; i++</code>.
+  This actually <em>speeds up</em> normal table ID allocation too, since the search space shrinks.
+</div>
+
+<!-- ================================================================== -->
+<h2 id="temp-design">4. Temporary Table Design: 3 Phases</h2>
+
+<p>By removing the schema mutex, all FLUSH phases, the commit mutex, WAIT_GCP, SUMA notifications,
+and merging PARSE with PREPARE, we can reduce temporary table creation to <strong>3 broadcast
+phases</strong>:</p>
+
+<div class="diagram-box">
+<svg viewBox="0 0 900 520" xmlns="http://www.w3.org/2000/svg">
+  <text x="450" y="30" text-anchor="middle" fill="#53d8fb" font-size="16" font-weight="bold">Temporary Table: 3-Phase Schema Transaction</text>
+
+  <!-- Column headers -->
+  <text x="120" y="65" text-anchor="middle" fill="#53d8fb" font-size="13" font-weight="bold">NDB API</text>
+  <text x="350" y="65" text-anchor="middle" fill="#53d8fb" font-size="13" font-weight="bold">DBDICT Master</text>
+  <text x="650" y="65" text-anchor="middle" fill="#53d8fb" font-size="13" font-weight="bold">All DBDICT Nodes</text>
+  <line x1="10" y1="73" x2="890" y2="73" stroke="#334" stroke-width="1"/>
+
+  <!-- Lifelines -->
+  <line x1="120" y1="77" x2="120" y2="500" stroke="#334" stroke-width="1" stroke-dasharray="4,4"/>
+  <line x1="350" y1="77" x2="350" y2="500" stroke="#334" stroke-width="1" stroke-dasharray="4,4"/>
+  <line x1="650" y1="77" x2="650" y2="500" stroke="#334" stroke-width="1" stroke-dasharray="4,4"/>
+
+  <!-- API -> DBDICT: CREATE_TEMP_TABLE_REQ -->
+  <line x1="120" y1="95" x2="340" y2="95" stroke="#4ec9b0" stroke-width="1.5" marker-end="url(#arr2)"/>
+  <text x="230" y="91" text-anchor="middle" fill="#4ec9b0" font-size="10">CREATE_TEMP_TABLE_REQ</text>
+  <text x="350" y="115" text-anchor="middle" fill="#aab" font-size="9">getTempTableId() [atomic, no lock]</text>
+
+  <!-- Phase 1: PARSE+PREPARE -->
+  <rect x="10" y="130" width="880" height="160" rx="6" fill="rgba(86,156,214,0.12)" stroke="#569cd6" stroke-width="2"/>
+  <text x="30" y="150" fill="#569cd6" font-size="12" font-weight="bold">Phase 1: RT_PARSE_PREPARE (merged)</text>
+
+  <line x1="350" y1="165" x2="640" y2="165" stroke="#e94560" stroke-width="1.5" marker-end="url(#arr2)"/>
+  <text x="495" y="161" text-anchor="middle" fill="#e94560" font-size="10" font-weight="bold">SCHEMA_TRANS_IMPL_REQ</text>
+
+  <text x="670" y="185" fill="#569cd6" font-size="9">Each node (alloc SchemaTrans + parse + prepare):</text>
+  <text x="670" y="198" fill="#aab" font-size="9">1. createTable_parse() - validate, alloc TableRecord</text>
+  <text x="670" y="211" fill="#aab" font-size="9">2. CREATE_TAB_REQ &rarr; DBLQH &rarr; DBTUP</text>
+  <text x="670" y="224" fill="#aab" font-size="9">3. LQHADDATTREQ &rarr; DBLQH</text>
+  <text x="670" y="237" fill="#aab" font-size="9">4. DIADDTABREQ &rarr; DBDIH (simplified)</text>
+  <text x="670" y="250" fill="#aab" font-size="9">5. LQHFRAGREQ &rarr; DBLQH &rarr; DBACC + DBTUP</text>
+  <text x="670" y="263" fill="#aab" font-size="9">6. TAB_COMMITREQ &rarr; DBLQH</text>
+
+  <text x="180" y="280" fill="#888" font-size="9">No schema file writes. No disk I/O.</text>
+
+  <!-- Phase 2: COMMIT -->
+  <rect x="10" y="300" width="880" height="90" rx="6" fill="rgba(78,201,176,0.12)" stroke="#4ec9b0" stroke-width="2"/>
+  <text x="30" y="320" fill="#4ec9b0" font-size="12" font-weight="bold">Phase 2: RT_COMMIT</text>
+
+  <line x1="350" y1="338" x2="640" y2="338" stroke="#e94560" stroke-width="1.5" marker-end="url(#arr2)"/>
+  <text x="495" y="334" text-anchor="middle" fill="#e94560" font-size="10" font-weight="bold">SCHEMA_TRANS_IMPL_REQ</text>
+
+  <text x="670" y="352" fill="#aab" font-size="9">TAB_COMMITREQ &rarr; DBTC + DBSPJ + DBDIH</text>
+  <text x="670" y="365" fill="#f44747" font-size="9" text-decoration="line-through">No SUMA notification</text>
+  <text x="670" y="378" fill="#f44747" font-size="9" text-decoration="line-through">No commit mutex</text>
+
+  <!-- Phase 3: END -->
+  <rect x="10" y="400" width="880" height="55" rx="6" fill="rgba(110,42,42,0.15)" stroke="#6e2a2a" stroke-width="2"/>
+  <text x="30" y="420" fill="#ce9178" font-size="12" font-weight="bold">Phase 3: RT_END</text>
+
+  <line x1="350" y1="435" x2="640" y2="435" stroke="#e94560" stroke-width="1.5" marker-end="url(#arr2)"/>
+  <text x="495" y="431" text-anchor="middle" fill="#e94560" font-size="10" font-weight="bold">SCHEMA_TRANS_IMPL_REQ</text>
+  <text x="670" y="444" fill="#aab" font-size="9">Release SchemaTrans. No schema file write.</text>
+
+  <!-- Reply -->
+  <line x1="340" y1="470" x2="130" y2="470" stroke="#4ec9b0" stroke-width="1.5" marker-end="url(#arr2)"/>
+  <text x="230" y="466" text-anchor="middle" fill="#4ec9b0" font-size="10">CREATE_TEMP_TABLE_CONF</text>
+
+  <!-- Count -->
+  <rect x="30" y="485" width="840" height="25" rx="4" fill="var(--surface2)"/>
+  <text x="450" y="502" text-anchor="middle" fill="#4ec9b0" font-size="11" font-weight="bold">
+    3 broadcast rounds (down from 11) &mdash; zero disk I/O &mdash; no schema mutex
+  </text>
+
+  <defs>
+    <marker id="arr2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#aab"/>
+    </marker>
+  </defs>
+</svg>
+</div>
+
+<h3 id="temp-phase1">Phase 1: RT_PARSE_PREPARE (Merged)</h3>
+
+<p>The key insight is that PARSE and PREPARE can be merged for temporary tables because:</p>
+
+<ul>
+  <li><strong>No crash recovery needed</strong>: If a node crashes mid-PREPARE, temp table data is lost anyway.
+  There is no need for the FLUSH_PREPARE checkpoint that enables rolling back a half-prepared table.</li>
+  <li><strong>Parse errors are still detected</strong>: The merged handler runs parse first. If parse fails,
+  it returns REF immediately without starting prepare work.</li>
+  <li><strong>No schema file state transitions</strong>: Normal tables need SF_STARTED &rarr; SF_PREPARE for recovery.
+  Temp tables skip schema file entirely.</li>
+</ul>
+
+<div class="diagram-box">
+<pre class="signal-flow">
+<span class="new">RT_PARSE_PREPARE</span> handler on each node:
+
+  <span class="note">1. START work (inlined, no separate broadcast):</span>
+     Allocate local SchemaTrans, set m_isMaster/m_masterRef
+
+  <span class="note">2. PARSE work:</span>
+     createTable_parse():
+       &bull; Allocate SchemaOp + CreateTableRec
+       &bull; seizeTableRecord(tempTableId)     <span class="note">// ID already allocated by master</span>
+       &bull; handleTabInfoInit()               <span class="note">// populate metadata</span>
+       &bull; Build KeyDescriptor
+       &bull; <span class="note">If parse fails: return REF immediately (no cleanup needed)</span>
+
+  <span class="note">3. PREPARE work (only if parse succeeded):</span>
+     createTable_prepare():
+       <span class="skip">&bull; writeTableFile()                   SKIPPED (temp table)</span>
+       &bull; CREATE_TAB_REQ &rarr; DBLQH &rarr; DBTUP    <span class="note">// create table structure</span>
+       &bull; LQHADDATTREQ &rarr; DBLQH               <span class="note">// add attributes</span>
+       &bull; DIADDTABREQ &rarr; DBDIH                 <span class="note">// simplified: no replicas, no disk pack</span>
+         &bull; LQHFRAGREQ &rarr; DBLQH &rarr; DBACC + DBTUP  <span class="note">// create fragment</span>
+       &bull; TAB_COMMITREQ &rarr; DBLQH               <span class="note">// local commit</span>
+
+  <span class="note">4. Reply:</span>
+     SCHEMA_TRANS_IMPL_CONF &rarr; master
+</pre>
+</div>
+
+<div class="callout info">
+  <strong>Error handling in the merged phase:</strong> If parse succeeds but prepare fails (e.g.,
+  out of fragment records), the handler must clean up the parse artifacts before returning REF.
+  This is <code>createTable_abortPrepare()</code> followed by <code>createTable_abortParse()</code>,
+  both of which already exist.
+</div>
+
+<h3 id="temp-phase2">Phase 2: RT_COMMIT</h3>
+
+<p>This phase remains because DBTC and DBSPJ need to be notified that the table exists before
+operations can be routed to it. However, it is simplified:</p>
+
+<div class="diagram-box">
+<pre class="signal-flow">
+<span class="kept">RT_COMMIT</span> handler on each node:
+
+  createTable_commit() (simplified for temp):
+    <span class="skip">&bull; CONNECT_TABLE_DB_REQ              SKIPPED (not needed for temp)</span>
+    &bull; TAB_COMMITREQ &rarr; DBDIH             <span class="note">// tabStatus = TS_ACTIVE</span>
+    &bull; TAB_COMMITREQ &rarr; DBSPJ             <span class="note">// enabled = true</span>
+    &bull; TAB_COMMITREQ &rarr; DBTC              <span class="note">// enabled = true</span>
+    <span class="skip">&bull; TC_SCHVERREQ &rarr; DBSPJ              SKIPPED (not needed for temp)</span>
+    <span class="skip">&bull; CREATE_TAB_CONF &rarr; SUMA            SKIPPED (no replication)</span>
+    <span class="skip">&bull; commit mutex                       SKIPPED (no LCP interaction)</span>
+
+  SCHEMA_TRANS_IMPL_CONF &rarr; master
+</pre>
+</div>
+
+<h3 id="temp-phase3">Phase 3: RT_END</h3>
+
+<p>Minimal cleanup:</p>
+
+<div class="diagram-box">
+<pre class="signal-flow">
+<span class="kept">RT_END</span> handler on each node:
+
+  <span class="skip">&bull; Write schema file                  SKIPPED</span>
+  <span class="skip">&bull; WAIT_GCP                           SKIPPED</span>
+  &bull; Release SchemaTrans object
+  &bull; SCHEMA_TRANS_IMPL_CONF &rarr; master
+
+  Master:
+    <span class="skip">&bull; dict_lock_unlock()                 SKIPPED (lock was never acquired)</span>
+    &bull; SCHEMA_TRANS_END_CONF &rarr; NDB API
+</pre>
+</div>
+
+<h3>What About DROP for Temp Tables?</h3>
+
+<p>DROP follows the same 3-phase pattern:</p>
+
+<div class="diagram-box">
+<pre class="signal-flow">
+<span class="new">Temp Table DROP: 3 phases</span>
+
+<span class="new">Phase 1: RT_PARSE_PREPARE</span>
+  Parse: validate table exists, check version
+  Prepare: <span class="skip">no backup mutex (temp tables can't be backed up)</span>
+
+<span class="kept">Phase 2: RT_COMMIT</span>
+  <span class="note">PREP_DROP_TAB_REQ + DROP_TAB_REQ in parallel to all blocks:</span>
+    &bull; DBLQH: drop fragments (ACC + TUP + TUX), release Fragrecords
+    &bull; DBSPJ: release TableRecord
+    &bull; DBTC: release TableRecord
+    &bull; DBDIH: release Fragmentstore, TabRecord
+  <span class="note">All four blocks notified in parallel (no sequential ordering needed</span>
+  <span class="note">for temp tables since there are no concurrent users from other sessions)</span>
+  <span class="skip">&bull; SUMA notification                   SKIPPED</span>
+
+<span class="kept">Phase 3: RT_END</span>
+  &bull; unlinkDictObject(), releaseTableObject()
+  &bull; Release SchemaTrans
+  <span class="skip">&bull; Schema file write                   SKIPPED</span>
+  <span class="skip">&bull; WAIT_GCP                            SKIPPED</span>
+</pre>
+</div>
+
+<div class="callout info">
+  <strong>Merging PREP_DROP and DROP_TAB into COMMIT:</strong> For temp tables, the PREP_DROP
+  and DROP_TAB signals can be sent together in the COMMIT phase rather than using separate
+  COMMIT and COMPLETE phases. The sequential ordering (DBLQH before DBTC) exists to let in-flight
+  operations drain. For temp tables with no concurrent users, this is unnecessary &mdash; all blocks
+  can be notified in parallel, and both prep-drop and drop can be combined into a single step per block.
+</div>
+
+<!-- ================================================================== -->
+<h2 id="normal-design">5. Normal Table Optimization: 7 Phases</h2>
+
+<p>Even for normal (non-temporary) tables, we can reduce the 11 phases to <strong>7</strong> by
+merging adjacent phases that have no fundamental reason to be separate broadcasts:</p>
+
+<div class="diagram-box">
+<svg viewBox="0 0 900 550" xmlns="http://www.w3.org/2000/svg">
+  <text x="450" y="28" text-anchor="middle" fill="#53d8fb" font-size="15" font-weight="bold">Normal Table: 11 Phases &rarr; 7 Phases</text>
+
+  <!-- Current side -->
+  <rect x="20" y="48" width="400" height="470" rx="8" fill="rgba(0,0,0,0.2)" stroke="#334"/>
+  <text x="220" y="70" text-anchor="middle" fill="#text-dim" font-size="12" font-weight="bold">Current (11 phases)</text>
+
+  <!-- Proposed side -->
+  <rect x="480" y="48" width="400" height="470" rx="8" fill="rgba(0,0,0,0.2)" stroke="#334"/>
+  <text x="680" y="70" text-anchor="middle" fill="#4ec9b0" font-size="12" font-weight="bold">Proposed (7 phases)</text>
+
+  <!-- Current phases -->
+  <rect x="40" y="85" width="180" height="28" rx="4" fill="#2a6e3f" stroke="#4ec9b0"/>
+  <text x="130" y="103" text-anchor="middle" fill="white" font-size="10">1. RT_START</text>
+
+  <rect x="40" y="120" width="180" height="28" rx="4" fill="#5a2d6a" stroke="#c586c0"/>
+  <text x="130" y="138" text-anchor="middle" fill="white" font-size="10">2. RT_PARSE</text>
+
+  <rect x="40" y="155" width="180" height="28" rx="4" fill="#444" stroke="#888"/>
+  <text x="130" y="173" text-anchor="middle" fill="#aab" font-size="10">3. RT_FLUSH_PREPARE</text>
+
+  <rect x="40" y="190" width="180" height="28" rx="4" fill="#1a4a6e" stroke="#569cd6"/>
+  <text x="130" y="208" text-anchor="middle" fill="white" font-size="10">4. RT_PREPARE</text>
+
+  <rect x="40" y="225" width="180" height="28" rx="4" fill="#444" stroke="#888"/>
+  <text x="130" y="243" text-anchor="middle" fill="#aab" font-size="10">5. RT_FLUSH_COMMIT</text>
+
+  <rect x="40" y="260" width="180" height="28" rx="4" fill="#1a5e3f" stroke="#4ec9b0"/>
+  <text x="130" y="278" text-anchor="middle" fill="white" font-size="10">6. RT_COMMIT</text>
+
+  <rect x="40" y="295" width="180" height="28" rx="4" fill="#444" stroke="#888"/>
+  <text x="130" y="313" text-anchor="middle" fill="#aab" font-size="10">7. RT_FLUSH_COMPLETE</text>
+
+  <rect x="40" y="330" width="180" height="28" rx="4" fill="#5e3a1a" stroke="#ce9178"/>
+  <text x="130" y="348" text-anchor="middle" fill="white" font-size="10">8. RT_COMPLETE</text>
+
+  <rect x="40" y="365" width="180" height="28" rx="4" fill="#5e1a1a" stroke="#f44747" stroke-dasharray="4,2"/>
+  <text x="130" y="383" text-anchor="middle" fill="#f44747" font-size="10">9. WAIT_GCP</text>
+
+  <rect x="40" y="400" width="180" height="28" rx="4" fill="#4a1a1a" stroke="#6e2a2a"/>
+  <text x="130" y="418" text-anchor="middle" fill="white" font-size="10">10. RT_END</text>
+
+  <text x="130" y="455" text-anchor="middle" fill="#aab" font-size="10">11. dict_lock_unlock</text>
+
+  <!-- Proposed phases -->
+  <!-- 1: START+PARSE merged -->
+  <rect x="500" y="85" width="220" height="60" rx="4" fill="#5a2d6a" stroke="#c586c0" stroke-width="2"/>
+  <text x="610" y="108" text-anchor="middle" fill="white" font-size="10" font-weight="bold">1. RT_START_PARSE</text>
+  <text x="610" y="125" text-anchor="middle" fill="#aab" font-size="9">Alloc SchemaTrans + parse in one round</text>
+
+  <!-- Merge arrows -->
+  <line x1="220" y1="99" x2="500" y2="99" stroke="#c586c0" stroke-width="1" stroke-dasharray="3,3"/>
+  <line x1="220" y1="134" x2="500" y2="120" stroke="#c586c0" stroke-width="1" stroke-dasharray="3,3"/>
+
+  <!-- 2: FLUSH_PREPARE (kept) -->
+  <rect x="500" y="155" width="220" height="28" rx="4" fill="#444" stroke="#888"/>
+  <text x="610" y="173" text-anchor="middle" fill="#aab" font-size="10">2. RT_FLUSH_PREPARE</text>
+  <line x1="220" y1="169" x2="500" y2="169" stroke="#888" stroke-width="1" stroke-dasharray="3,3"/>
+
+  <!-- 3: PREPARE (kept) -->
+  <rect x="500" y="190" width="220" height="28" rx="4" fill="#1a4a6e" stroke="#569cd6" stroke-width="2"/>
+  <text x="610" y="208" text-anchor="middle" fill="white" font-size="10">3. RT_PREPARE</text>
+  <line x1="220" y1="204" x2="500" y2="204" stroke="#569cd6" stroke-width="1" stroke-dasharray="3,3"/>
+
+  <!-- 4: FLUSH_COMMIT+COMMIT merged -->
+  <rect x="500" y="225" width="220" height="60" rx="4" fill="#1a5e3f" stroke="#4ec9b0" stroke-width="2"/>
+  <text x="610" y="248" text-anchor="middle" fill="white" font-size="10" font-weight="bold">4. RT_FLUSH_COMMIT_AND_COMMIT</text>
+  <text x="610" y="265" text-anchor="middle" fill="#aab" font-size="9">Schema write + mutex + commit in one round</text>
+  <line x1="220" y1="239" x2="500" y2="239" stroke="#4ec9b0" stroke-width="1" stroke-dasharray="3,3"/>
+  <line x1="220" y1="274" x2="500" y2="260" stroke="#4ec9b0" stroke-width="1" stroke-dasharray="3,3"/>
+
+  <!-- 5: FLUSH_COMPLETE+COMPLETE merged -->
+  <rect x="500" y="295" width="220" height="60" rx="4" fill="#5e3a1a" stroke="#ce9178" stroke-width="2"/>
+  <text x="610" y="318" text-anchor="middle" fill="white" font-size="10" font-weight="bold">5. RT_FLUSH_COMPLETE_AND_COMPLETE</text>
+  <text x="610" y="335" text-anchor="middle" fill="#aab" font-size="9">Schema write + mutex release + complete</text>
+  <line x1="220" y1="309" x2="500" y2="309" stroke="#ce9178" stroke-width="1" stroke-dasharray="3,3"/>
+  <line x1="220" y1="344" x2="500" y2="335" stroke="#ce9178" stroke-width="1" stroke-dasharray="3,3"/>
+
+  <!-- 6: WAIT_GCP + END merged -->
+  <rect x="500" y="365" width="220" height="60" rx="4" fill="#4a1a1a" stroke="#6e2a2a" stroke-width="2"/>
+  <text x="610" y="388" text-anchor="middle" fill="white" font-size="10" font-weight="bold">6. WAIT_GCP</text>
+  <text x="610" y="405" text-anchor="middle" fill="#aab" font-size="9">Master-only, not a broadcast</text>
+  <line x1="220" y1="379" x2="500" y2="379" stroke="#6e2a2a" stroke-width="1" stroke-dasharray="3,3"/>
+
+  <!-- 7: END -->
+  <rect x="500" y="435" width="220" height="28" rx="4" fill="#4a1a1a" stroke="#6e2a2a"/>
+  <text x="610" y="453" text-anchor="middle" fill="white" font-size="10">7. RT_END</text>
+  <line x1="220" y1="414" x2="500" y2="448" stroke="#6e2a2a" stroke-width="1" stroke-dasharray="3,3"/>
+
+  <!-- Savings annotation -->
+  <rect x="500" y="480" width="220" height="25" rx="4" fill="var(--surface2)"/>
+  <text x="610" y="497" text-anchor="middle" fill="#4ec9b0" font-size="10" font-weight="bold">4 fewer broadcast rounds</text>
+</svg>
+</div>
+
+<h3 id="normal-merge1">Merge 1: START + PARSE &rarr; RT_START_PARSE</h3>
+
+<p><code>RT_START</code> allocates a <code>SchemaTrans</code> on each node.
+<code>RT_PARSE</code> executes the parse handler. There is no reason these can't be
+a single broadcast: the parse handler can allocate the SchemaTrans as its first step.</p>
+
+<div class="callout info">
+  <strong>What RT_START currently does on slaves</strong> (Dbdict.cpp:30312-30360):
+  Allocate SchemaTrans, set <code>m_isMaster=false</code>, set <code>m_masterRef</code>, set state
+  <code>TS_STARTED</code>. This is ~10 lines of code. There is no reason this must be a separate
+  network round-trip before PARSE.
+</div>
+
+<p><strong>Implementation</strong>: Add a new request type <code>RT_START_PARSE</code> that first runs
+<code>slave_run_start()</code> then immediately runs <code>slave_run_parse()</code>. The master
+sends a single broadcast instead of two. On error during parse, <code>slave_run_start()</code>
+cleanup is trivial (just release the SchemaTrans).</p>
+
+<h3 id="normal-merge2">Merge 2: FLUSH_COMMIT + COMMIT &rarr; RT_FLUSH_COMMIT_AND_COMMIT</h3>
+
+<p>Currently these are two separate broadcasts. <code>RT_FLUSH_COMMIT</code> writes the schema file
+and acquires the commit mutex, then <code>RT_COMMIT</code> runs the commit handler. These can be
+merged because:</p>
+
+<ul>
+  <li>The schema file write in FLUSH_COMMIT is a prerequisite for COMMIT (crash recovery needs to
+  know prepare succeeded before commit begins). But the write happens <em>locally on each node</em>,
+  not as a distributed operation.</li>
+  <li>After the local write completes, the node can immediately run the commit handler.</li>
+  <li>The master just needs to know all nodes completed both steps, which a single CONF achieves.</li>
+</ul>
+
+<p><strong>Implementation</strong>: The merged handler writes the schema file (if <code>m_flush_commit</code>
+is set), acquires the commit mutex, then executes the operation's commit callback, then sends CONF.
+The master gets one round-trip instead of two.</p>
+
+<h3 id="normal-merge3">Merge 3: FLUSH_COMPLETE + COMPLETE &rarr; RT_FLUSH_COMPLETE_AND_COMPLETE</h3>
+
+<p>Same reasoning as Merge 2. <code>RT_FLUSH_COMPLETE</code> writes the schema file and releases the
+commit mutex, then <code>RT_COMPLETE</code> runs the (usually no-op) complete handler. The local schema
+file write can be followed immediately by the complete handler in a single round.</p>
+
+<h3 id="normal-merge4">Merge 4: Move WAIT_GCP before RT_END</h3>
+
+<p><code>WAIT_GCP</code> is already not a broadcast &mdash; it's a signal from the master to its local DBDIH.
+It just needs to complete before <code>RT_END</code> releases the transaction. This is already the case
+today; we just list it as a distinct step because it adds latency. No merging needed, but it's worth
+noting that it does <em>not</em> add a broadcast round.</p>
+
+<h3>Summary: Normal Table Phase Reduction</h3>
+
+<table>
+  <tr><th>Current (11 broadcasts)</th><th>&rarr;</th><th>Proposed (7 broadcasts)</th><th>Savings</th></tr>
+  <tr><td>1. RT_START</td><td rowspan="2">&rarr;</td><td rowspan="2">1. RT_START_PARSE</td><td rowspan="2" style="color: var(--green);">-1 broadcast</td></tr>
+  <tr><td>2. RT_PARSE</td></tr>
+  <tr><td>3. RT_FLUSH_PREPARE</td><td>&rarr;</td><td>2. RT_FLUSH_PREPARE</td><td style="color: var(--text-dim);">unchanged</td></tr>
+  <tr><td>4. RT_PREPARE</td><td>&rarr;</td><td>3. RT_PREPARE</td><td style="color: var(--text-dim);">unchanged</td></tr>
+  <tr><td>5. RT_FLUSH_COMMIT</td><td rowspan="2">&rarr;</td><td rowspan="2">4. RT_FLUSH_COMMIT_AND_COMMIT</td><td rowspan="2" style="color: var(--green);">-1 broadcast</td></tr>
+  <tr><td>6. RT_COMMIT</td></tr>
+  <tr><td>7. RT_FLUSH_COMPLETE</td><td rowspan="2">&rarr;</td><td rowspan="2">5. RT_FLUSH_COMPLETE_AND_COMPLETE</td><td rowspan="2" style="color: var(--green);">-1 broadcast</td></tr>
+  <tr><td>8. RT_COMPLETE</td></tr>
+  <tr><td>9. WAIT_GCP</td><td>&rarr;</td><td>6. WAIT_GCP (master-local, not a broadcast)</td><td style="color: var(--text-dim);">unchanged</td></tr>
+  <tr><td>10. RT_END</td><td>&rarr;</td><td>7. RT_END</td><td style="color: var(--text-dim);">unchanged</td></tr>
+  <tr><td>11. dict_lock_unlock</td><td>&rarr;</td><td>(part of RT_END)</td><td style="color: var(--text-dim);">unchanged</td></tr>
+  <tr><td colspan="3" style="text-align: right; color: var(--green); font-weight: bold;">Total savings:</td><td style="color: var(--green); font-weight: bold;">-3 broadcasts (-27%)</td></tr>
+</table>
+
+<div class="callout warn">
+  <strong>Why FLUSH_PREPARE can't be merged with PREPARE:</strong>
+  The FLUSH_PREPARE schema file write records that a transaction has started. If a node crashes
+  after PREPARE allocates resources (fragments, etc.) but before the schema file records this,
+  crash recovery won't know to clean up those resources. The schema file write <em>must</em>
+  complete on all nodes before any node begins PREPARE work. This is a fundamental safety
+  requirement for normal tables. (Temp tables bypass this because lost resources are acceptable.)
+</div>
+
+<!-- ================================================================== -->
+<h2 id="signal-comparison">6. Signal Flow Comparison</h2>
+
+<div class="comparison-grid">
+  <div class="comparison-card">
+    <h4 style="color: var(--text-dim);">Current Normal Table: 11 broadcasts</h4>
+<pre class="signal-flow" style="font-size: 0.78rem;">
+ 1. <span class="rt">RT_START</span>
+ 2. <span class="rt">RT_PARSE</span>
+ 3. <span class="rt">RT_FLUSH_PREPARE</span>  <span class="flush">[disk]</span>
+ 4. <span class="rt">RT_PREPARE</span>         <span class="note">[heavy]</span>
+ 5. <span class="rt">RT_FLUSH_COMMIT</span>   <span class="flush">[disk+mutex]</span>
+ 6. <span class="rt">RT_COMMIT</span>
+ 7. <span class="rt">RT_FLUSH_COMPLETE</span> <span class="flush">[disk+mutex]</span>
+ 8. <span class="rt">RT_COMPLETE</span>
+ 9. <span class="note">WAIT_GCP</span>           <span class="note">[~2s]</span>
+10. <span class="rt">RT_END</span>             <span class="flush">[disk]</span>
+11. <span class="note">unlock</span>
+</pre>
+  </div>
+  <div class="comparison-card">
+    <h4 style="color: var(--green);">Optimized Normal Table: 7 broadcasts</h4>
+<pre class="signal-flow" style="font-size: 0.78rem;">
+1. <span class="new">RT_START_PARSE</span>       <span class="note">[merged]</span>
+2. <span class="rt">RT_FLUSH_PREPARE</span>    <span class="flush">[disk]</span>
+3. <span class="rt">RT_PREPARE</span>           <span class="note">[heavy]</span>
+4. <span class="new">RT_FLUSH+COMMIT</span>     <span class="flush">[disk+mutex+commit]</span>
+5. <span class="new">RT_FLUSH+COMPLETE</span>   <span class="flush">[disk+mutex+complete]</span>
+6. <span class="note">WAIT_GCP</span>             <span class="note">[~2s, local]</span>
+7. <span class="rt">RT_END</span>               <span class="flush">[disk]</span>
+</pre>
+  </div>
+</div>
+
+<div class="comparison-grid">
+  <div class="comparison-card">
+    <h4 style="color: var(--text-dim);">Current Temp Table: 11 broadcasts</h4>
+<pre class="signal-flow" style="font-size: 0.78rem;">
+ 1. <span class="rt">RT_START</span>
+ 2. <span class="rt">RT_PARSE</span>
+ 3. <span class="rt">RT_FLUSH_PREPARE</span>  <span class="flush">[disk]</span>
+ 4. <span class="rt">RT_PREPARE</span>         <span class="note">[heavy]</span>
+ 5. <span class="rt">RT_FLUSH_COMMIT</span>   <span class="flush">[disk+mutex]</span>
+ 6. <span class="rt">RT_COMMIT</span>
+ 7. <span class="rt">RT_FLUSH_COMPLETE</span> <span class="flush">[disk+mutex]</span>
+ 8. <span class="rt">RT_COMPLETE</span>
+ 9. <span class="note">WAIT_GCP</span>           <span class="note">[~2s]</span>
+10. <span class="rt">RT_END</span>             <span class="flush">[disk]</span>
+11. <span class="note">unlock</span>
+</pre>
+  </div>
+  <div class="comparison-card">
+    <h4 style="color: var(--green);">Optimized Temp Table: 3 broadcasts</h4>
+<pre class="signal-flow" style="font-size: 0.78rem;">
+1. <span class="new">RT_PARSE_PREPARE</span>    <span class="note">[parse+prepare merged]</span>
+2. <span class="kept">RT_COMMIT</span>            <span class="note">[activate in TC/SPJ/DIH]</span>
+3. <span class="kept">RT_END</span>               <span class="note">[release, no disk]</span>
+
+<span class="skip">No schema mutex</span>
+<span class="skip">No FLUSH phases (no disk I/O)</span>
+<span class="skip">No commit mutex</span>
+<span class="skip">No WAIT_GCP</span>
+<span class="skip">No SUMA</span>
+<span class="skip">No COMPLETE phase</span>
+</pre>
+  </div>
+</div>
+
+<h3>Broadcast Round Savings Summary</h3>
+
+<table>
+  <tr><th>Scenario</th><th>Current</th><th>Proposed</th><th>Reduction</th></tr>
+  <tr>
+    <td>Normal table CREATE</td>
+    <td>11 broadcasts + WAIT_GCP</td>
+    <td>7 broadcasts + WAIT_GCP</td>
+    <td style="color: var(--green);">-36%</td>
+  </tr>
+  <tr>
+    <td>Normal table DROP</td>
+    <td>11 broadcasts + 9 sequential internal</td>
+    <td>7 broadcasts + 9 sequential internal</td>
+    <td style="color: var(--green);">-36%</td>
+  </tr>
+  <tr>
+    <td>Temp table CREATE</td>
+    <td>11 broadcasts + WAIT_GCP + mutex</td>
+    <td>3 broadcasts, zero disk I/O</td>
+    <td style="color: var(--green); font-weight: bold;">-73%</td>
+  </tr>
+  <tr>
+    <td>Temp table DROP</td>
+    <td>11 broadcasts + 9 sequential internal</td>
+    <td>3 broadcasts + parallel internal</td>
+    <td style="color: var(--green); font-weight: bold;">-73%</td>
+  </tr>
+</table>
+
+<!-- ================================================================== -->
+<h2 id="implementation">7. Implementation Strategy</h2>
+
+<h3>Step 1: Table ID Reservation (prerequisite)</h3>
+
+<ul>
+  <li>Add config parameter <code>MaxNoOfTempTables</code> (default 2048)</li>
+  <li>Compute <code>c_tempTableIdBase = c_noOfMetaTables - MaxNoOfTempTables</code></li>
+  <li>Add atomic counter <code>c_nextTempTableId</code> initialized to <code>c_tempTableIdBase</code></li>
+  <li>Modify <code>getFreeObjId()</code> to stop scanning before <code>c_tempTableIdBase</code></li>
+  <li>Add <code>getTempTableId()</code> using the atomic counter</li>
+</ul>
+
+<h3>Step 2: Add RT_PARSE_PREPARE request type</h3>
+
+<ul>
+  <li>Add <code>RT_PARSE_PREPARE = 0xb</code> to <code>SchemaTransImplReq</code></li>
+  <li>Add handler in <code>execSCHEMA_TRANS_IMPL_REQ</code> that calls <code>slave_run_start()</code>,
+  then <code>slave_run_parse()</code>, then <code>createTable_prepare()</code></li>
+  <li>Master's <code>trans_prepare_start()</code>: detect temp table, skip FLUSH_PREPARE and send
+  <code>RT_PARSE_PREPARE</code> directly</li>
+</ul>
+
+<h3>Step 3: Temp table fast path in DBDICT</h3>
+
+<ul>
+  <li>In <code>execCREATE_TABLE_REQ</code>: detect <code>TableTemporaryFlag</code>, allocate temp ID,
+  skip <code>beginSchemaTrans()</code> / schema lock</li>
+  <li>Send <code>RT_PARSE_PREPARE</code> &rarr; <code>RT_COMMIT</code> &rarr; <code>RT_END</code> (3 rounds)</li>
+  <li>In commit handler: skip SUMA, skip TC_SCHVERREQ, skip CONNECT_TABLE_DB_REQ</li>
+  <li>In end handler: skip schema file write, skip WAIT_GCP</li>
+</ul>
+
+<h3>Step 4: Temp table fast path for DROP</h3>
+
+<ul>
+  <li>Same 3-phase pattern: <code>RT_PARSE_PREPARE</code> &rarr; <code>RT_COMMIT</code> &rarr; <code>RT_END</code></li>
+  <li>In commit: parallel PREP_DROP + DROP_TAB to all blocks simultaneously</li>
+  <li>In end: release DBDICT records, return temp table ID to pool</li>
+</ul>
+
+<h3>Step 5: Normal table merges (separate work item)</h3>
+
+<ul>
+  <li>Add <code>RT_START_PARSE</code> request type</li>
+  <li>Add <code>RT_FLUSH_COMMIT_AND_COMMIT</code> merged handler</li>
+  <li>Add <code>RT_FLUSH_COMPLETE_AND_COMPLETE</code> merged handler</li>
+  <li>Update master state machine to use merged phases</li>
+  <li>Keep old request types for backward compatibility during rolling upgrades</li>
+</ul>
+
+<div class="callout warn">
+  <strong>Rolling upgrade compatibility:</strong> During a rolling upgrade, some nodes may
+  understand the new merged request types while others don't. The master must check
+  <code>ndbd_support_merged_schema_phases(nodeVersion)</code> before using merged types. If any
+  node doesn't support them, fall back to the current 11-phase protocol. This is the standard
+  NDB pattern for protocol evolution (see <code>ndb_version.h.in</code>).
+</div>
+
+<!-- ================================================================== -->
+<h2 id="risks">8. Risks &amp; Mitigations</h2>
+
+<table>
+  <tr><th>Risk</th><th>Severity</th><th>Mitigation</th></tr>
+  <tr>
+    <td>Concurrent temp table creates race on table ID</td>
+    <td style="color: var(--yellow);">Medium</td>
+    <td>Atomic counter ensures unique IDs. Validate with <code>tableRecordInUse(id)</code> check after increment. Retry on collision (wrap-around case).</td>
+  </tr>
+  <tr>
+    <td>Node crash during temp table PARSE_PREPARE leaves orphaned resources</td>
+    <td style="color: var(--yellow);">Medium</td>
+    <td>At node restart, scan for table IDs in temp range and drop any that exist (temp tables are not expected to survive restarts). Add cleanup in <code>execNDB_STTOR()</code>.</td>
+  </tr>
+  <tr>
+    <td>Parse error during merged PARSE_PREPARE requires aborting prepare artifacts</td>
+    <td style="color: var(--green);">Low</td>
+    <td>The merged handler runs parse first. Only proceeds to prepare if parse succeeds. If parse fails, no prepare artifacts exist. If prepare fails after parse succeeded, call existing <code>abortPrepare()</code> + <code>abortParse()</code>.</td>
+  </tr>
+  <tr>
+    <td>Merged FLUSH+COMMIT for normal tables: crash between flush write and commit handler</td>
+    <td style="color: var(--green);">Low</td>
+    <td>If a node crashes after writing schema file but before running commit handler, crash recovery sees SF_PREPARE state and rolls forward (same as today). The commit handler is idempotent: running it twice is safe because TAB_COMMITREQ to DBTC/DBSPJ is idempotent.</td>
+  </tr>
+  <tr>
+    <td>Rolling upgrade: mixed cluster with old/new nodes</td>
+    <td style="color: var(--yellow);">Medium</td>
+    <td>Version-gate all new request types. Master checks minimum node version before using merged phases. Fall back to 11-phase protocol if any node is old version.</td>
+  </tr>
+  <tr>
+    <td>Temp table ID pool exhaustion</td>
+    <td style="color: var(--green);">Low</td>
+    <td>Return IDs to pool on DROP. If pool exhausted, return <code>SchemaTransBeginRef::TooManySchemaOps</code> error. Pool size is configurable.</td>
+  </tr>
+  <tr>
+    <td>API node disconnect with active temp tables</td>
+    <td style="color: var(--yellow);">Medium</td>
+    <td>Track temp table ownership in DBDICT (API node &rarr; set of temp table IDs). On API node failure (<code>execNODE_FAILREP()</code> for API nodes), auto-drop all owned temp tables. This reuses the existing node failure handling framework.</td>
+  </tr>
+</table>
+
+<div class="callout success">
+  <strong>Summary of improvements:</strong>
+  <ul>
+    <li><strong>Temporary tables</strong>: 11 &rarr; 3 broadcast rounds, zero disk I/O, no schema mutex, no GCP wait. Estimated ~4-5x faster CREATE/DROP.</li>
+    <li><strong>Normal tables</strong>: 11 &rarr; 7 broadcast rounds. Estimated ~25-35% faster CREATE/DROP (varies with network latency).</li>
+    <li><strong>Both</strong>: No degradation in crash safety, recovery, or correctness. All optimizations are backward-compatible via version gating.</li>
+  </ul>
+</div>
+
+</body>
+</html>
