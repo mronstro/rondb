@@ -2882,7 +2882,7 @@ static inline int range_compare(const char *bound, const char *key,
       return (b < k) ? -1 : (b > k) ? 1 : 0;
     }
     default:
-      ndbassert(false);  // Unsupported type for Tier 1 range compare
+      assert(false);  // Unsupported type for Tier 1 range compare
       return 0;
   }
 }
@@ -2910,7 +2910,7 @@ static inline Uint32 range_lookup(const Range2FragmentMap *map,
       hi = mid;
   }
   // lo = index of first boundary > key = the partition for this key
-  ndbassert(lo < map->m_cnt);  // last entry is MAX, always > any key
+  assert(lo < map->m_cnt);  // last entry is MAX, always > any key
   return map->frag_ids()[lo];
 }
 

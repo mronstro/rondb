@@ -636,7 +636,7 @@ emalformedstring:
 NdbTransaction *Ndb::startTransaction(const NdbRecord *keyRec,
                                       const char *keyData, void *xfrmbuf,
                                       Uint32 xfrmbuflen) {
-  NdbTableImpl *impl = keyRec->table;
+  const NdbTableImpl *impl = keyRec->table;
 
   // Range tables: extract partition key value, binary search for fragment ID
   if (impl->m_fragmentType == NdbDictionary::Object::RangePartition) {
