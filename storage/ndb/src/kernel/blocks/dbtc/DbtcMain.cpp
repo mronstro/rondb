@@ -1089,7 +1089,7 @@ void Dbtc::execTC_SCHVERREQ(Signal *signal) {
     jam();
     tabptr.p->m_flags |= TableRecord::TR_FULLY_REPLICATED;
   }
-  if (req->rangePartition) {
+  if (userDefinedPartitioning == 2) {
     jam();
     tabptr.p->m_flags |= TableRecord::TR_RANGE_PARTITION;
   }

@@ -376,7 +376,7 @@ void Dbspj::execTC_SCHVERREQ(Signal *signal) {
     tablePtr.p->m_flags |= TableRecord::TR_HASH_FUNCTION;
   }
 
-  if (req->rangePartition)
+  if (req->userDefinedPartition == 2)
   {
     jam();
     tablePtr.p->m_flags |= TableRecord::TR_RANGE_PARTITION;

@@ -32,7 +32,7 @@
 #define JAM_FILE_ID 72
 
 struct AlterTabReq {
-  static constexpr Uint32 SignalLength = 16;
+  static constexpr Uint32 SignalLength = 14;
 
   enum RequestType {
     AlterTablePrepare = 0,  // Prepare alter table
@@ -69,14 +69,14 @@ struct AlterTabReq {
   Uint32 ttlColumnNo;
 
   /**
-   * Pointer to new Range2FragmentMap for range-partitioned tables.
-   * Only used within the same node (DBDICT -> DBDIH).
-   * nullptr for non-range tables.
+   * New Range2FragmentMap pointer for range-partitioned tables,
+   * stored as two Uint32 words to avoid 64-bit alignment issues.
+   * Only used for local sends (DBDICT -> DBDIH, same node).
+   * Not included in SignalLength since it's only needed locally
+   * and adding 2 words would overflow SCHEMA_TRANS_IMPL_REQ.
    */
-  union {
-    void *newRangeMapPtr;
-    Uint32 newRangeMapStorage[2];
-  };
+  Uint32 newRangeMapPtrLow;
+  Uint32 newRangeMapPtrHigh;
 
   SECTION(DICT_TAB_INFO = 0);
   SECTION(FRAGMENTATION = 1);

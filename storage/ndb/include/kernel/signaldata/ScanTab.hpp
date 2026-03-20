@@ -264,7 +264,7 @@ class ScanTabReq {
 
 #define SCAN_JOIN_AGG_SHIFT    (1)
 
-#define SCAN_PARTITION_RANGE_SHIFT (2)
+#define SCAN_PARTITION_RANGE_SHIFT (0)
 #define SCAN_PARTITION_RANGE_MASK  (1)
 
 inline Uint8 ScanTabReq::getReadCommittedBaseFlag(const UintR &requestInfo) {

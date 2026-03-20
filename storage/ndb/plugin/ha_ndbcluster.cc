@@ -15540,6 +15540,49 @@ static int create_table_set_up_partition_info(partition_info *part_info,
       DBUG_PRINT("info", ("setting dist key on %s", col->getName()));
       col->setPartitionKey(true);
     }
+  } else if (part_info->part_type == partition_type::RANGE &&
+             part_info->column_list &&
+             part_info->num_part_fields == 1 &&
+             part_info->part_field_array != nullptr) {
+    /*
+     * RANGE COLUMNS(col) with a single column — use native RangePartition.
+     * The column value is used directly as partition key (no expression
+     * evaluation needed), so NDB can do server-side range lookup in DBDIH.
+     * No $PART_FUNC_VALUE shadow column needed.
+     */
+    DBUG_PRINT("info", ("Using RangePartition fragmentation type"));
+    ndbtab.setFragmentType(NDBTAB::RangePartition);
+
+    /* Extract boundary values from range_col_array (RANGE COLUMNS format).
+     * Each partition has num_part_fields column values; we use field 0.
+     */
+    const uint parts = part_info->num_parts;
+    const uint cols = part_info->num_part_fields;  // == 1
+    std::unique_ptr<int32[]> range_data(new (std::nothrow) int32[parts]);
+    if (!range_data) {
+      my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR), parts * sizeof(int32));
+      return 1;
+    }
+    for (uint i = 0; i < parts; i++) {
+      const part_column_list_val &col_val =
+          part_info->range_col_array[i * cols];
+      if (col_val.max_value) {
+        range_data[i] = INT_MAX32;
+      } else {
+        /* field_image points to the field's native binary representation */
+        const uchar *img = col_val.column_value.field_image;
+        range_data[i] = sint4korr(img);
+      }
+    }
+    ndbtab.setRangeListData(range_data.get(), parts);
+    ndbtab.setRangeBoundaryType(NDB_TYPE_INT);
+
+    /* Mark partition column as distribution key (DKey)
+     * so DBTC can extract it via create_distr_key().
+     */
+    Field **fields = part_info->part_field_array;
+    NDBCOL *pk_col = colIdMap.getColumn(ndbtab, fields[0]->field_index());
+    pk_col->setPartitionKey(true);
   } else {
     auto partition_type_description = [](partition_type pt) {
       switch (pt) {
@@ -15623,29 +15666,8 @@ static int create_table_set_up_partition_info(partition_info *part_info,
       ndbtab.setRangeListData(list_data.get(), values * 2);
     }
 
-    if (part_info->part_type == partition_type::RANGE) {
-      DBUG_PRINT("info", ("Using RangePartition fragmentation type"));
-      ndbtab.setFragmentType(NDBTAB::RangePartition);
-
-      /* Set RangeBoundaryType based on partition expression type.
-       * Currently only Int32 boundaries supported (from range_int_array).
-       */
-      ndbtab.setRangeBoundaryType(NDB_TYPE_INT);
-
-      /* Mark partition expression column as distribution key (DKey)
-       * so DBTC can extract it via create_distr_key().
-       */
-      if (part_info->part_field_array != nullptr) {
-        Field **fields = part_info->part_field_array;
-        for (uint i = 0; i < part_info->num_part_fields; i++) {
-          NDBCOL *pk_col = colIdMap.getColumn(ndbtab, fields[i]->field_index());
-          pk_col->setPartitionKey(true);
-        }
-      }
-    } else {
-      DBUG_PRINT("info", ("Using UserDefined fragmentation type"));
-      ndbtab.setFragmentType(NDBTAB::UserDefined);
-    }
+    DBUG_PRINT("info", ("Using UserDefined fragmentation type"));
+    ndbtab.setFragmentType(NDBTAB::UserDefined);
   }
 
   const bool use_default_num_parts = part_info->use_default_num_partitions;

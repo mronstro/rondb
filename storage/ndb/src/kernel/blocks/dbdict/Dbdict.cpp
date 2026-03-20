@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2003, 2025, Oracle and/or its affiliates.
-   Copyright (c) 2021, 2025, Hopsworks and/or its affiliates.
+   Copyright (c) 2021, 2026, Hopsworks and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -8110,7 +8110,9 @@ void Dbdict::execTAB_COMMITCONF(Signal *signal) {
     req->senderData = op_ptr.p->op_key;
     req->noOfPrimaryKeys = (Uint32)tabPtr.p->noOfPrimkey;
     req->singleUserMode = (Uint32)tabPtr.p->singleUserMode;
-    req->userDefinedPartition = (tabPtr.p->fragmentType == DictTabInfo::UserDefined);
+    req->userDefinedPartition =
+        (tabPtr.p->fragmentType == DictTabInfo::RangePartition) ? 2 :
+        (tabPtr.p->fragmentType == DictTabInfo::UserDefined) ? 1 : 0;
     req->hashFunctionFlag =
       (Uint32)(((tabPtr.p->m_bits &
                  TableRecord::TR_HashFunction) == 0) ? 0 : 1);
@@ -8126,22 +8128,19 @@ void Dbdict::execTAB_COMMITCONF(Signal *signal) {
           (Uint32) !!(tabPtr.p->m_bits & TableRecord::TR_ReadBackup);
       req->fullyReplicated =
           (Uint32)((tabPtr.p->m_bits & TableRecord::TR_FullyReplicated) != 0);
-      req->rangePartition =
-          (Uint32)(tabPtr.p->fragmentType == DictTabInfo::RangePartition);
     } else {
       jam();
       TableRecordPtr basePtr;
       bool ok = find_object(basePtr, tabPtr.p->primaryTableId);
       ndbrequire(ok);
       req->userDefinedPartition =
-          (basePtr.p->fragmentType == DictTabInfo::UserDefined);
+          (basePtr.p->fragmentType == DictTabInfo::RangePartition) ? 2 :
+          (basePtr.p->fragmentType == DictTabInfo::UserDefined) ? 1 : 0;
 
       req->readBackup =
           (Uint32) !!(basePtr.p->m_bits & TableRecord::TR_ReadBackup);
       req->fullyReplicated =
           (Uint32)((basePtr.p->m_bits & TableRecord::TR_FullyReplicated) != 0);
-      req->rangePartition =
-          (Uint32)(basePtr.p->fragmentType == DictTabInfo::RangePartition);
     }
 
     sendSignal(DBSPJ_REF, GSN_TC_SCHVERREQ, signal, TcSchVerReq::SignalLength,
@@ -8379,7 +8378,9 @@ void Dbdict::execTC_SCHVERCONF(Signal *signal) {
     req->senderData = op_ptr.p->op_key;
     req->noOfPrimaryKeys = (Uint32)tabPtr.p->noOfPrimkey;
     req->singleUserMode = (Uint32)tabPtr.p->singleUserMode;
-    req->userDefinedPartition = (tabPtr.p->fragmentType == DictTabInfo::UserDefined);
+    req->userDefinedPartition =
+        (tabPtr.p->fragmentType == DictTabInfo::RangePartition) ? 2 :
+        (tabPtr.p->fragmentType == DictTabInfo::UserDefined) ? 1 : 0;
     req->hashFunctionFlag =
       (Uint32)(((tabPtr.p->m_bits &
                  TableRecord::TR_HashFunction) == 0) ? 0 : 1);
@@ -8398,21 +8399,18 @@ void Dbdict::execTC_SCHVERCONF(Signal *signal) {
       bool ok = find_object(basePtr, tabPtr.p->primaryTableId);
       ndbrequire(ok);
       req->userDefinedPartition =
-          (basePtr.p->fragmentType == DictTabInfo::UserDefined);
+          (basePtr.p->fragmentType == DictTabInfo::RangePartition) ? 2 :
+          (basePtr.p->fragmentType == DictTabInfo::UserDefined) ? 1 : 0;
       req->readBackup =
           (Uint32) !!(basePtr.p->m_bits & TableRecord::TR_ReadBackup);
       req->fullyReplicated =
           (Uint32)((basePtr.p->m_bits & TableRecord::TR_FullyReplicated) != 0);
-      req->rangePartition =
-          (Uint32)(basePtr.p->fragmentType == DictTabInfo::RangePartition);
     } else {
       jam();
       req->readBackup =
           (Uint32) !!(tabPtr.p->m_bits & TableRecord::TR_ReadBackup);
       req->fullyReplicated =
           (Uint32)((tabPtr.p->m_bits & TableRecord::TR_FullyReplicated) != 0);
-      req->rangePartition =
-          (Uint32)(tabPtr.p->fragmentType == DictTabInfo::RangePartition);
     }
 
     /*
@@ -9859,7 +9857,7 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
       const Uint32 blen = old_rmap->m_boundary_len;
 
       /* Validate: new RangeListData must have new_cnt boundary values */
-      if (c_tableDesc.RangeListDataLen < (Int32)(new_cnt * 4)) {
+      if (c_tableDesc.RangeListDataLen < (Uint32)(new_cnt * 4)) {
         jam();
         setError(error, AlterTableRef::UnsupportedChange, __LINE__);
         return;
@@ -11179,7 +11177,8 @@ void Dbdict::alterTable_toLocal(Signal *signal, SchemaOpPtr op_ptr) {
   req->newNoOfKeyAttrs = impl_req->newNoOfKeyAttrs;
   req->ttlSec = impl_req->ttlSec;
   req->ttlColumnNo = impl_req->ttlColumnNo;
-  req->newRangeMapPtr = nullptr;
+  req->newRangeMapPtrLow = 0;
+  req->newRangeMapPtrHigh = 0;
   g_eventLogger->info("[DICT], alterTable_toLocal(), AlterTableReq on Table "
                        "%u, [%u, %u]",
                        impl_req->tableId,
@@ -11240,23 +11239,28 @@ void Dbdict::alterTable_toLocal(Signal *signal, SchemaOpPtr op_ptr) {
       c_tableRecordPool_.getPtr(newTablePtr);
       if (newTablePtr.p->fragmentType == DictTabInfo::RangePartition) {
         jam();
-        /* Pass new range map pointer to DBDIH (same node) */
-        req->newRangeMapPtr = newTablePtr.p->m_range_ptr;
+        /* Pass new range map pointer to DBDIH (same node, split into 2x32) */
+        uintptr_t ptr = reinterpret_cast<uintptr_t>(newTablePtr.p->m_range_ptr);
+        req->newRangeMapPtrLow = (Uint32)(ptr & 0xFFFFFFFF);
+        req->newRangeMapPtrHigh = (Uint32)(ptr >> 32);
         req->new_map_ptr_i = RNIL;
       } else {
         jam();
         HashMapRecordPtr hm_ptr;
         ndbrequire(find_object(hm_ptr, newTablePtr.p->hashMapObjectId));
         req->new_map_ptr_i = hm_ptr.p->m_map_ptr_i;
-        req->newRangeMapPtr = nullptr;
+        req->newRangeMapPtrLow = 0;
+        req->newRangeMapPtrHigh = 0;
       }
     } else {
-      req->newRangeMapPtr = nullptr;
+      req->newRangeMapPtrLow = 0;
+      req->newRangeMapPtrHigh = 0;
     }
 
     SectionHandle handle(this, fragInfoPtr.i);
-    sendSignal(blockRef, GSN_ALTER_TAB_REQ, signal, AlterTabReq::SignalLength,
-               JBB, &handle);
+    /* Use extended length to include newRangeMapPtr fields (local only) */
+    sendSignal(blockRef, GSN_ALTER_TAB_REQ, signal,
+               AlterTabReq::SignalLength + 2, JBB, &handle);
   } else {
     jam();
     sendSignal(blockRef, GSN_ALTER_TAB_REQ, signal, AlterTabReq::SignalLength,
@@ -15099,11 +15103,13 @@ void Dbdict::alterIndex_toAddPartitions(Signal *signal, SchemaOpPtr op_ptr) {
   req->newNoOfKeyAttrs = 0;
   req->ttlSec = 0;
   req->ttlColumnNo = 0;
-  req->newRangeMapPtr = nullptr;
+  req->newRangeMapPtrLow = 0;
+  req->newRangeMapPtrHigh = 0;
   AlterTableReq::setAddFragFlag(req->changeMask, 1);
 
-  sendSignal(DBDIH_REF, GSN_ALTER_TAB_REQ, signal, AlterTabReq::SignalLength,
-             JBB, &handle);
+  /* Use extended length to include newRangeMapPtr fields (local only) */
+  sendSignal(DBDIH_REF, GSN_ALTER_TAB_REQ, signal,
+             AlterTabReq::SignalLength + 2, JBB, &handle);
 }
 
 void Dbdict::alterIndex_fromAddPartitions(Signal *signal, Uint32 op_key,

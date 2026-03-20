@@ -8,6 +8,7 @@ Detailed documentation is organized by topic in `claude_files/`. Read the releva
 |-------|-----------|-------------|
 | SET Config Param | `claude_files/set_config_param/` | Adding runtime-settable config parameters via the MGM client SET command |
 | Range Partitioning | `claude_files/range_partitioning/` | Adding native RANGE partition support to NDB (server-side range lookup in DBDIH) |
+| Trace File Analysis | `claude_files/pushdown_join_aggregation/trace_file_analysis.md` | How to analyse NDB data node crash trace files (error log, ndbd.log, per-thread jam traces) |
 
 ### set_config_param
 

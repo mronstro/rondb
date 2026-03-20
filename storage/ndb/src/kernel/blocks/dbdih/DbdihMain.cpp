@@ -14776,8 +14776,12 @@ void Dbdih::execALTER_TAB_REQ(Signal *signal) {
       connectPtr.p->m_alter.m_partitionCount = tabPtr.p->partitionCount;
       connectPtr.p->m_alter.m_changeMask = req->changeMask;
       connectPtr.p->m_alter.m_new_map_ptr_i = req->new_map_ptr_i;
-      connectPtr.p->m_alter.m_new_range_ptr =
-        reinterpret_cast<Range2FragmentMap *>(req->newRangeMapPtr);
+      {
+        uintptr_t ptr = (uintptr_t)req->newRangeMapPtrLow |
+                         ((uintptr_t)req->newRangeMapPtrHigh << 32);
+        connectPtr.p->m_alter.m_new_range_ptr =
+            reinterpret_cast<Range2FragmentMap *>(ptr);
+      }
       connectPtr.p->userpointer = senderData;
       connectPtr.p->userblockref = senderRef;
       connectPtr.p->connectState = ConnectRecord::ALTER_TABLE;
