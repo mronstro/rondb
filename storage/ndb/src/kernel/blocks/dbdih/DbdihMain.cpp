@@ -34,6 +34,7 @@
 
 #include "Configuration.hpp"
 #include "Dbdih.hpp"
+#include "../dbdict/Dbdict.hpp"
 
 #include <signaldata/AllocNodeId.hpp>
 #include <signaldata/BlockCommitOrd.hpp>
@@ -1888,6 +1889,7 @@ void Dbdih::execSTTOR(Signal *signal) {
   switch (signal->theData[1]) {
     case 1:
       jam();
+      c_dict = (Dbdict *)globalData.getBlock(DBDICT, 0);
       createMutexes(signal, 0);
       init_lcp_pausing_module();
 #ifdef DEBUG_LCP_COMP
@@ -14013,8 +14015,14 @@ void Dbdih::execDIADDTABREQ(Signal *signal) {
 
   if (tabPtr.p->method == TabRecord::RANGE_PARTITION) {
     jam();
-    Range2FragmentMap *rmap =
-      reinterpret_cast<Range2FragmentMap *>(req->rangeMapPtr);
+    /* Get range map from DBDICT (same thread, same process).
+     * For index tables, use the primary table's range map. */
+    Uint32 rangeTableId = tabPtr.i;
+    if (req->primaryTableId != RNIL) {
+      jam();
+      rangeTableId = req->primaryTableId;
+    }
+    Range2FragmentMap *rmap = c_dict->getRangeMap(rangeTableId);
     ndbrequire(rmap != nullptr);
     tabPtr.p->m_range_ptr = rmap;
     tabPtr.p->m_new_range_ptr = nullptr;
@@ -14776,11 +14784,13 @@ void Dbdih::execALTER_TAB_REQ(Signal *signal) {
       connectPtr.p->m_alter.m_partitionCount = tabPtr.p->partitionCount;
       connectPtr.p->m_alter.m_changeMask = req->changeMask;
       connectPtr.p->m_alter.m_new_map_ptr_i = req->new_map_ptr_i;
-      {
-        uintptr_t ptr = (uintptr_t)req->newRangeMapPtrLow |
-                         ((uintptr_t)req->newRangeMapPtrHigh << 32);
+      if (tabPtr.p->method == TabRecord::RANGE_PARTITION) {
+        /* For range tables, new_map_ptr_i holds the DBDICT pool index
+         * of the new table record containing the new range map. */
         connectPtr.p->m_alter.m_new_range_ptr =
-            reinterpret_cast<Range2FragmentMap *>(ptr);
+            c_dict->getRangeMapByPtrI(req->new_map_ptr_i);
+      } else {
+        connectPtr.p->m_alter.m_new_range_ptr = nullptr;
       }
       connectPtr.p->userpointer = senderData;
       connectPtr.p->userblockref = senderRef;

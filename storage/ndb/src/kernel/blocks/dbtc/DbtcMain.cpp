@@ -150,12 +150,19 @@
 //#define DEBUG_RATE_OVERFLOW 1
 //#define DEBUG_CONT_SCAN 1
 //#define DEBUG_JOIN_AGG_TRACE 1
+#define DEBUG_RANGE 1
 #endif
 
 #ifdef DEBUG_JOIN_AGG_TRACE
 #define DEB_JOIN_AGG(arglist) do { g_eventLogger->info arglist ; } while (0)
 #else
 #define DEB_JOIN_AGG(arglist) do { } while (0)
+#endif
+
+#ifdef DEBUG_RANGE
+#define DEB_RANGE(arglist) do { g_eventLogger->info arglist ; } while (0)
+#else
+#define DEB_RANGE(arglist) do { } while (0)
 #endif
 
 #define MAX_QUEUE_TIME_MS 60
@@ -1093,6 +1100,8 @@ void Dbtc::execTC_SCHVERREQ(Signal *signal) {
     jam();
     tabptr.p->m_flags |= TableRecord::TR_RANGE_PARTITION;
   }
+  DEB_RANGE(("(%u) TC_SCHVERREQ: tableId=%u userDefPart=%u flags=0x%x",
+             instance(), tabptr.i, userDefinedPartitioning, tabptr.p->m_flags));
   /*
    * TTL related
    */
@@ -3227,6 +3236,9 @@ void Dbtc::hash(Signal *signal, CacheRecord *const regCachePtr) {
     jam();
     const KeyDescriptor *desc =
       g_key_descriptor_pool.getPtr(regCachePtr->tableref);
+    DEB_RANGE(("(%u) hash: TR_RANGE_PARTITION tableId=%u noOfDistrKeys=%u "
+               "keylen=%u",
+               instance(), regCachePtr->tableref, desc->noOfDistrKeys, keylen));
     if (desc->noOfDistrKeys > 0) {
       jam();
       Uint32 rangeKeyWords = create_distr_key(regCachePtr->tableref,
@@ -4825,6 +4837,10 @@ void Dbtc::tckeyreq050Lab(Signal *signal, CacheRecordPtr const cachePtr,
   req->jamBufferPtr = jamBuffer();
   req->rangeKeyPtr = regCachePtr->m_range_key_ptr;
   req->rangeKeyLen = regCachePtr->m_range_key_len;
+  DEB_RANGE(("(%u) DIGETNODES: tableId=%u rangeKeyPtr=%p rangeKeyLen=%u "
+             "distr_key_indicator=%u hashValue=%u",
+             instance(), Ttableref, req->rangeKeyPtr, req->rangeKeyLen,
+             req->distr_key_indicator, TdistrHashValue));
 
   if (localTabptr.p->m_flags & TableRecord::TR_FULLY_REPLICATED) {
     if (regTcPtr->operation == ZREAD) {

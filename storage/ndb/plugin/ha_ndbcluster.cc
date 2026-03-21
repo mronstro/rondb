@@ -12240,9 +12240,17 @@ void ha_ndbcluster::set_part_info(partition_info *part_info, bool early) {
         PARTITION BY HASH, RANGE and LIST plus all subpartitioning variants
         all use MySQL defined partitioning. PARTITION BY KEY uses NDB native
         partitioning scheme.
+        Exception: RANGE COLUMNS with native RangePartition uses NDB
+        server-side range lookup — no MySQL partition function needed.
       */
-      m_use_partition_pruning = true;
-      m_user_defined_partitioning = true;
+      if (m_part_info->part_type == partition_type::RANGE &&
+          m_part_info->column_list &&
+          m_part_info->num_part_fields == 1) {
+        /* Native RangePartition — NDB handles partitioning */
+      } else {
+        m_use_partition_pruning = true;
+        m_user_defined_partitioning = true;
+      }
     }
     if (m_part_info->part_type == partition_type::HASH &&
         m_part_info->list_of_part_fields &&
@@ -15526,6 +15534,10 @@ static int create_table_set_up_partition_info(partition_info *part_info,
                                               NdbDictionary::Table &ndbtab,
                                               Ndb_table_map &colIdMap) {
   DBUG_TRACE;
+  fprintf(stderr, "create_table_set_up_partition_info: part_type=%d "
+          "column_list=%d list_of_part_fields=%d num_part_fields=%u\n",
+          (int)part_info->part_type, (int)part_info->column_list,
+          (int)part_info->list_of_part_fields, part_info->num_part_fields);
 
   if (part_info->part_type == partition_type::HASH &&
       part_info->list_of_part_fields == true) {
@@ -15540,10 +15552,14 @@ static int create_table_set_up_partition_info(partition_info *part_info,
       DBUG_PRINT("info", ("setting dist key on %s", col->getName()));
       col->setPartitionKey(true);
     }
-  } else if (part_info->part_type == partition_type::RANGE &&
+  } else if ((fprintf(stderr, "RANGE check: part_type=%d column_list=%d "
+              "num_part_fields=%u part_field_array=%p\n",
+              (int)part_info->part_type, (int)part_info->column_list,
+              part_info->num_part_fields, part_info->part_field_array), false) ||
+             (part_info->part_type == partition_type::RANGE &&
              part_info->column_list &&
              part_info->num_part_fields == 1 &&
-             part_info->part_field_array != nullptr) {
+             part_info->part_field_array != nullptr)) {
     /*
      * RANGE COLUMNS(col) with a single column — use native RangePartition.
      * The column value is used directly as partition key (no expression
@@ -15558,6 +15574,8 @@ static int create_table_set_up_partition_info(partition_info *part_info,
      */
     const uint parts = part_info->num_parts;
     const uint cols = part_info->num_part_fields;  // == 1
+    fprintf(stderr, "RANGE COLUMNS: parts=%u cols=%u range_col_array=%p\n",
+            parts, cols, part_info->range_col_array);
     std::unique_ptr<int32[]> range_data(new (std::nothrow) int32[parts]);
     if (!range_data) {
       my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR), parts * sizeof(int32));
@@ -15566,16 +15584,31 @@ static int create_table_set_up_partition_info(partition_info *part_info,
     for (uint i = 0; i < parts; i++) {
       const part_column_list_val &col_val =
           part_info->range_col_array[i * cols];
+      fprintf(stderr, "  part[%u]: max_value=%d fixed=%d item_expr=%p\n",
+              i, (int)col_val.max_value, (int)col_val.fixed,
+              col_val.item_expression);
       if (col_val.max_value) {
         range_data[i] = INT_MAX32;
+      } else if (col_val.item_expression != nullptr) {
+        longlong val = col_val.item_expression->val_int();
+        fprintf(stderr, "    item_expression->val_int() = %lld\n", val);
+        if (val < INT_MIN32 || val > INT_MAX32) {
+          my_error(ER_LIMITED_PART_RANGE, MYF(0), "NDB");
+          return 1;
+        }
+        range_data[i] = (int32)val;
       } else {
-        /* field_image points to the field's native binary representation */
-        const uchar *img = col_val.column_value.field_image;
-        range_data[i] = sint4korr(img);
+        fprintf(stderr, "    ERROR: no item_expression\n");
+        my_error(ER_INTERNAL_ERROR, MYF(0),
+                 "RANGE COLUMNS: no boundary value");
+        return 1;
       }
+      fprintf(stderr, "    range_data[%u] = %d\n", i, range_data[i]);
     }
     ndbtab.setRangeListData(range_data.get(), parts);
     ndbtab.setRangeBoundaryType(NDB_TYPE_INT);
+    fprintf(stderr, "RANGE COLUMNS: set %u boundaries, type=%u\n",
+            parts, NDB_TYPE_INT);
 
     /* Mark partition column as distribution key (DKey)
      * so DBTC can extract it via create_distr_key().

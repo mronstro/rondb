@@ -508,6 +508,20 @@ class Dbdict : public SimulatedBlock {
   RSS_AP_SNAPSHOT(c_tableRecordPool_);
   TableRecord_pool &get_pool(TableRecordPtr) { return c_tableRecordPool_; }
 
+  /**
+   * Get the Range2FragmentMap pointer for a table.
+   * Called by DBDIH (same thread) to retrieve the range map built
+   * during handleTabInfoInit. Returns nullptr for non-range tables.
+   */
+  Range2FragmentMap *getRangeMap(Uint32 tableId);
+
+  Range2FragmentMap *getRangeMapByPtrI(Uint32 ptrI) {
+    TableRecordPtr tabPtr;
+    tabPtr.i = ptrI;
+    c_tableRecordPool_.getPtr(tabPtr);
+    return tabPtr.p->m_range_ptr;
+  }
+
   Uint32 cnoReplicas;
 
   /**

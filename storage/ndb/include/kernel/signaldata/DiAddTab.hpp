@@ -42,7 +42,7 @@ class DiAddTabReq {
   friend class Dbdih;
 
  public:
-  static constexpr Uint32 SignalLength = 14 + (sizeof(void*) / sizeof(Uint32));
+  static constexpr Uint32 SignalLength = 14;
   SECTION(FRAGMENTATION = 0);
   SECTION(TS_RANGE = 0);
 
@@ -61,15 +61,6 @@ class DiAddTabReq {
   Uint32 hashMapPtrI;
   Uint32 fullyReplicated;
   Uint32 partitionCount;
-  /**
-   * Pointer to Range2FragmentMap for range-partitioned tables.
-   * Only used within the same node (DBDICT -> DBDIH).
-   * nullptr for non-range tables.
-   */
-  union {
-    void *rangeMapPtr;
-    Uint32 rangeMapStorage[2];
-  };
 };
 
 class DiAddTabRef {

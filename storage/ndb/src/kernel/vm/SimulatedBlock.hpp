@@ -2909,8 +2909,12 @@ static inline Uint32 range_lookup(const Range2FragmentMap *map,
     else             // boundary > key, search left
       hi = mid;
   }
-  // lo = index of first boundary > key = the partition for this key
-  assert(lo < map->m_cnt);  // last entry is MAX, always > any key
+  // lo = index of first boundary > key = the partition for this key.
+  // If lo == m_cnt, value is beyond all boundaries (no MAXVALUE partition).
+  // Clamp to last partition — the lookup will return "not found" naturally.
+  if (lo >= map->m_cnt) {
+    lo = map->m_cnt - 1;
+  }
   return map->frag_ids()[lo];
 }
 

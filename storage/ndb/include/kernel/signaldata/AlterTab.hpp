@@ -68,16 +68,6 @@ struct AlterTabReq {
   Uint32 ttlSec;
   Uint32 ttlColumnNo;
 
-  /**
-   * New Range2FragmentMap pointer for range-partitioned tables,
-   * stored as two Uint32 words to avoid 64-bit alignment issues.
-   * Only used for local sends (DBDICT -> DBDIH, same node).
-   * Not included in SignalLength since it's only needed locally
-   * and adding 2 words would overflow SCHEMA_TRANS_IMPL_REQ.
-   */
-  Uint32 newRangeMapPtrLow;
-  Uint32 newRangeMapPtrHigh;
-
   SECTION(DICT_TAB_INFO = 0);
   SECTION(FRAGMENTATION = 1);
   /*

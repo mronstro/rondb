@@ -51,7 +51,7 @@ bool printALTER_TAB_REQ(FILE *output, const Uint32 *theData, Uint32 len,
   fprintf(output, "\n");
   fprintf(output, " ttlSec: %u", sig->ttlSec);
   fprintf(output, " ttlColumnNo: %u", sig->ttlColumnNo);
-  fprintf(output, " newRangeMapPtr: 0x%x%08x", sig->newRangeMapPtrHigh, sig->newRangeMapPtrLow);
+  /* newRangeMapPtr fields removed — range map retrieved via c_dict */
   fprintf(output, "\n");
   return true;
 }

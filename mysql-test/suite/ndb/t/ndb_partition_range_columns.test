@@ -1,0 +1,231 @@
+-- source include/have_ndb.inc
+
+#
+# Test native RANGE COLUMNS partitioning in NDB (RangePartition fragment type).
+# Unlike RANGE(expression) which uses UserDefined partitioning with a shadow
+# column, RANGE COLUMNS uses server-side range lookup in DBDIH.
+#
+
+--echo #
+--echo # Basic RANGE COLUMNS with INT partition key
+--echo #
+
+CREATE TABLE t1 (
+  a int not null,
+  b int not null,
+  c int not null,
+  primary key(a,b))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (5),
+ partition p1 values less than (10),
+ partition p2 values less than (20));
+
+INSERT into t1 values (1, 1, 1);
+INSERT into t1 values (6, 1, 1);
+INSERT into t1 values (10, 1, 1);
+INSERT into t1 values (15, 1, 1);
+
+# Full table scan
+select * from t1 order by a;
+
+# PK lookups
+select * from t1 where a=1 and b=1;
+select * from t1 where a=6 and b=1;
+select * from t1 where a=10 and b=1;
+select * from t1 where a=15 and b=1;
+
+# Non-existent rows
+select * from t1 where a=21 and b=1;
+select * from t1 where a=21;
+
+# IN-list scan
+select * from t1 where a in (1,6,10,21) order by a;
+
+# Boundary values: exact boundary goes to next partition
+INSERT into t1 values (5, 1, 100);
+select * from t1 where a=5 and b=1;
+
+INSERT into t1 values (0, 1, 200);
+select * from t1 where a=0 and b=1;
+
+# Negative values (should go to p0)
+INSERT into t1 values (-10, 1, 300);
+select * from t1 where a=-10 and b=1;
+
+select * from t1 order by a;
+
+# UPDATE and DELETE
+UPDATE t1 SET c = 999 WHERE a = 6 AND b = 1;
+select * from t1 where a=6 and b=1;
+
+DELETE from t1 WHERE a = 15 AND b = 1;
+select * from t1 where a=15 and b=1;
+
+select * from t1 order by a;
+
+drop table t1;
+
+--echo #
+--echo # RANGE COLUMNS with MAXVALUE partition
+--echo #
+
+CREATE TABLE t2 (
+  id int not null,
+  val int not null,
+  primary key(id))
+engine = ndb
+partition by range columns (id)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition pmax values less than (maxvalue));
+
+INSERT into t2 values (50, 1);
+INSERT into t2 values (150, 2);
+INSERT into t2 values (999, 3);
+INSERT into t2 values (2147483647, 4);
+
+select * from t2 order by id;
+
+# PK lookups spanning all partitions
+select * from t2 where id=50;
+select * from t2 where id=150;
+select * from t2 where id=999;
+select * from t2 where id=2147483647;
+
+drop table t2;
+
+--echo #
+--echo # Scan pruning for RANGE COLUMNS
+--echo #
+
+create table t3 (
+  a int not null,
+  b int not null,
+  c int not null,
+  primary key (a,b))
+engine=ndb
+partition by range columns (a)
+(partition part0 values less than (3),
+ partition part1 values less than (6),
+ partition part2 values less than (maxvalue));
+
+insert into t3 values (0, 0, 0);
+insert into t3 values (0, 1, 1);
+insert into t3 values (0, 2, 2);
+insert into t3 values (1, 0, 3);
+insert into t3 values (1, 1, 4);
+insert into t3 values (1, 2, 5);
+insert into t3 values (4, 0, 6);
+insert into t3 values (4, 1, 7);
+insert into t3 values (4, 2, 8);
+insert into t3 values (7, 0, 9);
+
+--echo All partitions scan
+--source suite/ndb/include/ndb_init_scan_counts.inc
+select * from t3 order by c;
+--source suite/ndb/include/ndb_scan_counts.inc
+
+--echo Single partition scan (equality)
+--source suite/ndb/include/ndb_init_scan_counts.inc
+select * from t3 where a=0 order by c;
+--source suite/ndb/include/ndb_scan_counts.inc
+
+--echo Single partition scan (equality, different partition)
+--source suite/ndb/include/ndb_init_scan_counts.inc
+select * from t3 where a=4 order by c;
+--source suite/ndb/include/ndb_scan_counts.inc
+
+--echo Single partition scan (range within one partition)
+--source suite/ndb/include/ndb_init_scan_counts.inc
+select * from t3 where a<3 order by c;
+--source suite/ndb/include/ndb_scan_counts.inc
+
+--echo MRR single partition scan
+--source suite/ndb/include/ndb_init_scan_counts.inc
+select * from t3 where a in (0, 2) order by c;
+--source suite/ndb/include/ndb_scan_counts.inc
+
+drop table t3;
+
+--echo #
+--echo # Verify no $PART_FUNC_VALUE shadow column for RANGE COLUMNS
+--echo #
+CREATE TABLE t4 (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (10),
+ partition p1 values less than (maxvalue));
+
+# show create should not show deprecated warning
+--disable_warnings
+show create table t4;
+--enable_warnings
+
+# Check column count in ndbinfo (no hidden $PART_FUNC_VALUE column)
+select column_name from information_schema.columns
+  where table_schema='test' and table_name='t4' order by ordinal_position;
+
+INSERT into t4 values (1, 10);
+INSERT into t4 values (20, 30);
+select * from t4 order by a;
+
+drop table t4;
+
+--echo #
+--echo # Multiple operations in same transaction
+--echo #
+CREATE TABLE t5 (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (maxvalue));
+
+BEGIN;
+INSERT into t5 values (1, 1);
+INSERT into t5 values (101, 2);
+INSERT into t5 values (201, 3);
+COMMIT;
+
+select * from t5 order by a;
+
+BEGIN;
+UPDATE t5 SET b = 10 WHERE a = 1;
+UPDATE t5 SET b = 20 WHERE a = 101;
+DELETE FROM t5 WHERE a = 201;
+COMMIT;
+
+select * from t5 order by a;
+
+# Rollback test
+BEGIN;
+INSERT into t5 values (300, 99);
+ROLLBACK;
+
+select * from t5 order by a;
+
+drop table t5;
+
+--echo #
+--echo # DROP TABLE verifies range map cleanup (no memory leak)
+--echo #
+CREATE TABLE t6 (
+  a int not null primary key)
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (10),
+ partition p1 values less than (20),
+ partition p2 values less than (30),
+ partition p3 values less than (40),
+ partition p4 values less than (maxvalue));
+
+INSERT into t6 values (5), (15), (25), (35), (100);
+select * from t6 order by a;
+drop table t6;

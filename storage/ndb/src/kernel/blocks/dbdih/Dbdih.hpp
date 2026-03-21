@@ -145,11 +145,14 @@
 #define MAX_QUEUED_FRAG_CHECKPOINTS_PER_NODE 32
 #define MAX_STARTED_FRAG_CHECKPOINTS_PER_NODE 32
 
+class Dbdict;
+
 class Dbdih : public SimulatedBlock {
 #ifdef ERROR_INSERT
   typedef void (Dbdih::*SendFunction)(Signal *, Uint32, Uint32);
 #endif
  public:
+  class Dbdict *c_dict;
   // Records
 
   /*############## CONNECT_RECORD ##############*/
