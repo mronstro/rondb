@@ -14677,15 +14677,24 @@ void Dbdih::releaseTable(TabRecordPtr tabPtr) {
     releaseFile(tabPtr.p->tabFile[1]);
     tabPtr.p->tabFile[0] = tabPtr.p->tabFile[1] = RNIL;
   }//if
-  /* Free range map if this was a range-partitioned table */
+  /* Free range map if this was a range-partitioned base table.
+   * Index tables share the base table's range map pointer but do NOT
+   * own the allocation — only the base table (primaryTableId == RNIL)
+   * should free it. */
   if (tabPtr.p->m_range_ptr != nullptr) {
     jam();
-    lc_ndbd_pool_free(tabPtr.p->m_range_ptr);
+    if (tabPtr.p->primaryTableId == RNIL) {
+      jam();
+      lc_ndbd_pool_free(tabPtr.p->m_range_ptr);
+    }
     tabPtr.p->m_range_ptr = nullptr;
   }
   if (tabPtr.p->m_new_range_ptr != nullptr) {
     jam();
-    lc_ndbd_pool_free(tabPtr.p->m_new_range_ptr);
+    if (tabPtr.p->primaryTableId == RNIL) {
+      jam();
+      lc_ndbd_pool_free(tabPtr.p->m_new_range_ptr);
+    }
     tabPtr.p->m_new_range_ptr = nullptr;
   }
   tabPtr.p->totalfragments = 0;

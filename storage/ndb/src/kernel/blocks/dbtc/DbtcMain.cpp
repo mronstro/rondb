@@ -16686,10 +16686,34 @@ void Dbtc::execDIH_SCAN_TAB_CONF(Signal *signal, ScanRecordPtr scanptr,
       tfragCount = packed & 0xFFFF;
     } else {
       /**
-       * Prepare for sendDihGetNodeReq to request DBDIH info for
-       * the single pruned-to fragId we got from NDB API.
+       * For range-partitioned tables, ignore NDB API single-partition
+       * pruning. The NDB API sends a hash value which is meaningless
+       * for range lookup, and the NDB API's partition choice cannot be
+       * trusted during ALTER TABLE when data may move between fragments.
+       * Server-side multi-partition range pruning (m_scan_partition_range_flag)
+       * is the correct mechanism for range tables.
+       *
+       * Look up base table to check for range partition flag (for index
+       * scans, tabPtr/scanTableref is the index table, not the base table).
        */
-      tfragCount = 1;
+      TableRecordPtr baseTabPtr;
+      baseTabPtr.i = tabPtr.p->m_primary_table_id;
+      if (baseTabPtr.i == RNIL) {
+        baseTabPtr = tabPtr;  // Not an index, this IS the base table
+      } else {
+        ptrCheckGuard(baseTabPtr, ctabrecFilesize, tableRecord);
+      }
+      if (baseTabPtr.p->m_flags & TableRecord::TR_RANGE_PARTITION) {
+        jam();
+        /* Disable single-partition pruning — scan all fragments */
+        scanptr.p->m_scan_dist_key_flag = 0;
+      } else {
+        /**
+         * Prepare for sendDihGetNodeReq to request DBDIH info for
+         * the single pruned-to fragId we got from NDB API.
+         */
+        tfragCount = 1;
+      }
     }
   }
   ndbassert(scanptr.p->scanNextFragId == 0);
@@ -17117,12 +17141,10 @@ bool Dbtc::sendDihGetNodeReq(Signal *signal, ScanRecordPtr scanptr,
     tabPtr.i = scanptr.p->scanTableref;
     ptrCheckGuard(tabPtr, ctabrecFilesize, tableRecord);
 
-    if (tabPtr.p->m_flags & TableRecord::TR_RANGE_PARTITION) {
-      jamDebug();
-      distr_key_indicator = ZTRUE;
-    } else {
-      distr_key_indicator = tabPtr.p->get_user_defined_partitioning();
-    }
+    /* For range tables, single-partition scan pruning is disabled in
+     * execDIH_SCAN_TAB_CONF so we should not reach here. */
+    ndbassert(!(tabPtr.p->m_flags & TableRecord::TR_RANGE_PARTITION));
+    distr_key_indicator = tabPtr.p->get_user_defined_partitioning();
   }
   req->distr_key_indicator = distr_key_indicator;
   c_dih->execDIGETNODESREQ(signal);

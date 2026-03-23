@@ -1,0 +1,293 @@
+#
+# Basic RANGE COLUMNS with INT partition key
+#
+CREATE TABLE t1 (
+a int not null,
+b int not null,
+c int not null,
+primary key(a,b))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (5),
+partition p1 values less than (10),
+partition p2 values less than (20));
+INSERT into t1 values (1, 1, 1);
+INSERT into t1 values (6, 1, 1);
+INSERT into t1 values (10, 1, 1);
+INSERT into t1 values (15, 1, 1);
+select * from t1 order by a;
+a	b	c
+1	1	1
+6	1	1
+10	1	1
+15	1	1
+select * from t1 where a=1 and b=1;
+a	b	c
+1	1	1
+select * from t1 where a=6 and b=1;
+a	b	c
+6	1	1
+select * from t1 where a=10 and b=1;
+a	b	c
+10	1	1
+select * from t1 where a=15 and b=1;
+a	b	c
+15	1	1
+select * from t1 where a=21 and b=1;
+a	b	c
+select * from t1 where a=21;
+a	b	c
+select * from t1 where a in (1,6,10,21) order by a;
+a	b	c
+1	1	1
+6	1	1
+10	1	1
+INSERT into t1 values (5, 1, 100);
+select * from t1 where a=5 and b=1;
+a	b	c
+5	1	100
+INSERT into t1 values (0, 1, 200);
+select * from t1 where a=0 and b=1;
+a	b	c
+0	1	200
+INSERT into t1 values (-10, 1, 300);
+select * from t1 where a=-10 and b=1;
+a	b	c
+-10	1	300
+select * from t1 order by a;
+a	b	c
+-10	1	300
+0	1	200
+1	1	1
+5	1	100
+6	1	1
+10	1	1
+15	1	1
+UPDATE t1 SET c = 999 WHERE a = 6 AND b = 1;
+select * from t1 where a=6 and b=1;
+a	b	c
+6	1	999
+DELETE from t1 WHERE a = 15 AND b = 1;
+select * from t1 where a=15 and b=1;
+a	b	c
+select * from t1 order by a;
+a	b	c
+-10	1	300
+0	1	200
+1	1	1
+5	1	100
+6	1	999
+10	1	1
+drop table t1;
+#
+# RANGE COLUMNS with MAXVALUE partition
+#
+CREATE TABLE t2 (
+id int not null,
+val int not null,
+primary key(id))
+engine = ndb
+partition by range columns (id)
+(partition p0 values less than (100),
+partition p1 values less than (200),
+partition pmax values less than (maxvalue));
+INSERT into t2 values (50, 1);
+INSERT into t2 values (150, 2);
+INSERT into t2 values (999, 3);
+INSERT into t2 values (2147483647, 4);
+select * from t2 order by id;
+id	val
+50	1
+150	2
+999	3
+2147483647	4
+select * from t2 where id=50;
+id	val
+50	1
+select * from t2 where id=150;
+id	val
+150	2
+select * from t2 where id=999;
+id	val
+999	3
+select * from t2 where id=2147483647;
+id	val
+2147483647	4
+drop table t2;
+#
+# Scan pruning for RANGE COLUMNS
+#
+create table t3 (
+a int not null,
+b int not null,
+c int not null,
+primary key (a,b))
+engine=ndb
+partition by range columns (a)
+(partition part0 values less than (3),
+partition part1 values less than (6),
+partition part2 values less than (maxvalue));
+insert into t3 values (0, 0, 0);
+insert into t3 values (0, 1, 1);
+insert into t3 values (0, 2, 2);
+insert into t3 values (1, 0, 3);
+insert into t3 values (1, 1, 4);
+insert into t3 values (1, 2, 5);
+insert into t3 values (4, 0, 6);
+insert into t3 values (4, 1, 7);
+insert into t3 values (4, 2, 8);
+insert into t3 values (7, 0, 9);
+All partitions scan
+select * from t3 order by c;
+a	b	c
+0	0	0
+0	1	1
+0	2	2
+1	0	3
+1	1	4
+1	2	5
+4	0	6
+4	1	7
+4	2	8
+7	0	9
+ndb_scan_count
+1
+ndb_pruned_scan_count
+0
+Single partition scan (equality)
+select * from t3 where a=0 order by c;
+a	b	c
+0	0	0
+0	1	1
+0	2	2
+ndb_scan_count
+1
+ndb_pruned_scan_count
+1
+Single partition scan (equality, different partition)
+select * from t3 where a=4 order by c;
+a	b	c
+4	0	6
+4	1	7
+4	2	8
+ndb_scan_count
+1
+ndb_pruned_scan_count
+1
+Single partition scan (range within one partition)
+select * from t3 where a<3 order by c;
+a	b	c
+0	0	0
+0	1	1
+0	2	2
+1	0	3
+1	1	4
+1	2	5
+ndb_scan_count
+1
+ndb_pruned_scan_count
+0
+MRR single partition scan
+select * from t3 where a in (0, 2) order by c;
+a	b	c
+0	0	0
+0	1	1
+0	2	2
+ndb_scan_count
+1
+ndb_pruned_scan_count
+0
+drop table t3;
+#
+# Verify no  shadow column for RANGE COLUMNS
+#
+CREATE TABLE t4 (
+a int not null,
+b int not null,
+primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (10),
+partition p1 values less than (maxvalue));
+show create table t4;
+Table	Create Table
+t4	CREATE TABLE `t4` (
+  `a` int NOT NULL,
+  `b` int NOT NULL,
+  PRIMARY KEY (`a`)
+) ENGINE=ndbcluster DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+/*!50500 PARTITION BY RANGE  COLUMNS(a)
+(PARTITION p0 VALUES LESS THAN (10) ENGINE = ndbcluster,
+ PARTITION p1 VALUES LESS THAN (MAXVALUE) ENGINE = ndbcluster) */
+select column_name from information_schema.columns
+where table_schema='test' and table_name='t4' order by ordinal_position;
+COLUMN_NAME
+a
+b
+INSERT into t4 values (1, 10);
+INSERT into t4 values (20, 30);
+select * from t4 order by a;
+a	b
+1	10
+20	30
+drop table t4;
+#
+# Multiple operations in same transaction
+#
+CREATE TABLE t5 (
+a int not null,
+b int not null,
+primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+partition p1 values less than (200),
+partition p2 values less than (maxvalue));
+BEGIN;
+INSERT into t5 values (1, 1);
+INSERT into t5 values (101, 2);
+INSERT into t5 values (201, 3);
+COMMIT;
+select * from t5 order by a;
+a	b
+1	1
+101	2
+201	3
+BEGIN;
+UPDATE t5 SET b = 10 WHERE a = 1;
+UPDATE t5 SET b = 20 WHERE a = 101;
+DELETE FROM t5 WHERE a = 201;
+COMMIT;
+select * from t5 order by a;
+a	b
+1	10
+101	20
+BEGIN;
+INSERT into t5 values (300, 99);
+ROLLBACK;
+select * from t5 order by a;
+a	b
+1	10
+101	20
+drop table t5;
+#
+# DROP TABLE verifies range map cleanup (no memory leak)
+#
+CREATE TABLE t6 (
+a int not null primary key)
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (10),
+partition p1 values less than (20),
+partition p2 values less than (30),
+partition p3 values less than (40),
+partition p4 values less than (maxvalue));
+INSERT into t6 values (5), (15), (25), (35), (100);
+select * from t6 order by a;
+a
+5
+15
+25
+35
+100
+drop table t6;
