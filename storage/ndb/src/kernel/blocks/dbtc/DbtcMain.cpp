@@ -16582,6 +16582,7 @@ void Dbtc::diFcountReqLab(Signal *signal, ScanRecordPtr scanptr,
   }
 
   scanptr.p->scanNextFragId = 0;
+  scanptr.p->m_startFid_offset = 0;
   ndbassert(scanptr.p->m_booked_fragments_count == scanptr.p->scanParallel);
   scanptr.p->m_read_any_node =
       (ScanFragReq::getReadCommittedFlag(scanptr.p->scanRequestInfo) ||
@@ -16720,6 +16721,7 @@ void Dbtc::execDIH_SCAN_TAB_CONF(Signal *signal, ScanRecordPtr scanptr,
 
   scanptr.p->scanParallel = tfragCount;
   scanptr.p->scanNoFrag = tfragCount;
+  scanptr.p->m_startFid_offset = conf->startFidOffset;
   scanptr.p->scanState = ScanRecord::RUNNING;
 
   setApiConTimer(apiConnectptr, 0, __LINE__);
@@ -16879,9 +16881,12 @@ void Dbtc::sendDihGetNodesLab(Signal *signal, ScanRecordPtr scanptr,
       return;
     }
 
+    /* Apply circular offset for range-partitioned tables */
+    const Uint32 physFragId =
+        scanP->scanNextFragId + scanP->m_startFid_offset;
     const bool success =
         sendDihGetNodeReq(signal, scanptr, fragLocationPtr,
-                          scanP->scanNextFragId, is_multi_spj_scan,
+                          physFragId, is_multi_spj_scan,
                           ttl_can_go_to_replica);
     if (unlikely(!success)) {
       jam();

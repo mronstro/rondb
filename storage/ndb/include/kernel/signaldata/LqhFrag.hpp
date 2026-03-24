@@ -291,7 +291,7 @@ class LqhAddAttrConf {
 
 struct DropFragReq {
   static constexpr Uint32 SignalLength = 5;
-  enum RequestInfo { AlterTableAbort = 0x1 };
+  enum RequestInfo { AlterTableAbort = 0x1, AlterTableDrop = 0x2 };
   Uint32 senderRef;
   Uint32 senderData;
   Uint32 tableId;

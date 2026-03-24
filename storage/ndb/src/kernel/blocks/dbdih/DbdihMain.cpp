@@ -13309,7 +13309,9 @@ void Dbdih::execCREATE_FRAGMENTATION_REQ(Signal *signal) {
         jam();
         FragmentstorePtr fragPtr;
         ReplicaRecordPtr replicaPtr;
-        getFragstore(primTabPtr.p, fragNo, fragPtr);
+        Uint32 physFragNo = (primTabPtr.p->m_startFid_offset + fragNo) %
+                            primTabPtr.p->startFidSize;
+        getFragstore(primTabPtr.p, physFragNo, fragPtr);
         Uint32 log_part_id = fragPtr.p->m_log_part_id;
         fragments[count++] = log_part_id;
         fragments[count++] = fragPtr.p->preferredPrimary;
@@ -13373,7 +13375,8 @@ void Dbdih::execCREATE_FRAGMENTATION_REQ(Signal *signal) {
       } else if (flags == CreateFragmentationReq::RI_ADD_FRAGMENTS) {
         jam();
         ndbrequire(fragType == DictTabInfo::HashMapPartition ||
-                   fragType == DictTabInfo::DistrKeyOrderedIndex);
+                   fragType == DictTabInfo::DistrKeyOrderedIndex ||
+                   fragType == DictTabInfo::RangePartition);
         /**
          * All nodes that don't belong to a nodegroup to ~0
          * tmp_fragments_per_node so that they don't get any more...
@@ -14816,6 +14819,26 @@ void Dbdih::execALTER_TAB_REQ(Signal *signal) {
         tabPtr.p->m_new_range_ptr = connectPtr.p->m_alter.m_new_range_ptr;
       }
 
+      /* For DROP PARTITION: record which fragment to drop, new offset,
+       * and reduced fragment/partition counts.
+       */
+      if (AlterTableReq::getDropFragFlag(req->changeMask)) {
+        jam();
+        const Range2FragmentMap *old_rmap = tabPtr.p->m_range_ptr;
+        ndbassert(old_rmap != nullptr);
+        connectPtr.p->m_alter.m_drop_frag_id = old_rmap->frag_ids()[0];
+        connectPtr.p->m_alter.m_new_startFid_offset =
+            (tabPtr.p->m_startFid_offset + 1) % tabPtr.p->startFidSize;
+        connectPtr.p->m_alter.m_totalfragments =
+            tabPtr.p->totalfragments - 1;
+        connectPtr.p->m_alter.m_partitionCount =
+            tabPtr.p->partitionCount - 1;
+      } else {
+        connectPtr.p->m_alter.m_drop_frag_id = RNIL;
+        connectPtr.p->m_alter.m_new_startFid_offset =
+            tabPtr.p->m_startFid_offset;
+      }
+
       tabPtr.p->connectrec = connectPtr.i;
       break;
     case AlterTabReq::AlterTableRevert:
@@ -14846,6 +14869,12 @@ void Dbdih::execALTER_TAB_REQ(Signal *signal) {
         return;
       }
 
+      if (AlterTableReq::getDropFragFlag(req->changeMask)) {
+        jam();
+        /* DROP PARTITION revert: discard new range map, no LQH changes */
+        tabPtr.p->m_new_range_ptr = nullptr;
+      }
+
       send_alter_tab_conf(signal, connectPtr);
 
       ndbrequire(tabPtr.p->connectrec == connectPtr.i);
@@ -14874,6 +14903,25 @@ void Dbdih::execALTER_TAB_REQ(Signal *signal) {
       ptrCheckGuard(connectPtr, cconnectFileSize, connectRecord);
       connectPtr.p->userpointer = senderData;
       connectPtr.p->userblockref = senderRef;
+
+      /* For DROP PARTITION: send DROP_FRAG_REQ to LQH to delete data
+       * and release the dropped fragment's LQH resources.
+       */
+      if (AlterTableReq::getDropFragFlag(
+              connectPtr.p->m_alter.m_changeMask)) {
+        jam();
+        Uint32 dropFragId = connectPtr.p->m_alter.m_drop_frag_id;
+        DropFragReq *dropReq =
+            (DropFragReq *)signal->getDataPtrSend();
+        dropReq->senderRef = reference();
+        dropReq->senderData = connectPtr.i;
+        dropReq->tableId = tabPtr.i;
+        dropReq->fragId = dropFragId;
+        dropReq->requestInfo = DropFragReq::AlterTableDrop;
+        sendSignal(DBLQH_REF, GSN_DROP_FRAG_REQ, signal,
+                   DropFragReq::SignalLength, JBB);
+        return;
+      }
 
       if (!make_old_table_non_writeable(tabPtr, connectPtr)) {
         jam();
@@ -15270,6 +15318,46 @@ void Dbdih::execDROP_FRAG_CONF(Signal *signal) {
   ConnectRecordPtr connectPtr;
   connectPtr.i = conf->senderData;
   ptrCheckGuard(connectPtr, cconnectFileSize, connectRecord);
+
+  if (AlterTableReq::getDropFragFlag(connectPtr.p->m_alter.m_changeMask)) {
+    jam();
+    /* DROP PARTITION complete: release the dropped fragment's resources */
+    TabRecordPtr tabPtr;
+    tabPtr.i = connectPtr.p->table;
+    ptrCheckGuard(tabPtr, ctabFileSize, tabRecord);
+
+    Uint32 dropFragId = connectPtr.p->m_alter.m_drop_frag_id;
+    FragmentstorePtr fragPtr;
+    getFragstore(tabPtr.p, dropFragId, fragPtr);
+
+    /* Release replica records */
+    releaseReplicas(&fragPtr.p->storedReplicas);
+    releaseReplicas(&fragPtr.p->oldStoredReplicas);
+
+    /* Release Fragmentstore and mark slot as free */
+    c_fragmentRecordPool.release(fragPtr);
+    tabPtr.p->startFid[dropFragId] = RNIL64;
+
+    /* Free old range map */
+    NdbMutex_Lock(&tabPtr.p->theMutex);
+    DIH_TAB_WRITE_LOCK(tabPtr.p);
+    tabPtr.p->m_new_map_ptr_i = RNIL;
+    tabPtr.p->m_scan_reorg_flag = 0;
+    if (tabPtr.p->m_new_range_ptr != nullptr) {
+      lc_ndbd_pool_free(tabPtr.p->m_new_range_ptr);
+      tabPtr.p->m_new_range_ptr = nullptr;
+    }
+    DIH_TAB_WRITE_UNLOCK(tabPtr.p);
+    NdbMutex_Unlock(&tabPtr.p->theMutex);
+
+    /* Send conf before releasing connect record */
+    send_alter_tab_conf(signal, connectPtr);
+
+    ndbrequire(tabPtr.p->connectrec == connectPtr.i);
+    tabPtr.p->connectrec = RNIL;
+    release_connect(connectPtr);
+    return;
+  }
 
   drop_fragments(signal, connectPtr, conf->fragId);
 }
@@ -15908,22 +15996,29 @@ loop:
       reinterpret_cast<const char *>(req->rangeKeyPtr);
     Uint32 rangeKeyLen = req->rangeKeyLen;
     fragId = range_lookup(range_map, rangeKey, rangeKeyLen);
-    if (unlikely(fragId == RNIL)) {
-      thrjam(jambuf);
-      conf->zero = 1;  // Indicate error
-      signal->theData[1] = ZUNDEFINED_FRAGMENT_ERROR;
-      goto error;
-    }
 
     /* Check new map during ALTER TABLE transition */
     if (unlikely(tabPtr.p->m_new_range_ptr != nullptr)) {
       thrjam(jambuf);
       newFragId = range_lookup(tabPtr.p->m_new_range_ptr,
                                rangeKey, rangeKeyLen);
-      if (newFragId == fragId) {
+      if (fragId == RNIL && newFragId != RNIL) {
+        /* Value is beyond old map but valid in new map (ADD PARTITION).
+         * Route to the new fragment. */
+        thrjam(jambuf);
+        fragId = newFragId;
+        newFragId = RNIL;
+      } else if (newFragId == fragId) {
         thrjam(jambuf);
         newFragId = RNIL;
       }
+    }
+
+    if (unlikely(fragId == RNIL)) {
+      thrjam(jambuf);
+      conf->zero = 1;  // Indicate error
+      signal->theData[1] = ZUNDEFINED_FRAGMENT_ERROR;
+      goto error;
     }
   } else {
     thrjam(jambuf);
@@ -16244,6 +16339,7 @@ void Dbdih::start_scan_on_table(TabRecordPtr tabPtr, Signal *signal,
      * are always the first fragments in the interface to DIH.
      */
     conf->fragmentCount = tabPtr.p->partitionCount;
+    conf->startFidOffset = tabPtr.p->m_startFid_offset;
 
     conf->noOfBackups = tabPtr.p->noOfBackups;
     conf->scanCookie = tabPtr.p->m_scan_reorg_flag;
@@ -16508,6 +16604,10 @@ void Dbdih::make_new_table_read_and_writeable(TabRecordPtr tabPtr,
   DIH_TAB_WRITE_LOCK(tabPtr.p);
   tabPtr.p->totalfragments = connectPtr.p->m_alter.m_totalfragments;
   tabPtr.p->partitionCount = connectPtr.p->m_alter.m_partitionCount;
+  if (AlterTableReq::getDropFragFlag(connectPtr.p->m_alter.m_changeMask)) {
+    jam();
+    tabPtr.p->m_startFid_offset = connectPtr.p->m_alter.m_new_startFid_offset;
+  }
   if (AlterTableReq::getReorgFragFlag(connectPtr.p->m_alter.m_changeMask)) {
     jam();
     if (tabPtr.p->method == TabRecord::RANGE_PARTITION) {
@@ -16526,7 +16626,9 @@ void Dbdih::make_new_table_read_and_writeable(TabRecordPtr tabPtr,
     for (Uint32 i = 0; i < tabPtr.p->totalfragments; i++) {
       jam();
       FragmentstorePtr fragPtr;
-      getFragstore(tabPtr.p, i, fragPtr);
+      Uint32 physIdx = (tabPtr.p->m_startFid_offset + i) %
+                       tabPtr.p->startFidSize;
+      getFragstore(tabPtr.p, physIdx, fragPtr);
       fragPtr.p->distributionKey = (fragPtr.p->distributionKey + 1) & 0xFF;
       fragPtr.p->changeNumber++;
       DEB_ACTIVE_NODES(("make_new_table_read_and_writeable: tab(%u,%u),"
@@ -24736,6 +24838,7 @@ void Dbdih::initTable(TabRecordPtr tabPtr) {
   tabPtr.p->m_dropTab.tabUserPtr = RNIL;
   tabPtr.p->startFid = nullptr;
   tabPtr.p->startFidSize = 0;
+  tabPtr.p->m_startFid_offset = 0;
   tabPtr.p->m_range_ptr = nullptr;
   tabPtr.p->m_new_range_ptr = nullptr;
   Uint32 i;

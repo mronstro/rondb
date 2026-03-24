@@ -2837,9 +2837,10 @@ void Suma::execDIH_SCAN_TAB_CONF(Signal *signal) {
     ndbrequire(fragBuf.getSize() == 0);
   }
   D("fragCount = " << fragCount << " m_frag_cnt = " << ptr.p->m_frag_cnt);
-  ndbassert(fragCount >= ptr.p->m_frag_cnt);
-  if (ptr.p->m_frag_cnt == 0) {
+  if (ptr.p->m_frag_cnt == 0 || fragCount != ptr.p->m_frag_cnt) {
     jam();
+    /* Fragment count can increase (ADD PARTITION) or decrease
+     * (DROP PARTITION on range tables). Update to current count. */
     ptr.p->m_frag_cnt = fragCount;
   }
   ptr.p->m_scan_cookie = scanCookie;

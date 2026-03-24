@@ -1949,6 +1949,10 @@ class Dbtc : public SimulatedBlock {
     // Total number of fragments in the table we are scanning
     Uint32 scanNoFrag;
 
+    // Circular offset for range-partitioned tables (0 for others).
+    // Physical fragId = m_startFid_offset + scanNextFragId
+    Uint32 m_startFid_offset;
+
     // Length of expected attribute information
     Uint32 m_booked_fragments_count;
 

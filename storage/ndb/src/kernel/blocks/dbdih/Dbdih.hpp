@@ -183,6 +183,8 @@ class Dbdih : public SimulatedBlock {
         Uint32 m_org_totalfragments;
         Uint32 m_new_map_ptr_i;
         Range2FragmentMap *m_new_range_ptr;  // new range map during ALTER
+        Uint32 m_drop_frag_id;         // fragment ID being dropped (DROP PARTITION)
+        Uint32 m_new_startFid_offset;  // new startFid offset after drop
       } m_alter;
       struct {
         Uint32 m_map_ptr_i;
@@ -774,6 +776,7 @@ class Dbdih : public SimulatedBlock {
 
     Uint32 startFidSize;
     Uint64 *startFid;
+    Uint32 m_startFid_offset;  // circular offset: first live fragment index
 
     CopyStatus tabCopyStatus;
     UpdateState tabUpdateState;

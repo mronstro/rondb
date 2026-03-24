@@ -9899,26 +9899,22 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
       const Int32 *range_src =
         reinterpret_cast<const Int32 *>(c_tableDesc.RangeListData);
 
-      /* Validate: new boundary (at position old_cnt-1) must be greater
-       * than the last non-MAXVALUE boundary (at position old_cnt-2).
-       * The MAXVALUE sentinel is at position old_cnt-1 in the old map
-       * and at position new_cnt-1 in the new map.
-       */
-      if (old_cnt >= 2) {
-        const char *prev_bound = old_rmap->boundary(old_cnt - 2);
-        Int32 new_bound_val = range_src[old_cnt - 1];
+      /* Validate: last new boundary must be > last old boundary */
+      {
+        const char *last_old = old_rmap->boundary(old_cnt - 1);
+        Int32 last_new_val = range_src[new_cnt - 1];
         if (blen == 4) {
-          Int32 prev_val;
-          memcpy(&prev_val, prev_bound, sizeof(Int32));
-          if (new_bound_val <= prev_val) {
+          Int32 old_val;
+          memcpy(&old_val, last_old, sizeof(Int32));
+          if (last_new_val <= old_val) {
             jam();
             setError(error, AlterTableRef::UnsupportedChange, __LINE__);
             return;
           }
         } else {
-          Int64 prev_val;
-          memcpy(&prev_val, prev_bound, sizeof(Int64));
-          if ((Int64)new_bound_val <= prev_val) {
+          Int64 old_val;
+          memcpy(&old_val, last_old, sizeof(Int64));
+          if ((Int64)last_new_val <= old_val) {
             jam();
             setError(error, AlterTableRef::UnsupportedChange, __LINE__);
             return;
@@ -9944,8 +9940,8 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
       rmap->m_object_id = old_rmap->m_object_id;
 
       /* Copy old frag_ids, assign new frag_id for new partition.
-       * The old MAXVALUE partition keeps its frag_id (it narrows in range).
-       * The new partition gets the next sequential frag_id.
+       * Old partitions keep their fragment IDs.
+       * New partition gets the next sequential frag_id.
        */
       const Uint16 *old_fids = old_rmap->frag_ids();
       Uint16 *new_fids = rmap->frag_ids();
@@ -9954,37 +9950,20 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
       }
       new_fids[old_cnt] = (Uint16)old_cnt;  // new fragment
 
-      /* Copy old boundaries [0..old_cnt-2], insert new boundary
-       * at [old_cnt-1], copy MAXVALUE sentinel to [old_cnt].
+      /* Copy ALL new boundaries from range_src (provided by ha_ndbcluster).
+       * range_src contains the complete new boundary set for all new_cnt
+       * partitions, correctly ordered.
        */
-      const char *old_bounds = old_rmap->boundaries();
       char *new_bounds = rmap->boundaries();
-      /* Copy existing non-MAXVALUE boundaries */
-      if (old_cnt >= 2) {
-        memcpy(new_bounds, old_bounds, (old_cnt - 1) * blen);
-      }
-      /* Insert new boundary at position old_cnt - 1 */
-      {
-        Int32 new_bound_val = range_src[old_cnt - 1];
+      for (Uint32 i = 0; i < new_cnt; i++) {
+        Int32 val = range_src[i];
         if (blen == 4) {
-          memcpy(new_bounds + (old_cnt - 1) * blen,
-                 &new_bound_val, sizeof(Int32));
+          memcpy(new_bounds + i * blen, &val, sizeof(Int32));
         } else {
-          Int64 val64 = (Int64)new_bound_val;
-          memcpy(new_bounds + (old_cnt - 1) * blen, &val64, sizeof(Int64));
+          Int64 val64 = (Int64)val;
+          memcpy(new_bounds + i * blen, &val64, sizeof(Int64));
         }
       }
-      /* Copy MAXVALUE sentinel from old position old_cnt-1 to new_cnt-1 */
-      memcpy(new_bounds + old_cnt * blen,
-             old_bounds + (old_cnt - 1) * blen, blen);
-
-      /* Swap old MAXVALUE frag_id to last position:
-       * The old MAXVALUE partition (frag old_fids[old_cnt-1]) now narrows
-       * and stays at position new_cnt-1 (last = MAXVALUE).
-       * The new partition gets position old_cnt-1 (the newly split range).
-       */
-      new_fids[old_cnt] = old_fids[old_cnt - 1];  // old MAXVALUE frag stays MAXVALUE
-      new_fids[old_cnt - 1] = (Uint16)old_cnt;    // new frag gets new boundary slot
 
       newTablePtr.p->m_range_ptr = rmap;
       newTablePtr.p->m_range_boundary_type = btype;
@@ -10110,6 +10089,69 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
       count = 2 + (1 + c_fragData[0]) * c_fragData[1];
       c_fragDataLen = sizeof(Uint16) * count;
     }
+  } else if (AlterTableReq::getDropFragFlag(impl_req->changeMask)) {
+    /* DROP PARTITION for range tables: build new Range2FragmentMap
+     * without the first partition.
+     */
+    if (newTablePtr.p->fragmentType != DictTabInfo::RangePartition) {
+      jam();
+      setError(error, AlterTableRef::UnsupportedChange, __LINE__);
+      return;
+    }
+
+    const Uint32 old_cnt = tablePtr.p->fragmentCount;
+    const Uint32 new_cnt = newTablePtr.p->fragmentCount;
+    if (new_cnt >= old_cnt || new_cnt == 0) {
+      jam();
+      setError(error, AlterTableRef::UnsupportedChange, __LINE__);
+      return;
+    }
+
+    const Range2FragmentMap *old_rmap = tablePtr.p->m_range_ptr;
+    if (old_rmap == nullptr) {
+      jam();
+      setError(error, AlterTableRef::UnsupportedChange, __LINE__);
+      return;
+    }
+
+    const Uint32 btype = old_rmap->m_boundary_type;
+    const Uint32 blen = old_rmap->m_boundary_len;
+    const Uint32 num_dropped = old_cnt - new_cnt;
+
+    /* Allocate new Range2FragmentMap */
+    Uint32 alloc_sz = Range2FragmentMap::alloc_size(new_cnt, blen);
+    void *mem = lc_ndbd_pool_malloc(alloc_sz, RG_SCHEMA_MEMORY,
+                                    getThreadId(), true);
+    if (mem == nullptr) {
+      jam();
+      setError(error, AlterTableRef::UnsupportedChange, __LINE__);
+      return;
+    }
+
+    Range2FragmentMap *rmap = reinterpret_cast<Range2FragmentMap *>(mem);
+    rmap->m_cnt = new_cnt;
+    rmap->m_boundary_len = blen;
+    rmap->m_boundary_type = btype;
+    rmap->m_num_columns = old_rmap->m_num_columns;
+    rmap->m_object_id = old_rmap->m_object_id;
+
+    /* Copy surviving frag_ids (skip first num_dropped entries) */
+    const Uint16 *old_fids = old_rmap->frag_ids();
+    Uint16 *new_fids = rmap->frag_ids();
+    for (Uint32 i = 0; i < new_cnt; i++) {
+      new_fids[i] = old_fids[num_dropped + i];
+    }
+
+    /* Copy surviving boundaries (skip first num_dropped entries) */
+    const char *old_bounds = old_rmap->boundaries();
+    char *new_bounds = rmap->boundaries();
+    memcpy(new_bounds, old_bounds + num_dropped * blen, new_cnt * blen);
+
+    newTablePtr.p->m_range_ptr = rmap;
+    newTablePtr.p->m_range_boundary_type = btype;
+
+    D("DROP PARTITION range: old_cnt=" << old_cnt << " new_cnt=" << new_cnt);
+    AlterTableReq::setReorgFragFlag(impl_req->changeMask, 1);
   } else if (AlterTableReq::getReorgFragFlag(
                  impl_req->changeMask)) {  // Reorg without adding fragments are
                                            // not supported

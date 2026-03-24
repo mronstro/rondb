@@ -69,7 +69,7 @@ struct AlterTableReq {
   O = TTL col
            1111111111222222222233
  01234567890123456789012345678901
- nfdrtsafrcCuUFRmSO--------------
+ nfdrtsafrcCuUFRmSOD-------------
 */
 #define NAME_SHIFT (0)
 #define FRM_SHIFT (1)
@@ -89,6 +89,7 @@ struct AlterTableReq {
 #define MODIFY_ATTR_SHIFT (15)
 #define TTL_SEC_SHIFT (16)
 #define TTL_COL_SHIFT (17)
+#define DROP_FRAG_SHIFT (18)
 
   /**
    * Getters and setters
@@ -125,6 +126,8 @@ struct AlterTableReq {
   static Uint8 getTTLSecFlag(const UintR &changeMask);
   static void setTTLColFlag(UintR &changeMask, Uint32 tsFlg);
   static Uint8 getTTLColFlag(const UintR &changeMask);
+  static void setDropFragFlag(UintR &changeMask, Uint32 dropFlg);
+  static Uint8 getDropFragFlag(const UintR &changeMask);
 
   /**
    * These flags are never used.
@@ -325,6 +328,14 @@ inline Uint8 AlterTableReq::getTTLColFlag(const UintR &changeMask) {
 
 inline void AlterTableReq::setTTLColFlag(UintR &changeMask, Uint32 rbFlag) {
   changeMask |= (rbFlag << TTL_COL_SHIFT);
+}
+
+inline Uint8 AlterTableReq::getDropFragFlag(const UintR &changeMask) {
+  return (Uint8)((changeMask >> DROP_FRAG_SHIFT) & 1);
+}
+
+inline void AlterTableReq::setDropFragFlag(UintR &changeMask, Uint32 dropFlg) {
+  changeMask |= (dropFlg << DROP_FRAG_SHIFT);
 }
 
 struct AlterTableConf {

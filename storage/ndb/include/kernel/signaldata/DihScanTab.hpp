@@ -51,7 +51,7 @@ struct DihScanTabReq {
  */
 struct DihScanTabConf
 {
-  static constexpr Uint32 SignalLength = 7;
+  static constexpr Uint32 SignalLength = 8;
   static constexpr Uint32 InvalidCookie = RNIL;
 
   Uint32 tableId;
@@ -61,6 +61,7 @@ struct DihScanTabConf
   Uint32 scanCookie;
   Uint32 scanSchemaVersionCookie;
   Uint32 reorgFlag;
+  Uint32 startFidOffset;  // circular offset for range partitioned tables
 };
 
 /**

@@ -4625,13 +4625,25 @@ int NdbDictInterface::compChangeMask(const NdbTableImpl &old_impl,
     if (!ok) {
       goto invalid_alter_table;
     }
-    AlterTableReq::setAddFragFlag(change_mask, true);
+    if (impl.m_fragmentType == NdbDictionary::Object::RangePartition &&
+        impl.m_fragmentCount < old_impl.m_fragmentCount) {
+      AlterTableReq::setDropFragFlag(change_mask, true);
+    } else {
+      AlterTableReq::setAddFragFlag(change_mask, true);
+    }
     AlterTableReq::setPartitionBalanceFlag(change_mask, true);
   }
   if (impl.m_fragmentCount != old_impl.m_fragmentCount) {
-    if (impl.m_fragmentType != NdbDictionary::Object::HashMapPartition)
+    if (impl.m_fragmentType == NdbDictionary::Object::RangePartition) {
+      if (impl.m_fragmentCount < old_impl.m_fragmentCount)
+        AlterTableReq::setDropFragFlag(change_mask, true);
+      else
+        AlterTableReq::setAddFragFlag(change_mask, true);
+    } else if (impl.m_fragmentType != NdbDictionary::Object::HashMapPartition) {
       goto invalid_alter_table;
-    AlterTableReq::setAddFragFlag(change_mask, true);
+    } else {
+      AlterTableReq::setAddFragFlag(change_mask, true);
+    }
   } else if (AlterTableReq::getPartitionBalanceFlag(change_mask)) {
     ;       // Already handled above
   } else {  // Changing hash map only supported if adding fragments
