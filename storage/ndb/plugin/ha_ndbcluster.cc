@@ -16191,6 +16191,7 @@ enum_alter_inplace_result ha_ndbcluster::check_inplace_alter_supported(
       Alter_inplace_info::ALTER_COLUMN_STORAGE_TYPE |
       Alter_inplace_info::ALTER_COLUMN_COLUMN_FORMAT |
       Alter_inplace_info::ADD_PARTITION |
+      Alter_inplace_info::DROP_PARTITION |
       Alter_inplace_info::ALTER_TABLE_REORG |
       Alter_inplace_info::CHANGE_CREATE_OPTION |
       Alter_inplace_info::ADD_FOREIGN_KEY |
@@ -16535,6 +16536,31 @@ enum_alter_inplace_result ha_ndbcluster::check_inplace_alter_supported(
         new_tab.setRangeListData(range_data.get(), parts);
         new_tab.setRangeBoundaryType(old_tab->getRangeBoundaryType());
       }
+    } else if (alter_flags & Alter_inplace_info::DROP_PARTITION) {
+      /* DROP PARTITION only supported for range-partitioned tables */
+      if (old_tab->getFragmentType() != NDBTAB::RangePartition) {
+        return inplace_unsupported(
+            ha_alter_info,
+            "DROP PARTITION only supported for range-partitioned tables");
+      }
+      DBUG_PRINT("info", ("Dropping partition, new count: %u",
+                           part_info->num_parts));
+      new_tab.setFragmentCount(part_info->num_parts);
+      new_tab.setPartitionBalance(
+          NdbDictionary::Object::PartitionBalance_Specific);
+
+      /* Set updated range boundaries (without dropped partitions) */
+      const uint parts = part_info->num_parts;
+      std::unique_ptr<int32[]> range_data(new (std::nothrow) int32[parts]);
+      if (!range_data) {
+        my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR),
+                 parts * sizeof(int32));
+        return HA_ALTER_ERROR;
+      }
+      if (ndb_extract_range_boundaries(part_info, range_data.get(), parts))
+        return HA_ALTER_ERROR;
+      new_tab.setRangeListData(range_data.get(), parts);
+      new_tab.setRangeBoundaryType(old_tab->getRangeBoundaryType());
     }
 
     if (comment_changed) {
@@ -17097,14 +17123,17 @@ bool ha_ndbcluster::prepare_inplace_alter_table(
   }
 
   if (alter_flags & Alter_inplace_info::ALTER_TABLE_REORG ||
-      alter_flags & Alter_inplace_info::ADD_PARTITION || max_rows_changed ||
+      alter_flags & Alter_inplace_info::ADD_PARTITION ||
+      alter_flags & Alter_inplace_info::DROP_PARTITION || max_rows_changed ||
       partition_balance_in_comment) {
     if (alter_flags & Alter_inplace_info::ALTER_TABLE_REORG) {
       new_tab->setFragmentCount(0);
       new_tab->setFragmentData(nullptr, 0);
-    } else if (alter_flags & Alter_inplace_info::ADD_PARTITION) {
+    } else if (alter_flags & (Alter_inplace_info::ADD_PARTITION |
+                              Alter_inplace_info::DROP_PARTITION)) {
       partition_info *part_info = altered_table->part_info;
-      DBUG_PRINT("info", ("Adding partition (%u)", part_info->num_parts));
+      DBUG_PRINT("info", ("Alter partition, new count: %u",
+                           part_info->num_parts));
       new_tab->setFragmentCount(part_info->num_parts);
       new_tab->setPartitionBalance(
           NdbDictionary::Object::PartitionBalance_Specific);
