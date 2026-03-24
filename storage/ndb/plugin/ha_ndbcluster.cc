@@ -32,6 +32,8 @@
 
 #include "storage/ndb/plugin/ha_ndbcluster.h"
 
+#include "storage/ndb/plugin/ha_ndbcluster_range.h"
+
 #include <algorithm>  // std::min(),std::max()
 #include <memory>
 #include <sstream>
@@ -15569,46 +15571,16 @@ static int create_table_set_up_partition_info(partition_info *part_info,
     DBUG_PRINT("info", ("Using RangePartition fragmentation type"));
     ndbtab.setFragmentType(NDBTAB::RangePartition);
 
-    /* Extract boundary values from range_col_array (RANGE COLUMNS format).
-     * Each partition has num_part_fields column values; we use field 0.
-     */
     const uint parts = part_info->num_parts;
-    const uint cols = part_info->num_part_fields;  // == 1
-    fprintf(stderr, "RANGE COLUMNS: parts=%u cols=%u range_col_array=%p\n",
-            parts, cols, part_info->range_col_array);
     std::unique_ptr<int32[]> range_data(new (std::nothrow) int32[parts]);
     if (!range_data) {
       my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR), parts * sizeof(int32));
       return 1;
     }
-    for (uint i = 0; i < parts; i++) {
-      const part_column_list_val &col_val =
-          part_info->range_col_array[i * cols];
-      fprintf(stderr, "  part[%u]: max_value=%d fixed=%d item_expr=%p\n",
-              i, (int)col_val.max_value, (int)col_val.fixed,
-              col_val.item_expression);
-      if (col_val.max_value) {
-        range_data[i] = INT_MAX32;
-      } else if (col_val.item_expression != nullptr) {
-        longlong val = col_val.item_expression->val_int();
-        fprintf(stderr, "    item_expression->val_int() = %lld\n", val);
-        if (val < INT_MIN32 || val > INT_MAX32) {
-          my_error(ER_LIMITED_PART_RANGE, MYF(0), "NDB");
-          return 1;
-        }
-        range_data[i] = (int32)val;
-      } else {
-        fprintf(stderr, "    ERROR: no item_expression\n");
-        my_error(ER_INTERNAL_ERROR, MYF(0),
-                 "RANGE COLUMNS: no boundary value");
-        return 1;
-      }
-      fprintf(stderr, "    range_data[%u] = %d\n", i, range_data[i]);
-    }
+    if (ndb_extract_range_boundaries(part_info, range_data.get(), parts))
+      return 1;
     ndbtab.setRangeListData(range_data.get(), parts);
     ndbtab.setRangeBoundaryType(NDB_TYPE_INT);
-    fprintf(stderr, "RANGE COLUMNS: set %u boundaries, type=%u\n",
-            parts, NDB_TYPE_INT);
 
     /* Mark partition column as distribution key (DKey)
      * so DBTC can extract it via create_distr_key().
@@ -15661,19 +15633,8 @@ static int create_table_set_up_partition_info(partition_info *part_info,
         my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR), parts * sizeof(int32));
         return 1;
       }
-      for (uint i = 0; i < parts; i++) {
-        longlong range_val = part_info->range_int_array[i];
-        if (part_info->part_expr->unsigned_flag)
-          range_val -= 0x8000000000000000ULL;
-        if (range_val < INT_MIN32 || range_val >= INT_MAX32) {
-          if ((i != parts - 1) || (range_val != LLONG_MAX)) {
-            my_error(ER_LIMITED_PART_RANGE, MYF(0), "NDB");
-            return 1;
-          }
-          range_val = INT_MAX32;
-        }
-        range_data[i] = (int32)range_val;
-      }
+      if (ndb_extract_range_boundaries(part_info, range_data.get(), parts))
+        return 1;
       ndbtab.setRangeListData(range_data.get(), parts);
     } else if (part_info->part_type == partition_type::LIST) {
       // Translate and check values for LIST partitions to NDB format
@@ -16569,19 +16530,8 @@ enum_alter_inplace_result ha_ndbcluster::check_inplace_alter_supported(
                    parts * sizeof(int32));
           return HA_ALTER_ERROR;
         }
-        for (uint i = 0; i < parts; i++) {
-          longlong range_val = part_info->range_int_array[i];
-          if (part_info->part_expr->unsigned_flag)
-            range_val -= 0x8000000000000000ULL;
-          if (range_val < INT_MIN32 || range_val >= INT_MAX32) {
-            if ((i != parts - 1) || (range_val != LLONG_MAX)) {
-              my_error(ER_LIMITED_PART_RANGE, MYF(0), "NDB");
-              return HA_ALTER_ERROR;
-            }
-            range_val = INT_MAX32;
-          }
-          range_data[i] = (int32)range_val;
-        }
+        if (ndb_extract_range_boundaries(part_info, range_data.get(), parts))
+          return HA_ALTER_ERROR;
         new_tab.setRangeListData(range_data.get(), parts);
         new_tab.setRangeBoundaryType(old_tab->getRangeBoundaryType());
       }
@@ -17168,19 +17118,8 @@ bool ha_ndbcluster::prepare_inplace_alter_table(
                    parts * sizeof(int32));
           goto abort;
         }
-        for (uint i = 0; i < parts; i++) {
-          longlong range_val = part_info->range_int_array[i];
-          if (part_info->part_expr->unsigned_flag)
-            range_val -= 0x8000000000000000ULL;
-          if (range_val < INT_MIN32 || range_val >= INT_MAX32) {
-            if ((i != parts - 1) || (range_val != LLONG_MAX)) {
-              my_error(ER_LIMITED_PART_RANGE, MYF(0), "NDB");
-              goto abort;
-            }
-            range_val = INT_MAX32;
-          }
-          range_data[i] = (int32)range_val;
-        }
+        if (ndb_extract_range_boundaries(part_info, range_data.get(), parts))
+          goto abort;
         new_tab->setRangeListData(range_data.get(), parts);
         new_tab->setRangeBoundaryType(old_tab->getRangeBoundaryType());
       }

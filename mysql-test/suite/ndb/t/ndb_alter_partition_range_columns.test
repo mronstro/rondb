@@ -1,0 +1,618 @@
+-- source include/have_multi_ndb.inc
+
+#
+# Test ALTER TABLE ADD/DROP PARTITION for native RANGE COLUMNS
+# partitioned NDB tables with online (inplace) operations.
+#
+
+--echo #
+--echo # Basic ALTER TABLE ADD PARTITION
+--echo #
+
+CREATE TABLE t1 (
+  a int not null,
+  b int not null,
+  c int not null,
+  primary key(a,b))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (10),
+ partition p1 values less than (20),
+ partition p2 values less than (30));
+
+INSERT into t1 values (1, 1, 1);
+INSERT into t1 values (15, 1, 2);
+INSERT into t1 values (25, 1, 3);
+
+select * from t1 order by a;
+
+# Verify partition count before ALTER
+select count(*) as partition_count from information_schema.partitions
+  where table_schema='test' and table_name='t1';
+
+--echo Add partition at end
+ALTER TABLE t1 ADD PARTITION (PARTITION p3 VALUES LESS THAN (40));
+
+select count(*) as partition_count from information_schema.partitions
+  where table_schema='test' and table_name='t1';
+
+# Existing data unchanged
+select * from t1 order by a;
+
+# PK lookups still work
+select * from t1 where a=1 and b=1;
+select * from t1 where a=15 and b=1;
+select * from t1 where a=25 and b=1;
+
+# Insert into new partition
+INSERT into t1 values (35, 1, 4);
+select * from t1 where a=35 and b=1;
+
+# Value beyond all partitions should fail (no MAXVALUE)
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT into t1 values (40, 1, 5);
+
+--echo Add MAXVALUE partition at end
+ALTER TABLE t1 ADD PARTITION (PARTITION pmax VALUES LESS THAN (MAXVALUE));
+
+select count(*) as partition_count from information_schema.partitions
+  where table_schema='test' and table_name='t1';
+
+# Now the overflow value works
+INSERT into t1 values (100, 1, 5);
+select * from t1 where a=100 and b=1;
+
+select * from t1 order by a;
+
+drop table t1;
+
+--echo #
+--echo # Basic ALTER TABLE DROP PARTITION
+--echo #
+
+CREATE TABLE t2 (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (10),
+ partition p1 values less than (20),
+ partition p2 values less than (30),
+ partition pmax values less than (maxvalue));
+
+INSERT into t2 values (5, 1);
+INSERT into t2 values (15, 2);
+INSERT into t2 values (25, 3);
+INSERT into t2 values (50, 4);
+
+select * from t2 order by a;
+
+--echo Drop first partition
+ALTER TABLE t2 DROP PARTITION p0;
+
+select count(*) as partition_count from information_schema.partitions
+  where table_schema='test' and table_name='t2';
+
+# Data from p0 is gone
+select * from t2 order by a;
+select * from t2 where a=5;
+
+# Other partitions still work
+select * from t2 where a=15;
+select * from t2 where a=25;
+select * from t2 where a=50;
+
+# Insert into remaining partitions still works
+INSERT into t2 values (18, 5);
+select * from t2 where a=18;
+
+--echo Drop another partition (now p1 is first)
+ALTER TABLE t2 DROP PARTITION p1;
+
+select count(*) as partition_count from information_schema.partitions
+  where table_schema='test' and table_name='t2';
+
+select * from t2 order by a;
+
+# PK lookups on remaining data
+select * from t2 where a=25;
+select * from t2 where a=50;
+
+drop table t2;
+
+--echo #
+--echo # Sequential ADD and DROP PARTITION operations
+--echo #
+
+CREATE TABLE t3 (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300));
+
+INSERT into t3 values (50, 1);
+INSERT into t3 values (150, 2);
+INSERT into t3 values (250, 3);
+
+--echo Step 1: Add partition p3
+ALTER TABLE t3 ADD PARTITION (PARTITION p3 VALUES LESS THAN (400));
+INSERT into t3 values (350, 4);
+select * from t3 order by a;
+
+--echo Step 2: Drop first partition
+ALTER TABLE t3 DROP PARTITION p0;
+select * from t3 order by a;
+
+--echo Step 3: Add another partition at end
+ALTER TABLE t3 ADD PARTITION (PARTITION p4 VALUES LESS THAN (500));
+INSERT into t3 values (450, 5);
+select * from t3 order by a;
+
+--echo Step 4: Drop current first partition
+ALTER TABLE t3 DROP PARTITION p1;
+select * from t3 order by a;
+
+--echo Step 5: Add MAXVALUE partition
+ALTER TABLE t3 ADD PARTITION (PARTITION pmax VALUES LESS THAN (MAXVALUE));
+INSERT into t3 values (999, 6);
+select * from t3 order by a;
+
+# Full table scan
+select count(*) from t3;
+
+# PK lookups on all remaining data
+select * from t3 where a=250;
+select * from t3 where a=350;
+select * from t3 where a=450;
+select * from t3 where a=999;
+
+drop table t3;
+
+--echo #
+--echo # Data integrity: UPDATE and DELETE after ALTER
+--echo #
+
+CREATE TABLE t4 (
+  a int not null,
+  b int not null,
+  c varchar(50),
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (10),
+ partition p1 values less than (20),
+ partition p2 values less than (30));
+
+INSERT into t4 values (5, 1, 'five');
+INSERT into t4 values (15, 2, 'fifteen');
+INSERT into t4 values (25, 3, 'twentyfive');
+
+ALTER TABLE t4 ADD PARTITION (PARTITION p3 VALUES LESS THAN (40));
+
+# UPDATE existing row
+UPDATE t4 SET c = 'updated_five' WHERE a = 5;
+select * from t4 where a=5;
+
+# DELETE existing row
+DELETE FROM t4 WHERE a = 15;
+select * from t4 where a=15;
+
+# INSERT into new partition
+INSERT into t4 values (35, 4, 'thirtyfive');
+
+# UPDATE in new partition
+UPDATE t4 SET c = 'updated_thirtyfive' WHERE a = 35;
+select * from t4 where a=35;
+
+select * from t4 order by a;
+
+# Now DROP the first partition
+ALTER TABLE t4 DROP PARTITION p0;
+
+# Verify data from dropped partition is gone
+select * from t4 where a=5;
+
+# Remaining data intact
+select * from t4 order by a;
+
+# DML on remaining partitions still works
+UPDATE t4 SET c = 'updated_twentyfive' WHERE a = 25;
+DELETE FROM t4 WHERE a = 35;
+select * from t4 order by a;
+
+drop table t4;
+
+--echo #
+--echo # Scan pruning after ALTER TABLE ADD PARTITION
+--echo #
+
+CREATE TABLE t5 (
+  a int not null,
+  b int not null,
+  c int not null,
+  primary key(a,b))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (10),
+ partition p1 values less than (20),
+ partition p2 values less than (30));
+
+INSERT into t5 values (5, 1, 1);
+INSERT into t5 values (15, 1, 2);
+INSERT into t5 values (25, 1, 3);
+
+# Verify pruning works before ALTER
+--echo Pruned scan before ALTER
+--source suite/ndb/include/ndb_init_scan_counts.inc
+select * from t5 where a=5 and b=1;
+--source suite/ndb/include/ndb_scan_counts.inc
+
+# Add partition
+ALTER TABLE t5 ADD PARTITION (PARTITION p3 VALUES LESS THAN (40));
+INSERT into t5 values (35, 1, 4);
+
+# Full scan (no pruning)
+--echo Full scan after ALTER
+--source suite/ndb/include/ndb_init_scan_counts.inc
+select * from t5 order by a;
+--source suite/ndb/include/ndb_scan_counts.inc
+
+# Pruned scan on old partition
+--echo Pruned scan on old partition after ALTER
+--source suite/ndb/include/ndb_init_scan_counts.inc
+select * from t5 where a=15 order by a;
+--source suite/ndb/include/ndb_scan_counts.inc
+
+# Pruned scan on new partition
+--echo Pruned scan on new partition after ALTER
+--source suite/ndb/include/ndb_init_scan_counts.inc
+select * from t5 where a=35 order by a;
+--source suite/ndb/include/ndb_scan_counts.inc
+
+drop table t5;
+
+--echo #
+--echo # Scan pruning after ALTER TABLE DROP PARTITION
+--echo #
+
+CREATE TABLE t6 (
+  a int not null,
+  b int not null,
+  primary key(a,b))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (10),
+ partition p1 values less than (20),
+ partition p2 values less than (30),
+ partition pmax values less than (maxvalue));
+
+INSERT into t6 values (5, 1);
+INSERT into t6 values (15, 1);
+INSERT into t6 values (25, 1);
+INSERT into t6 values (50, 1);
+
+ALTER TABLE t6 DROP PARTITION p0;
+
+--echo Pruned scan after DROP PARTITION
+--source suite/ndb/include/ndb_init_scan_counts.inc
+select * from t6 where a=25 and b=1;
+--source suite/ndb/include/ndb_scan_counts.inc
+
+--echo Full scan after DROP PARTITION
+--source suite/ndb/include/ndb_init_scan_counts.inc
+select * from t6 order by a;
+--source suite/ndb/include/ndb_scan_counts.inc
+
+drop table t6;
+
+--echo #
+--echo # Concurrent DML during ALTER TABLE ADD PARTITION
+--echo #
+
+CREATE TABLE t7 (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300));
+
+# Populate with data
+let $i = 1;
+while ($i <= 50)
+{
+  --disable_query_log
+  eval INSERT into t7 values ($i, $i);
+  --enable_query_log
+  inc $i;
+}
+let $i = 101;
+while ($i <= 150)
+{
+  --disable_query_log
+  eval INSERT into t7 values ($i, $i);
+  --enable_query_log
+  inc $i;
+}
+let $i = 201;
+while ($i <= 250)
+{
+  --disable_query_log
+  eval INSERT into t7 values ($i, $i);
+  --enable_query_log
+  inc $i;
+}
+
+select count(*) from t7;
+
+# Start concurrent scan from server2
+--connection server2
+--send select count(*) from t7
+
+# Perform ALTER on server1
+--connection server1
+ALTER TABLE t7 ADD PARTITION (PARTITION p3 VALUES LESS THAN (400));
+
+--connection server2
+--reap
+
+# Both servers should see the new partition structure
+--connection server1
+INSERT into t7 values (350, 350);
+select * from t7 where a=350;
+
+--connection server2
+select * from t7 where a=350;
+select count(*) from t7;
+
+--connection server1
+select count(*) from t7;
+
+drop table t7;
+
+--echo #
+--echo # Concurrent DML during ALTER TABLE DROP PARTITION
+--echo #
+
+--connection server1
+
+CREATE TABLE t8 (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300),
+ partition pmax values less than (maxvalue));
+
+INSERT into t8 values (50, 1);
+INSERT into t8 values (150, 2);
+INSERT into t8 values (250, 3);
+INSERT into t8 values (500, 4);
+
+# Start concurrent scan from server2
+--connection server2
+--send select sum(b) from t8
+
+# Perform DROP PARTITION on server1
+--connection server1
+ALTER TABLE t8 DROP PARTITION p0;
+
+--connection server2
+--reap
+
+# Verify data on both servers
+--connection server1
+select * from t8 order by a;
+
+--connection server2
+select * from t8 order by a;
+
+# Verify p0 data is gone from both servers
+--connection server1
+select * from t8 where a=50;
+
+--connection server2
+select * from t8 where a=50;
+
+--connection server1
+drop table t8;
+
+--echo #
+--echo # Transactions spanning partitions with ALTER
+--echo #
+
+--connection server1
+
+CREATE TABLE t9 (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300));
+
+# Multi-row transaction across partitions
+BEGIN;
+INSERT into t9 values (50, 1);
+INSERT into t9 values (150, 2);
+INSERT into t9 values (250, 3);
+COMMIT;
+
+select * from t9 order by a;
+
+ALTER TABLE t9 ADD PARTITION (PARTITION p3 VALUES LESS THAN (MAXVALUE));
+
+# Transaction spanning old and new partitions
+BEGIN;
+INSERT into t9 values (350, 4);
+UPDATE t9 SET b = 10 WHERE a = 50;
+UPDATE t9 SET b = 20 WHERE a = 150;
+COMMIT;
+
+select * from t9 order by a;
+
+# Rollback across partitions after ALTER
+BEGIN;
+INSERT into t9 values (400, 5);
+DELETE FROM t9 WHERE a = 250;
+ROLLBACK;
+
+select * from t9 order by a;
+
+drop table t9;
+
+--echo #
+--echo # BIGINT partition key with ALTER TABLE
+--echo #
+
+CREATE TABLE t10 (
+  a bigint not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (1000000),
+ partition p1 values less than (2000000),
+ partition p2 values less than (3000000));
+
+INSERT into t10 values (500000, 1);
+INSERT into t10 values (1500000, 2);
+INSERT into t10 values (2500000, 3);
+
+ALTER TABLE t10 ADD PARTITION (PARTITION p3 VALUES LESS THAN (4000000));
+INSERT into t10 values (3500000, 4);
+
+select * from t10 order by a;
+
+# PK lookups after ALTER
+select * from t10 where a=500000;
+select * from t10 where a=3500000;
+
+ALTER TABLE t10 DROP PARTITION p0;
+select * from t10 order by a;
+select * from t10 where a=500000;
+
+drop table t10;
+
+--echo #
+--echo # Error cases
+--echo #
+
+CREATE TABLE t11 (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (10),
+ partition p1 values less than (20),
+ partition p2 values less than (30));
+
+# Cannot add partition with boundary less than existing max
+--error ER_RANGE_NOT_INCREASING_ERROR
+ALTER TABLE t11 ADD PARTITION (PARTITION p_bad VALUES LESS THAN (15));
+
+# Cannot add partition with boundary equal to existing max
+--error ER_RANGE_NOT_INCREASING_ERROR
+ALTER TABLE t11 ADD PARTITION (PARTITION p_bad VALUES LESS THAN (30));
+
+# Drop non-first partition - MySQL allows it for RANGE, NDB should handle it
+INSERT into t11 values (5, 1);
+INSERT into t11 values (15, 2);
+INSERT into t11 values (25, 3);
+
+# Verify drop of middle partition
+ALTER TABLE t11 DROP PARTITION p1;
+
+select count(*) as partition_count from information_schema.partitions
+  where table_schema='test' and table_name='t1';
+
+select * from t11 order by a;
+
+# p1 data is gone
+select * from t11 where a=15;
+
+# Other partitions work
+select * from t11 where a=5;
+select * from t11 where a=25;
+
+drop table t11;
+
+--echo #
+--echo # Multiple ADD PARTITIONs in one statement
+--echo #
+
+CREATE TABLE t12 (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (10));
+
+INSERT into t12 values (5, 1);
+
+ALTER TABLE t12 ADD PARTITION (
+  PARTITION p1 VALUES LESS THAN (20),
+  PARTITION p2 VALUES LESS THAN (30),
+  PARTITION p3 VALUES LESS THAN (MAXVALUE));
+
+select count(*) as partition_count from information_schema.partitions
+  where table_schema='test' and table_name='t12';
+
+INSERT into t12 values (15, 2);
+INSERT into t12 values (25, 3);
+INSERT into t12 values (100, 4);
+
+select * from t12 order by a;
+
+# PK lookups across all partitions
+select * from t12 where a=5;
+select * from t12 where a=15;
+select * from t12 where a=25;
+select * from t12 where a=100;
+
+drop table t12;
+
+--echo #
+--echo # SHOW CREATE TABLE after ALTER operations
+--echo #
+
+CREATE TABLE t13 (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (10),
+ partition p1 values less than (20));
+
+--disable_warnings
+show create table t13;
+--enable_warnings
+
+ALTER TABLE t13 ADD PARTITION (PARTITION p2 VALUES LESS THAN (30));
+
+--disable_warnings
+show create table t13;
+--enable_warnings
+
+ALTER TABLE t13 DROP PARTITION p0;
+
+--disable_warnings
+show create table t13;
+--enable_warnings
+
+drop table t13;

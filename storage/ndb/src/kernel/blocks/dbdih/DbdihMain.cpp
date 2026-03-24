@@ -15908,6 +15908,12 @@ loop:
       reinterpret_cast<const char *>(req->rangeKeyPtr);
     Uint32 rangeKeyLen = req->rangeKeyLen;
     fragId = range_lookup(range_map, rangeKey, rangeKeyLen);
+    if (unlikely(fragId == RNIL)) {
+      thrjam(jambuf);
+      conf->zero = 1;  // Indicate error
+      signal->theData[1] = ZUNDEFINED_FRAGMENT_ERROR;
+      goto error;
+    }
 
     /* Check new map during ALTER TABLE transition */
     if (unlikely(tabPtr.p->m_new_range_ptr != nullptr)) {

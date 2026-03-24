@@ -2892,7 +2892,8 @@ static inline int range_compare(const char *bound, const char *key,
  * @param map       Range map (Tier 1, fixed-size boundaries)
  * @param key       Partition key bytes (native endian)
  * @param key_len   Length of partition key in bytes
- * @return fragment ID for the matching partition
+ * @return fragment ID for the matching partition, or RNIL if the value
+ *         is beyond all boundaries (no MAXVALUE partition)
  */
 static inline Uint32 range_lookup(const Range2FragmentMap *map,
                                   const char *key, Uint32 key_len) {
@@ -2911,9 +2912,8 @@ static inline Uint32 range_lookup(const Range2FragmentMap *map,
   }
   // lo = index of first boundary > key = the partition for this key.
   // If lo == m_cnt, value is beyond all boundaries (no MAXVALUE partition).
-  // Clamp to last partition — the lookup will return "not found" naturally.
   if (lo >= map->m_cnt) {
-    lo = map->m_cnt - 1;
+    return RNIL;
   }
   return map->frag_ids()[lo];
 }
