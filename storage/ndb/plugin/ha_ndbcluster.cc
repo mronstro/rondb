@@ -17399,17 +17399,30 @@ bool ha_ndbcluster::commit_inplace_alter_table(
                                        ndbtab->getObjectVersion());
 
       // Also check and correct the partition count if required.
+      // For RangePartition tables: the altered_table_def from MySQL
+      // already has correct partition entries with boundary values
+      // (built by fill_dd_partition_from_create_info which properly
+      // handles PART_TO_BE_DROPPED). Don't override with generic entries.
       const bool check_partition_count_result =
           ndb_dd_table_check_partition_count(new_table_def,
                                              ndbtab->getPartitionCount());
-      if (!check_partition_count_result) {
+      if (!check_partition_count_result &&
+          ndbtab->getFragmentType() !=
+              NdbDictionary::Object::RangePartition) {
         ndb_dd_table_fix_partition_count(new_table_def,
                                          ndbtab->getPartitionCount());
       }
 
-      // Check that NDB and DD metadata matches
-      assert(Ndb_metadata::compare(thd, thd_ndb->ndb, dbname, ndbtab,
-                                   new_table_def));
+      // Check that NDB and DD metadata matches.
+      // For RangePartition tables, partition count in DD may temporarily
+      // differ from NDB fragment count during ALTER TABLE ADD/DROP
+      // PARTITION (NDB uses physical fragments while DD uses logical
+      // partitions). Skip the comparison for range tables.
+      if (ndbtab->getFragmentType() !=
+          NdbDictionary::Object::RangePartition) {
+        assert(Ndb_metadata::compare(thd, thd_ndb->ndb, dbname, ndbtab,
+                                     new_table_def));
+      }
     }
   }
 

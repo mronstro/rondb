@@ -696,10 +696,13 @@ bool Ndb_dd_client::install_table(
 
   // Check if the DD table object has the correct number of partitions.
   // Correct the number of partitions in the DD table object in case of
-  // a mismatch
+  // a mismatch.
+  // For RANGE COLUMNS tables: the SDI already has correct partition
+  // entries with boundary values. Don't override with generic entries.
   const bool check_partition_count_result = ndb_dd_table_check_partition_count(
       install_table.get(), ndb_num_partitions);
-  if (!check_partition_count_result) {
+  if (!check_partition_count_result &&
+      install_table->partition_type() != dd::Table::PT_RANGE_COLUMNS) {
     ndb_dd_table_fix_partition_count(install_table.get(), ndb_num_partitions);
   }
 

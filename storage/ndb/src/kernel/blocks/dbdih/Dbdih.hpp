@@ -184,6 +184,7 @@ class Dbdih : public SimulatedBlock {
         Uint32 m_new_map_ptr_i;
         Range2FragmentMap *m_new_range_ptr;  // new range map during ALTER
         Uint32 m_drop_frag_id;         // fragment ID being dropped (DROP PARTITION)
+        Uint64 m_drop_frag_ptrI;       // pool index of dropped fragment
         Uint32 m_new_startFid_offset;  // new startFid offset after drop
       } m_alter;
       struct {
@@ -776,7 +777,14 @@ class Dbdih : public SimulatedBlock {
 
     Uint32 startFidSize;
     Uint64 *startFid;
-    Uint32 m_startFid_offset;  // circular offset: first live fragment index
+    /**
+     * fragId of the fragment at startFid[0].
+     * For hash tables this is always 0.
+     * For range tables it increases with each DROP PARTITION.
+     * Conversion: fragId = fragNo + m_startFid_offset
+     *             fragNo = fragId - m_startFid_offset
+     */
+    Uint32 m_startFid_offset;
 
     CopyStatus tabCopyStatus;
     UpdateState tabUpdateState;
@@ -1762,6 +1770,15 @@ class Dbdih : public SimulatedBlock {
   void getFragstoreCanFail(const TabRecord *,
                            Uint32 fragNo,
                            FragmentstorePtr & ptr);
+
+  /* Convert 0-based fragment number to real fragment ID */
+  static Uint32 fragNoToId(const TabRecord *tab, Uint32 fragNo) {
+    return fragNo + tab->m_startFid_offset;
+  }
+  /* Convert real fragment ID to 0-based fragment number */
+  static Uint32 fragIdToNo(const TabRecord *tab, Uint32 fragId) {
+    return fragId - tab->m_startFid_offset;
+  }
 
   void wait_old_scan(Signal*);
   Uint32 add_fragments_to_table(Signal*,

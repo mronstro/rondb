@@ -38,7 +38,8 @@ int ndb_extract_range_boundaries(const partition_info *part_info,
       const part_column_list_val &col_val =
           part_info->range_col_array[i * cols];
       if (col_val.max_value) {
-        range_data[i] = INT_MAX32;
+        my_error(ER_LIMITED_PART_RANGE, MYF(0), "NDB");
+        return 1;
       } else if (col_val.item_expression != nullptr) {
         longlong val = col_val.item_expression->val_int();
         if (val < INT_MIN32 || val > INT_MAX32) {
@@ -53,7 +54,10 @@ int ndb_extract_range_boundaries(const partition_info *part_info,
       }
     }
   } else {
-    /* RANGE(expr) — use range_int_array */
+    /* RANGE(expr) — use range_int_array.
+     * Old-style partitioning with $PART_FUNC_VALUE shadow column;
+     * MAXVALUE is allowed here since ALTER uses copy-table approach.
+     */
     for (uint i = 0; i < parts; i++) {
       longlong range_val = part_info->range_int_array[i];
       if (part_info->part_expr->unsigned_flag)

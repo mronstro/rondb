@@ -9855,6 +9855,13 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
     setError(error, AlterTableRef::UnsupportedChange, __LINE__);
     return;
   }
+  /* Range-partitioned tables never need data reorg — reject if requested */
+  if (AlterTableReq::getReorgFragFlag(impl_req->changeMask) &&
+      newTablePtr.p->fragmentType == DictTabInfo::RangePartition) {
+    jam();
+    setError(error, AlterTableRef::UnsupportedChange, __LINE__);
+    return;
+  }
   if (AlterTableReq::getAddFragFlag(impl_req->changeMask)) {
     if (newTablePtr.p->fragmentType != DictTabInfo::HashMapPartition &&
         newTablePtr.p->fragmentType != DictTabInfo::RangePartition) {
@@ -9969,7 +9976,9 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
       newTablePtr.p->m_range_boundary_type = btype;
 
       D("ADD PARTITION range: old_cnt=" << old_cnt << " new_cnt=" << new_cnt);
-      AlterTableReq::setReorgFragFlag(impl_req->changeMask, 1);
+      /* No ReorgFragFlag for range ADD PARTITION — new partitions are
+       * empty, no data movement needed. The new range map is passed
+       * to DBDIH via new_map_ptr_i and installed at commit time. */
     } else {
       /* HashMapPartition path (existing code) */
       jam();
@@ -10151,7 +10160,9 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
     newTablePtr.p->m_range_boundary_type = btype;
 
     D("DROP PARTITION range: old_cnt=" << old_cnt << " new_cnt=" << new_cnt);
-    AlterTableReq::setReorgFragFlag(impl_req->changeMask, 1);
+    /* No ReorgFragFlag for DROP PARTITION — we simply drop the partition
+     * and its data, no data movement needed. The new range map is passed
+     * to DBDIH via new_map_ptr_i and installed at commit time. */
   } else if (AlterTableReq::getReorgFragFlag(
                  impl_req->changeMask)) {  // Reorg without adding fragments are
                                            // not supported
@@ -11295,17 +11306,11 @@ void Dbdict::alterTable_toLocal(Signal *signal, SchemaOpPtr op_ptr) {
     sendSignal(blockRef, GSN_ALTER_TAB_REQ, signal, AlterTabReq::SignalLength,
                JBB, ptr, 1);
   } else if (blockNo == DBDIH &&
-             AlterTableReq::getAddFragFlag(req->changeMask)) {
+             (AlterTableReq::getAddFragFlag(req->changeMask) ||
+              AlterTableReq::getDropFragFlag(req->changeMask))) {
     jam();
-    const OpSection &fragInfoSec =
-        getOpSection(op_ptr, AlterTabReq::FRAGMENTATION);
-    SegmentedSectionPtr fragInfoPtr;
-    LocalArenaPool<OpSectionSegment> op_sec_pool(
-        op_ptr.p->m_trans_ptr.p->m_arena, c_opSectionBufferPool);
-    bool ok = copyOut(op_sec_pool, fragInfoSec, fragInfoPtr);
-    ndbrequire(ok);
 
-    if (AlterTableReq::getReorgFragFlag(req->changeMask)) {
+    {
       jam();
       TableRecordPtr newTablePtr;
       newTablePtr.i = alterTabPtr.p->m_newTablePtrI;
@@ -11313,9 +11318,12 @@ void Dbdict::alterTable_toLocal(Signal *signal, SchemaOpPtr op_ptr) {
       if (newTablePtr.p->fragmentType == DictTabInfo::RangePartition) {
         jam();
         /* For range tables, store the DBDICT pool index in new_map_ptr_i.
-         * DBDIH will call c_dict->getRangeMapByPtrI() to get the pointer. */
+         * DBDIH will call c_dict->getRangeMapByPtrI() to get the pointer.
+         * This applies to both ADD and DROP PARTITION (no ReorgFragFlag
+         * needed — range partitions never move data).
+         */
         req->new_map_ptr_i = newTablePtr.i;
-      } else {
+      } else if (AlterTableReq::getReorgFragFlag(req->changeMask)) {
         jam();
         HashMapRecordPtr hm_ptr;
         ndbrequire(find_object(hm_ptr, newTablePtr.p->hashMapObjectId));
@@ -11323,9 +11331,24 @@ void Dbdict::alterTable_toLocal(Signal *signal, SchemaOpPtr op_ptr) {
       }
     }
 
-    SectionHandle handle(this, fragInfoPtr.i);
-    sendSignal(blockRef, GSN_ALTER_TAB_REQ, signal,
-               AlterTabReq::SignalLength, JBB, &handle);
+    if (AlterTableReq::getAddFragFlag(req->changeMask)) {
+      jam();
+      const OpSection &fragInfoSec =
+          getOpSection(op_ptr, AlterTabReq::FRAGMENTATION);
+      SegmentedSectionPtr fragInfoPtr;
+      LocalArenaPool<OpSectionSegment> op_sec_pool(
+          op_ptr.p->m_trans_ptr.p->m_arena, c_opSectionBufferPool);
+      bool ok = copyOut(op_sec_pool, fragInfoSec, fragInfoPtr);
+      ndbrequire(ok);
+
+      SectionHandle handle(this, fragInfoPtr.i);
+      sendSignal(blockRef, GSN_ALTER_TAB_REQ, signal,
+                 AlterTabReq::SignalLength, JBB, &handle);
+    } else {
+      jam();
+      sendSignal(blockRef, GSN_ALTER_TAB_REQ, signal,
+                 AlterTabReq::SignalLength, JBB);
+    }
   } else {
     jam();
     sendSignal(blockRef, GSN_ALTER_TAB_REQ, signal, AlterTabReq::SignalLength,

@@ -16583,6 +16583,9 @@ void Dbtc::diFcountReqLab(Signal *signal, ScanRecordPtr scanptr,
 
   scanptr.p->scanNextFragId = 0;
   scanptr.p->m_startFid_offset = 0;
+  DEB_MATCH(("(%u) startFid_offset: %u, scanPtrI: %u, LINE: %u",
+    scanptr.p->m_startFid_offset, scanptr.i, __LINE__));
+
   ndbassert(scanptr.p->m_booked_fragments_count == scanptr.p->scanParallel);
   scanptr.p->m_read_any_node =
       (ScanFragReq::getReadCommittedFlag(scanptr.p->scanRequestInfo) ||
@@ -16687,34 +16690,10 @@ void Dbtc::execDIH_SCAN_TAB_CONF(Signal *signal, ScanRecordPtr scanptr,
       tfragCount = packed & 0xFFFF;
     } else {
       /**
-       * For range-partitioned tables, ignore NDB API single-partition
-       * pruning. The NDB API sends a hash value which is meaningless
-       * for range lookup, and the NDB API's partition choice cannot be
-       * trusted during ALTER TABLE when data may move between fragments.
-       * Server-side multi-partition range pruning (m_scan_partition_range_flag)
-       * is the correct mechanism for range tables.
-       *
-       * Look up base table to check for range partition flag (for index
-       * scans, tabPtr/scanTableref is the index table, not the base table).
+       * Prepare for sendDihGetNodeReq to request DBDIH info for
+       * the single pruned-to fragId we got from NDB API.
        */
-      TableRecordPtr baseTabPtr;
-      baseTabPtr.i = tabPtr.p->m_primary_table_id;
-      if (baseTabPtr.i == RNIL) {
-        baseTabPtr = tabPtr;  // Not an index, this IS the base table
-      } else {
-        ptrCheckGuard(baseTabPtr, ctabrecFilesize, tableRecord);
-      }
-      if (baseTabPtr.p->m_flags & TableRecord::TR_RANGE_PARTITION) {
-        jam();
-        /* Disable single-partition pruning — scan all fragments */
-        scanptr.p->m_scan_dist_key_flag = 0;
-      } else {
-        /**
-         * Prepare for sendDihGetNodeReq to request DBDIH info for
-         * the single pruned-to fragId we got from NDB API.
-         */
-        tfragCount = 1;
-      }
+      tfragCount = 1;
     }
   }
   ndbassert(scanptr.p->scanNextFragId == 0);
@@ -16723,6 +16702,9 @@ void Dbtc::execDIH_SCAN_TAB_CONF(Signal *signal, ScanRecordPtr scanptr,
   scanptr.p->scanNoFrag = tfragCount;
   scanptr.p->m_startFid_offset = conf->startFidOffset;
   scanptr.p->scanState = ScanRecord::RUNNING;
+
+  DEB_MATCH(("(%u) startFid_offset: %u, scanPtrI: %u, LINE: %u",
+    scanptr.p->m_startFid_offset, scanptr.i, __LINE__));
 
   setApiConTimer(apiConnectptr, 0, __LINE__);
   updateBuddyTimer(apiConnectptr);
@@ -16884,6 +16866,14 @@ void Dbtc::sendDihGetNodesLab(Signal *signal, ScanRecordPtr scanptr,
     /* Apply circular offset for range-partitioned tables */
     const Uint32 physFragId =
         scanP->scanNextFragId + scanP->m_startFid_offset;
+
+    DEB_MATCH(("(%u) startFid_offset: %u, scanPtrI: %u, LINE: %u,"
+               " scanNextFragId: %u",
+      scanptr.p->m_startFid_offset,
+      scanptr.i,
+      __LINE__,
+      scanptr.p->scanNextFragId));
+
     const bool success =
         sendDihGetNodeReq(signal, scanptr, fragLocationPtr,
                           physFragId, is_multi_spj_scan,
