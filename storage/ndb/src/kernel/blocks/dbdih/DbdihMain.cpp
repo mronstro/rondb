@@ -3184,25 +3184,24 @@ bool Dbdih::check_pause_state_sanity(void) {
 /* Support function for execLCP_FRAG_REP */
 void Dbdih::queue_lcp_frag_rep(Signal *signal, LcpFragRep *lcpReport) {
   Uint32 tableId = lcpReport->tableId;
-  Uint32 fragId = lcpReport->fragId;
-
   TabRecordPtr tabPtr;
   tabPtr.i = tableId;
   ptrCheckGuard(tabPtr, ctabFileSize, tabRecord);
+  Uint32 fragNo = fragIdToNo(tabPtr.p, lcpReport->fragId);
 
   if (tabPtr.p->tabStatus == TabRecord::TS_DROPPING ||
       tabPtr.p->tabStatus == TabRecord::TS_IDLE) {
     jam();
     DEB_PAUSE(("Skip Queue LCP_FRAG_REP for tab(%u,%u), lcpId: %u",
-      tableId, fragId, lcpReport->lcpId));
+      tableId, fragNo, lcpReport->lcpId));
     return;
   }
 
   DEB_PAUSE(("Queue LCP_FRAG_REP for tab(%u,%u), lcpId: %u",
-    tableId, fragId, lcpReport->lcpId));
+    tableId, fragNo, lcpReport->lcpId));
 
   FragmentstorePtr fragPtr;
-  getFragstore(tabPtr.p, fragId, fragPtr);
+  getFragstore(tabPtr.p, fragNo, fragPtr);
 
   ReplicaRecordPtr replicaPtr;
   findReplica(replicaPtr, fragPtr.p, lcpReport->nodeId);
@@ -4720,7 +4719,7 @@ void Dbdih::execUPDATE_TOREQ(Signal *signal) {
 
     takeOverPtr.p->toCopyNode = req.copyNodeId;
     takeOverPtr.p->toCurrentTabref = req.tableId;
-    takeOverPtr.p->toCurrentFragid = req.fragmentNo;
+    takeOverPtr.p->toCurrentFragNo = req.fragmentNo;
 
     NodeRecordPtr nodePtr;
     NodeGroupRecordPtr NGPtr;
@@ -4811,7 +4810,7 @@ void Dbdih::updateToReq_fragmentMutex_locked(Signal *signal, Uint32 toPtrI,
     jam();
     infoEvent(
         "Node %u waiting to continue copying table %u fragment: %u (%s)",
-        nodeId, takeOverPtr.p->toCurrentTabref, takeOverPtr.p->toCurrentFragid,
+        nodeId, takeOverPtr.p->toCurrentTabref, takeOverPtr.p->toCurrentFragNo,
         takeOverPtr.p->toMasterStatus == TakeOverRecord::TO_MUTEX_BEFORE_STORED
             ? "STORED"
             : "COMMIT");
@@ -5097,7 +5096,7 @@ void Dbdih::execUPDATE_FRAG_STATEREQ(Signal *signal) {
   tabPtr.i = req->tableId;
   ptrCheckGuard(tabPtr, ctabFileSize, tabRecord);
 
-  Uint32 fragId = req->fragId;
+  Uint32 fragNo = fragIdToNo(tabPtr.p, req->fragId);
   Uint32 tdestNodeid = req->startingNodeId;
   // Uint32 tsourceNodeid = req->copyNodeId;
   Uint32 startGci = req->startGci;
@@ -5110,7 +5109,7 @@ void Dbdih::execUPDATE_FRAG_STATEREQ(Signal *signal) {
     primaryNode = 0;
   }
   FragmentstorePtr fragPtr;
-  getFragstore(tabPtr.p, fragId, fragPtr);
+  getFragstore(tabPtr.p, fragNo, fragPtr);
   RETURN_IF_NODE_NOT_ALIVE(tdestNodeid);
   ReplicaRecordPtr frReplicaPtr;
   findReplica(frReplicaPtr, fragPtr.p, tFailedNodeId,
@@ -5173,7 +5172,7 @@ void Dbdih::execUPDATE_FRAG_STATEREQ(Signal *signal) {
   UpdateFragStateConf *const conf = (UpdateFragStateConf *)&signal->theData[0];
   conf->senderData = senderData;
   conf->tableId = tabPtr.i;
-  conf->fragId = fragId;
+  conf->fragId = req->fragId;
   conf->sendingNodeId = cownNodeId;
   conf->startingNodeId = tdestNodeid;
   conf->failedNodeId = tFailedNodeId;
@@ -7307,7 +7306,7 @@ void Dbdih::startTakeOver(Signal *signal, Uint32 startNode,
   takeOverPtr.p->toStartingNode = startNode;
   takeOverPtr.p->toFailedNode = nodeTakenOver;
   takeOverPtr.p->toCurrentTabref = 0;
-  takeOverPtr.p->toCurrentFragid = 0;
+  takeOverPtr.p->toCurrentFragNo = 0;
 
   ndbrequire(req != NULL);
   takeOverPtr.p->m_flags = req->flags;
@@ -7333,19 +7332,19 @@ void Dbdih::nr_start_fragments(Signal *signal, TakeOverRecordPtr takeOverPtr) {
     if (tabPtr.p->tabStatus != TabRecord::TS_ACTIVE ||
         tabPtr.p->tabStorage != TabRecord::ST_NORMAL) {
       jam();
-      takeOverPtr.p->toCurrentFragid = 0;
+      takeOverPtr.p->toCurrentFragNo = 0;
       takeOverPtr.p->toCurrentTabref++;
       continue;
     }  // if
-    Uint32 fragId = takeOverPtr.p->toCurrentFragid;
-    if (fragId >= tabPtr.p->totalfragments) {
+    Uint32 fragNo = takeOverPtr.p->toCurrentFragNo;
+    if (fragNo >= tabPtr.p->totalfragments) {
       jam();
-      takeOverPtr.p->toCurrentFragid = 0;
+      takeOverPtr.p->toCurrentFragNo = 0;
       takeOverPtr.p->toCurrentTabref++;
       continue;
     }  // if
     FragmentstorePtr fragPtr;
-    getFragstore(tabPtr.p, fragId, fragPtr);
+    getFragstore(tabPtr.p, fragNo, fragPtr);
     ReplicaRecordPtr loopReplicaPtr;
     loopReplicaPtr.i = fragPtr.p->oldStoredReplicas;
     while (loopReplicaPtr.i != RNIL64) {
@@ -7360,7 +7359,7 @@ void Dbdih::nr_start_fragments(Signal *signal, TakeOverRecordPtr takeOverPtr) {
         loopReplicaPtr.i = loopReplicaPtr.p->nextPool;
       }  // if
     }    // while
-    takeOverPtr.p->toCurrentFragid++;
+    takeOverPtr.p->toCurrentFragNo++;
   }  // while
   signal->theData[0] = DihContinueB::ZTO_START_FRAGMENTS;
   signal->theData[1] = takeOverPtr.i;
@@ -7380,7 +7379,7 @@ void Dbdih::nr_start_fragment(Signal *signal, TakeOverRecordPtr takeOverPtr,
   g_eventLogger->info("tab: %d frag: %d replicaP->nextLcp: %d,"
                       " restorableGci: %u",
                       takeOverPtr.p->toCurrentTabref,
-                      takeOverPtr.p->toCurrentFragid,
+                      takeOverPtr.p->toCurrentFragNo,
                       replicaPtr.p->nextLcp,
                       restorableGCI);
 #endif
@@ -7508,7 +7507,7 @@ done:
       ptrAss(tabPtr, tabRecord);
 
       FragmentstorePtr fragPtr;
-      getFragstore(tabPtr.p, takeOverPtr.p->toCurrentFragid, fragPtr);
+      getFragstore(tabPtr.p, takeOverPtr.p->toCurrentFragNo, fragPtr);
       dump_replica_info(fragPtr.p);
     }
     ndbassert(gci == 0);
@@ -7519,7 +7518,7 @@ done:
     req->lcpNo = ZNIL;
     req->lcpId = 0;
     req->tableId = takeOverPtr.p->toCurrentTabref;
-    req->fragId = takeOverPtr.p->toCurrentFragid;
+    req->fragId = fragNoToId(tabPtr.p, takeOverPtr.p->toCurrentFragNo);
     req->noOfLogNodes = 0;
 
     if (c_2pass_inr && cstarttype == NodeState::ST_INITIAL_NODE_RESTART) {
@@ -7548,7 +7547,7 @@ done:
       ptrCheckGuard(tabPtr, ctabFileSize, tabRecord);
 
       FragmentstorePtr fragPtr;
-      getFragstore(tabPtr.p, takeOverPtr.p->toCurrentFragid, fragPtr);
+      getFragstore(tabPtr.p, takeOverPtr.p->toCurrentFragNo, fragPtr);
       Uint32 nodes[MAX_REPLICAS];
       extractNodeInfo(jamBuffer(), fragPtr.p, nodes);
 
@@ -7561,13 +7560,13 @@ done:
       g_eventLogger->debug("node: %d tab: %d frag: %d no lcp to restore",
                            takeOverPtr.p->toStartingNode,
                            takeOverPtr.p->toCurrentTabref,
-                           takeOverPtr.p->toCurrentFragid);
+                           takeOverPtr.p->toCurrentFragNo);
     } else {
       g_eventLogger->debug(
           "node: %d tab: %d frag: %d copying data from %u"
           " (gci: %u)",
           takeOverPtr.p->toStartingNode, takeOverPtr.p->toCurrentTabref,
-          takeOverPtr.p->toCurrentFragid, req->lqhLogNode[0],
+          takeOverPtr.p->toCurrentFragNo, req->lqhLogNode[0],
           takeOverPtr.p->startGci);
     }
 
@@ -7588,7 +7587,7 @@ done:
       ptrAss(tabPtr, tabRecord);
 
       FragmentstorePtr fragPtr;
-      getFragstore(tabPtr.p, takeOverPtr.p->toCurrentFragid, fragPtr);
+      getFragstore(tabPtr.p, takeOverPtr.p->toCurrentFragNo, fragPtr);
       dump_replica_info(fragPtr.p);
     }
     ndbassert(gci == restorableGCI || (gci + 1) == restorableGCI);
@@ -7602,7 +7601,7 @@ done:
         " maxGciStarted: %u maxGciCompleted: %u (restorable:"
         " %u(%u) newestRestorableGCI: %u)",
         takeOverPtr.p->toStartingNode, takeOverPtr.p->toCurrentTabref,
-        takeOverPtr.p->toCurrentFragid, maxLcpId, maxLcpIndex,
+        takeOverPtr.p->toCurrentFragNo, maxLcpId, maxLcpIndex,
         replicaPtr.p->maxGciStarted[maxLcpIndex],
         replicaPtr.p->maxGciCompleted[maxLcpIndex], restorableGCI,
         SYSFILE->lastCompletedGCI[takeOverPtr.p->toStartingNode],
@@ -7614,7 +7613,7 @@ done:
     req->lcpNo = maxLcpIndex;
     req->lcpId = maxLcpId;
     req->tableId = takeOverPtr.p->toCurrentTabref;
-    req->fragId = takeOverPtr.p->toCurrentFragid;
+    req->fragId = fragNoToId(tabPtr.p, takeOverPtr.p->toCurrentFragNo);
     req->noOfLogNodes = 1;
     req->lqhLogNode[0] = takeOverPtr.p->toStartingNode;
     req->startGci[0] = startGci;
@@ -7654,7 +7653,7 @@ void Dbdih::nr_run_redo(Signal *signal, TakeOverRecordPtr takeOverPtr) {
       " the database to an off-line but consistent state");
 
   takeOverPtr.p->toCurrentTabref = 0;
-  takeOverPtr.p->toCurrentFragid = 0;
+  takeOverPtr.p->toCurrentFragNo = 0;
   takeOverPtr.p->toSlaveStatus = TakeOverRecord::TO_RUN_REDO;
   sendSTART_RECREQ(signal, takeOverPtr.p->toStartingNode, takeOverPtr.i);
 
@@ -7698,20 +7697,20 @@ void Dbdih::nr_start_logging(Signal *signal, TakeOverRecordPtr takeOverPtr) {
     if (tabPtr.p->tabStatus != TabRecord::TS_ACTIVE ||
         tabPtr.p->tabStorage != TabRecord::ST_NORMAL) {
       jam();
-      takeOverPtr.p->toCurrentFragid = 0;
+      takeOverPtr.p->toCurrentFragNo = 0;
       takeOverPtr.p->toCurrentTabref++;
       continue;
     }
 
-    Uint32 fragId = takeOverPtr.p->toCurrentFragid;
-    if (fragId >= tabPtr.p->totalfragments) {
+    Uint32 fragNo = takeOverPtr.p->toCurrentFragNo;
+    if (fragNo >= tabPtr.p->totalfragments) {
       jam();
-      takeOverPtr.p->toCurrentFragid = 0;
+      takeOverPtr.p->toCurrentFragNo = 0;
       takeOverPtr.p->toCurrentTabref++;
       continue;
     }
     FragmentstorePtr fragPtr;
-    getFragstore(tabPtr.p, fragId, fragPtr);
+    getFragstore(tabPtr.p, fragNo, fragPtr);
 
     Uint32 instanceKey = dihGetInstanceKey(fragPtr);
     if (!check_takeover_thread(takeOverPtr,
@@ -7725,7 +7724,7 @@ void Dbdih::nr_start_logging(Signal *signal, TakeOverRecordPtr takeOverPtr) {
        * was not ours to take over, it will be handled by another take over
        * thread.
        */
-      takeOverPtr.p->toCurrentFragid++;
+      takeOverPtr.p->toCurrentFragNo++;
       continue;
     }
 
@@ -7746,12 +7745,12 @@ void Dbdih::nr_start_logging(Signal *signal, TakeOverRecordPtr takeOverPtr) {
 
         DEB_COPY_ACTIVE(("COPY_ACTIVEREQ: takeOverPtr.i: %u, tab(%u,%u)",
                          takeOverPtr.i, takeOverPtr.p->toCurrentTabref,
-                         takeOverPtr.p->toCurrentFragid));
+                         takeOverPtr.p->toCurrentFragNo));
         CopyActiveReq *const req = (CopyActiveReq *)&signal->theData[0];
         req->userPtr = takeOverPtr.i;
         req->userRef = reference();
         req->tableId = takeOverPtr.p->toCurrentTabref;
-        req->fragId = takeOverPtr.p->toCurrentFragid;
+        req->fragId = fragNoToId(tabPtr.p, takeOverPtr.p->toCurrentFragNo);
         req->distributionKey = fragPtr.p->distributionKey;
         req->flags = 0;
         sendSignal(lqhRef, GSN_COPY_ACTIVEREQ, signal,
@@ -7762,7 +7761,7 @@ void Dbdih::nr_start_logging(Signal *signal, TakeOverRecordPtr takeOverPtr) {
         loopReplicaPtr.i = loopReplicaPtr.p->nextPool;
       }
     }
-    takeOverPtr.p->toCurrentFragid++;
+    takeOverPtr.p->toCurrentFragNo++;
   }
   send_continueb_nr_start_logging(signal, takeOverPtr);
 }
@@ -7954,7 +7953,7 @@ void Dbdih::init_takeover_thread(TakeOverRecordPtr takeOverPtr,
   takeOverPtr.p->toMasterStatus = TakeOverRecord::TO_MASTER_IDLE;
 
   takeOverPtr.p->toCurrentTabref = 0;
-  takeOverPtr.p->toCurrentFragid = 0;
+  takeOverPtr.p->toCurrentFragNo = 0;
   takeOverPtr.p->toCurrentReplica = RNIL64;
 }
 
@@ -8095,7 +8094,7 @@ void Dbdih::startNextCopyFragment(Signal *signal, Uint32 takeOverPtrI) {
     ptrAss(tabPtr, tabRecord);
     if (tabPtr.p->tabStatus != TabRecord::TS_ACTIVE) {
       jam();
-      takeOverPtr.p->toCurrentFragid = 0;
+      takeOverPtr.p->toCurrentFragNo = 0;
       takeOverPtr.p->toCurrentTabref++;
       continue;
     }//if
@@ -8114,10 +8113,10 @@ void Dbdih::startNextCopyFragment(Signal *signal, Uint32 takeOverPtrI) {
                             tabPtr.p->totalfragments,
                             __LINE__);
     }
-    Uint32 fragId = takeOverPtr.p->toCurrentFragid;
-    if (fragId >= tabPtr.p->totalfragments) {
+    Uint32 fragNo = takeOverPtr.p->toCurrentFragNo;
+    if (fragNo >= tabPtr.p->totalfragments) {
       jam();
-      takeOverPtr.p->toCurrentFragid = 0;
+      takeOverPtr.p->toCurrentFragNo = 0;
       takeOverPtr.p->toCurrentTabref++;
       if (ERROR_INSERTED(7135)) {
         if (takeOverPtr.p->toCurrentTabref == 1) {
@@ -8127,7 +8126,7 @@ void Dbdih::startNextCopyFragment(Signal *signal, Uint32 takeOverPtrI) {
       continue;
     }  // if
     FragmentstorePtr fragPtr;
-    getFragstore(tabPtr.p, fragId, fragPtr);
+    getFragstore(tabPtr.p, fragNo, fragPtr);
 
     Uint32 instanceKey = dihGetInstanceKey(fragPtr);
     if (!check_takeover_thread(takeOverPtr,
@@ -8141,7 +8140,7 @@ void Dbdih::startNextCopyFragment(Signal *signal, Uint32 takeOverPtrI) {
        * thread.
        */
       jam();
-      takeOverPtr.p->toCurrentFragid++;
+      takeOverPtr.p->toCurrentFragNo++;
       continue;
     }
     jam();
@@ -8173,7 +8172,7 @@ void Dbdih::startNextCopyFragment(Signal *signal, Uint32 takeOverPtrI) {
         loopReplicaPtr.i = loopReplicaPtr.p->nextPool;
       }  // if
     }    // while
-    takeOverPtr.p->toCurrentFragid++;
+    takeOverPtr.p->toCurrentFragNo++;
   }  // while
   send_continueb_start_next_copy(signal, takeOverPtr);
 }  // Dbdih::startNextCopyFragment()
@@ -8187,13 +8186,13 @@ void Dbdih::toCopyFragLab(Signal *signal, Uint32 takeOverPtrI) {
    */
   g_eventLogger->debug("PREPARE_COPY_FRAGREQ: tab: %u, frag: %u, thread: %u",
                        takeOverPtr.p->toCurrentTabref,
-                       takeOverPtr.p->toCurrentFragid, takeOverPtr.i);
+                       takeOverPtr.p->toCurrentFragNo, takeOverPtr.i);
   TabRecordPtr tabPtr;
   tabPtr.i = takeOverPtr.p->toCurrentTabref;
   ptrCheckGuard(tabPtr, ctabFileSize, tabRecord);
 
   FragmentstorePtr fragPtr;
-  getFragstore(tabPtr.p, takeOverPtr.p->toCurrentFragid, fragPtr);
+  getFragstore(tabPtr.p, takeOverPtr.p->toCurrentFragNo, fragPtr);
   Uint32 nodes[MAX_REPLICAS];
   extractNodeInfo(jamBuffer(), fragPtr.p, nodes);
   takeOverPtr.p->toCopyNode = nodes[0];
@@ -8202,7 +8201,7 @@ void Dbdih::toCopyFragLab(Signal *signal, Uint32 takeOverPtrI) {
   req->senderRef = reference();
   req->senderData = takeOverPtrI;
   req->tableId = takeOverPtr.p->toCurrentTabref;
-  req->fragId = takeOverPtr.p->toCurrentFragid;
+  req->fragId = fragNoToId(tabPtr.p, takeOverPtr.p->toCurrentFragNo);
   req->copyNodeId = takeOverPtr.p->toCopyNode;
   req->startingNodeId = takeOverPtr.p->toStartingNode;  // Dst
 
@@ -8251,7 +8250,7 @@ void Dbdih::execPREPARE_COPY_FRAG_CONF(Signal *signal) {
   ReplicaRecordPtr replicaPtr;
   tabPtr.i = takeOverPtr.p->toCurrentTabref;
   ptrCheckGuard(tabPtr, ctabFileSize, tabRecord);
-  getFragstore(tabPtr.p, takeOverPtr.p->toCurrentFragid, fragPtr);
+  getFragstore(tabPtr.p, takeOverPtr.p->toCurrentFragNo, fragPtr);
   findReplica(replicaPtr, fragPtr.p, getOwnNodeId(), true);
   if (signal->length() == PrepareCopyFragConf::SignalLength &&
       replicaPtr.p->m_restorable_gci == 0) {
@@ -8304,7 +8303,7 @@ void Dbdih::sendUpdateTo(Signal *signal, TakeOverRecordPtr takeOverPtr) {
    */
   g_eventLogger->debug("UPDATE_TOREQ: tab:%u, frag:%u, thread:%u, state:%u",
                        takeOverPtr.p->toCurrentTabref,
-                       takeOverPtr.p->toCurrentFragid, takeOverPtr.i,
+                       takeOverPtr.p->toCurrentFragNo, takeOverPtr.i,
                        takeOverPtr.p->toSlaveStatus);
   UpdateToReq *req = (UpdateToReq *)signal->getDataPtrSend();
   req->senderData = c_mainTakeOverPtr.i;
@@ -8312,7 +8311,7 @@ void Dbdih::sendUpdateTo(Signal *signal, TakeOverRecordPtr takeOverPtr) {
   req->startingNodeId = takeOverPtr.p->toStartingNode;
   req->copyNodeId = takeOverPtr.p->toCopyNode;
   req->tableId = takeOverPtr.p->toCurrentTabref;
-  req->fragmentNo = takeOverPtr.p->toCurrentFragid;
+  req->fragmentNo = takeOverPtr.p->toCurrentFragNo;
   switch (takeOverPtr.p->toSlaveStatus) {
     case TakeOverRecord::TO_UPDATE_BEFORE_STORED:
       jam();
@@ -8429,10 +8428,10 @@ void Dbdih::toStartCopyFrag(Signal *signal, TakeOverRecordPtr takeOverPtr) {
   tabPtr.i = takeOverPtr.p->toCurrentTabref;
   ptrCheckGuard(tabPtr, ctabFileSize, tabRecord);
 
-  Uint32 fragId = takeOverPtr.p->toCurrentFragid;
+  Uint32 fragNo = takeOverPtr.p->toCurrentFragNo;
 
   FragmentstorePtr fragPtr;
-  getFragstore(tabPtr.p, fragId, fragPtr);
+  getFragstore(tabPtr.p, fragNo, fragPtr);
 
   ReplicaRecordPtr replicaPtr;
   findReplica(replicaPtr, fragPtr.p, getOwnNodeId(), true);
@@ -8461,7 +8460,7 @@ void Dbdih::toStartCopyFrag(Signal *signal, TakeOverRecordPtr takeOverPtr) {
              JBB);
   g_eventLogger->debug("COPY_FRAGREQ: thread: %u, tab: %u, frag: %u",
                        takeOverPtr.i, takeOverPtr.p->toCurrentTabref,
-                       takeOverPtr.p->toCurrentFragid);
+                       takeOverPtr.p->toCurrentFragNo);
   start_next_takeover_thread(signal);
   c_active_copy_threads_list.addFirst(takeOverPtr);
 }  // Dbdih::toStartCopy()
@@ -8473,12 +8472,16 @@ void Dbdih::sendUpdateFragStateReq(Signal *signal, Uint32 startGci,
 
   g_eventLogger->debug("Update frag state for inst:%u,tab:%u,frag:%u",
                        takeOverPtr.i, takeOverPtr.p->toCurrentTabref,
-                       takeOverPtr.p->toCurrentFragid);
+                       takeOverPtr.p->toCurrentFragNo);
   UpdateFragStateReq *const req = (UpdateFragStateReq *)&signal->theData[0];
   req->senderData = takeOverPtr.i;
+  TabRecordPtr tabPtr;
+  tabPtr.i = takeOverPtr.p->toCurrentTabref;
+  ptrCheckGuard(tabPtr, ctabFileSize, tabRecord);
+
   req->senderRef = reference();
   req->tableId = takeOverPtr.p->toCurrentTabref;
-  req->fragId = takeOverPtr.p->toCurrentFragid;
+  req->fragId = fragNoToId(tabPtr.p, takeOverPtr.p->toCurrentFragNo);
   req->startingNodeId = takeOverPtr.p->toStartingNode;
   req->copyNodeId = takeOverPtr.p->toCopyNode;
   req->failedNodeId = takeOverPtr.p->toFailedNode;
@@ -8486,10 +8489,7 @@ void Dbdih::sendUpdateFragStateReq(Signal *signal, Uint32 startGci,
   req->replicaType = replicaType;
 
   FragmentstorePtr fragPtr;
-  TabRecordPtr tabPtr;
-  tabPtr.i = req->tableId;
-  ptrCheckGuard(tabPtr, ctabFileSize, tabRecord);
-  getFragstore(tabPtr.p, req->fragId, fragPtr);
+  getFragstore(tabPtr.p, takeOverPtr.p->toCurrentFragNo, fragPtr);
   Uint32 len = is_dynamic_primary_replicas_supported() ?
                UpdateFragStateReq::SignalLength :
                UpdateFragStateReq::OldSignalLength;
@@ -8522,7 +8522,7 @@ void Dbdih::execUPDATE_FRAG_STATECONF(Signal *signal) {
 
   g_eventLogger->debug("Updated frag state for inst:%u,tab:%u,frag:%u,state:%u",
                        takeOverPtr.i, takeOverPtr.p->toCurrentTabref,
-                       takeOverPtr.p->toCurrentFragid,
+                       takeOverPtr.p->toCurrentFragNo,
                        takeOverPtr.p->toSlaveStatus);
   receiveLoopMacro(UPDATE_FRAG_STATEREQ, conf->sendingNodeId);
 
@@ -8545,7 +8545,7 @@ void Dbdih::execUPDATE_FRAG_STATECONF(Signal *signal) {
       g_eventLogger->debug("UPDATE_FRAG_STATE completed: thread: %u",
                            takeOverPtr.i);
       takeOverPtr.p->toSlaveStatus = TakeOverRecord::TO_START_LOGGING;
-      takeOverPtr.p->toCurrentFragid++;
+      takeOverPtr.p->toCurrentFragNo++;
       signal->theData[0] = DihContinueB::ZTO_START_LOGGING;
       signal->theData[1] = takeOverPtr.i;
       sendSignal(reference(), GSN_CONTINUEB, signal, 2, JBB);
@@ -8567,7 +8567,13 @@ void Dbdih::execCOPY_FRAGREF(Signal *signal) {
   TakeOverRecordPtr takeOverPtr;
   ndbrequire(c_takeOverPool.getPtr(takeOverPtr, takeOverPtrI));
   ndbrequire(ref->tableId == takeOverPtr.p->toCurrentTabref);
-  ndbrequire(ref->fragId == takeOverPtr.p->toCurrentFragid);
+  {
+    TabRecordPtr tabPtr;
+    tabPtr.i = takeOverPtr.p->toCurrentTabref;
+    ptrCheckGuard(tabPtr, ctabFileSize, tabRecord);
+    ndbrequire(ref->fragId ==
+               fragNoToId(tabPtr.p, takeOverPtr.p->toCurrentFragNo));
+  }
   ndbrequire(ref->startingNodeId == takeOverPtr.p->toStartingNode);
   ndbrequire(ref->sendingNodeId == takeOverPtr.p->toCopyNode);
   ndbrequire(takeOverPtr.p->toSlaveStatus == TakeOverRecord::TO_COPY_FRAG);
@@ -8598,21 +8604,27 @@ void Dbdih::execCOPY_FRAGCONF(Signal *signal) {
   Uint32 bytes_lo = conf->bytes_lo;
 
   ndbrequire(conf->tableId == takeOverPtr.p->toCurrentTabref);
-  ndbrequire(conf->fragId == takeOverPtr.p->toCurrentFragid);
+  {
+    TabRecordPtr tabPtr;
+    tabPtr.i = takeOverPtr.p->toCurrentTabref;
+    ptrCheckGuard(tabPtr, ctabFileSize, tabRecord);
+    ndbrequire(conf->fragId ==
+               fragNoToId(tabPtr.p, takeOverPtr.p->toCurrentFragNo));
+  }
   ndbrequire(conf->startingNodeId == takeOverPtr.p->toStartingNode);
   ndbrequire(conf->sendingNodeId == takeOverPtr.p->toCopyNode);
   ndbrequire(takeOverPtr.p->toSlaveStatus == TakeOverRecord::TO_COPY_FRAG);
 
   g_eventLogger->debug("COPY_FRAGCONF: thread: %u, tab(%u,%u)", takeOverPtr.i,
                        takeOverPtr.p->toCurrentTabref,
-                       takeOverPtr.p->toCurrentFragid);
+                       takeOverPtr.p->toCurrentFragNo);
 
   TabRecordPtr tabPtr;
   tabPtr.i = takeOverPtr.p->toCurrentTabref;
   ptrCheckGuard(tabPtr, ctabFileSize, tabRecord);
 
   FragmentstorePtr fragPtr;
-  getFragstore(tabPtr.p, takeOverPtr.p->toCurrentFragid, fragPtr);
+  getFragstore(tabPtr.p, takeOverPtr.p->toCurrentFragNo, fragPtr);
   Uint32 instanceKey = dihGetInstanceKey(fragPtr);
   Uint32 instanceNo = getInstanceNo(takeOverPtr.p->toStartingNode, instanceKey);
   BlockReference lqhRef =
@@ -8621,7 +8633,7 @@ void Dbdih::execCOPY_FRAGCONF(Signal *signal) {
   req->userPtr = takeOverPtr.i;
   req->userRef = reference();
   req->tableId = takeOverPtr.p->toCurrentTabref;
-  req->fragId = takeOverPtr.p->toCurrentFragid;
+  req->fragId = fragNoToId(tabPtr.p, takeOverPtr.p->toCurrentFragNo);
   req->distributionKey = fragPtr.p->distributionKey;
   req->flags = 0;
 
@@ -8639,14 +8651,14 @@ void Dbdih::execCOPY_FRAGCONF(Signal *signal) {
              JBB);
   g_eventLogger->debug("COPY_ACTIVEREQ: thread: %u, tab(%u,%u)", takeOverPtr.i,
                        takeOverPtr.p->toCurrentTabref,
-                       takeOverPtr.p->toCurrentFragid);
+                       takeOverPtr.p->toCurrentFragNo);
 
   takeOverPtr.p->toSlaveStatus = TakeOverRecord::TO_COPY_ACTIVE;
 
   signal->theData[0] = NDB_LE_NR_CopyFragDone;
   signal->theData[1] = getOwnNodeId();
   signal->theData[2] = takeOverPtr.p->toCurrentTabref;
-  signal->theData[3] = takeOverPtr.p->toCurrentFragid;
+  signal->theData[3] = takeOverPtr.p->toCurrentFragNo;
   signal->theData[4] = rows_lo;
   signal->theData[5] = 0;
   signal->theData[6] = bytes_lo;
@@ -8654,7 +8666,7 @@ void Dbdih::execCOPY_FRAGCONF(Signal *signal) {
   sendSignal(CMVMI_REF, GSN_EVENT_REP, signal, 8, JBB);
   g_eventLogger->debug("DIH:tab(%u,%u), COPY_FRAGCONF: %u rows inserted",
                        takeOverPtr.p->toCurrentTabref,
-                       takeOverPtr.p->toCurrentFragid, rows_lo);
+                       takeOverPtr.p->toCurrentFragNo, rows_lo);
 }  // Dbdih::execCOPY_FRAGCONF()
 
 void Dbdih::execCOPY_ACTIVECONF(Signal *signal) {
@@ -8666,12 +8678,18 @@ void Dbdih::execCOPY_ACTIVECONF(Signal *signal) {
   ndbrequire(c_takeOverPool.getPtr(takeOverPtr, conf->userPtr));
 
   ndbrequire(conf->tableId == takeOverPtr.p->toCurrentTabref);
-  ndbrequire(conf->fragId == takeOverPtr.p->toCurrentFragid);
+  {
+    TabRecordPtr tabPtr;
+    tabPtr.i = takeOverPtr.p->toCurrentTabref;
+    ptrCheckGuard(tabPtr, ctabFileSize, tabRecord);
+    ndbrequire(conf->fragId ==
+               fragNoToId(tabPtr.p, takeOverPtr.p->toCurrentFragNo));
+  }
   ndbrequire(checkNodeAlive(conf->startingNodeId));
 
   g_eventLogger->debug("COPY_ACTIVECONF: thread: %u, tab: %u, frag: %u",
                        takeOverPtr.i, takeOverPtr.p->toCurrentTabref,
-                       takeOverPtr.p->toCurrentFragid);
+                       takeOverPtr.p->toCurrentFragNo);
 
   takeOverPtr.p->startGci = conf->startGci;
 
@@ -8695,7 +8713,7 @@ void Dbdih::execCOPY_ACTIVECONF(Signal *signal) {
     }
     g_eventLogger->debug("Copy frag active: tab:%u,frag:%u,inst:%u",
                          takeOverPtr.p->toCurrentTabref,
-                         takeOverPtr.p->toCurrentFragid, takeOverPtr.i);
+                         takeOverPtr.p->toCurrentFragNo, takeOverPtr.i);
     jam();
     c_activeThreadTakeOverPtr = takeOverPtr; /* Mark master busy */
     takeOverPtr.p->toSlaveStatus = TakeOverRecord::TO_UPDATE_BEFORE_COMMIT;
@@ -8719,11 +8737,11 @@ void Dbdih::execCOPY_ACTIVECONF(Signal *signal) {
     takeOverPtr.p->toSlaveStatus = TakeOverRecord::TO_SL_UPDATE_FRAG_STATE;
     g_eventLogger->debug("Update frag state:inst:%u,tab:%u,frag:%u,state:%u",
                          takeOverPtr.i, takeOverPtr.p->toCurrentTabref,
-                         takeOverPtr.p->toCurrentFragid,
+                         takeOverPtr.p->toCurrentFragNo,
                          takeOverPtr.p->toSlaveStatus);
     DEB_COPY_ACTIVE(("COPY_ACTIVECONF: takeOverPtr.i: %u, tab(%u,%u)",
                      takeOverPtr.i, takeOverPtr.p->toCurrentTabref,
-                     takeOverPtr.p->toCurrentFragid));
+                     takeOverPtr.p->toCurrentFragNo));
     sendUpdateFragStateReq(signal, takeOverPtr.p->startGci,
                            UpdateFragStateReq::START_LOGGING, takeOverPtr);
   }
@@ -8840,7 +8858,7 @@ void Dbdih::start_thread_takeover_logging(Signal *signal) {
     c_active_copy_threads_list.addFirst(takeOverPtr);
     takeOverPtr.p->toSlaveStatus = TakeOverRecord::TO_START_LOGGING;
     takeOverPtr.p->toCurrentTabref = 0;
-    takeOverPtr.p->toCurrentFragid = 0;
+    takeOverPtr.p->toCurrentFragNo = 0;
     takeOverPtr.p->toCurrentReplica = RNIL64;
     send_continueb_nr_start_logging(signal, takeOverPtr);
   } while (1);
@@ -8901,7 +8919,7 @@ void Dbdih::releaseTakeOver(TakeOverRecordPtr takeOverPtr, bool from_master,
   takeOverPtr.p->m_copy_thread_id = (Uint32)-1;
 
   takeOverPtr.p->toCopyNode = RNIL;
-  takeOverPtr.p->toCurrentFragid = RNIL;
+  takeOverPtr.p->toCurrentFragNo = RNIL;
   takeOverPtr.p->toCurrentReplica = RNIL64;
   takeOverPtr.p->toCurrentTabref = RNIL;
   takeOverPtr.p->toFailedNode = RNIL;
@@ -12532,8 +12550,8 @@ Dbdih::is_dynamic_primary_replicas_supported()
  */
 void
 Dbdih::calc_primary_replicas(TabRecord *tabPtrP,
-                             Uint32 first_fid,
-                             Uint32 limit_fid,
+                             Uint32 first_fragNo,
+                             Uint32 limit_fragNo,
                              Uint32 line)
 {
   /**
@@ -12608,11 +12626,11 @@ Dbdih::calc_primary_replicas(TabRecord *tabPtrP,
     }
     ndbrequire(NGPtr.p->m_temp_nodes_alive > 0);
   }
-  for (Uint32 fragId = first_fid; fragId < limit_fid; fragId++)
+  for (Uint32 fragNo = first_fragNo; fragNo < limit_fragNo; fragNo++)
   {
     NodeGroupRecordPtr NGPtr;
     FragmentstorePtr fragPtr;
-    getFragstore(tabPtrP, fragId, fragPtr);
+    getFragstore(tabPtrP, fragNo, fragPtr);
     fragPtr.p->primaryNode = 0;
     nodePtr.i = fragPtr.p->activeNodes[0];
     ptrCheckGuard(nodePtr, MAX_NDB_NODES, nodeRecord);
@@ -12654,12 +12672,12 @@ Dbdih::calc_primary_replicas(TabRecord *tabPtrP,
        (NGPtr.p->m_temp_nodes_alive - 1)) /
       NGPtr.p->m_temp_nodes_alive;
   }
-  for (Uint32 fragId = first_fid; fragId < limit_fid; fragId++)
+  for (Uint32 fragNo = first_fragNo; fragNo < limit_fragNo; fragNo++)
   {
     jamDebug();
     NodeGroupRecordPtr NGPtr;
     FragmentstorePtr fragPtr;
-    getFragstore(tabPtrP, fragId, fragPtr);
+    getFragstore(tabPtrP, fragNo, fragPtr);
     nodePtr.i = fragPtr.p->activeNodes[0];
     ptrCheckGuard(nodePtr, MAX_NDB_NODES, nodeRecord);
     NGPtr.i = nodePtr.p->nodeGroup;
@@ -13818,7 +13836,7 @@ void Dbdih::insertCopyFragmentList(TabRecord *tabPtr, Fragmentstore *fragPtr,
   while (locFragPtr.p->nextCopyFragmentId != RNIL)
   {
     found_fragid = locFragPtr.p->nextCopyFragmentId;
-    getFragstore(tabPtr, found_fragid, locFragPtr);
+    getFragstore(tabPtr, fragIdToNo(tabPtr, found_fragid), locFragPtr);
   }
   /**
    * We update in a safe manner here ensuring that the list is
@@ -14038,12 +14056,12 @@ void Dbdih::execDIADDTABREQ(Signal *signal) {
   }
 
   Uint32 index = 2;
-  for (Uint32 fragId = 0; fragId < noFragments; fragId++) {
+  for (Uint32 fragNo = 0; fragNo < noFragments; fragNo++) {
     jam();
     FragmentstorePtr fragPtr;
     NodeGroupRecordPtr NGPtr;
     Uint32 activeIndex = 0;
-    getFragstore(tabPtr.p, fragId, fragPtr);
+    getFragstore(tabPtr.p, fragNo, fragPtr);
     fragPtr.p->m_log_part_id = fragments[index++];
     fragPtr.p->m_inc_used_log_parts = true;
     fragPtr.p->preferredPrimary = fragments[index];
@@ -14055,17 +14073,17 @@ void Dbdih::execDIADDTABREQ(Signal *signal) {
                           ", m_used_log_parts[]: %u",
                          NGPtr.i,
                          tabPtr.i,
-                         fragId,
+                         fragNo,
                          fragPtr.p->m_log_part_id,
                          NGPtr.p->m_used_log_parts[fragPtr.p->m_log_part_id]));
     }
-    fragPtr.p->partition_id = fragId % tabPtr.p->partitionCount;
+    fragPtr.p->partition_id = fragNo % tabPtr.p->partitionCount;
     inc_ng_refcount(NGPtr.i);
 
     for (Uint32 i = 0; i < noReplicas; i++) {
       const Uint32 nodeId = fragments[index++];
       ReplicaRecordPtr replicaPtr;
-      allocStoredReplica(fragPtr, replicaPtr, nodeId, fragId, tabPtr.i);
+      allocStoredReplica(fragPtr, replicaPtr, nodeId, fragNo, tabPtr.i);
       if (getNodeStatus(nodeId) == NodeRecord::ALIVE) {
         jam();
         ndbrequire(activeIndex < MAX_REPLICAS);
@@ -14093,11 +14111,11 @@ void Dbdih::execDIADDTABREQ(Signal *signal) {
                         0,
                         noFragments,
                         __LINE__);
-  for (Uint32 fragId = 0; fragId < noFragments; fragId++)
+  for (Uint32 fragNo = 0; fragNo < noFragments; fragNo++)
   {
     jam();
     FragmentstorePtr fragPtr;
-    getFragstore(tabPtr.p, fragId, fragPtr);
+    getFragstore(tabPtr.p, fragNo, fragPtr);
     updateNodeInfo(signal, fragPtr);
   }
   initTableFile(tabPtr);
@@ -14121,7 +14139,7 @@ void Dbdih::addTable_closeConf(Signal *signal, Uint32 tabPtrI) {
 }
 
 void Dbdih::sendAddFragreq(Signal *signal, ConnectRecordPtr connectPtr,
-                           TabRecordPtr tabPtr, Uint32 fragId,
+                           TabRecordPtr tabPtr, Uint32 fragNo,
                            bool rcu_lock_held) {
   jam();
   const Uint32 fragCount = connectPtr.p->m_alter.m_totalfragments;
@@ -14164,9 +14182,9 @@ void Dbdih::sendAddFragreq(Signal *signal, ConnectRecordPtr connectPtr,
     }
   }
   replicaPtr.i = RNIL64;
-  for(; fragId<fragCount; fragId++){
+  for(; fragNo<fragCount; fragNo++){
     jam();
-    getFragstore(tabPtr.p, fragId, fragPtr);
+    getFragstore(tabPtr.p, fragNo, fragPtr);
 
     replicaPtr.i = fragPtr.p->storedReplicas;
     while(replicaPtr.i != RNIL64){
@@ -14201,7 +14219,7 @@ void Dbdih::sendAddFragreq(Signal *signal, ConnectRecordPtr connectPtr,
   
   if(replicaPtr.i != RNIL64){
     jam();
-    ndbrequire(fragId < fragCount);
+    ndbrequire(fragNo < fragCount);
     ndbrequire(replicaPtr.p->procNode == getOwnNodeId());
 
     Uint32 requestInfo = 0;
@@ -14216,7 +14234,7 @@ void Dbdih::sendAddFragreq(Signal *signal, ConnectRecordPtr connectPtr,
     AddFragReq *const req = (AddFragReq *)signal->getDataPtr();
     req->dihPtr = connectPtr.i;
     req->senderData = connectPtr.p->userpointer;
-    req->fragmentId = fragId;
+    req->fragmentId = fragNoToId(tabPtr.p, fragNo);
     req->requestInfo = requestInfo;
     req->tableId = tabPtr.i;
     req->nextLCP = 0;
@@ -14299,12 +14317,12 @@ void Dbdih::sendAddFragreq(Signal *signal, ConnectRecordPtr connectPtr,
          getNodeState().getNodeRestartInProgress()) &&
         (tabPtr.p->m_flags & TabRecord::TF_FULLY_REPLICATED) != 0) {
       jam();
-      for (Uint32 fragId = 0; fragId < tabPtr.p->totalfragments; fragId++) {
+      for (Uint32 fragNo = 0; fragNo < tabPtr.p->totalfragments; fragNo++) {
         jam();
         FragmentstorePtr fragPtr;
-        getFragstore(tabPtr.p, fragId, fragPtr);
-        fragPtr.p->partition_id = fragId % tabPtr.p->partitionCount;
-        insertCopyFragmentList(tabPtr.p, fragPtr.p, fragId);
+        getFragstore(tabPtr.p, fragNo, fragPtr);
+        fragPtr.p->partition_id = fragNo % tabPtr.p->partitionCount;
+        insertCopyFragmentList(tabPtr.p, fragPtr.p, fragNo);
       }
     }
 
@@ -14670,10 +14688,10 @@ void Dbdih::tableDeleteLab(Signal *signal, FileRecordPtr filePtr) {
 
 void Dbdih::releaseTable(TabRecordPtr tabPtr) {
   FragmentstorePtr fragPtr;
-  for (Uint32 fragId = 0; fragId < tabPtr.p->totalfragments; fragId++)
+  for (Uint32 fragNo = 0; fragNo < tabPtr.p->totalfragments; fragNo++)
   {
     jam();
-    getFragstore(tabPtr.p, fragId, fragPtr);
+    getFragstore(tabPtr.p, fragNo, fragPtr);
     dec_ng_refcount(getNodeGroup(fragPtr.p->preferredPrimary));
     releaseReplicas(& fragPtr.p->storedReplicas);
     releaseReplicas(& fragPtr.p->oldStoredReplicas);
@@ -15094,8 +15112,8 @@ Dbdih::add_fragments_to_table(Signal *signal,
   for (i = 0; i < cnt; i++)
   {
     FragmentstorePtr fragPtr;
-    Uint32 fragId = current + i;
-    getFragstore(tabPtr.p, fragId, fragPtr);
+    Uint32 fragNo = current + i;
+    getFragstore(tabPtr.p, fragNo, fragPtr);
     updateNodeInfo(signal, fragPtr);
   }
   return 0;
@@ -15185,18 +15203,18 @@ Dbdih::add_fragment_to_table(Ptr<TabRecord> tabPtr,
  * Both table mutex and table RCU lock need be held when calling
  * this function.
  */
-void Dbdih::release_fragment_from_table(Ptr<TabRecord> tabPtr, Uint32 fragId) {
+void Dbdih::release_fragment_from_table(Ptr<TabRecord> tabPtr, Uint32 fragNo) {
   FragmentstorePtr fragPtr;
   Uint32 fragments = tabPtr.p->totalfragments;
-  if (fragId >= fragments)
+  if (fragNo >= fragments)
   {
     jam();
     return;
   }
-  ndbrequire(fragId == fragments - 1);  // only remove at end
+  ndbrequire(fragNo == fragments - 1);  // only remove at end
   ndbrequire(fragments != 0);
 
-  getFragstore(tabPtr.p, fragId, fragPtr);
+  getFragstore(tabPtr.p, fragNo, fragPtr);
   dec_ng_refcount(getNodeGroup(fragPtr.p->preferredPrimary));
 
   releaseReplicas(&fragPtr.p->storedReplicas);
@@ -15204,7 +15222,7 @@ void Dbdih::release_fragment_from_table(Ptr<TabRecord> tabPtr, Uint32 fragId) {
 
   callocated_frags --;
   c_fragmentRecordPool.release(fragPtr);
-  tabPtr.p->startFid[fragId] = RNIL64;
+  tabPtr.p->startFid[fragNo] = RNIL64;
   tabPtr.p->totalfragments--;
 }
 
@@ -15908,7 +15926,7 @@ loop:
     thrjamDebug(jambuf);
     fragId = hashValue;
     ndbassert((tabPtr.p->m_flags & TabRecord::TF_FULLY_REPLICATED) != 0);
-    getFragstoreCanFail(tabPtr.p, fragId, fragPtr);
+    getFragstoreCanFail(tabPtr.p, fragIdToNo(tabPtr.p, fragId), fragPtr);
     if (unlikely(fragPtr.p == nullptr)) {
       thrjam(jambuf);
       goto crash_check_exit;
@@ -16061,7 +16079,10 @@ loop:
     signal->theData[1] = ZLONG_MESSAGE_ERROR;
     return;
   }
-  getFragstoreCanFail(tabPtr.p, fragId, fragPtr);
+  {
+    Uint32 fragNo = fragIdToNo(tabPtr.p, fragId);
+    getFragstoreCanFail(tabPtr.p, fragNo, fragPtr);
+  }
   if (unlikely(fragPtr.p == nullptr)) {
     thrjam(jambuf);
     goto crash_check_exit;
@@ -16098,7 +16119,7 @@ loop:
   if (unlikely(newFragId != RNIL)) {
     thrjam(jambuf);
     conf->reqinfo |= DiGetNodesConf::REORG_MOVING;
-    getFragstore(tabPtr.p, newFragId, fragPtr);
+    getFragstore(tabPtr.p, fragIdToNo(tabPtr.p, newFragId), fragPtr);
     nodeCount = extractNodeInfo(jambuf,
                                fragPtr.p,
                                conf->nodes + 3 + MAX_REPLICAS,
@@ -16168,7 +16189,7 @@ Uint32 Dbdih::findPartitionOrder(const TabRecord *tabPtrP,
   Uint32 fragId = fragPtr.p->partition_id;
   do {
     jam();
-    getFragstore(tabPtrP, fragId, tempFragPtr);
+    getFragstore(tabPtrP, fragIdToNo(tabPtrP, fragId), tempFragPtr);
     if (fragPtr.p == tempFragPtr.p) {
       jam();
       return order;
@@ -16187,7 +16208,7 @@ Uint32 Dbdih::findFirstNewFragment(const TabRecord *tabPtrP,
    * to copy data to during the copy phase.
    */
   do {
-    getFragstoreCanFail(tabPtrP, fragId, fragPtr);
+    getFragstoreCanFail(tabPtrP, fragIdToNo(tabPtrP, fragId), fragPtr);
     if (unlikely(fragPtr.p == nullptr)) {
       thrjam(jambuf);
       return Uint32(~0);
@@ -16230,7 +16251,7 @@ Uint32 Dbdih::findLocalFragment(const TabRecord *tabPtrP,
       thrjam(jambuf);
       break;
     }
-    getFragstoreCanFail(tabPtrP, fragId, fragPtr);
+    getFragstoreCanFail(tabPtrP, fragIdToNo(tabPtrP, fragId), fragPtr);
     if (unlikely(fragPtr.p == nullptr)) {
       thrjam(jambuf);
       return 0;
@@ -19166,10 +19187,10 @@ void Dbdih::initLcpLab(Signal *signal, Uint32 senderRef, Uint32 tableId) {
      * For each fragment
      */
     tabPtr.p->tabActiveLcpFragments = 0;
-    for (Uint32 fragId = 0; fragId < tabPtr.p->totalfragments; fragId++) {
+    for (Uint32 fragNo = 0; fragNo < tabPtr.p->totalfragments; fragNo++) {
       jam();
       FragmentstorePtr fragPtr;
-      getFragstore(tabPtr.p, fragId, fragPtr);
+      getFragstore(tabPtr.p, fragNo, fragPtr);
 
       /**
        * For each of replica record
@@ -19961,10 +19982,10 @@ void Dbdih::copyTabReq_complete(Signal *signal, TabRecordPtr tabPtr) {
      * and DBTC hasn't started using these tables yet.
      */
     tabPtr.p->tabStatus = TabRecord::TS_ACTIVE;
-    for (Uint32 fragId = 0; fragId < tabPtr.p->totalfragments; fragId++) {
+    for (Uint32 fragNo = 0; fragNo < tabPtr.p->totalfragments; fragNo++) {
       jam();
       FragmentstorePtr fragPtr;
-      getFragstore(tabPtr.p, fragId, fragPtr);
+      getFragstore(tabPtr.p, fragNo, fragPtr);
       /**
        * Here we will simply install the order as proposed by the master
        * node. The primary might not be the preferred primary node even
@@ -22394,7 +22415,6 @@ bool Dbdih::reportLcpCompletion(const LcpFragRep *lcpReport) {
   Uint32 maxGciStarted = lcpReport->maxGciStarted;
   Uint32 maxGciCompleted = lcpReport->maxGciCompleted;
   Uint32 tableId = lcpReport->tableId;
-  Uint32 fragId = lcpReport->fragId;
   Uint32 nodeId = lcpReport->nodeId;
 
   TabRecordPtr tabPtr;
@@ -22407,8 +22427,9 @@ bool Dbdih::reportLcpCompletion(const LcpFragRep *lcpReport) {
     return true;
   }
 
+  Uint32 fragNo = fragIdToNo(tabPtr.p, lcpReport->fragId);
   FragmentstorePtr fragPtr;
-  getFragstore(tabPtr.p, fragId, fragPtr);
+  getFragstore(tabPtr.p, fragNo, fragPtr);
 
   ReplicaRecordPtr replicaPtr;
   findReplica(replicaPtr, fragPtr.p, nodeId);
@@ -27128,7 +27149,7 @@ void Dbdih::execDUMP_STATE_ORD(Signal *signal) {
     }
 
     FragmentstorePtr fragPtr;
-    getFragstore(tabPtr.p, fragid, fragPtr);
+    getFragstore(tabPtr.p, fragIdToNo(tabPtr.p, fragid), fragPtr);
 
     Uint32 nodeOrder[MAX_REPLICAS];
     const Uint32 noOfReplicas =
@@ -27553,7 +27574,7 @@ void Dbdih::execDUMP_STATE_ORD(Signal *signal) {
               ptr.p->toMasterStatus);
     infoEvent("restorableGci: %u startGci: %u tab: %u frag: %u src: %u max: %u",
               ptr.p->restorableGci, ptr.p->startGci, ptr.p->toCurrentTabref,
-              ptr.p->toCurrentFragid, ptr.p->toCopyNode, ptr.p->maxPage);
+              ptr.p->toCurrentFragNo, ptr.p->toCopyNode, ptr.p->maxPage);
 
     c_masterActiveTakeOverList.next(ptr);
     signal->theData[0] = arg;
@@ -29211,7 +29232,7 @@ Uint32 Dbdih::dihGetInstanceKey(Uint32 tabId, Uint32 fragId) {
   FragmentstorePtr tFragPtr;
 loop:
   Uint32 tab_val = tTabPtr.p->m_lock.read_lock();
-  getFragstore(tTabPtr.p, fragId, tFragPtr);
+  getFragstore(tTabPtr.p, fragIdToNo(tTabPtr.p, fragId), tFragPtr);
   Uint32 instanceKey = dihGetInstanceKey(tFragPtr);
   if (unlikely(!tTabPtr.p->m_lock.read_unlock(tab_val))) goto loop;
   return instanceKey;
@@ -29225,14 +29246,15 @@ Uint32 Dbdih::dihGetInstanceKeyCanFail(Uint32 tabId, Uint32 fragId) {
     return Uint32(RNIL);
   }
   ptrAss(tTabPtr, tabRecord);
-  if (fragId >= tTabPtr.p->totalfragments) {
+  Uint32 fragNo = fragIdToNo(tTabPtr.p, fragId);
+  if (fragNo >= tTabPtr.p->totalfragments) {
     return Uint32(RNIL);
   }
   FragmentstorePtr tFragPtr;
   Uint32 tab_val;
   do {
     tab_val = tTabPtr.p->m_lock.read_lock();
-    getFragstoreCanFail(tTabPtr.p, fragId, tFragPtr);
+    getFragstoreCanFail(tTabPtr.p, fragNo, tFragPtr);
     if (tFragPtr.p == NULL) {
       instanceKey = Uint32(RNIL);
     } else {

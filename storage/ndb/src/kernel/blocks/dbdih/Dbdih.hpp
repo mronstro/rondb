@@ -960,7 +960,7 @@ class Dbdih : public SimulatedBlock {
     Uint32 startGci;
     Uint32 maxPage;
     Uint32 toCopyNode;
-    Uint32 toCurrentFragid;
+    Uint32 toCurrentFragNo;
     Uint64 toCurrentReplica;
     Uint32 toCurrentTabref;
     Uint32 toFailedNode;
@@ -1417,7 +1417,7 @@ class Dbdih : public SimulatedBlock {
 
   void sendStartFragreq(Signal *, TabRecordPtr regTabPtr, Uint32 fragId);
 
-  void sendAddFragreq(Signal *, ConnectRecordPtr, TabRecordPtr, Uint32 fragId,
+  void sendAddFragreq(Signal *, ConnectRecordPtr, TabRecordPtr, Uint32 fragNo,
                       bool rcu_lock_held);
   void addTable_closeConf(Signal* signal, Uint32 tabPtrI);
   void resetReplicaSr(Signal*, TabRecordPtr tabPtr);
@@ -1788,7 +1788,7 @@ class Dbdih : public SimulatedBlock {
   Uint32 add_fragment_to_table(Ptr<TabRecord>, Uint32, FragmentstorePtr&);
 
   void drop_fragments(Signal *, ConnectRecordPtr, Uint32 last);
-  void release_fragment_from_table(Ptr<TabRecord>, Uint32 fragId);
+  void release_fragment_from_table(Ptr<TabRecord>, Uint32 fragNo);
   void send_alter_tab_ref(Signal *, Ptr<TabRecord>, Ptr<ConnectRecord>, Uint32);
   void send_alter_tab_conf(Signal *, Ptr<ConnectRecord>);
   void alter_table_writeTable_conf(Signal *signal, Uint32 ptrI, Uint32 err);
@@ -2877,8 +2877,8 @@ class Dbdih : public SimulatedBlock {
   void getNodeGroupPtr(Uint32 nodeId, NodeGroupRecordPtr & NGPtr);
 
   void calc_primary_replicas(TabRecord *tabPtrP,
-                             Uint32 first_fid,
-                             Uint32 limit_fid,
+                             Uint32 first_fragNo,
+                             Uint32 limit_fragNo,
                              Uint32 line);
   bool c_any_node_waiting_for_lcp;
   Uint32 c_start_tab_queued;
