@@ -16585,7 +16585,6 @@ void Dbtc::diFcountReqLab(Signal *signal, ScanRecordPtr scanptr,
   scanptr.p->m_startFid_offset = 0;
   DEB_RANGE(("(%u) startFid_offset: %u, scanPtrI: %u, LINE: %u",
     instance(), scanptr.p->m_startFid_offset, scanptr.i, __LINE__));
-
   ndbassert(scanptr.p->m_booked_fragments_count == scanptr.p->scanParallel);
   scanptr.p->m_read_any_node =
       (ScanFragReq::getReadCommittedFlag(scanptr.p->scanRequestInfo) ||
@@ -16702,7 +16701,6 @@ void Dbtc::execDIH_SCAN_TAB_CONF(Signal *signal, ScanRecordPtr scanptr,
   scanptr.p->scanNoFrag = tfragCount;
   scanptr.p->m_startFid_offset = conf->startFidOffset;
   scanptr.p->scanState = ScanRecord::RUNNING;
-
   DEB_RANGE(("(%u) startFid_offset: %u, scanPtrI: %u, LINE: %u",
     instance(), scanptr.p->m_startFid_offset, scanptr.i, __LINE__));
 
@@ -16863,21 +16861,18 @@ void Dbtc::sendDihGetNodesLab(Signal *signal, ScanRecordPtr scanptr,
       return;
     }
 
-    /* Apply circular offset for range-partitioned tables */
-    const Uint32 physFragId =
+    /* Convert 0-based scanNextFragId to real fragId for DBDIH */
+    const Uint32 fragId =
         scanP->scanNextFragId + scanP->m_startFid_offset;
 
     DEB_RANGE(("(%u) startFid_offset: %u, scanPtrI: %u, LINE: %u,"
-               " scanNextFragId: %u",
-      instance(),
-      scanptr.p->m_startFid_offset,
-      scanptr.i,
-      __LINE__,
-      scanptr.p->scanNextFragId));
+               " scanNextFragId: %u, fragId: %u",
+      instance(), scanP->m_startFid_offset, scanptr.i, __LINE__,
+      scanP->scanNextFragId, fragId));
 
     const bool success =
         sendDihGetNodeReq(signal, scanptr, fragLocationPtr,
-                          physFragId, is_multi_spj_scan,
+                          fragId, is_multi_spj_scan,
                           ttl_can_go_to_replica);
     if (unlikely(!success)) {
       jam();
