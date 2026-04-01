@@ -16583,8 +16583,8 @@ void Dbtc::diFcountReqLab(Signal *signal, ScanRecordPtr scanptr,
 
   scanptr.p->scanNextFragId = 0;
   scanptr.p->m_startFid_offset = 0;
-  DEB_MATCH(("(%u) startFid_offset: %u, scanPtrI: %u, LINE: %u",
-    scanptr.p->m_startFid_offset, scanptr.i, __LINE__));
+  DEB_RANGE(("(%u) startFid_offset: %u, scanPtrI: %u, LINE: %u",
+    instance(), scanptr.p->m_startFid_offset, scanptr.i, __LINE__));
 
   ndbassert(scanptr.p->m_booked_fragments_count == scanptr.p->scanParallel);
   scanptr.p->m_read_any_node =
@@ -16703,8 +16703,8 @@ void Dbtc::execDIH_SCAN_TAB_CONF(Signal *signal, ScanRecordPtr scanptr,
   scanptr.p->m_startFid_offset = conf->startFidOffset;
   scanptr.p->scanState = ScanRecord::RUNNING;
 
-  DEB_MATCH(("(%u) startFid_offset: %u, scanPtrI: %u, LINE: %u",
-    scanptr.p->m_startFid_offset, scanptr.i, __LINE__));
+  DEB_RANGE(("(%u) startFid_offset: %u, scanPtrI: %u, LINE: %u",
+    instance(), scanptr.p->m_startFid_offset, scanptr.i, __LINE__));
 
   setApiConTimer(apiConnectptr, 0, __LINE__);
   updateBuddyTimer(apiConnectptr);
@@ -16867,8 +16867,9 @@ void Dbtc::sendDihGetNodesLab(Signal *signal, ScanRecordPtr scanptr,
     const Uint32 physFragId =
         scanP->scanNextFragId + scanP->m_startFid_offset;
 
-    DEB_MATCH(("(%u) startFid_offset: %u, scanPtrI: %u, LINE: %u,"
+    DEB_RANGE(("(%u) startFid_offset: %u, scanPtrI: %u, LINE: %u,"
                " scanNextFragId: %u",
+      instance(),
       scanptr.p->m_startFid_offset,
       scanptr.i,
       __LINE__,

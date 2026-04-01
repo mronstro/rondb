@@ -3207,7 +3207,7 @@ void Dbdih::queue_lcp_frag_rep(Signal *signal, LcpFragRep *lcpReport) {
   findReplica(replicaPtr, fragPtr.p, lcpReport->nodeId);
   c_queued_lcp_frag_rep.addLast(replicaPtr);
   ndbrequire(replicaPtr.p->nextLcp == lcpReport->lcpNo);
-  ndbrequire(replicaPtr.p->fragId == fragId);
+  ndbrequire(replicaPtr.p->fragId == lcpReport->fragId);
   ndbrequire(replicaPtr.p->tableId == tableId);
   ndbrequire(replicaPtr.p->procNode == lcpReport->nodeId);
   ndbrequire(c_lcp_id_paused == RNIL || c_lcp_id_paused == lcpReport->lcpId);
@@ -7493,6 +7493,9 @@ void Dbdih::nr_start_fragment(Signal *signal, TakeOverRecordPtr takeOverPtr,
 
 done:
 
+  TabRecordPtr tabPtr;
+  tabPtr.i = takeOverPtr.p->toCurrentTabref;
+  ptrCheckGuard(tabPtr, ctabFileSize, tabRecord);
   StartFragReq *req = (StartFragReq *)signal->getDataPtrSend();
   req->requestInfo = StartFragReq::SFR_RESTORE_LCP;
   req->nodeRestorableGci = takeOverPtr.p->restorableGci;
@@ -7502,10 +7505,6 @@ done:
      */
     jam();
     if (gci == 0) {
-      Ptr<TabRecord> tabPtr;
-      tabPtr.i = takeOverPtr.p->toCurrentTabref;
-      ptrAss(tabPtr, tabRecord);
-
       FragmentstorePtr fragPtr;
       getFragstore(tabPtr.p, takeOverPtr.p->toCurrentFragNo, fragPtr);
       dump_replica_info(fragPtr.p);
@@ -7541,10 +7540,6 @@ done:
          */
         takeOverPtr.p->startGci = SYSFILE->lastCompletedGCI[cmasterNodeId];
       }
-
-      TabRecordPtr tabPtr;
-      tabPtr.i = takeOverPtr.p->toCurrentTabref;
-      ptrCheckGuard(tabPtr, ctabFileSize, tabRecord);
 
       FragmentstorePtr fragPtr;
       getFragstore(tabPtr.p, takeOverPtr.p->toCurrentFragNo, fragPtr);
@@ -7582,10 +7577,6 @@ done:
       }
       g_eventLogger->info("gci: %u, maxLcpIndex = %u, maxLcpId = %u",
         gci, maxLcpIndex, maxLcpId);
-      Ptr<TabRecord> tabPtr;
-      tabPtr.i = takeOverPtr.p->toCurrentTabref;
-      ptrAss(tabPtr, tabRecord);
-
       FragmentstorePtr fragPtr;
       getFragstore(tabPtr.p, takeOverPtr.p->toCurrentFragNo, fragPtr);
       dump_replica_info(fragPtr.p);
@@ -8439,6 +8430,7 @@ void Dbdih::toStartCopyFrag(Signal *signal, TakeOverRecordPtr takeOverPtr) {
   Uint32 gci = replicaPtr.p->m_restorable_gci;
   replicaPtr.p->m_restorable_gci = 0;  // used in union...
 
+  Uint32 fragId = fragNoToId(tabPtr.p, fragNo);
   Uint32 instanceKey = dihGetInstanceKey(tabPtr.i, fragId);
   Uint32 instanceNo = getInstanceNo(takeOverPtr.p->toCopyNode, instanceKey);
   BlockReference ref =
@@ -14077,13 +14069,14 @@ void Dbdih::execDIADDTABREQ(Signal *signal) {
                          fragPtr.p->m_log_part_id,
                          NGPtr.p->m_used_log_parts[fragPtr.p->m_log_part_id]));
     }
-    fragPtr.p->partition_id = fragNo % tabPtr.p->partitionCount;
+    Uint32 fragId = fragNoToId(tabPtr.p, fragNo);
+    fragPtr.p->partition_id = fragId % tabPtr.p->partitionCount;
     inc_ng_refcount(NGPtr.i);
 
     for (Uint32 i = 0; i < noReplicas; i++) {
       const Uint32 nodeId = fragments[index++];
       ReplicaRecordPtr replicaPtr;
-      allocStoredReplica(fragPtr, replicaPtr, nodeId, fragNo, tabPtr.i);
+      allocStoredReplica(fragPtr, replicaPtr, nodeId, fragId, tabPtr.i);
       if (getNodeStatus(nodeId) == NodeRecord::ALIVE) {
         jam();
         ndbrequire(activeIndex < MAX_REPLICAS);
@@ -14266,12 +14259,13 @@ void Dbdih::sendAddFragreq(Signal *signal, ConnectRecordPtr connectPtr,
     if (connectPtr.p->connectState != ConnectRecord::ALTER_TABLE) {
       jam();
       req->changeMask = 0;
-      req->partitionId = fragId % tabPtr.p->partitionCount;
+      req->partitionId = fragNoToId(tabPtr.p, fragNo) % tabPtr.p->partitionCount;
     } else /* connectState == ALTER_TABLE */
     {
       jam();
       req->changeMask = connectPtr.p->m_alter.m_changeMask;
-      req->partitionId = fragId % connectPtr.p->m_alter.m_partitionCount;
+      req->partitionId = fragNoToId(tabPtr.p, fragNo) %
+                         connectPtr.p->m_alter.m_partitionCount;
     }
 
     sendSignal(DBDICT_REF, GSN_ADD_FRAGREQ, signal, AddFragReq::SignalLength,
@@ -14321,8 +14315,9 @@ void Dbdih::sendAddFragreq(Signal *signal, ConnectRecordPtr connectPtr,
         jam();
         FragmentstorePtr fragPtr;
         getFragstore(tabPtr.p, fragNo, fragPtr);
-        fragPtr.p->partition_id = fragNo % tabPtr.p->partitionCount;
-        insertCopyFragmentList(tabPtr.p, fragPtr.p, fragNo);
+        Uint32 fragId = fragNoToId(tabPtr.p, fragNo);
+        fragPtr.p->partition_id = fragId % tabPtr.p->partitionCount;
+        insertCopyFragmentList(tabPtr.p, fragPtr.p, fragId);
       }
     }
 
@@ -14865,7 +14860,7 @@ void Dbdih::execALTER_TAB_REQ(Signal *signal) {
       DEB_RANGE_PART(("DBDIH: startFidSize: %u, startFid_offset: %u, mask: 0x%x"
                  "tabPtrI: %u, line: %u",
         tabPtr.p->startFidSize,
-        tabPtr.p->startFid_offset,
+        tabPtr.p->m_startFid_offset,
         req->changeMask,
         tabPtr.i,
         __LINE__));
@@ -16399,11 +16394,11 @@ void Dbdih::start_scan_on_table(TabRecordPtr tabPtr, Signal *signal,
       conf->startFidOffset = tabPtr.p->m_startFid_offset;
     }
 
-    DEB_RANGE_PART(("DBDIH: tabPtrI: %u, startFid_offset: %u, fragCount: %u"
-                    ", line: %u",
+    DEB_RANGE_PART(("DBDIH: tabPtrI: %u, fragCount: %u, startFidOffset: %u"
+                    ", tableType: %u, line: %u",
                     tabPtr.i,
                     conf->fragmentCount,
-                    conf->startFid_offset,
+                    conf->startFidOffset,
                     tabPtr.p->tableType,
                     __LINE__));
 
@@ -21693,7 +21688,7 @@ void Dbdih::startNextChkpt(Signal *signal) {
 
             Uint32 i = nodePtr.p->noOfStartedChkpt;
             nodePtr.p->startedChkpt[i].tableId = tabPtr.i;
-            nodePtr.p->startedChkpt[i].fragId = curr.fragmentId;
+            nodePtr.p->startedChkpt[i].fragNo = curr.fragmentId;
             nodePtr.p->startedChkpt[i].replicaPtr = replicaPtr.i;
             nodePtr.p->noOfStartedChkpt = i + 1;
 
@@ -21714,7 +21709,7 @@ void Dbdih::startNextChkpt(Signal *signal) {
 
             Uint32 i = nodePtr.p->noOfQueuedChkpt;
             nodePtr.p->queuedChkpt[i].tableId = tabPtr.i;
-            nodePtr.p->queuedChkpt[i].fragId = curr.fragmentId;
+            nodePtr.p->queuedChkpt[i].fragNo = curr.fragmentId;
             nodePtr.p->queuedChkpt[i].replicaPtr = replicaPtr.i;
             nodePtr.p->noOfQueuedChkpt = i + 1;
             queued++;
@@ -21923,7 +21918,6 @@ void Dbdih::execLCP_FRAG_REP(Signal *signal) {
 
   Uint32 nodeId = lcpReport->nodeId;
   Uint32 tableId = lcpReport->tableId;
-  Uint32 fragId = lcpReport->fragId;
 
   /**
    * We can receive LCP_FRAG_REP in 2 different situations:
@@ -22053,7 +22047,7 @@ void Dbdih::execLCP_FRAG_REP(Signal *signal) {
       jam();
       g_eventLogger->info(
           "TS_DROPPING - Neglecting to save Table: %d Frag: %d - ", tableId,
-          fragId);
+          lcpReport->fragId);
     } else {
       jam();
       /**
@@ -22112,7 +22106,7 @@ void Dbdih::execLCP_FRAG_REP(Signal *signal) {
   signal->theData[0] = NDB_LE_LCPFragmentCompleted;
   signal->theData[1] = nodeId;
   signal->theData[2] = tableId;
-  signal->theData[3] = fragId;
+  signal->theData[3] = lcpReport->fragId;
   signal->theData[4] = started;
   signal->theData[5] = completed;
   sendSignal(CMVMI_REF, GSN_EVENT_REP, signal, 6, JBB);
@@ -22158,13 +22152,14 @@ void Dbdih::execLCP_FRAG_REP(Signal *signal) {
     nodePtr.i = nodeId;
     ptrCheckGuard(nodePtr, MAX_NDB_NODES, nodeRecord);
 
+    Uint32 fragNo = fragIdToNo(tabPtr.p, lcpReport->fragId);
     const Uint32 outstanding = nodePtr.p->noOfStartedChkpt;
     if (outstanding > 0) {
       jam();
       bool found = false;
       for (Uint32 i = 0; i < outstanding; i++) {
         if (nodePtr.p->startedChkpt[i].tableId != tableId ||
-            nodePtr.p->startedChkpt[i].fragId != fragId) {
+            nodePtr.p->startedChkpt[i].fragNo != fragNo) {
           jam();
           continue;
         }
@@ -22186,7 +22181,7 @@ void Dbdih::execLCP_FRAG_REP(Signal *signal) {
       bool found = false;
       for (Uint32 i = 0; i < outstanding_queued; i++) {
         if (nodePtr.p->queuedChkpt[i].tableId != tableId ||
-            nodePtr.p->queuedChkpt[i].fragId != fragId) {
+            nodePtr.p->queuedChkpt[i].fragNo != fragNo) {
           jam();
           continue;
         }
@@ -22441,7 +22436,7 @@ bool Dbdih::reportLcpCompletion(const LcpFragRep *lcpReport) {
         "nodeId: %u, replica->lcpStatus: %u"
         "replicaPtr->lcpId: %u, replicaPtr->nextLcp: %u, "
         "tabStatus: %u, tabLcpStatus: %u",
-        lcpNo, lcpId, maxGciStarted, maxGciCompleted, tableId, fragId, nodeId,
+        lcpNo, lcpId, maxGciStarted, maxGciCompleted, tableId, fragNo, nodeId,
         replicaPtr.p->lcpStatus[lcpNo], replicaPtr.p->lcpId[lcpNo],
         replicaPtr.p->nextLcp,
         tabPtr.p->tabStatus,
@@ -22462,7 +22457,7 @@ bool Dbdih::reportLcpCompletion(const LcpFragRep *lcpReport) {
   replicaPtr.p->lcpIdStarted = lcpId;
   replicaPtr.p->lcpOngoingFlag = false;
 
-  removeOldCrashedReplicas(tableId, fragId, replicaPtr);
+  removeOldCrashedReplicas(tableId, fragNo, replicaPtr);
   replicaPtr.p->lcpId[lcpNo] = lcpId;
   replicaPtr.p->lcpStatus[lcpNo] = ZVALID;
   replicaPtr.p->maxGciStarted[lcpNo] = maxGciStarted;
@@ -22563,9 +22558,13 @@ void Dbdih::sendLCP_FRAG_ORD(Signal *signal,
       requestInfo = LcpFragOrd::LcpWaitFlag;
     }
   }
+  TabRecordPtr tabPtr;
+  tabPtr.i = info.tableId;
+  ptrCheckGuard(tabPtr, ctabFileSize, tabRecord);
+
   LcpFragOrd *const lcpFragOrd = (LcpFragOrd *)&signal->theData[0];
   lcpFragOrd->tableId = info.tableId;
-  lcpFragOrd->fragmentId = info.fragId;
+  lcpFragOrd->fragmentId = fragNoToId(tabPtr.p, info.fragNo);
   lcpFragOrd->lcpId = SYSFILE->latestLCP_ID;
   lcpFragOrd->lcpNo = replicaPtr.p->nextLcp;
   lcpFragOrd->keepGci = keepGci;
@@ -27288,15 +27287,15 @@ void Dbdih::execDUMP_STATE_ORD(Signal *signal) {
 	  infoEvent("Node %d: started: table=%d fragment=%d replica=%llu",
 		    nodePtr.i, 
 		    nodePtr.p->startedChkpt[i].tableId,
-		    nodePtr.p->startedChkpt[i].fragId,
+		    nodePtr.p->startedChkpt[i].fragNo,
 		    nodePtr.p->startedChkpt[i].replicaPtr);
 	}
-	
+
 	for(i = 0; i<nodePtr.p->noOfQueuedChkpt; i++){
 	  infoEvent("Node %d: queued: table=%d fragment=%d replica=%llu",
-		    nodePtr.i, 
+		    nodePtr.i,
 		    nodePtr.p->queuedChkpt[i].tableId,
-		    nodePtr.p->queuedChkpt[i].fragId,
+		    nodePtr.p->queuedChkpt[i].fragNo,
 		    nodePtr.p->queuedChkpt[i].replicaPtr);
 	}
       }

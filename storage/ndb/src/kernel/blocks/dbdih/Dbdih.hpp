@@ -473,7 +473,7 @@ class Dbdih : public SimulatedBlock {
 
     struct FragmentCheckpointInfo {
       Uint32 tableId;
-      Uint32 fragId;
+      Uint32 fragNo;
       Uint64 replicaPtr;
     };
 
