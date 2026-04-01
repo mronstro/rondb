@@ -15189,7 +15189,7 @@ Dbdih::add_fragment_to_table(Ptr<TabRecord> tabPtr,
   }
   callocated_frags++;
   tabPtr.p->startFid[fragId] = fragPtr.i;
-  initFragstore(fragPtr, fragId, tabPtr.i);
+  initFragstore(fragPtr, fragNoToId(tabPtr.p, fragId), tabPtr.i);
   tabPtr.p->totalfragments++;
   return 0;
 }
@@ -17042,7 +17042,7 @@ bool Dbdih::allocFragments(Uint32 noOfFragments, TabRecordPtr tabPtr)
       return false;
     }
     startFid[i] = fragPtr.i;
-    initFragstore(fragPtr, i, tabPtr.i);
+    initFragstore(fragPtr, fragNoToId(tabPtr.p, i), tabPtr.i);
   }
   callocated_frags += noOfFragments;
   mb();
