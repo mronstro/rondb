@@ -14736,9 +14736,13 @@ void Dbdict::set_index_stat_frag(Signal *signal, TableRecordPtr indexPtr) {
   /**
    * Convert fragNo to real fragId using the base table's startFid offset.
    * For non-range tables the offset is 0 so fragId == fragNo.
+   * Guard against primaryTableId being RNIL during early index creation.
    */
-  const Uint32 fragId =
-      (fragNo + c_dih->getStartFidOffset(indexPtr.p->primaryTableId)) & 0xFFFF;
+  Uint32 fragId = fragNo;
+  if (indexPtr.p->primaryTableId != RNIL) {
+    fragId = (fragNo + c_dih->getStartFidOffset(
+                indexPtr.p->primaryTableId)) & 0xFFFF;
+  }
   indexPtr.p->indexStatFragId = fragId;
 
   /**
