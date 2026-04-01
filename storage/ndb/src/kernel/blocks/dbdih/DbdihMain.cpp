@@ -20027,7 +20027,16 @@ void Dbdih::readPagesIntoTableLab(Signal *signal, Uint32 tableId) {
   ptrCheckGuard(rf.rwfTabPtr, ctabFileSize, tabRecord);
   rf.rwfPageptr.i = rf.rwfTabPtr.p->pageRef[0];
   ptrCheckGuard(rf.rwfPageptr, cpageFileSize, pageRecord);
-  rf.rwfTabPtr.p->totalfragments = readPageWord(&rf);
+  {
+    /**
+     * totalfragments word packs totalfragments (lower 16 bits) and
+     * m_startFid_offset (upper 16 bits). Backward compatible since
+     * m_startFid_offset is 0 for non-range-partitioned tables.
+     */
+    Uint32 packed = readPageWord(&rf);
+    rf.rwfTabPtr.p->totalfragments = packed & 0xFFFF;
+    rf.rwfTabPtr.p->m_startFid_offset = packed >> 16;
+  }
   rf.rwfTabPtr.p->noOfBackups = readPageWord(&rf);
   rf.rwfTabPtr.p->hashpointer = readPageWord(&rf);
   rf.rwfTabPtr.p->kvalue = readPageWord(&rf);
@@ -20047,14 +20056,16 @@ void Dbdih::readPagesIntoTableLab(Signal *signal, Uint32 tableId) {
 }  // Dbdih::readPagesIntoTableLab()
 
 void Dbdih::readPagesIntoFragLab(Signal *signal, RWFragment *rf) {
-  for (rf->fragId = 0;
-       rf->fragId < rf->rwfTabPtr.p->totalfragments;
-       rf->fragId++) {
+  Uint32 startFidOffset = rf->rwfTabPtr.p->m_startFid_offset;
+  for (Uint32 fragNo = 0;
+       fragNo < rf->rwfTabPtr.p->totalfragments;
+       fragNo++) {
+    rf->fragId = fragNo + startFidOffset;
     ndbrequire(rf->pageIndex < NDB_ARRAY_SIZE(rf->rwfTabPtr.p->pageRef));
     rf->rwfPageptr.i = rf->rwfTabPtr.p->pageRef[rf->pageIndex];
     ptrCheckGuard(rf->rwfPageptr, cpageFileSize, pageRecord);
     FragmentstorePtr fragPtr;
-    getFragstore(rf->rwfTabPtr.p, rf->fragId, fragPtr);
+    getFragstore(rf->rwfTabPtr.p, fragNo, fragPtr);
     readFragment(rf, fragPtr);
     readReplicas(rf, rf->rwfTabPtr.p, fragPtr);
   }
@@ -20125,7 +20136,14 @@ void Dbdih::packTableIntoPagesLab(Signal *signal, Uint32 tableId) {
     }
   }
 
-  writePageWord(&wf, totalfragments);
+  /**
+   * Pack totalfragments (lower 16 bits) and m_startFid_offset (upper 16 bits)
+   * into one word. Backward compatible since m_startFid_offset is 0 for
+   * non-range-partitioned tables.
+   */
+  writePageWord(&wf,
+                (totalfragments & 0xFFFF) |
+                (tabPtr.p->m_startFid_offset << 16));
   writePageWord(&wf, tabPtr.p->noOfBackups);
   writePageWord(&wf, tabPtr.p->hashpointer);
   writePageWord(&wf, tabPtr.p->kvalue);
@@ -20141,12 +20159,14 @@ void Dbdih::packTableIntoPagesLab(Signal *signal, Uint32 tableId) {
 // execCONTINUEB(ZPACK_FRAG_INTO_PAGES)
 /*****************************************************************************/
 void Dbdih::packFragIntoPagesLab(Signal *signal, RWFragment *wf) {
-  for (wf->fragId = 0; wf->fragId < wf->totalfragments; wf->fragId++) {
+  Uint32 startFidOffset = wf->rwfTabPtr.p->m_startFid_offset;
+  for (Uint32 fragNo = 0; fragNo < wf->totalfragments; fragNo++) {
+    wf->fragId = fragNo + startFidOffset;
     ndbrequire(wf->pageIndex < NDB_ARRAY_SIZE(wf->rwfTabPtr.p->pageRef));
     wf->rwfPageptr.i = wf->rwfTabPtr.p->pageRef[wf->pageIndex];
     ptrCheckGuard(wf->rwfPageptr, cpageFileSize, pageRecord);
     FragmentstorePtr fragPtr;
-    getFragstore(wf->rwfTabPtr.p, wf->fragId, fragPtr);
+    getFragstore(wf->rwfTabPtr.p, fragNo, fragPtr);
     writeFragment(wf, fragPtr);
     {
       Uint32 nodeOrder[MAX_REPLICAS];
