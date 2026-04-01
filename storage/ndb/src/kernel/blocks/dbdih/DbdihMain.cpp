@@ -21948,6 +21948,7 @@ void Dbdih::execLCP_FRAG_REP(Signal *signal) {
 
   Uint32 nodeId = lcpReport->nodeId;
   Uint32 tableId = lcpReport->tableId;
+  Uint32 fragId = lcpReport->fragId;
 
   /**
    * We can receive LCP_FRAG_REP in 2 different situations:
@@ -22077,7 +22078,7 @@ void Dbdih::execLCP_FRAG_REP(Signal *signal) {
       jam();
       g_eventLogger->info(
           "TS_DROPPING - Neglecting to save Table: %d Frag: %d - ", tableId,
-          lcpReport->fragId);
+          fragId);
     } else {
       jam();
       /**
@@ -22136,7 +22137,7 @@ void Dbdih::execLCP_FRAG_REP(Signal *signal) {
   signal->theData[0] = NDB_LE_LCPFragmentCompleted;
   signal->theData[1] = nodeId;
   signal->theData[2] = tableId;
-  signal->theData[3] = lcpReport->fragId;
+  signal->theData[3] = fragId;
   signal->theData[4] = started;
   signal->theData[5] = completed;
   sendSignal(CMVMI_REF, GSN_EVENT_REP, signal, 6, JBB);
@@ -22182,7 +22183,7 @@ void Dbdih::execLCP_FRAG_REP(Signal *signal) {
     nodePtr.i = nodeId;
     ptrCheckGuard(nodePtr, MAX_NDB_NODES, nodeRecord);
 
-    Uint32 fragNo = fragIdToNo(tabPtr.p, lcpReport->fragId);
+    Uint32 fragNo = fragIdToNo(tabPtr.p, fragId);
     const Uint32 outstanding = nodePtr.p->noOfStartedChkpt;
     if (outstanding > 0) {
       jam();
@@ -22440,6 +22441,7 @@ bool Dbdih::reportLcpCompletion(const LcpFragRep *lcpReport) {
   Uint32 maxGciStarted = lcpReport->maxGciStarted;
   Uint32 maxGciCompleted = lcpReport->maxGciCompleted;
   Uint32 tableId = lcpReport->tableId;
+  Uint32 fragId = lcpReport->fragId;
   Uint32 nodeId = lcpReport->nodeId;
 
   TabRecordPtr tabPtr;
@@ -22452,7 +22454,7 @@ bool Dbdih::reportLcpCompletion(const LcpFragRep *lcpReport) {
     return true;
   }
 
-  Uint32 fragNo = fragIdToNo(tabPtr.p, lcpReport->fragId);
+  Uint32 fragNo = fragIdToNo(tabPtr.p, fragId);
   FragmentstorePtr fragPtr;
   getFragstore(tabPtr.p, fragNo, fragPtr);
 
