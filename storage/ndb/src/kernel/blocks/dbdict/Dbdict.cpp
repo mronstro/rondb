@@ -15490,9 +15490,7 @@ void Dbdict::alterIndex_complete(Signal *signal, SchemaOpPtr op_ptr) {
       return;
     }
   } else if (impl_req->requestType ==
-                 AlterIndxImplReq::AlterIndexAddPartition ||
-             impl_req->requestType ==
-                 AlterIndxImplReq::AlterIndexDropPartition) {
+                 AlterIndxImplReq::AlterIndexAddPartition) {
     jam();
     TableRecordPtr indexPtr;
     bool ok = find_object(indexPtr, impl_req->indexId);
