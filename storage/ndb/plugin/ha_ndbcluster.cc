@@ -15568,6 +15568,11 @@ static int create_table_set_up_partition_info(partition_info *part_info,
      * evaluation needed), so NDB can do server-side range lookup in DBDIH.
      * No $PART_FUNC_VALUE shadow column needed.
      */
+    if (ndbtab.getFullyReplicated()) {
+      my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+               "FULLY_REPLICATED with RANGE COLUMNS partitioning");
+      return 1;
+    }
     DBUG_PRINT("info", ("Using RangePartition fragmentation type"));
     ndbtab.setFragmentType(NDBTAB::RangePartition);
 

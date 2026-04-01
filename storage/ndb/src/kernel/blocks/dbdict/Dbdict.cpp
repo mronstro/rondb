@@ -6026,6 +6026,9 @@ void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
              tablePtr.p->fragmentType, DictTabInfo::RangePartition));
   if (tablePtr.p->fragmentType == DictTabInfo::RangePartition) {
     jam();
+    /* Range partitioning does not support fully replicated tables */
+    tabRequire((tablePtr.p->m_bits & TableRecord::TR_FullyReplicated) == 0,
+               CreateTableRef::InvalidFormat);
     /**
      * Build Range2FragmentMap from RangeListData.
      * RangeListData contains int32 boundary values, one per partition.

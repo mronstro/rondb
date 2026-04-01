@@ -4852,6 +4852,11 @@ int NdbDictInterface::serializeTableDesc(NdbTableImpl &impl,
   tmpTab->FragmentType = getKernelConstant(impl.m_fragmentType,
  					   fragmentTypeMapping,
 					   DictTabInfo::AllNodesSmallTable);
+  if (impl.m_fully_replicated &&
+      impl.m_fragmentType == NdbDictionary::Object::RangePartition) {
+    m_error.code = CreateTableRef::InvalidFormat;
+    DBUG_RETURN(-1);
+  }
   tmpTab->TableVersion = rand();
 
   DBUG_PRINT("info", ("SerializeTableDesc %s, m_use_new_hash_function/HashFunctionFlag: %u",
