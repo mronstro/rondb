@@ -522,7 +522,7 @@ class Dbdict : public SimulatedBlock {
     return tabPtr.p->m_range_ptr;
   }
 
-  class Dbdih *c_dih;
+  class Dbdih *c_dih = nullptr;
   Uint32 cnoReplicas;
 
   /**
