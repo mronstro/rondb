@@ -10451,6 +10451,53 @@ bool Dbdict::alterTable_subOps(Signal *signal, SchemaOpPtr op_ptr) {
     }
   }
 
+  if (AlterTableReq::getDropFragFlag(impl_req->changeMask)) {
+    jam();
+    if (alterTabPtr.p->m_sub_drop_ordered_index_frag == false) {
+      jam();
+      /**
+       * Drop partition from ordered indexes to keep fragments in sync
+       * with the base table.
+       */
+      TableRecordPtr tabPtr;
+      TableRecordPtr indexPtr;
+      bool ok = find_object(tabPtr, impl_req->tableId);
+      ndbrequire(ok);
+      LocalTableRecord_list list(c_tableRecordPool_, tabPtr.p->m_indexes);
+      Uint32 ptrI = alterTabPtr.p->m_sub_drop_frag_index_ptr;
+
+      if (ptrI == RNIL) {
+        jam();
+        list.first(indexPtr);
+      } else {
+        jam();
+        list.getPtr(indexPtr, ptrI);
+        list.next(indexPtr);
+      }
+      for (; !indexPtr.isNull(); list.next(indexPtr)) {
+        if (DictTabInfo::isOrderedIndex(indexPtr.p->tableType)) {
+          jam();
+          break;
+        }
+      }
+      if (indexPtr.isNull()) {
+        jam();
+        alterTabPtr.p->m_sub_drop_ordered_index_frag = true;
+        alterTabPtr.p->m_sub_drop_frag_index_ptr = RNIL;
+      } else {
+        ndbrequire(DictTabInfo::isOrderedIndex(indexPtr.p->tableType));
+        jam();
+        Callback c = {safe_cast(&Dbdict::alterTable_fromAlterIndex),
+                      op_ptr.p->op_key};
+        op_ptr.p->m_callback = c;
+
+        alterTabPtr.p->m_sub_drop_frag_index_ptr = indexPtr.i;
+        alterTable_toDropOrderedIndex(signal, op_ptr);
+        return true;
+      }
+    }
+  }
+
   if (AlterTableReq::getReadBackupFlag(impl_req->changeMask)) {
     jam();
     if (alterTabPtr.p->m_sub_read_backup == false) {
@@ -10597,6 +10644,32 @@ void Dbdict::alterTable_toAlterOrderedIndex(Signal *signal,
   req->indexVersion = indexPtr.p->tableVersion;
   DictSignal::setRequestType(req->requestInfo,
                              AlterIndxImplReq::AlterIndexAddPartition);
+  sendSignal(reference(), GSN_ALTER_INDX_REQ, signal,
+             AlterIndxReq::SignalLength, JBB);
+}
+
+void Dbdict::alterTable_toDropOrderedIndex(Signal *signal,
+                                            SchemaOpPtr op_ptr) {
+  jam();
+  AlterTableRecPtr alterTabPtr;
+  getOpRec(op_ptr, alterTabPtr);
+  SchemaTransPtr trans_ptr = op_ptr.p->m_trans_ptr;
+  D("alterTable_toDropOrderedIndex");
+
+  TableRecordPtr indexPtr;
+  indexPtr.i = alterTabPtr.p->m_sub_drop_frag_index_ptr;
+  ndbrequire(c_tableRecordPool_.getValidPtr(indexPtr));
+
+  AlterIndxReq *req = (AlterIndxReq *)signal->getDataPtrSend();
+  req->clientRef = reference();
+  req->clientData = op_ptr.p->op_key;
+  req->transId = trans_ptr.p->m_transId;
+  req->transKey = trans_ptr.p->trans_key;
+  req->requestInfo = 0;
+  req->indexId = indexPtr.p->tableId;
+  req->indexVersion = indexPtr.p->tableVersion;
+  DictSignal::setRequestType(req->requestInfo,
+                             AlterIndxImplReq::AlterIndexDropPartition);
   sendSignal(reference(), GSN_ALTER_INDX_REQ, signal,
              AlterIndxReq::SignalLength, JBB);
 }
@@ -14533,6 +14606,7 @@ void Dbdict::alterIndex_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
       indexPtr.p->indexState = TableRecord::IS_DROPPING;
       break;
     case AlterIndxImplReq::AlterIndexAddPartition:
+    case AlterIndxImplReq::AlterIndexDropPartition:
       jam();
       if (indexPtr.p->tableType == DictTabInfo::OrderedIndex) {
         jam();
@@ -14717,6 +14791,7 @@ bool Dbdict::alterIndex_subOps(Signal *signal, SchemaOpPtr op_ptr) {
         }
         break;
       case AlterIndxImplReq::AlterIndexAddPartition:
+      case AlterIndxImplReq::AlterIndexDropPartition:
         jam();
         return false;
       default:
@@ -15146,6 +15221,14 @@ void Dbdict::alterIndex_prepare(Signal *signal, SchemaOpPtr op_ptr) {
         alterIndex_toAddPartitions(signal, op_ptr);
         return;
       }
+      if (requestType == AlterIndxImplReq::AlterIndexDropPartition) {
+        jam();
+        Callback c = {safe_cast(&Dbdict::alterIndex_fromDropPartitions),
+                      op_ptr.p->op_key};
+        op_ptr.p->m_callback = c;
+        alterIndex_toDropPartitions(signal, op_ptr);
+        return;
+      }
       sendTransConf(signal, op_ptr);
       break;
     default:
@@ -15287,6 +15370,70 @@ void Dbdict::alterIndex_fromAddPartitions(Signal *signal, Uint32 op_key,
   }
 }
 
+void Dbdict::alterIndex_toDropPartitions(Signal *signal, SchemaOpPtr op_ptr) {
+  AlterIndexRecPtr alterIndexPtr;
+  getOpRec(op_ptr, alterIndexPtr);
+  const AlterIndxImplReq *impl_req = &alterIndexPtr.p->m_request;
+
+  /**
+   * Get the base table's ALTER operation to access the new range map pointer
+   */
+  SchemaOpPtr base_op;
+  ndbrequire(c_schemaOpPool.getPtr(base_op, op_ptr.p->m_base_op_ptr_i));
+
+  AlterTableRecPtr alterTabPtr;
+  getOpRec(base_op, alterTabPtr);
+
+  AlterTabReq *req = (AlterTabReq *)signal->getDataPtrSend();
+  req->senderRef = reference();
+  req->senderData = op_ptr.p->op_key;
+  req->requestType = AlterTabReq::AlterTablePrepare;
+  req->tableId = impl_req->indexId;
+  req->tableVersion = impl_req->indexVersion;
+  req->newTableVersion = impl_req->indexVersion;
+  req->gci = 0;
+  req->changeMask = 0;
+  req->connectPtr = RNIL;
+  req->noOfNewAttr = 0;
+  req->newNoOfCharsets = 0;
+  req->newNoOfKeyAttrs = 0;
+  req->ttlSec = 0;
+  req->ttlColumnNo = 0;
+  AlterTableReq::setDropFragFlag(req->changeMask, 1);
+
+  /**
+   * Pass the new range map pointer from the base table's ALTER.
+   * DBDIH will use getRangeMapByPtrI to access it.
+   */
+  TableRecordPtr newTablePtr;
+  newTablePtr.i = alterTabPtr.p->m_newTablePtrI;
+  c_tableRecordPool_.getPtr(newTablePtr);
+  if (newTablePtr.p->fragmentType == DictTabInfo::RangePartition) {
+    req->new_map_ptr_i = newTablePtr.i;
+  }
+
+  sendSignal(DBDIH_REF, GSN_ALTER_TAB_REQ, signal, AlterTabReq::SignalLength,
+             JBB);
+}
+
+void Dbdict::alterIndex_fromDropPartitions(Signal *signal, Uint32 op_key,
+                                           Uint32 ret) {
+  SchemaOpPtr op_ptr;
+  AlterIndexRecPtr alterIndexPtr;
+  ndbrequire(findSchemaOp(op_ptr, alterIndexPtr, op_key));
+
+  if (ret == 0) {
+    jam();
+    const AlterTabConf *conf = (const AlterTabConf *)signal->getDataPtr();
+    alterIndexPtr.p->m_dihAddFragPtr = conf->connectPtr;
+    sendTransConf(signal, op_ptr);
+  } else {
+    jam();
+    setError(op_ptr, ret, __LINE__);
+    sendTransRef(signal, op_ptr);
+  }
+}
+
 // AlterIndex: COMMIT
 
 void Dbdict::alterIndex_commit(Signal *signal, SchemaOpPtr op_ptr) {
@@ -15296,7 +15443,8 @@ void Dbdict::alterIndex_commit(Signal *signal, SchemaOpPtr op_ptr) {
   getOpRec(op_ptr, alterIndexPtr);
   const AlterIndxImplReq *impl_req = &alterIndexPtr.p->m_request;
 
-  if (impl_req->requestType == AlterIndxImplReq::AlterIndexAddPartition) {
+  if (impl_req->requestType == AlterIndxImplReq::AlterIndexAddPartition ||
+      impl_req->requestType == AlterIndxImplReq::AlterIndexDropPartition) {
     AlterTabReq *req = (AlterTabReq *)signal->getDataPtrSend();
     req->senderRef = reference();
     req->senderData = op_ptr.p->op_key;
@@ -15342,7 +15490,9 @@ void Dbdict::alterIndex_complete(Signal *signal, SchemaOpPtr op_ptr) {
       return;
     }
   } else if (impl_req->requestType ==
-             AlterIndxImplReq::AlterIndexAddPartition) {
+                 AlterIndxImplReq::AlterIndexAddPartition ||
+             impl_req->requestType ==
+                 AlterIndxImplReq::AlterIndexDropPartition) {
     jam();
     TableRecordPtr indexPtr;
     bool ok = find_object(indexPtr, impl_req->indexId);
@@ -15410,7 +15560,8 @@ void Dbdict::alterIndex_abortPrepare(Signal *signal, SchemaOpPtr op_ptr) {
 
   D("alterIndex_abortPrepare" << *op_ptr.p);
 
-  if (impl_req->requestType == AlterIndxImplReq::AlterIndexAddPartition) {
+  if (impl_req->requestType == AlterIndxImplReq::AlterIndexAddPartition ||
+      impl_req->requestType == AlterIndxImplReq::AlterIndexDropPartition) {
     AlterTabReq *req = (AlterTabReq *)signal->getDataPtrSend();
     req->senderRef = reference();
     req->senderData = op_ptr.p->op_key;
@@ -15425,7 +15576,11 @@ void Dbdict::alterIndex_abortPrepare(Signal *signal, SchemaOpPtr op_ptr) {
     req->newNoOfCharsets = 0;
     req->newNoOfKeyAttrs = 0;
     req->connectPtr = alterIndexPtr.p->m_dihAddFragPtr;
-    AlterTableReq::setAddFragFlag(req->changeMask, 1);
+    if (impl_req->requestType == AlterIndxImplReq::AlterIndexAddPartition) {
+      AlterTableReq::setAddFragFlag(req->changeMask, 1);
+    } else {
+      AlterTableReq::setDropFragFlag(req->changeMask, 1);
+    }
 
     Callback c = {safe_cast(&Dbdict::alterIndex_fromLocal), op_ptr.p->op_key};
     op_ptr.p->m_callback = c;

@@ -33,7 +33,8 @@ struct AlterIndxImplReq {
     AlterIndexOnline = 1,
     AlterIndexOffline = 2,
     AlterIndexAddPartition = 3,
-    AlterIndexBuilding = 4
+    AlterIndexBuilding = 4,
+    AlterIndexDropPartition = 5
   };
 
   static constexpr Uint32 SignalLength = 8;

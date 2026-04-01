@@ -3180,6 +3180,8 @@ class Dbdict : public SimulatedBlock {
     bool m_sub_add_ordered_index_frag;
     bool m_sub_add_unique_index_frag;
     Uint32 m_sub_add_frag_index_ptr;
+    bool m_sub_drop_ordered_index_frag;
+    Uint32 m_sub_drop_frag_index_ptr;
     bool m_sub_reorg_trigger;
     bool m_sub_copy_data;
     bool m_sub_suma_enable;
@@ -3200,6 +3202,8 @@ class Dbdict : public SimulatedBlock {
       m_sub_add_frag_index_ptr = RNIL;
       m_sub_add_ordered_index_frag = false;
       m_sub_add_unique_index_frag = false;
+      m_sub_drop_frag_index_ptr = RNIL;
+      m_sub_drop_ordered_index_frag = false;
       m_sub_reorg_commit = false;
       m_sub_reorg_complete = false;
       m_sub_reorg_trigger = false;
@@ -3251,6 +3255,7 @@ class Dbdict : public SimulatedBlock {
   void alterTable_fromLocal(Signal *, Uint32 op_key, Uint32 ret);
 
   void alterTable_toAlterOrderedIndex(Signal *, SchemaOpPtr);
+  void alterTable_toDropOrderedIndex(Signal *, SchemaOpPtr);
   void alterTable_fromAlterIndex(Signal *, Uint32 op_key, Uint32 ret);
 
   void alterTable_toReorgTable(Signal *, SchemaOpPtr, Uint32 step);
@@ -3502,6 +3507,8 @@ class Dbdict : public SimulatedBlock {
 
   void alterIndex_toAddPartitions(Signal *, SchemaOpPtr);
   void alterIndex_fromAddPartitions(Signal *, Uint32 op_key, Uint32 ret);
+  void alterIndex_toDropPartitions(Signal *, SchemaOpPtr);
+  void alterIndex_fromDropPartitions(Signal *, Uint32 op_key, Uint32 ret);
 
   // abort
   void alterIndex_abortFromLocal(Signal *, Uint32 op_key, Uint32 ret);
