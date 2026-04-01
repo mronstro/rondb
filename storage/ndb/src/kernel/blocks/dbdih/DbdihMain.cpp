@@ -15951,7 +15951,8 @@ loop:
      * of fully replicated triggers also go to the new fragments.
      *
      */
-    if (unlikely((!scan_indicator) && fragId >= tabPtr.p->totalfragments &&
+    if (unlikely((!scan_indicator) &&
+                 fragIdToNo(tabPtr.p, fragId) >= tabPtr.p->totalfragments &&
                  anyNode != 3)) {
       thrjam(jambuf);
       conf->zero = 1;  // Indicate error;
@@ -16208,7 +16209,7 @@ Uint32 Dbdih::findFirstNewFragment(const TabRecord *tabPtrP,
       thrjam(jambuf);
       return Uint32(~0);
     }
-    if (fragPtr.p->fragId >= tabPtrP->totalfragments) {
+    if (fragIdToNo(tabPtrP, fragPtr.p->fragId) >= tabPtrP->totalfragments) {
       /* Found first new fragment */
       break;
     }
@@ -16241,7 +16242,8 @@ Uint32 Dbdih::findLocalFragment(const TabRecord *tabPtrP,
     }
     /* Step to next copy fragment. */
     fragId = fragPtr.p->nextCopyFragmentId;
-    if (fragId == RNIL || fragId > tabPtrP->totalfragments)
+    if (fragId == RNIL ||
+        fragIdToNo(tabPtrP, fragId) >= tabPtrP->totalfragments)
     {
       thrjam(jambuf);
       break;
