@@ -14727,10 +14727,12 @@ void Dbdict::set_index_stat_frag(Signal *signal, TableRecordPtr indexPtr) {
 
   // distribute by table and index id
   const Uint32 value = indexPtr.p->primaryTableId + indexId;
-  const Uint32 fragId = value % noOfFragments;
-  const Uint32 fragIndex = 2 + (1 + noOfReplicas) * fragId;
+  const Uint32 fragNo = value % noOfFragments;
+  const Uint32 fragIndex = 2 + (1 + noOfReplicas) * fragNo;
   const Uint32 nodeIndex = value % noOfReplicas;
 
+  /* Read the real fragId from the fragmentation data */
+  const Uint32 fragId = frag_data[fragIndex];
   indexPtr.p->indexStatFragId = fragId;
 
   /**
