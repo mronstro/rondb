@@ -8695,11 +8695,6 @@ void Dbdict::releaseTableObject(Uint32 table_ptr_i, bool removeFromHash) {
     tmp.erase();
   }
 
-  if (tablePtr.p->m_range_ptr != nullptr) {
-    lc_ndbd_pool_free(tablePtr.p->m_range_ptr);
-    tablePtr.p->m_range_ptr = nullptr;
-  }
-
   LocalAttributeRecord_list list(c_attributeRecordPool,
                                  tablePtr.p->m_attributes);
   AttributeRecordPtr attrPtr;
@@ -9980,6 +9975,11 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
         }
       }
 
+      /* Free range map from handleTabInfoInit before replacing */
+      if (newTablePtr.p->m_range_ptr != nullptr) {
+        jam();
+        lc_ndbd_pool_free(newTablePtr.p->m_range_ptr);
+      }
       newTablePtr.p->m_range_ptr = rmap;
       newTablePtr.p->m_range_boundary_type = btype;
 
@@ -10164,6 +10164,11 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
     char *new_bounds = rmap->boundaries();
     memcpy(new_bounds, old_bounds + num_dropped * blen, new_cnt * blen);
 
+    /* Free range map from handleTabInfoInit before replacing */
+    if (newTablePtr.p->m_range_ptr != nullptr) {
+      jam();
+      lc_ndbd_pool_free(newTablePtr.p->m_range_ptr);
+    }
     newTablePtr.p->m_range_ptr = rmap;
     newTablePtr.p->m_range_boundary_type = btype;
 
@@ -11570,12 +11575,14 @@ void Dbdict::alterTable_commit(Signal *signal, SchemaOpPtr op_ptr) {
       tablePtr.p->partitionCount = newTablePtr.p->partitionCount;
       newTablePtr.p->partitionCount = save_rfc;
 
-      /* Swap range map pointer for range-partitioned tables */
+      /* Install new range map. The old committed map is shared with
+       * DBDIH and freed there — null out newTablePtr to prevent
+       * double-free in releaseTableObject.
+       */
       if (tablePtr.p->fragmentType == DictTabInfo::RangePartition) {
         jam();
-        Range2FragmentMap *save_rmap = tablePtr.p->m_range_ptr;
         tablePtr.p->m_range_ptr = newTablePtr.p->m_range_ptr;
-        newTablePtr.p->m_range_ptr = save_rmap;
+        newTablePtr.p->m_range_ptr = nullptr;
 
         Uint32 save_btype = tablePtr.p->m_range_boundary_type;
         tablePtr.p->m_range_boundary_type =
@@ -11605,12 +11612,14 @@ void Dbdict::alterTable_commit(Signal *signal, SchemaOpPtr op_ptr) {
       tablePtr.p->partitionCount = newTablePtr.p->partitionCount;
       newTablePtr.p->partitionCount = save_rfc;
 
-      /* Swap range map pointer for range-partitioned tables */
+      /* Install new range map. The old committed map is shared with
+       * DBDIH and freed there — null out newTablePtr to prevent
+       * double-free in releaseTableObject.
+       */
       if (tablePtr.p->fragmentType == DictTabInfo::RangePartition) {
         jam();
-        Range2FragmentMap *save_rmap = tablePtr.p->m_range_ptr;
         tablePtr.p->m_range_ptr = newTablePtr.p->m_range_ptr;
-        newTablePtr.p->m_range_ptr = save_rmap;
+        newTablePtr.p->m_range_ptr = nullptr;
 
         Uint32 save_btype = tablePtr.p->m_range_boundary_type;
         tablePtr.p->m_range_boundary_type =
