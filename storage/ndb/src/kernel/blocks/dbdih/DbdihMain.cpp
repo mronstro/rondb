@@ -14739,6 +14739,7 @@ void Dbdih::releaseTable(TabRecordPtr tabPtr) {
     tabPtr.p->m_new_range_ptr = nullptr;
   }
   tabPtr.p->totalfragments = 0;
+  tabPtr.p->m_startFid_offset = 0;
   tabPtr.p->schemaVersion = Uint32(~0);
 }//Dbdih::releaseTable()
 
