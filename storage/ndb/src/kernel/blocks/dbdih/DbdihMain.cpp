@@ -15377,15 +15377,12 @@ void Dbdih::execDROP_FRAG_CONF(Signal *signal) {
     /* Release Fragmentstore */
     c_fragmentRecordPool.release(fragPtr);
 
-    /* Free old range map */
+    /* Old range map already freed in make_new_table_read_and_writeable */
     NdbMutex_Lock(&tabPtr.p->theMutex);
     DIH_TAB_WRITE_LOCK(tabPtr.p);
     tabPtr.p->m_new_map_ptr_i = RNIL;
     tabPtr.p->m_scan_reorg_flag = 0;
-    if (tabPtr.p->m_new_range_ptr != nullptr) {
-      lc_ndbd_pool_free(tabPtr.p->m_new_range_ptr);
-      tabPtr.p->m_new_range_ptr = nullptr;
-    }
+    ndbassert(tabPtr.p->m_new_range_ptr == nullptr);
     DIH_TAB_WRITE_UNLOCK(tabPtr.p);
     NdbMutex_Unlock(&tabPtr.p->theMutex);
 
@@ -16042,6 +16039,10 @@ loop:
       thrjam(jambuf);
       newFragId = range_lookup(tabPtr.p->m_new_range_ptr,
                                rangeKey, rangeKeyLen);
+      thrjamDataDebug(jambuf, fragId);
+      thrjamDataDebug(jambuf, newFragId);
+      thrjamDataDebug(jambuf, tabPtr.p->m_startFid_offset);
+      thrjamDataDebug(jambuf, tabPtr.p->startFidSize);
       if (fragId == RNIL && newFragId != RNIL) {
         /* Value is beyond old map but valid in new map (ADD PARTITION).
          * Route to the new fragment. */
@@ -16704,12 +16705,13 @@ void Dbdih::make_new_table_read_and_writeable(TabRecordPtr tabPtr,
    * never move data (new partitions are empty, dropped partitions are
    * deleted).
    */
+  Range2FragmentMap *old_range_ptr = nullptr;
   if (tabPtr.p->method == TabRecord::RANGE_PARTITION &&
       tabPtr.p->m_new_range_ptr != nullptr) {
     jam();
-    Range2FragmentMap *save_range = tabPtr.p->m_range_ptr;
+    old_range_ptr = tabPtr.p->m_range_ptr;
     tabPtr.p->m_range_ptr = tabPtr.p->m_new_range_ptr;
-    tabPtr.p->m_new_range_ptr = save_range;
+    tabPtr.p->m_new_range_ptr = nullptr;
   }
   if (AlterTableReq::getReorgFragFlag(connectPtr.p->m_alter.m_changeMask)) {
     jam();
@@ -16760,6 +16762,9 @@ void Dbdih::make_new_table_read_and_writeable(TabRecordPtr tabPtr,
 
   DIH_TAB_WRITE_UNLOCK(tabPtr.p);
   NdbMutex_Unlock(&tabPtr.p->theMutex);
+  if (old_range_ptr != nullptr) {
+    lc_ndbd_pool_free(old_range_ptr);
+  }
   send_alter_tab_conf(signal, connectPtr);
   ndbrequire(tabPtr.p->connectrec == connectPtr.i);
   tabPtr.p->connectrec = RNIL;
