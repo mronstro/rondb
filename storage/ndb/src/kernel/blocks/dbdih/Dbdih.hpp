@@ -1779,6 +1779,13 @@ class Dbdih : public SimulatedBlock {
   static Uint32 fragIdToNo(const TabRecord *tab, Uint32 fragId) {
     return (fragId - tab->m_startFid_offset) & 0xFFFF;
   }
+  /* Get m_startFid_offset for a table (callable from other blocks) */
+  Uint32 getStartFidOffset(Uint32 tableId) {
+    TabRecordPtr tabPtr;
+    tabPtr.i = tableId;
+    ptrCheckGuard(tabPtr, ctabFileSize, tabRecord);
+    return tabPtr.p->m_startFid_offset;
+  }
 
   void wait_old_scan(Signal*);
   Uint32 add_fragments_to_table(Signal*,

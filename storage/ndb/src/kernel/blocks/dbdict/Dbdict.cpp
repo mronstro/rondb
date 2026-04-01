@@ -34,6 +34,7 @@
 #define DBDICT_C
 #include "Dbdict.hpp"
 #include "diskpage.hpp"
+#include "../dbdih/Dbdih.hpp"
 
 #include <ndb_limits.h>
 #include <ndb_math.h>
@@ -2461,6 +2462,7 @@ Dbdict::Dbdict(Block_context &ctx)
     &c_tableRecordPool_;
   c_transient_pools[DBDICT_ATTRIBUTE_RECORD_TRANSIENT_POOL_INDEX] =
     &c_attributeRecordPool;
+  c_dih = (Dbdih *)globalData.getBlock(DBDIH, 0);
 }//Dbdict::Dbdict()
 
 Dbdict::~Dbdict() {}  // Dbdict::~Dbdict()
@@ -14731,8 +14733,12 @@ void Dbdict::set_index_stat_frag(Signal *signal, TableRecordPtr indexPtr) {
   const Uint32 fragIndex = 2 + (1 + noOfReplicas) * fragNo;
   const Uint32 nodeIndex = value % noOfReplicas;
 
-  /* Read the real fragId from the fragmentation data */
-  const Uint32 fragId = frag_data[fragIndex];
+  /**
+   * Convert fragNo to real fragId using the base table's startFid offset.
+   * For non-range tables the offset is 0 so fragId == fragNo.
+   */
+  const Uint32 fragId =
+      (fragNo + c_dih->getStartFidOffset(indexPtr.p->primaryTableId)) & 0xFFFF;
   indexPtr.p->indexStatFragId = fragId;
 
   /**
