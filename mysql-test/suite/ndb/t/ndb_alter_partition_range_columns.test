@@ -616,3 +616,87 @@ show create table t13;
 --enable_warnings
 
 drop table t13;
+
+--echo #
+--echo # FragId Uint16 wrap-around test (ERROR_INSERT 7251)
+--echo # Forces m_startFid_offset=65532 so 4 partitions get fragIds
+--echo # 65532, 65533, 65534, 65535. ADD PARTITION wraps fragId to 0.
+--echo #
+
+# Enable error insert on all data nodes
+--exec $NDB_MGM -e "all error 7251"
+
+CREATE TABLE t14 (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300),
+ partition p3 values less than (400));
+
+# Clear error insert
+--exec $NDB_MGM -e "all error 0"
+
+# Verify basic operations with fragIds near 65535
+INSERT into t14 values (50, 1);
+INSERT into t14 values (150, 2);
+INSERT into t14 values (250, 3);
+INSERT into t14 values (350, 4);
+select * from t14 order by a;
+
+# PK lookups
+select * from t14 where a=50;
+select * from t14 where a=150;
+select * from t14 where a=250;
+select * from t14 where a=350;
+
+--echo ADD PARTITION — new fragId wraps to 0
+ALTER TABLE t14 ADD PARTITION (PARTITION p4 VALUES LESS THAN (500));
+
+INSERT into t14 values (450, 5);
+select * from t14 order by a;
+
+# PK lookup on wrapped-fragId partition
+select * from t14 where a=450;
+
+--echo DROP PARTITION — m_startFid_offset becomes 65533
+ALTER TABLE t14 DROP PARTITION p0;
+
+select * from t14 order by a;
+select * from t14 where a=50;
+select * from t14 where a=150;
+select * from t14 where a=450;
+
+--echo ADD another partition — fragId = 1
+ALTER TABLE t14 ADD PARTITION (PARTITION p5 VALUES LESS THAN (600));
+
+INSERT into t14 values (550, 6);
+select * from t14 order by a;
+select * from t14 where a=550;
+
+--echo DROP 3 more partitions to push m_startFid_offset through 65535 to 0
+ALTER TABLE t14 DROP PARTITION p1;
+ALTER TABLE t14 DROP PARTITION p2;
+ALTER TABLE t14 DROP PARTITION p3;
+
+# m_startFid_offset is now (65533+3) & 0xFFFF = 0
+select * from t14 order by a;
+
+# Remaining partitions still work
+select * from t14 where a=450;
+select * from t14 where a=550;
+
+--echo ADD partition after full wrap — fragId = 2
+ALTER TABLE t14 ADD PARTITION (PARTITION p6 VALUES LESS THAN (700));
+
+INSERT into t14 values (650, 7);
+select * from t14 order by a;
+select * from t14 where a=650;
+
+# Final data integrity check
+select count(*) from t14;
+
+drop table t14;
