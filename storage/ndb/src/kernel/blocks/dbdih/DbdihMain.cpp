@@ -16778,7 +16778,12 @@ void Dbdih::make_new_table_read_and_writeable(TabRecordPtr tabPtr,
 
   DIH_TAB_WRITE_UNLOCK(tabPtr.p);
   NdbMutex_Unlock(&tabPtr.p->theMutex);
-  if (old_range_ptr != nullptr) {
+  if (old_range_ptr != nullptr &&
+      tabPtr.p->primaryTableId == RNIL) {
+    /**
+     * Only base tables own range map memory. Index tables share the
+     * base table's range map and must not free it.
+     */
     DEB_MEM_ALLOC(("DBDIH: lc_ndbd_pool_free(0x%p), line: %u",
                    old_range_ptr, __LINE__));
     lc_ndbd_pool_free(old_range_ptr);
