@@ -2845,6 +2845,7 @@ void Suma::execDIH_SCAN_TAB_CONF(Signal *signal) {
   }
   ptr.p->m_scan_cookie = scanCookie;
   ptr.p->m_schema_version_scan_cookie = schema_version_scanCookie;
+  ptr.p->m_startFid_offset = conf->startFidOffset;
   sendDIGETNODESREQ(signal, ptr.i, tableId, 0);
   return;
 }
@@ -2859,7 +2860,7 @@ void Suma::sendDIGETNODESREQ(Signal *signal, Uint32 synPtrI, Uint32 tableId,
     loopCount++;
     DiGetNodesReq *const req = (DiGetNodesReq *)signal->getDataPtrSend();
     req->tableId = tableId;
-    req->hashValue = fragNo;
+    req->hashValue = (fragNo + ptr.p->m_startFid_offset) & 0xFFFF;
     req->distr_key_indicator = ZTRUE;
     req->anyNode = 0;
     req->scan_indicator = ZTRUE;
