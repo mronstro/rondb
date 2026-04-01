@@ -14709,18 +14709,26 @@ void Dbdict::set_index_stat_frag(Signal *signal, TableRecordPtr indexPtr) {
   index_obj_ptr.i = indexPtr.p->m_obj_ptr_i;
   ndbrequire(c_obj_pool.getValidPtr(index_obj_ptr));
   const Uint32 indexId = index_obj_ptr.p->m_id;
+  jamDebug();
   Uint32 err = get_fragmentation(signal, indexId);
   ndbrequire(err == 0);
-  // format: R F { fragId node1 .. nodeR } x { F }
-  // fragId: 0 1 2 .. (or whatever)
+  jamDebug();
+  // format: R F { log_part_id preferredPrimary .. nodeR } x { F }
   const Uint16 *frag_data = (Uint16 *)(signal->theData + 25);
   Uint32 noOfFragments = frag_data[1];
   const Uint32 noOfReplicas = frag_data[0];
+  jamDebug();
+  g_eventLogger->info("DBDICT: set_index_stat_frag: indexId=%u"
+                      " primaryTableId=%u noOfFragments=%u"
+                      " noOfReplicas=%u",
+                      indexId, indexPtr.p->primaryTableId,
+                      noOfFragments, noOfReplicas);
   ndbrequire(noOfFragments != 0 && noOfReplicas != 0);
 
   {
     TableRecordPtr tablePtr;
     ndbrequire(find_object(tablePtr, indexPtr.p->primaryTableId));
+    jamDebug();
     if ((tablePtr.p->m_bits & TableRecord::TR_FullyReplicated) != 0) {
       jam();
       noOfFragments = tablePtr.p->partitionCount;
@@ -14732,6 +14740,7 @@ void Dbdict::set_index_stat_frag(Signal *signal, TableRecordPtr indexPtr) {
   const Uint32 fragNo = value % noOfFragments;
   const Uint32 fragIndex = 2 + (1 + noOfReplicas) * fragNo;
   const Uint32 nodeIndex = value % noOfReplicas;
+  jamDebug();
 
   /**
    * Convert fragNo to real fragId using the base table's startFid offset.
@@ -14740,9 +14749,14 @@ void Dbdict::set_index_stat_frag(Signal *signal, TableRecordPtr indexPtr) {
    */
   Uint32 fragId = fragNo;
   if (indexPtr.p->primaryTableId != RNIL) {
+    jamDebug();
     fragId = (fragNo + c_dih->getStartFidOffset(
                 indexPtr.p->primaryTableId)) & 0xFFFF;
   }
+  jamDebug();
+  g_eventLogger->info("DBDICT: set_index_stat_frag: fragNo=%u fragId=%u"
+                      " fragIndex=%u nodeIndex=%u",
+                      fragNo, fragId, fragIndex, nodeIndex);
   indexPtr.p->indexStatFragId = fragId;
 
   /**
