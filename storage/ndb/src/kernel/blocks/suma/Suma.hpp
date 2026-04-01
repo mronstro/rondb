@@ -140,7 +140,7 @@ class Suma : public SimulatedBlock {
   // m_dummy is used to pass value.
   union FragmentDescriptor {
     struct {
-      Uint32 m_fragmentNo;
+      Uint32 m_fragId;
       Uint16 m_lqhInstanceKey;
       Uint16 m_nodeId;
     } m_fragDesc;

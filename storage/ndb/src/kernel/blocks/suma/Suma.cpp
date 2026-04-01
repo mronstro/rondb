@@ -2886,7 +2886,7 @@ void Suma::sendDIGETNODESREQ(Signal *signal, Uint32 synPtrI, Uint32 tableId,
        */
       FragmentDescriptor fd;
       fd.m_fragDesc.m_nodeId = nodeId;
-      fd.m_fragDesc.m_fragmentNo = fragNo;
+      fd.m_fragDesc.m_fragId = conf->fragId;
       fd.m_fragDesc.m_lqhInstanceKey = instanceKey;
       if (ptr.p->m_frag_id == ZNIL) {
         signal->theData[2] = fd.m_dummy[0];
@@ -3230,7 +3230,7 @@ void Suma::SyncRecord::nextScan(Signal *signal) {
    */
   ScanFragReq::setTTLIgnoreFragFlag(req->requestInfo, 1);
 
-  req->fragmentNoKeyLen = fd.m_fragDesc.m_fragmentNo;
+  req->fragmentNoKeyLen = fd.m_fragDesc.m_fragId;
   req->schemaVersion = tabPtr.p->m_schemaVersion;
   req->transId1 = 0;
   req->transId2 = (SUMA << 20) + (suma.getOwnNodeId() << 8);
