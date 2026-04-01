@@ -8695,6 +8695,11 @@ void Dbdict::releaseTableObject(Uint32 table_ptr_i, bool removeFromHash) {
     tmp.erase();
   }
 
+  if (tablePtr.p->m_range_ptr != nullptr) {
+    lc_ndbd_pool_free(tablePtr.p->m_range_ptr);
+    tablePtr.p->m_range_ptr = nullptr;
+  }
+
   LocalAttributeRecord_list list(c_attributeRecordPool,
                                  tablePtr.p->m_attributes);
   AttributeRecordPtr attrPtr;
