@@ -13970,6 +13970,7 @@ void Dbdih::execDIADDTABREQ(Signal *signal) {
       primTabPtr.i = req->primaryTableId;
       ptrCheckGuard(primTabPtr, ctabFileSize, tabRecord);
       tabPtr.p->method = primTabPtr.p->method;
+      tabPtr.p->m_startFid_offset = primTabPtr.p->m_startFid_offset;
       req->hashMapPtrI = primTabPtr.p->m_map_ptr_i;
       break;
     }
