@@ -15536,10 +15536,10 @@ static int create_table_set_up_partition_info(partition_info *part_info,
                                               NdbDictionary::Table &ndbtab,
                                               Ndb_table_map &colIdMap) {
   DBUG_TRACE;
-  fprintf(stderr, "create_table_set_up_partition_info: part_type=%d "
-          "column_list=%d list_of_part_fields=%d num_part_fields=%u\n",
+  DBUG_PRINT("info", ("create_table_set_up_partition_info: part_type=%d "
+          "column_list=%d list_of_part_fields=%d num_part_fields=%u",
           (int)part_info->part_type, (int)part_info->column_list,
-          (int)part_info->list_of_part_fields, part_info->num_part_fields);
+          (int)part_info->list_of_part_fields, part_info->num_part_fields));
 
   if (part_info->part_type == partition_type::HASH &&
       part_info->list_of_part_fields == true) {
@@ -15554,14 +15554,10 @@ static int create_table_set_up_partition_info(partition_info *part_info,
       DBUG_PRINT("info", ("setting dist key on %s", col->getName()));
       col->setPartitionKey(true);
     }
-  } else if ((fprintf(stderr, "RANGE check: part_type=%d column_list=%d "
-              "num_part_fields=%u part_field_array=%p\n",
-              (int)part_info->part_type, (int)part_info->column_list,
-              part_info->num_part_fields, part_info->part_field_array), false) ||
-             (part_info->part_type == partition_type::RANGE &&
+  } else if (part_info->part_type == partition_type::RANGE &&
              part_info->column_list &&
              part_info->num_part_fields == 1 &&
-             part_info->part_field_array != nullptr)) {
+             part_info->part_field_array != nullptr) {
     /*
      * RANGE COLUMNS(col) with a single column — use native RangePartition.
      * The column value is used directly as partition key (no expression
