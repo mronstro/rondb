@@ -11585,6 +11585,41 @@ void Dbdict::alterTable_commit(Signal *signal, SchemaOpPtr op_ptr) {
         }
       }
     }
+    if (AlterTableReq::getDropFragFlag(changeMask)) {
+      jam();
+      D("alterTable_commit: getDropFragFlag set");
+      Uint32 save = tablePtr.p->fragmentCount;
+      tablePtr.p->fragmentCount = newTablePtr.p->fragmentCount;
+      newTablePtr.p->fragmentCount = save;
+
+      Uint32 save_part_bal = tablePtr.p->partitionBalance;
+      tablePtr.p->partitionBalance = newTablePtr.p->partitionBalance;
+      newTablePtr.p->partitionBalance = save_part_bal;
+
+      Uint32 save_rfc = tablePtr.p->partitionCount;
+      tablePtr.p->partitionCount = newTablePtr.p->partitionCount;
+      newTablePtr.p->partitionCount = save_rfc;
+
+      /* Swap range map pointer for range-partitioned tables */
+      if (tablePtr.p->fragmentType == DictTabInfo::RangePartition) {
+        jam();
+        Range2FragmentMap *save_rmap = tablePtr.p->m_range_ptr;
+        tablePtr.p->m_range_ptr = newTablePtr.p->m_range_ptr;
+        newTablePtr.p->m_range_ptr = save_rmap;
+
+        Uint32 save_btype = tablePtr.p->m_range_boundary_type;
+        tablePtr.p->m_range_boundary_type =
+            newTablePtr.p->m_range_boundary_type;
+        newTablePtr.p->m_range_boundary_type = save_btype;
+
+        /* Update committed table's rangeData with new boundaries */
+        {
+          LcConstRope r_new(newTablePtr.p->rangeData);
+          LcLocalRope r_committed(tablePtr.p->rangeData);
+          ndbrequire(r_new.copy(r_committed));
+        }
+      }
+    }
     if (AlterTableReq::getReadBackupFlag(changeMask)) {
       jam();
       Uint32 save_old = (tablePtr.p->m_bits & TableRecord::TR_ReadBackup);
