@@ -133,6 +133,13 @@ static const Uint32 WaitTableStateChangeMillis = 1;
 #define DEB_RANGE_PART(arglist) do { } while (0)
 #endif
 
+#define DEBUG_MEM_ALLOC 1
+#ifdef DEBUG_MEM_ALLOC
+#define DEB_MEM_ALLOC(arglist) do { g_eventLogger->info arglist ; } while (0)
+#else
+#define DEB_MEM_ALLOC(arglist) do { } while (0)
+#endif
+
 #ifdef DEBUG_LCP_ONGOING
 #define DEB_LCP_ONGOING(arglist) do { g_eventLogger->info arglist ; } while (0)
 #else
@@ -14714,6 +14721,8 @@ void Dbdih::releaseTable(TabRecordPtr tabPtr) {
     jam();
     if (tabPtr.p->primaryTableId == RNIL) {
       jam();
+      DEB_MEM_ALLOC(("DBDIH: lc_ndbd_pool_free(0x%p), line: %u",
+                     tabPtr.p->m_range_ptr, __LINE__));
       lc_ndbd_pool_free(tabPtr.p->m_range_ptr);
     }
     tabPtr.p->m_range_ptr = nullptr;
@@ -14722,6 +14731,8 @@ void Dbdih::releaseTable(TabRecordPtr tabPtr) {
     jam();
     if (tabPtr.p->primaryTableId == RNIL) {
       jam();
+      DEB_MEM_ALLOC(("DBDIH: lc_ndbd_pool_free(0x%p), line: %u",
+                     tabPtr.p->m_new_range_ptr, __LINE__));
       lc_ndbd_pool_free(tabPtr.p->m_new_range_ptr);
     }
     tabPtr.p->m_new_range_ptr = nullptr;
@@ -15029,6 +15040,8 @@ Dbdih::add_fragments_to_table(Signal *signal,
                         RG_SCHEMA_MEMORY,
                         getThreadId(),
                         false);
+  DEB_MEM_ALLOC(("DBDIH: lc_ndbd_pool_malloc(0x%p), line: %u",
+                 startFidNew, __LINE__));
   if (startFidNew == nullptr)
   {
     return ZOUT_OF_SCHEMA_MEMORY;
@@ -15049,6 +15062,8 @@ Dbdih::add_fragments_to_table(Signal *signal,
     mb();
     tabPtr.p->startFidSize = current + cnt;
     ndbrequire(startFidOld != nullptr);
+    DEB_MEM_ALLOC(("DBDIH: lc_ndbd_pool_free(0x%p), line: %u",
+                   startFidOld, __LINE__));
     lc_ndbd_pool_free(startFidOld);
     DEB_RANGE_PART(("startFidSize: old: %u, new: %u, tableId: %u",
       current, current + cnt, tabPtr.i));
@@ -16763,6 +16778,8 @@ void Dbdih::make_new_table_read_and_writeable(TabRecordPtr tabPtr,
   DIH_TAB_WRITE_UNLOCK(tabPtr.p);
   NdbMutex_Unlock(&tabPtr.p->theMutex);
   if (old_range_ptr != nullptr) {
+    DEB_MEM_ALLOC(("DBDIH: lc_ndbd_pool_free(0x%p), line: %u",
+                   old_range_ptr, __LINE__));
     lc_ndbd_pool_free(old_range_ptr);
   }
   send_alter_tab_conf(signal, connectPtr);
@@ -16810,6 +16827,8 @@ bool Dbdih::make_old_table_non_writeable(TabRecordPtr tabPtr,
   if (tabPtr.p->method == TabRecord::RANGE_PARTITION &&
       tabPtr.p->m_new_range_ptr != nullptr) {
     jam();
+    DEB_MEM_ALLOC(("DBDIH: lc_ndbd_pool_free(0x%p), line: %u",
+                   tabPtr.p->m_new_range_ptr, __LINE__));
     lc_ndbd_pool_free(tabPtr.p->m_new_range_ptr);
     tabPtr.p->m_new_range_ptr = nullptr;
   }
@@ -16949,6 +16968,8 @@ void Dbdih::make_new_table_non_writeable(TabRecordPtr tabPtr) {
   /* Free and clear new range map on revert */
   if (tabPtr.p->m_new_range_ptr != nullptr) {
     jam();
+    DEB_MEM_ALLOC(("DBDIH: lc_ndbd_pool_free(0x%p), line: %u",
+                   tabPtr.p->m_new_range_ptr, __LINE__));
     lc_ndbd_pool_free(tabPtr.p->m_new_range_ptr);
     tabPtr.p->m_new_range_ptr = nullptr;
   }
@@ -17035,6 +17056,8 @@ bool Dbdih::allocFragments(Uint32 noOfFragments, TabRecordPtr tabPtr)
                        RG_SCHEMA_MEMORY,
                        getThreadId(),
                        false);
+  DEB_MEM_ALLOC(("DBDIH: lc_ndbd_pool_malloc(0x%p), line: %u",
+                 startFid, __LINE__));
   if (startFid == nullptr)
   {
     return false;
@@ -17051,6 +17074,8 @@ bool Dbdih::allocFragments(Uint32 noOfFragments, TabRecordPtr tabPtr)
         ndbrequire(c_fragmentRecordPool.getPtr(fragPtr));
         c_fragmentRecordPool.release(fragPtr);
       }
+      DEB_MEM_ALLOC(("DBDIH: lc_ndbd_pool_free(0x%p), line: %u",
+                     startFid, __LINE__));
       lc_ndbd_pool_free(startFid);
       return false;
     }
@@ -17084,6 +17109,8 @@ void Dbdih::releaseFragments(TabRecordPtr tabPtr) {
   if (tabPtr.p->startFid != nullptr)
   {
     jam();
+    DEB_MEM_ALLOC(("DBDIH: lc_ndbd_pool_free(0x%p), line: %u",
+                   tabPtr.p->startFid, __LINE__));
     lc_ndbd_pool_free(tabPtr.p->startFid);
   }
   callocated_frags -= tabPtr.p->totalfragments;

@@ -182,6 +182,13 @@
 #define DEB_RANGE(arglist) do { } while (0)
 #endif
 
+#define DEBUG_MEM_ALLOC 1
+#ifdef DEBUG_MEM_ALLOC
+#define DEB_MEM_ALLOC(arglist) do { g_eventLogger->info arglist ; } while (0)
+#else
+#define DEB_MEM_ALLOC(arglist) do { } while (0)
+#endif
+
 #ifdef DEBUG_API_FAIL
 #define DEB_API_FAIL(arglist)    \
   do {                           \
@@ -6064,6 +6071,8 @@ void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
     Uint32 alloc_sz = Range2FragmentMap::alloc_size(nParts, blen);
     void *mem = lc_ndbd_pool_malloc(alloc_sz, RG_SCHEMA_MEMORY,
                                     getThreadId(), true);
+    DEB_MEM_ALLOC(("DBDICT: lc_ndbd_pool_malloc(0x%p), line: %u",
+                   mem, __LINE__));
     tabRequire(mem != nullptr, CreateTableRef::NoMoreTableRecords);
 
     Range2FragmentMap *rmap = reinterpret_cast<Range2FragmentMap *>(mem);
@@ -9936,6 +9945,8 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
       Uint32 alloc_sz = Range2FragmentMap::alloc_size(new_cnt, blen);
       void *mem = lc_ndbd_pool_malloc(alloc_sz, RG_SCHEMA_MEMORY,
                                       getThreadId(), true);
+      DEB_MEM_ALLOC(("DBDICT: lc_ndbd_pool_malloc(0x%p), line: %u",
+                     mem, __LINE__));
       if (mem == nullptr) {
         jam();
         setError(error, AlterTableRef::UnsupportedChange, __LINE__);
@@ -9978,6 +9989,8 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
       /* Free range map from handleTabInfoInit before replacing */
       if (newTablePtr.p->m_range_ptr != nullptr) {
         jam();
+        DEB_MEM_ALLOC(("DBDICT: lc_ndbd_pool_free(0x%p), line: %u",
+                       newTablePtr.p->m_range_ptr, __LINE__));
         lc_ndbd_pool_free(newTablePtr.p->m_range_ptr);
       }
       newTablePtr.p->m_range_ptr = rmap;
@@ -10139,6 +10152,8 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
     Uint32 alloc_sz = Range2FragmentMap::alloc_size(new_cnt, blen);
     void *mem = lc_ndbd_pool_malloc(alloc_sz, RG_SCHEMA_MEMORY,
                                     getThreadId(), true);
+    DEB_MEM_ALLOC(("DBDICT: lc_ndbd_pool_malloc(0x%p), line: %u",
+                   mem, __LINE__));
     if (mem == nullptr) {
       jam();
       setError(error, AlterTableRef::UnsupportedChange, __LINE__);
@@ -10167,6 +10182,8 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
     /* Free range map from handleTabInfoInit before replacing */
     if (newTablePtr.p->m_range_ptr != nullptr) {
       jam();
+      DEB_MEM_ALLOC(("DBDICT: lc_ndbd_pool_free(0x%p), line: %u",
+                     newTablePtr.p->m_range_ptr, __LINE__));
       lc_ndbd_pool_free(newTablePtr.p->m_range_ptr);
     }
     newTablePtr.p->m_range_ptr = rmap;
