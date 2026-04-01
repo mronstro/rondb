@@ -13973,6 +13973,14 @@ void Dbdih::execDIADDTABREQ(Signal *signal) {
     case DictTabInfo::RangePartition:
       jam();
       tabPtr.p->method = TabRecord::RANGE_PARTITION;
+      if (ERROR_INSERTED(7251)) {
+        jam();
+        /**
+         * Test fragId Uint16 wrap-around: force startFid_offset so that
+         * fragment IDs start near 65535 and wrap to 0 on ADD PARTITION.
+         */
+        tabPtr.p->m_startFid_offset = 65532;
+      }
       break;
     default:
       ndbabort();
@@ -14846,7 +14854,7 @@ void Dbdih::execALTER_TAB_REQ(Signal *signal) {
         ndbassert(old_rmap != nullptr);
         connectPtr.p->m_alter.m_drop_frag_id = old_rmap->frag_ids()[0];
         connectPtr.p->m_alter.m_new_startFid_offset =
-            tabPtr.p->m_startFid_offset + 1;
+            (tabPtr.p->m_startFid_offset + 1) & 0xFFFF;
         connectPtr.p->m_alter.m_totalfragments =
             tabPtr.p->totalfragments - 1;
         connectPtr.p->m_alter.m_partitionCount =

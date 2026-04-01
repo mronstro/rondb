@@ -1771,13 +1771,13 @@ class Dbdih : public SimulatedBlock {
                            Uint32 fragNo,
                            FragmentstorePtr & ptr);
 
-  /* Convert 0-based fragment number to real fragment ID */
+  /* Convert 0-based fragment number to real fragment ID (Uint16 wrap) */
   static Uint32 fragNoToId(const TabRecord *tab, Uint32 fragNo) {
-    return fragNo + tab->m_startFid_offset;
+    return (fragNo + tab->m_startFid_offset) & 0xFFFF;
   }
-  /* Convert real fragment ID to 0-based fragment number */
+  /* Convert real fragment ID to 0-based fragment number (Uint16 wrap) */
   static Uint32 fragIdToNo(const TabRecord *tab, Uint32 fragId) {
-    return fragId - tab->m_startFid_offset;
+    return (fragId - tab->m_startFid_offset) & 0xFFFF;
   }
 
   void wait_old_scan(Signal*);
