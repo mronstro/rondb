@@ -52,15 +52,21 @@ select * from t1 where a=35 and b=1;
 --error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
 INSERT into t1 values (40, 1, 5);
 
---echo Add MAXVALUE partition at end
+--echo Add MAXVALUE partition — rejected for native RANGE COLUMNS
+--error ER_LIMITED_PART_RANGE
 ALTER TABLE t1 ADD PARTITION (PARTITION pmax VALUES LESS THAN (MAXVALUE));
+
+# Table still usable after rejected ALTER
+select * from t1 order by a;
+
+# Add a concrete partition instead
+ALTER TABLE t1 ADD PARTITION (PARTITION p4 VALUES LESS THAN (50));
 
 select count(*) as partition_count from information_schema.partitions
   where table_schema='test' and table_name='t1';
 
-# Now the overflow value works
-INSERT into t1 values (100, 1, 5);
-select * from t1 where a=100 and b=1;
+INSERT into t1 values (45, 1, 5);
+select * from t1 where a=45 and b=1;
 
 select * from t1 order by a;
 
@@ -70,6 +76,8 @@ drop table t1;
 --echo # Basic ALTER TABLE DROP PARTITION
 --echo #
 
+--echo MAXVALUE rejected in CREATE TABLE for native RANGE COLUMNS
+--error ER_LIMITED_PART_RANGE
 CREATE TABLE t2 (
   a int not null,
   b int not null,
@@ -80,6 +88,17 @@ partition by range columns (a)
  partition p1 values less than (20),
  partition p2 values less than (30),
  partition pmax values less than (maxvalue));
+
+CREATE TABLE t2 (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (10),
+ partition p1 values less than (20),
+ partition p2 values less than (30),
+ partition p3 values less than (100));
 
 INSERT into t2 values (5, 1);
 INSERT into t2 values (15, 2);
@@ -157,8 +176,8 @@ select * from t3 order by a;
 ALTER TABLE t3 DROP PARTITION p1;
 select * from t3 order by a;
 
---echo Step 5: Add MAXVALUE partition
-ALTER TABLE t3 ADD PARTITION (PARTITION pmax VALUES LESS THAN (MAXVALUE));
+--echo Step 5: Add partition at end
+ALTER TABLE t3 ADD PARTITION (PARTITION p5 VALUES LESS THAN (1000));
 INSERT into t3 values (999, 6);
 select * from t3 order by a;
 
@@ -289,7 +308,7 @@ partition by range columns (a)
 (partition p0 values less than (10),
  partition p1 values less than (20),
  partition p2 values less than (30),
- partition pmax values less than (maxvalue));
+ partition p3 values less than (100));
 
 INSERT into t6 values (5, 1);
 INSERT into t6 values (15, 1);
@@ -392,7 +411,7 @@ partition by range columns (a)
 (partition p0 values less than (100),
  partition p1 values less than (200),
  partition p2 values less than (300),
- partition pmax values less than (maxvalue));
+ partition p3 values less than (1000));
 
 INSERT into t8 values (50, 1);
 INSERT into t8 values (150, 2);
@@ -452,7 +471,7 @@ COMMIT;
 
 select * from t9 order by a;
 
-ALTER TABLE t9 ADD PARTITION (PARTITION p3 VALUES LESS THAN (MAXVALUE));
+ALTER TABLE t9 ADD PARTITION (PARTITION p3 VALUES LESS THAN (500));
 
 # Transaction spanning old and new partitions
 BEGIN;
@@ -567,7 +586,7 @@ INSERT into t12 values (5, 1);
 ALTER TABLE t12 ADD PARTITION (
   PARTITION p1 VALUES LESS THAN (20),
   PARTITION p2 VALUES LESS THAN (30),
-  PARTITION p3 VALUES LESS THAN (MAXVALUE));
+  PARTITION p3 VALUES LESS THAN (200));
 
 select count(*) as partition_count from information_schema.partitions
   where table_schema='test' and table_name='t12';
