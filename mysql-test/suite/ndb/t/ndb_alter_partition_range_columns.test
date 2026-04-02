@@ -31,7 +31,7 @@ select count(*) as partition_count from information_schema.partitions
   where table_schema='test' and table_name='t1';
 
 --echo Add partition at end
-ALTER TABLE t1 ADD PARTITION (PARTITION p3 VALUES LESS THAN (40));
+ALTER TABLE t1 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p3 VALUES LESS THAN (40));
 
 select count(*) as partition_count from information_schema.partitions
   where table_schema='test' and table_name='t1';
@@ -54,13 +54,13 @@ INSERT into t1 values (40, 1, 5);
 
 --echo Add MAXVALUE partition — rejected for native RANGE COLUMNS
 --error ER_LIMITED_PART_RANGE
-ALTER TABLE t1 ADD PARTITION (PARTITION pmax VALUES LESS THAN (MAXVALUE));
+ALTER TABLE t1 ALGORITHM=INPLACE, ADD PARTITION (PARTITION pmax VALUES LESS THAN (MAXVALUE));
 
 # Table still usable after rejected ALTER
 select * from t1 order by a;
 
 # Add a concrete partition instead
-ALTER TABLE t1 ADD PARTITION (PARTITION p4 VALUES LESS THAN (50));
+ALTER TABLE t1 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p4 VALUES LESS THAN (50));
 
 select count(*) as partition_count from information_schema.partitions
   where table_schema='test' and table_name='t1';
@@ -108,7 +108,7 @@ INSERT into t2 values (50, 4);
 select * from t2 order by a;
 
 --echo Drop first partition
-ALTER TABLE t2 DROP PARTITION p0;
+ALTER TABLE t2 ALGORITHM=INPLACE, DROP PARTITION p0;
 
 select count(*) as partition_count from information_schema.partitions
   where table_schema='test' and table_name='t2';
@@ -127,7 +127,7 @@ INSERT into t2 values (18, 5);
 select * from t2 where a=18;
 
 --echo Drop another partition (now p1 is first)
-ALTER TABLE t2 DROP PARTITION p1;
+ALTER TABLE t2 ALGORITHM=INPLACE, DROP PARTITION p1;
 
 select count(*) as partition_count from information_schema.partitions
   where table_schema='test' and table_name='t2';
@@ -159,25 +159,25 @@ INSERT into t3 values (150, 2);
 INSERT into t3 values (250, 3);
 
 --echo Step 1: Add partition p3
-ALTER TABLE t3 ADD PARTITION (PARTITION p3 VALUES LESS THAN (400));
+ALTER TABLE t3 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p3 VALUES LESS THAN (400));
 INSERT into t3 values (350, 4);
 select * from t3 order by a;
 
 --echo Step 2: Drop first partition
-ALTER TABLE t3 DROP PARTITION p0;
+ALTER TABLE t3 ALGORITHM=INPLACE, DROP PARTITION p0;
 select * from t3 order by a;
 
 --echo Step 3: Add another partition at end
-ALTER TABLE t3 ADD PARTITION (PARTITION p4 VALUES LESS THAN (500));
+ALTER TABLE t3 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p4 VALUES LESS THAN (500));
 INSERT into t3 values (450, 5);
 select * from t3 order by a;
 
 --echo Step 4: Drop current first partition
-ALTER TABLE t3 DROP PARTITION p1;
+ALTER TABLE t3 ALGORITHM=INPLACE, DROP PARTITION p1;
 select * from t3 order by a;
 
 --echo Step 5: Add partition at end
-ALTER TABLE t3 ADD PARTITION (PARTITION p5 VALUES LESS THAN (1000));
+ALTER TABLE t3 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p5 VALUES LESS THAN (1000));
 INSERT into t3 values (999, 6);
 select * from t3 order by a;
 
@@ -211,7 +211,7 @@ INSERT into t4 values (5, 1, 'five');
 INSERT into t4 values (15, 2, 'fifteen');
 INSERT into t4 values (25, 3, 'twentyfive');
 
-ALTER TABLE t4 ADD PARTITION (PARTITION p3 VALUES LESS THAN (40));
+ALTER TABLE t4 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p3 VALUES LESS THAN (40));
 
 # UPDATE existing row
 UPDATE t4 SET c = 'updated_five' WHERE a = 5;
@@ -231,7 +231,7 @@ select * from t4 where a=35;
 select * from t4 order by a;
 
 # Now DROP the first partition
-ALTER TABLE t4 DROP PARTITION p0;
+ALTER TABLE t4 ALGORITHM=INPLACE, DROP PARTITION p0;
 
 # Verify data from dropped partition is gone
 select * from t4 where a=5;
@@ -272,7 +272,7 @@ select * from t5 where a=5 and b=1;
 --source suite/ndb/include/ndb_scan_counts.inc
 
 # Add partition
-ALTER TABLE t5 ADD PARTITION (PARTITION p3 VALUES LESS THAN (40));
+ALTER TABLE t5 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p3 VALUES LESS THAN (40));
 INSERT into t5 values (35, 1, 4);
 
 # Full scan (no pruning)
@@ -315,7 +315,7 @@ INSERT into t6 values (15, 1);
 INSERT into t6 values (25, 1);
 INSERT into t6 values (50, 1);
 
-ALTER TABLE t6 DROP PARTITION p0;
+ALTER TABLE t6 ALGORITHM=INPLACE, DROP PARTITION p0;
 
 --echo Pruned scan after DROP PARTITION
 --source suite/ndb/include/ndb_init_scan_counts.inc
@@ -377,7 +377,7 @@ select count(*) from t7;
 
 # Perform ALTER on server1
 --connection server1
-ALTER TABLE t7 ADD PARTITION (PARTITION p3 VALUES LESS THAN (400));
+ALTER TABLE t7 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p3 VALUES LESS THAN (400));
 
 --connection server2
 --reap
@@ -424,7 +424,7 @@ INSERT into t8 values (500, 4);
 
 # Perform DROP PARTITION on server1
 --connection server1
-ALTER TABLE t8 DROP PARTITION p0;
+ALTER TABLE t8 ALGORITHM=INPLACE, DROP PARTITION p0;
 
 --connection server2
 --reap
@@ -471,7 +471,7 @@ COMMIT;
 
 select * from t9 order by a;
 
-ALTER TABLE t9 ADD PARTITION (PARTITION p3 VALUES LESS THAN (500));
+ALTER TABLE t9 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p3 VALUES LESS THAN (500));
 
 # Transaction spanning old and new partitions
 BEGIN;
@@ -510,7 +510,7 @@ INSERT into t10 values (500000, 1);
 INSERT into t10 values (1500000, 2);
 INSERT into t10 values (2500000, 3);
 
-ALTER TABLE t10 ADD PARTITION (PARTITION p3 VALUES LESS THAN (4000000));
+ALTER TABLE t10 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p3 VALUES LESS THAN (4000000));
 INSERT into t10 values (3500000, 4);
 
 select * from t10 order by a;
@@ -519,7 +519,7 @@ select * from t10 order by a;
 select * from t10 where a=500000;
 select * from t10 where a=3500000;
 
-ALTER TABLE t10 DROP PARTITION p0;
+ALTER TABLE t10 ALGORITHM=INPLACE, DROP PARTITION p0;
 select * from t10 order by a;
 select * from t10 where a=500000;
 
@@ -541,27 +541,27 @@ partition by range columns (a)
 
 # Cannot add partition with boundary less than existing max
 --error ER_RANGE_NOT_INCREASING_ERROR
-ALTER TABLE t11 ADD PARTITION (PARTITION p_bad VALUES LESS THAN (15));
+ALTER TABLE t11 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p_bad VALUES LESS THAN (15));
 
 # Cannot add partition with boundary equal to existing max
 --error ER_RANGE_NOT_INCREASING_ERROR
-ALTER TABLE t11 ADD PARTITION (PARTITION p_bad VALUES LESS THAN (30));
+ALTER TABLE t11 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p_bad VALUES LESS THAN (30));
 
 # Drop non-first partition - NDB only supports dropping the first partition
 INSERT into t11 values (5, 1);
 INSERT into t11 values (15, 2);
 INSERT into t11 values (25, 3);
 
-# Dropping middle partition should be rejected
+# Dropping middle partition should be rejected by inplace algorithm
 --error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
-ALTER TABLE t11 DROP PARTITION p1;
+ALTER TABLE t11 ALGORITHM=INPLACE, DROP PARTITION p1;
 
-# Dropping last partition should also be rejected
+# Dropping last partition should also be rejected by inplace algorithm
 --error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
-ALTER TABLE t11 DROP PARTITION p2;
+ALTER TABLE t11 ALGORITHM=INPLACE, DROP PARTITION p2;
 
 # Dropping first partition should succeed
-ALTER TABLE t11 DROP PARTITION p0;
+ALTER TABLE t11 ALGORITHM=INPLACE, DROP PARTITION p0;
 
 select count(*) as partition_count from information_schema.partitions
   where table_schema='test' and table_name='t11';
@@ -592,14 +592,14 @@ partition by range columns (a)
 INSERT into t12 values (5, 1);
 
 --error 1296
-ALTER TABLE t12 ADD PARTITION (
+ALTER TABLE t12 ALGORITHM=INPLACE, ADD PARTITION (
   PARTITION p1 VALUES LESS THAN (20),
   PARTITION p2 VALUES LESS THAN (30),
   PARTITION p3 VALUES LESS THAN (200));
 
-ALTER TABLE t12 ADD PARTITION (PARTITION p_1 VALUES LESS THAN (20));
-ALTER TABLE t12 ADD PARTITION (PARTITION p_2 VALUES LESS THAN (30));
-ALTER TABLE t12 ADD PARTITION (PARTITION p_3 VALUES LESS THAN (200));
+ALTER TABLE t12 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p_1 VALUES LESS THAN (20));
+ALTER TABLE t12 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p_2 VALUES LESS THAN (30));
+ALTER TABLE t12 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p_3 VALUES LESS THAN (200));
 
 select count(*) as partition_count from information_schema.partitions
   where table_schema='test' and table_name='t12';
@@ -635,13 +635,13 @@ partition by range columns (a)
 show create table t13;
 --enable_warnings
 
-ALTER TABLE t13 ADD PARTITION (PARTITION p2 VALUES LESS THAN (30));
+ALTER TABLE t13 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p2 VALUES LESS THAN (30));
 
 --disable_warnings
 show create table t13;
 --enable_warnings
 
-ALTER TABLE t13 DROP PARTITION p0;
+ALTER TABLE t13 ALGORITHM=INPLACE, DROP PARTITION p0;
 
 --disable_warnings
 show create table t13;
@@ -686,7 +686,7 @@ select * from t14 where a=250;
 select * from t14 where a=350;
 
 --echo ADD PARTITION — new fragId wraps to 0
-ALTER TABLE t14 ADD PARTITION (PARTITION p4 VALUES LESS THAN (500));
+ALTER TABLE t14 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p4 VALUES LESS THAN (500));
 
 INSERT into t14 values (450, 5);
 select * from t14 order by a;
@@ -695,7 +695,7 @@ select * from t14 order by a;
 select * from t14 where a=450;
 
 --echo DROP PARTITION — m_startFid_offset becomes 65533
-ALTER TABLE t14 DROP PARTITION p0;
+ALTER TABLE t14 ALGORITHM=INPLACE, DROP PARTITION p0;
 
 select * from t14 order by a;
 select * from t14 where a=50;
@@ -703,16 +703,16 @@ select * from t14 where a=150;
 select * from t14 where a=450;
 
 --echo ADD another partition — fragId = 1
-ALTER TABLE t14 ADD PARTITION (PARTITION p5 VALUES LESS THAN (600));
+ALTER TABLE t14 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p5 VALUES LESS THAN (600));
 
 INSERT into t14 values (550, 6);
 select * from t14 order by a;
 select * from t14 where a=550;
 
 --echo DROP 3 more partitions to push m_startFid_offset through 65535 to 0
-ALTER TABLE t14 DROP PARTITION p1;
-ALTER TABLE t14 DROP PARTITION p2;
-ALTER TABLE t14 DROP PARTITION p3;
+ALTER TABLE t14 ALGORITHM=INPLACE, DROP PARTITION p1;
+ALTER TABLE t14 ALGORITHM=INPLACE, DROP PARTITION p2;
+ALTER TABLE t14 ALGORITHM=INPLACE, DROP PARTITION p3;
 
 # m_startFid_offset is now (65533+3) & 0xFFFF = 0
 select * from t14 order by a;
@@ -722,7 +722,7 @@ select * from t14 where a=450;
 select * from t14 where a=550;
 
 --echo ADD partition after full wrap — fragId = 2
-ALTER TABLE t14 ADD PARTITION (PARTITION p6 VALUES LESS THAN (700));
+ALTER TABLE t14 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p6 VALUES LESS THAN (700));
 
 INSERT into t14 values (650, 7);
 select * from t14 order by a;
