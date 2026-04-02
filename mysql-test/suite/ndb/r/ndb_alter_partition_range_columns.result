@@ -49,27 +49,36 @@ a	b	c
 35	1	4
 INSERT into t1 values (40, 1, 5);
 Got one of the listed errors
-Add MAXVALUE partition at end
+Add MAXVALUE partition — rejected for native RANGE COLUMNS
 ALTER TABLE t1 ADD PARTITION (PARTITION pmax VALUES LESS THAN (MAXVALUE));
-select count(*) as partition_count from information_schema.partitions
-where table_schema='test' and table_name='t1';
-partition_count
-5
-INSERT into t1 values (100, 1, 5);
-select * from t1 where a=100 and b=1;
-a	b	c
-100	1	5
+ERROR HY000: The NDB handler only supports 32 bit integers in VALUES
 select * from t1 order by a;
 a	b	c
 1	1	1
 15	1	2
 25	1	3
 35	1	4
-100	1	5
+ALTER TABLE t1 ADD PARTITION (PARTITION p4 VALUES LESS THAN (50));
+select count(*) as partition_count from information_schema.partitions
+where table_schema='test' and table_name='t1';
+partition_count
+5
+INSERT into t1 values (45, 1, 5);
+select * from t1 where a=45 and b=1;
+a	b	c
+45	1	5
+select * from t1 order by a;
+a	b	c
+1	1	1
+15	1	2
+25	1	3
+35	1	4
+45	1	5
 drop table t1;
 #
 # Basic ALTER TABLE DROP PARTITION
 #
+MAXVALUE rejected in CREATE TABLE for native RANGE COLUMNS
 CREATE TABLE t2 (
 a int not null,
 b int not null,
@@ -80,6 +89,17 @@ partition by range columns (a)
 partition p1 values less than (20),
 partition p2 values less than (30),
 partition pmax values less than (maxvalue));
+ERROR HY000: The NDB handler only supports 32 bit integers in VALUES
+CREATE TABLE t2 (
+a int not null,
+b int not null,
+primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (10),
+partition p1 values less than (20),
+partition p2 values less than (30),
+partition p3 values less than (100));
 INSERT into t2 values (5, 1);
 INSERT into t2 values (15, 2);
 INSERT into t2 values (25, 3);
@@ -98,13 +118,11 @@ partition_count
 3
 select * from t2 order by a;
 a	b
-5	1
 15	2
 25	3
 50	4
 select * from t2 where a=5;
 a	b
-5	1
 select * from t2 where a=15;
 a	b
 15	2
@@ -126,9 +144,6 @@ partition_count
 2
 select * from t2 order by a;
 a	b
-5	1
-15	2
-18	5
 25	3
 50	4
 select * from t2 where a=25;
@@ -166,7 +181,6 @@ Step 2: Drop first partition
 ALTER TABLE t3 DROP PARTITION p0;
 select * from t3 order by a;
 a	b
-50	1
 150	2
 250	3
 350	4
@@ -175,7 +189,6 @@ ALTER TABLE t3 ADD PARTITION (PARTITION p4 VALUES LESS THAN (500));
 INSERT into t3 values (450, 5);
 select * from t3 order by a;
 a	b
-50	1
 150	2
 250	3
 350	4
@@ -184,25 +197,21 @@ Step 4: Drop current first partition
 ALTER TABLE t3 DROP PARTITION p1;
 select * from t3 order by a;
 a	b
-50	1
-150	2
 250	3
 350	4
 450	5
-Step 5: Add MAXVALUE partition
-ALTER TABLE t3 ADD PARTITION (PARTITION pmax VALUES LESS THAN (MAXVALUE));
+Step 5: Add partition at end
+ALTER TABLE t3 ADD PARTITION (PARTITION p5 VALUES LESS THAN (1000));
 INSERT into t3 values (999, 6);
 select * from t3 order by a;
 a	b
-50	1
-150	2
 250	3
 350	4
 450	5
 999	6
 select count(*) from t3;
 count(*)
-6
+4
 select * from t3 where a=250;
 a	b
 250	3
@@ -253,17 +262,14 @@ a	b	c
 ALTER TABLE t4 DROP PARTITION p0;
 select * from t4 where a=5;
 a	b	c
-5	1	updated_five
 select * from t4 order by a;
 a	b	c
-5	1	updated_five
 25	3	twentyfive
 35	4	updated_thirtyfive
 UPDATE t4 SET c = 'updated_twentyfive' WHERE a = 25;
 DELETE FROM t4 WHERE a = 35;
 select * from t4 order by a;
 a	b	c
-5	1	updated_five
 25	3	updated_twentyfive
 drop table t4;
 #
@@ -332,7 +338,7 @@ partition by range columns (a)
 (partition p0 values less than (10),
 partition p1 values less than (20),
 partition p2 values less than (30),
-partition pmax values less than (maxvalue));
+partition p3 values less than (100));
 INSERT into t6 values (5, 1);
 INSERT into t6 values (15, 1);
 INSERT into t6 values (25, 1);
@@ -349,7 +355,6 @@ ndb_pruned_scan_count
 Full scan after DROP PARTITION
 select * from t6 order by a;
 a	b
-5	1
 15	1
 25	1
 50	1
@@ -403,7 +408,7 @@ partition by range columns (a)
 (partition p0 values less than (100),
 partition p1 values less than (200),
 partition p2 values less than (300),
-partition pmax values less than (maxvalue));
+partition p3 values less than (1000));
 INSERT into t8 values (50, 1);
 INSERT into t8 values (150, 2);
 INSERT into t8 values (250, 3);
@@ -414,22 +419,18 @@ sum(b)
 10
 select * from t8 order by a;
 a	b
-50	1
 150	2
 250	3
 500	4
 select * from t8 order by a;
 a	b
-50	1
 150	2
 250	3
 500	4
 select * from t8 where a=50;
 a	b
-50	1
 select * from t8 where a=50;
 a	b
-50	1
 drop table t8;
 #
 # Transactions spanning partitions with ALTER
@@ -453,7 +454,7 @@ a	b
 50	1
 150	2
 250	3
-ALTER TABLE t9 ADD PARTITION (PARTITION p3 VALUES LESS THAN (MAXVALUE));
+ALTER TABLE t9 ADD PARTITION (PARTITION p3 VALUES LESS THAN (500));
 BEGIN;
 INSERT into t9 values (350, 4);
 UPDATE t9 SET b = 10 WHERE a = 50;
@@ -508,13 +509,11 @@ a	b
 ALTER TABLE t10 DROP PARTITION p0;
 select * from t10 order by a;
 a	b
-500000	1
 1500000	2
 2500000	3
 3500000	4
 select * from t10 where a=500000;
 a	b
-500000	1
 drop table t10;
 #
 # Error cases
@@ -535,22 +534,27 @@ ERROR HY000: VALUES LESS THAN value must be strictly increasing for each partiti
 INSERT into t11 values (5, 1);
 INSERT into t11 values (15, 2);
 INSERT into t11 values (25, 3);
+Dropping middle partition should be rejected
 ALTER TABLE t11 DROP PARTITION p1;
+ERROR HY000: ALGORITHM=INPLACE is not supported. Reason: NDB only supports dropping the first partition. Try ALGORITHM=COPY.
+Dropping last partition should also be rejected
+ALTER TABLE t11 DROP PARTITION p2;
+ERROR HY000: ALGORITHM=INPLACE is not supported. Reason: NDB only supports dropping the first partition. Try ALGORITHM=COPY.
+Dropping first partition should succeed
+ALTER TABLE t11 DROP PARTITION p0;
 select count(*) as partition_count from information_schema.partitions
-where table_schema='test' and table_name='t1';
+where table_schema='test' and table_name='t11';
 partition_count
-0
+2
 select * from t11 order by a;
 a	b
-5	1
 15	2
 25	3
+select * from t11 where a=5;
+a	b
 select * from t11 where a=15;
 a	b
 15	2
-select * from t11 where a=5;
-a	b
-5	1
 select * from t11 where a=25;
 a	b
 25	3
@@ -569,7 +573,11 @@ INSERT into t12 values (5, 1);
 ALTER TABLE t12 ADD PARTITION (
 PARTITION p1 VALUES LESS THAN (20),
 PARTITION p2 VALUES LESS THAN (30),
-PARTITION p3 VALUES LESS THAN (MAXVALUE));
+PARTITION p3 VALUES LESS THAN (200));
+ERROR HY000: Got error 741 'Unsupported alter table' from NDBCLUSTER
+ALTER TABLE t12 ADD PARTITION (PARTITION p_1 VALUES LESS THAN (20));
+ALTER TABLE t12 ADD PARTITION (PARTITION p_2 VALUES LESS THAN (30));
+ALTER TABLE t12 ADD PARTITION (PARTITION p_3 VALUES LESS THAN (200));
 select count(*) as partition_count from information_schema.partitions
 where table_schema='test' and table_name='t12';
 partition_count
@@ -646,6 +654,7 @@ drop table t13;
 # Forces m_startFid_offset=65532 so 4 partitions get fragIds
 # 65532, 65533, 65534, 65535. ADD PARTITION wraps fragId to 0.
 #
+
 CREATE TABLE t14 (
 a int not null,
 b int not null,
@@ -656,6 +665,7 @@ partition by range columns (a)
 partition p1 values less than (200),
 partition p2 values less than (300),
 partition p3 values less than (400));
+
 INSERT into t14 values (50, 1);
 INSERT into t14 values (150, 2);
 INSERT into t14 values (250, 3);

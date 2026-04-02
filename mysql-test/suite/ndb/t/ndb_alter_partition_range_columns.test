@@ -547,24 +547,32 @@ ALTER TABLE t11 ADD PARTITION (PARTITION p_bad VALUES LESS THAN (15));
 --error ER_RANGE_NOT_INCREASING_ERROR
 ALTER TABLE t11 ADD PARTITION (PARTITION p_bad VALUES LESS THAN (30));
 
-# Drop non-first partition - MySQL allows it for RANGE, NDB should handle it
+# Drop non-first partition - NDB only supports dropping the first partition
 INSERT into t11 values (5, 1);
 INSERT into t11 values (15, 2);
 INSERT into t11 values (25, 3);
 
-# Verify drop of middle partition
+# Dropping middle partition should be rejected
+--error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
 ALTER TABLE t11 DROP PARTITION p1;
 
+# Dropping last partition should also be rejected
+--error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
+ALTER TABLE t11 DROP PARTITION p2;
+
+# Dropping first partition should succeed
+ALTER TABLE t11 DROP PARTITION p0;
+
 select count(*) as partition_count from information_schema.partitions
-  where table_schema='test' and table_name='t1';
+  where table_schema='test' and table_name='t11';
 
 select * from t11 order by a;
 
-# p1 data is gone
-select * from t11 where a=15;
-
-# Other partitions work
+# p0 data is gone
 select * from t11 where a=5;
+
+# Other partitions still work
+select * from t11 where a=15;
 select * from t11 where a=25;
 
 drop table t11;
@@ -583,10 +591,15 @@ partition by range columns (a)
 
 INSERT into t12 values (5, 1);
 
+--error 1296
 ALTER TABLE t12 ADD PARTITION (
   PARTITION p1 VALUES LESS THAN (20),
   PARTITION p2 VALUES LESS THAN (30),
   PARTITION p3 VALUES LESS THAN (200));
+
+ALTER TABLE t12 ADD PARTITION (PARTITION p_1 VALUES LESS THAN (20));
+ALTER TABLE t12 ADD PARTITION (PARTITION p_2 VALUES LESS THAN (30));
+ALTER TABLE t12 ADD PARTITION (PARTITION p_3 VALUES LESS THAN (200));
 
 select count(*) as partition_count from information_schema.partitions
   where table_schema='test' and table_name='t12';

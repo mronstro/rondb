@@ -16544,6 +16544,30 @@ enum_alter_inplace_result ha_ndbcluster::check_inplace_alter_supported(
             ha_alter_info,
             "DROP PARTITION only supported for range-partitioned tables");
       }
+      /*
+        NDB native range partitioning only supports dropping the first
+        partition. Verify that the partition being dropped is the first one.
+      */
+      {
+        List_iterator<String> name_it(alter_info->partition_names);
+        String *drop_name = name_it++;
+        if (drop_name == nullptr || name_it++ != nullptr) {
+          return inplace_unsupported(
+              ha_alter_info,
+              "NDB only supports dropping one partition at a time");
+        }
+        partition_info *old_part_info = table->part_info;
+        List_iterator<partition_element> part_it(old_part_info->partitions);
+        partition_element *first_part = part_it++;
+        if (first_part == nullptr ||
+            my_strcasecmp(system_charset_info,
+                          drop_name->ptr(),
+                          first_part->partition_name) != 0) {
+          return inplace_unsupported(
+              ha_alter_info,
+              "NDB only supports dropping the first partition");
+        }
+      }
       DBUG_PRINT("info", ("Dropping partition, new count: %u",
                            part_info->num_parts));
       new_tab.setFragmentCount(part_info->num_parts);
