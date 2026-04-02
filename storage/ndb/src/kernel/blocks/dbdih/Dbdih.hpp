@@ -157,20 +157,14 @@ class Dbdih : public SimulatedBlock {
   /* Get m_startFid_offset for a table (callable from other blocks) */
   Uint32 getStartFidOffset(Uint32 tableId) {
     if (tableId == RNIL || tableId >= ctabFileSize) {
-      g_eventLogger->info("DBDIH: getStartFidOffset: tableId=%u"
-                          " ctabFileSize=%u, returning 0",
-                          tableId, ctabFileSize);
       return 0;
     }
     TabRecordPtr tabPtr;
     tabPtr.i = tableId;
     ptrAss(tabPtr, tabRecord);
-    g_eventLogger->info("DBDIH: getStartFidOffset: tableId=%u"
-                        " tabStatus=%u offset=%u",
-                        tableId, tabPtr.p->tabStatus,
-                        tabPtr.p->m_startFid_offset);
     return tabPtr.p->m_startFid_offset;
   }
+  void setStartFidOffset(Uint32 tableId);
 
   // Records
 

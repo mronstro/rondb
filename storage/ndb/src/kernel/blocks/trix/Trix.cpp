@@ -69,6 +69,16 @@ check_timeout(Uint32 errCode)
   return false;
 }
 
+#if (defined(VM_TRACE) || defined(ERROR_INSERT))
+#define DEBUG_FRAGID 1
+#endif
+
+#ifdef DEBUG_FRAGID
+#define DEB_FRAGID(arglist) do { g_eventLogger->info arglist ; } while (0)
+#else
+#define DEB_FRAGID(arglist) do { } while (0)
+#endif
+
 #define DEBUG(x) \
   { ndbout << "TRIX::" << x << endl; }
 
@@ -510,7 +520,7 @@ void Trix::execBUILD_INDX_IMPL_REQ(Signal *signal) {
   subRec->prepareId = RNIL;
   subRec->requestType = INDEX_BUILD;
   subRec->fragCount = 0;
-  subRec->fragId = ZNIL;
+  subRec->fragId = RNIL;
   subRec->m_rows_processed = 0;
   subRec->m_flags = SubscriptionRecord::RF_WAIT_GCP;  // Todo make configurable
   subRec->m_gci = 0;
@@ -984,6 +994,7 @@ void Trix::startTableScan(Signal *signal, SubscriptionRecPtr subRecPtr) {
                             << subRec->fragCount << " requestInfo: " << hex
                             << subSyncReq->requestInfo);
 
+  DEB_FRAGID(("TRIX: SUB_SYNC_REQ to SUMA for fragId: %u", subRec->fragId));
   sendSignal(SUMA_REF, GSN_SUB_SYNC_REQ, signal, SubSyncReq::SignalLength, JBB,
              orderPtr, noOfSections);
 }
@@ -1434,7 +1445,7 @@ void Trix::execCOPY_DATA_IMPL_REQ(Signal *signal) {
   subRec->pendingSubSyncContinueConf = false;
   subRec->prepareId = req->transId;
   subRec->fragCount = req->srcFragments;
-  subRec->fragId = ZNIL;
+  subRec->fragId = RNIL;
   subRec->m_rows_processed = 0;
   subRec->m_flags = SubscriptionRecord::RF_WAIT_GCP;  // Todo make configurable
   subRec->m_gci = 0;
@@ -1562,7 +1573,7 @@ void Trix::execBUILD_FK_IMPL_REQ(Signal *signal) {
   subRec->pendingSubSyncContinueConf = false;
   subRec->prepareId = req->transId;
   subRec->fragCount = 0;  // all
-  subRec->fragId = ZNIL;
+  subRec->fragId = RNIL;
   subRec->m_rows_processed = 0;
   subRec->m_flags = 0;
   subRec->m_gci = 0;
@@ -2342,7 +2353,7 @@ void Trix::statCleanPrepare(Signal *signal, StatOp &stat) {
   };
   const Uint32 ao_size = sizeof(ao_list) / sizeof(ao_list[0]);
 
-  ndbrequire(req->fragId == ZNIL);
+  ndbrequire(req->fragId == RNIL);
   subRec->m_flags = 0;
   subRec->requestType = STAT_CLEAN;
   subRec->schemaTransId = req->transId;
@@ -2358,7 +2369,7 @@ void Trix::statCleanPrepare(Signal *signal, StatOp &stat) {
   subRec->noOfKeyColumns = 0;
   subRec->parallelism = 16;  // remains hardcoded for now
   subRec->fragCount = 0;
-  subRec->fragId = ZNIL;
+  subRec->fragId = RNIL;
   subRec->syncPtr = RNIL;
   subRec->errorCode = BuildIndxRef::NoError;
   subRec->subscriptionCreated = false;
@@ -2542,7 +2553,7 @@ void Trix::statScanPrepare(Signal *signal, StatOp &stat) {
                             AttributeHeader::INDEX_STAT_VALUE};
   const Uint32 ao_size = sizeof(ao_list) / sizeof(ao_list[0]);
 
-  ndbrequire(req->fragId != ZNIL);
+  ndbrequire(req->fragId != RNIL);
   subRec->m_flags = 0;
   subRec->requestType = STAT_SCAN;
   subRec->schemaTransId = req->transId;
@@ -2685,13 +2696,7 @@ void Trix::statScanEnd(Signal *signal, StatOp &stat) {
    * we prefer DbtuxProxy to avoid introducing MT-LQH into TRIX.
    */
 
-#ifdef trix_index_stat_rep_to_tux_instance
-  Uint32 instanceKey = getInstanceKey(req->indexId, req->fragId);
-  Uint32 instanceNo = getInstanceFromKey(instanceKey);
-  BlockReference tuxRef = numberToRef(DBTUX, instanceNo, getOwnNodeId());
-#else
   BlockReference tuxRef = DBTUX_REF;
-#endif
 
   IndexStatRep *rep = (IndexStatRep *)signal->getDataPtrSend();
   rep->senderRef = reference();
@@ -2703,6 +2708,9 @@ void Trix::statScanEnd(Signal *signal, StatOp &stat) {
   rep->tableId = req->tableId;
   rep->fragId = req->fragId;
   rep->loadTime = data.m_loadTime;
+  DEB_FRAGID(("TRIX: INDEX_STAT_REP to DBTUX for table: %u, index: %u,"
+              " fragId: %u",
+              req->tableId, req->indexId, req->fragId));
   sendSignal(tuxRef, GSN_INDEX_STAT_REP, signal, IndexStatRep::SignalLength,
              JBB);
 

@@ -836,7 +836,7 @@ sendScanFragReq(SignalSender &ss, Uint32 nodeId,
   scanReq->requestInfo = requestInfo;
 
   scanReq->tableId = meta.tableId;
-  scanReq->fragmentNoKeyLen = fragId;
+  scanReq->fragId = fragId;
   scanReq->schemaVersion = meta.schemaVersion;
   scanReq->transId1 = FAKE_TRANS_ID1;
   scanReq->transId2 = FAKE_TRANS_ID2;

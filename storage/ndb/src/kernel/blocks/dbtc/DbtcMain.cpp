@@ -16583,8 +16583,6 @@ void Dbtc::diFcountReqLab(Signal *signal, ScanRecordPtr scanptr,
 
   scanptr.p->scanNextFragId = 0;
   scanptr.p->m_startFid_offset = 0;
-  DEB_RANGE(("(%u) startFid_offset: %u, scanPtrI: %u, LINE: %u",
-    instance(), scanptr.p->m_startFid_offset, scanptr.i, __LINE__));
   ndbassert(scanptr.p->m_booked_fragments_count == scanptr.p->scanParallel);
   scanptr.p->m_read_any_node =
       (ScanFragReq::getReadCommittedFlag(scanptr.p->scanRequestInfo) ||
@@ -16667,7 +16665,7 @@ void Dbtc::execDIH_SCAN_TAB_CONF(Signal *signal, ScanRecordPtr scanptr,
 
   if (scanptr.p->m_scan_dist_key_flag)  // Pruned scan
   {
-    jamDebug();
+    jam();
     /*
      * NOTICE:
      * Have to comment this assert since
@@ -16687,6 +16685,9 @@ void Dbtc::execDIH_SCAN_TAB_CONF(Signal *signal, ScanRecordPtr scanptr,
       Uint32 packed = scanptr.p->m_scan_dist_key;
       scanptr.p->m_scan_frag_offset = packed >> 16;
       tfragCount = packed & 0xFFFF;
+    } else if (tabptr.p->m_flags & TableRecord::TR_RANGE_PARTITION) {
+      jam();
+      scanptr.p->m_scan_dist_key_flag = false;
     } else {
       /**
        * Prepare for sendDihGetNodeReq to request DBDIH info for
@@ -18678,7 +18679,7 @@ bool Dbtc::sendScanFragReq(Signal *signal, ScanRecordPtr scanptr,
   req->schemaVersion = scanP->scanSchemaVersion;
   req->senderData = scanFragP.i;
   req->requestInfo = requestInfo;
-  req->fragmentNoKeyLen = scanFragP.p->lqhScanFragId;
+  req->fragId = scanFragP.p->lqhScanFragId;
   req->resultRef = apiConnectptr.p->ndbapiBlockref;
   req->savePointId = apiConnectptr.p->currSavePointId;
   req->transId1 = apiConnectptr.p->transid[0];

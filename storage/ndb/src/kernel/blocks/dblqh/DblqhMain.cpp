@@ -18861,7 +18861,7 @@ void Dblqh::execSCAN_FRAGREQ(Signal *signal) {
      * thread. This setup is only valid within this real-time break.
      * The next real-time break must also setup this structures.
      */
-    const Uint32 fragId = (scanFragReq->fragmentNoKeyLen & 0xFFFF);
+    const Uint32 fragId = (scanFragReq->fragId & 0xFFFF);
     Uint32 instanceNo = getInstanceNoCanFail(tabptr.i, fragId);
     if (unlikely(instanceNo == RNIL)) {
       errorCode = ZINVALID_SCHEMA_VERSION;
@@ -18888,7 +18888,7 @@ void Dblqh::execSCAN_FRAGREQ(Signal *signal) {
   }
 
   {
-    const Uint32 fragId = (scanFragReq->fragmentNoKeyLen & 0xFFFF);
+    const Uint32 fragId = (scanFragReq->fragId & 0xFFFF);
     const Uint32 reqinfo = scanFragReq->requestInfo;
     const Uint32 max_rows = scanFragReq->batch_size_rows;
     const Uint32 scanLockMode = ScanFragReq::getLockMode(reqinfo);
@@ -21148,7 +21148,7 @@ Uint32 Dblqh::initScanrec(const ScanFragReq *scanFragReq,
     g_eventLogger->info(
         "adding (%d %lld) table: %d fragId: %d frag.i: %d tableFragptr: %d",
         scanPtr->scanNumber, scanPtr->fragPtrI, tabptr.i,
-        scanFragReq->fragmentNoKeyLen & 0xFFFF, fragptr.i,
+        scanFragReq->fragId & 0xFFFF, fragptr.i,
         fragptr.p->tableFragptr);
 #endif
     c_scanTakeOverHash.add(scanptr);

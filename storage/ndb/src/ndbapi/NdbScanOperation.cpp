@@ -320,6 +320,7 @@ int NdbScanOperation::handleScanOptions(const ScanOptions *options) {
     /* And set the vars in the operation now too */
     theDistributionKey = options->partitionId;
     theDistrKeyIndicator_ = 1;
+    DBUG_PRINT("info", ("setDistributionKey with SPS_FIXED SO_PARTITION_ID"));
     assert(((m_attribute_record->flags &
             NdbRecord::RecHasUserDefinedPartitioning) != 0) ||
             (options->scan_flags & SF_OnlyExpiredScan));
@@ -361,6 +362,7 @@ int NdbScanOperation::handleScanOptions(const ScanOptions *options) {
 
     theDistributionKey = partValue;
     theDistrKeyIndicator_ = 1;
+    DBUG_PRINT("info", ("setDistributionKey with SPS_FIXED SO_PART_INFO"));
     DBUG_PRINT("info",
                ("Set distribution key from partition spec to %u", partValue));
   }
@@ -378,6 +380,7 @@ int NdbScanOperation::handleScanOptions(const ScanOptions *options) {
     theDistributionKey =
         (options->firstPartitionId << 16) | options->numPartitions;
     theDistrKeyIndicator_ = 1;
+    DBUG_PRINT("info", ("setDistributionKey w SPS_FIXED SO_PARTITION_RANGE"));
     DBUG_PRINT("info",
                ("NdbScanOperation::handleScanOptions(partition range): "
                 "first=%u count=%u packed=0x%x",
@@ -1201,6 +1204,8 @@ int NdbIndexScanOperation::setBound(const NdbRecord *key_record,
     if (m_pruneState != prevPruneState) {
       theDistrKeyIndicator_ = (m_pruneState == SPS_ONE_PARTITION);
       theDistributionKey = m_pruningKey;
+      if (theDistrKeyIndicator_)
+        DBUG_PRINT("info", ("setDistributionKey with SPS_ONE_PARTITION"));
 
       ScanTabReq *req = CAST_PTR(ScanTabReq, theSCAN_TABREQ->getDataPtrSend());
       ScanTabReq::setDistributionKeyFlag(req->requestInfo,
@@ -2630,6 +2635,7 @@ int NdbScanOperation::prepareSendScan(Uint32 /*aTC_ConnectPtr*/,
 
   /* Set distribution key info if required */
   ScanTabReq::setDistributionKeyFlag(reqInfo, theDistrKeyIndicator_);
+  DBUG_PRINT("info", ("setDistributionKey to %u", theDistrKeyIndicator_));
   ScanTabReq::setPartitionRangeFlag(
       reqInfo, m_pruneState == SPS_FIXED_RANGE ? 1 : 0);
 
@@ -3021,6 +3027,7 @@ NdbOperation *NdbScanOperation::takeOverScanOp(OperationType opType,
     newOp->theScanInfo = scanInfo;
     newOp->theDistrKeyIndicator_ = 1;
     newOp->theDistributionKey = tTakeOverFragment;
+    DBUG_PRINT("info", ("setDistributionKey in takeOverScanOp"));
   }
 
   // Copy the first 8 words of key info from KEYINF20 into TCKEYREQ
@@ -3137,7 +3144,7 @@ NdbOperation *NdbScanOperation::takeOverScanOpNdbRecord(
   op->theScanInfo = scanInfo;
   op->theDistrKeyIndicator_ = 1;
   op->theDistributionKey = fragment;
-
+  DBUG_PRINT("info", ("setDistributionKey in takeOverScanOpNdbRecord"));
   op->m_attribute_row = row;
   AttributeMask readMask;
   record->copyMask(readMask.rep.data, mask);

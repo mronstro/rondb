@@ -12709,6 +12709,27 @@ Dbdih::calc_primary_replicas(TabRecord *tabPtrP,
   }
 }
 
+void Dbdih::setStartFidOffset(Uint32 tableId) {
+  TabRecordPtr tabPtr;
+  tabPtr.i = tableId;
+  ptrAss(tabPtr, tabRecord);
+  if (ERROR_INSERTED(7251)) {
+    jam();
+    /**
+     * Test fragId Uint16 wrap-around: force startFid_offset so that
+     * fragment IDs start near 65535 and wrap to 0 on ADD PARTITION.
+     */
+    g_eventLogger->info("DBDIH: tab: %u, set startFid_offset to 65532",
+                        tabPtr.i);
+    tabPtr.p->m_startFid_offset = 65532;
+  } else {
+    jam();
+    DEB_RANGE_PART(("Set m_startFid_offset to 0 for tab: %u",
+      tableId));
+    tabPtr.p->m_startFid_offset = 0;
+  }
+}
+
 /**
  * CREATE_FRAGMENTATION_REQ
  *
@@ -13972,6 +13993,8 @@ void Dbdih::execDIADDTABREQ(Signal *signal) {
       tabPtr.p->method = primTabPtr.p->method;
       tabPtr.p->m_startFid_offset = primTabPtr.p->m_startFid_offset;
       req->hashMapPtrI = primTabPtr.p->m_map_ptr_i;
+      DEB_RANGE_PART(("tab: %u, set m_startFid_offset to %u ordered index",
+        tabPtr.i, tabPtr.p->m_startFid_offset));
       break;
     }
     case DictTabInfo::UserDefined:
@@ -13981,14 +14004,6 @@ void Dbdih::execDIADDTABREQ(Signal *signal) {
     case DictTabInfo::RangePartition:
       jam();
       tabPtr.p->method = TabRecord::RANGE_PARTITION;
-      if (ERROR_INSERTED(7251)) {
-        jam();
-        /**
-         * Test fragId Uint16 wrap-around: force startFid_offset so that
-         * fragment IDs start near 65535 and wrap to 0 on ADD PARTITION.
-         */
-        tabPtr.p->m_startFid_offset = 65532;
-      }
       break;
     default:
       ndbabort();
@@ -16103,6 +16118,10 @@ loop:
   }
   {
     Uint32 fragNo = fragIdToNo(tabPtr.p, fragId);
+    thrjamDebug(jambuf);
+    thrjamDataDebug(jambuf, fragId);
+    thrjamDataDebug(jambuf, fragNo);
+    thrjamDataDebug(jambuf, tabPtr.p->m_startFid_offset);
     getFragstoreCanFail(tabPtr.p, fragNo, fragPtr);
   }
   if (unlikely(fragPtr.p == nullptr)) {

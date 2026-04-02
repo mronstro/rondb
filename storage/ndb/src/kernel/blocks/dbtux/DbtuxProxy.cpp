@@ -143,7 +143,7 @@ void DbtuxProxy::sendINDEX_STAT_IMPL_REQ(Signal *signal, Uint32 ssId,
   switch (req->requestType) {
     case IndexStatReq::RT_START_MON:
       /*
-       * DICT sets fragId if assigned frag is on this node, or else ZNIL
+       * DICT sets fragId if assigned frag is on this node, or else RNIL
        * to turn off any possible old assignment.  In MT-LQH we also have
        * to check which worker owns the frag.
        */
@@ -151,11 +151,11 @@ void DbtuxProxy::sendINDEX_STAT_IMPL_REQ(Signal *signal, Uint32 ssId,
       break;
     case IndexStatReq::RT_STOP_MON:
       /*
-       * DICT sets fragId to ZNIL always.  There is no (pointless) check
+       * DICT sets fragId to RNIL always.  There is no (pointless) check
        * to see if the frag was ever assigned.
        */
       jam();
-      ndbrequire(req->fragId == ZNIL);
+      ndbrequire(req->fragId == RNIL);
       break;
     default:
       ndbabort();

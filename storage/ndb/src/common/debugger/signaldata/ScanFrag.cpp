@@ -79,8 +79,7 @@ bool printSCAN_FRAGREQ(FILE *output, const Uint32 *theData, Uint32 len,
   fprintf(output, "\n");
 
   fprintf(output, " tableId: %u\n", sig->tableId);
-  fprintf(output, " fragmentNo: %u\n", sig->fragmentNoKeyLen & 0xFFFF);
-  fprintf(output, " keyLen: %u\n", sig->fragmentNoKeyLen >> 16);
+  fprintf(output, " fragId: %u\n", sig->fragId);
   fprintf(output, " schemaVersion: 0x%x\n", sig->schemaVersion);
   fprintf(output, " transId1: 0x%x\n", sig->transId1);
   fprintf(output, " transId2: 0x%x\n", sig->transId2);

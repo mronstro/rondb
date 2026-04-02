@@ -482,7 +482,7 @@ class Dbdict : public SimulatedBlock {
      * down, no automatic stats update takes place.  This is not
      * critical and is not worth fixing.
      */
-    Uint16 indexStatFragId;
+    Uint32 indexStatFragId;
     Uint16 indexStatNodes[MAX_REPLICAS];
 
     // pending background request (IndexStatRep::RequestType)

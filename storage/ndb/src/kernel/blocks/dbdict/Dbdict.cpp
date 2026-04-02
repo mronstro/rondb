@@ -143,8 +143,22 @@
 //#define DEBUG_QUOTAS_EXTRA 1
 //#define DEBUG_QUOTAS 1
 //#define DEBUG_RESTART 1
-#define DEBUG_META 1
+//#define DEBUG_META 1
 #define DEBUG_RANGE 1
+#define DEBUG_RANGE_MAP 1
+#define DEBUG_FRAGID 1
+#endif
+
+#ifdef DEBUG_FRAGID
+#define DEB_FRAGID(arglist) do { g_eventLogger->info arglist ; } while (0)
+#else
+#define DEB_FRAGID(arglist) do { } while (0)
+#endif
+
+#ifdef DEBUG_RANGE
+#define DEB_RANGE(arglist) do { g_eventLogger->info arglist ; } while (0)
+#else
+#define DEB_RANGE(arglist) do { } while (0)
 #endif
 
 #ifdef DEBUG_META
@@ -175,12 +189,6 @@
 #define DEB_HASH(arglist) do { g_eventLogger->info arglist ; } while (0)
 #else
 #define DEB_HASH(arglist) do { } while (0)
-#endif
-
-#ifdef DEBUG_RANGE
-#define DEB_RANGE(arglist) do { g_eventLogger->info arglist ; } while (0)
-#else
-#define DEB_RANGE(arglist) do { } while (0)
 #endif
 
 #define DEBUG_MEM_ALLOC 1
@@ -2558,7 +2566,7 @@ void Dbdict::initSendSchemaRecord() {
 void Dbdict::initReadTableRecord() {
   c_readTableRecord.no_of_words = 0;
   c_readTableRecord.pageId = RNIL;
-  c_readTableRecord.tableId = ZNIL;
+  c_readTableRecord.tableId = RNIL;
   c_readTableRecord.inUse = false;
 }  // initReadTableRecord()
 
@@ -2566,7 +2574,7 @@ void Dbdict::initWriteTableRecord() {
   c_writeTableRecord.no_of_words = 0;
   c_writeTableRecord.pageId = RNIL;
   c_writeTableRecord.noOfTableFilesHandled = 3;
-  c_writeTableRecord.tableId = ZNIL;
+  c_writeTableRecord.tableId = RNIL;
   c_writeTableRecord.tableWriteState = WriteTableRecord::IDLE;
 }  // initWriteTableRecord()
 
@@ -2685,7 +2693,7 @@ void Dbdict::initialiseTableRecord(TableRecordPtr tablePtr, Uint32 tableId) {
   tablePtr.p->buildTriggerId = RNIL;
   tablePtr.p->m_read_locked = 0;
   tablePtr.p->storageType = NDB_STORAGETYPE_DEFAULT;
-  tablePtr.p->indexStatFragId = ZNIL;
+  tablePtr.p->indexStatFragId = RNIL;
   std::memset(tablePtr.p->indexStatNodes, 0,
               sizeof(tablePtr.p->indexStatNodes));
   tablePtr.p->indexStatBgRequest = 0;
@@ -5577,6 +5585,16 @@ void TabInfoLongData::IndirectReader(SimpleProperties::Reader &it, void *dest) {
   info->unpackData(it);
 }
 
+#ifdef DEBUG_RANGE_MAP
+static void
+printRangeMap(const Uint16* fids, Uint32 cnt) {
+  for (Uint32 i = 0; i < cnt; i++) {
+    g_eventLogger->info("FragNo: %u = FragId: %u",
+      i, fids[i]);
+  }
+}
+#endif
+
 void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
                                SimpleProperties::Reader &it,
                                ParseDictTabInfoRecord *parseP,
@@ -5887,8 +5905,9 @@ void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
   tablePtr.p->maxLoadFactor = c_tableDesc.MaxLoadFactor;
   tablePtr.p->fragmentType =
       (DictTabInfo::FragmentType)c_tableDesc.FragmentType;
-  DEB_RANGE(("handleTabInfoInit: FragmentType=%u fragmentCount=%u "
+  DEB_RANGE(("handleTabInfoInit: tab: %u, FragmentType=%u fragmentCount=%u "
              "RangeBoundaryType=%u RangeListDataLen=%u",
+             tablePtr.p->tableId,
              c_tableDesc.FragmentType, c_tableDesc.FragmentCount,
              c_tableDesc.RangeBoundaryType, c_tableDesc.RangeListDataLen));
   tablePtr.p->tableType = (DictTabInfo::TableType)c_tableDesc.TableType;
@@ -6031,8 +6050,10 @@ void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
       tablePtr.p->partitionCount = mapptr.p->m_fragments;
     }
   }
-  DEB_RANGE(("handleTabInfoInit: fragmentType=%u (RangePartition=%u)",
-             tablePtr.p->fragmentType, DictTabInfo::RangePartition));
+  DEB_RANGE(("handleTabInfoInit: tab: %u, fragmentType=%u (RangePartition=%u)",
+             tablePtr.p->tableId,
+             tablePtr.p->fragmentType,
+             DictTabInfo::RangePartition));
   if (tablePtr.p->fragmentType == DictTabInfo::RangePartition) {
     jam();
     /* Range partitioning does not support fully replicated tables */
@@ -6090,6 +6111,11 @@ void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
       fids[i] = (Uint16)i;
     }
 
+#ifdef DEBUG_RANGE_MAP
+    g_eventLogger->info("New range map for table %u, CREATE TABLE",
+      tablePtr.p->tableId);
+    printRangeMap(fids, nParts);
+#endif
     /* Copy boundary values from RangeListData.
      * RangeListData is stored as int32 values from ha_ndbcluster.
      * We need to convert to the target boundary type.
@@ -6111,8 +6137,9 @@ void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
     tablePtr.p->m_range_ptr = rmap;
     tablePtr.p->m_range_boundary_type = btype;
     tablePtr.p->partitionCount = nParts;
-    DEB_RANGE(("RangePartition: built range map nParts=%u blen=%u btype=%u",
-               nParts, blen, btype));
+    DEB_RANGE(("RangePartition: tab: %u, built range map nParts=%u blen=%u"
+               " btype=%u",
+               tablePtr.p->tableId, nParts, blen, btype));
   }
 
   tablePtr.p->frmData = frmData;
@@ -7112,9 +7139,11 @@ void Dbdict::createTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
 
     // create fragmentation via DIH (no changes in DIH)
     Uint16 *frag_data = (Uint16 *)(signal->getDataPtr() + 25);
-    DEB_RANGE(("createTable_parse: fragmentType=%u fragmentCount=%u "
+    DEB_RANGE(("createTable_parse: tab: %u, fragmentType=%u fragmentCount=%u "
                "c_fragDataLen=%u",
-               tabPtr.p->fragmentType, tabPtr.p->fragmentCount,
+               tabPtr.i,
+               tabPtr.p->fragmentType,
+               tabPtr.p->fragmentCount,
                c_fragDataLen));
     Uint32 err =
         create_fragmentation(signal, tabPtr, c_fragData, c_fragDataLen / 2,
@@ -7924,6 +7953,8 @@ void Dbdict::execADD_FRAGREQ(Signal *signal) {
   Uint32 createGci = req->createGci;
   Uint32 nodeFragCount = req->nodeFragCount;
   D("execADD_FRAGREQ(" << tableId << "), dihPtr = " << dihPtr);
+  DEB_RANGE(("DBDICT: ADD_FRAGREQ tab(%u,%u), count: %u",
+    tableId, fragId, fragCount));
 
   ndbrequire(node == getOwnNodeId());
 
@@ -9492,6 +9523,7 @@ Dbdict::execALTER_TABLE_REQ(Signal* signal)
 
   D("ALTER_TABLE_REQ: changeMask: " << hex << req->changeMask);
   D("ALTER_TABLE_REQ: tableId: " << req->tableId);
+  DEB_RANGE(("ALTER_TABLE_REQ on tab: %u", req->tableId));
   ErrorInfo error;
   do {
     SchemaOpPtr op_ptr;
@@ -9971,8 +10003,19 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
       for (Uint32 i = 0; i < old_cnt; i++) {
         new_fids[i] = old_fids[i];
       }
-      new_fids[old_cnt] = (Uint16)old_cnt;  // new fragment
+      ndbassert(old_cnt > 0);
+      Uint32 last_old_fragid = old_fids[old_cnt - 1];
+      Uint32 num_new_frags = new_cnt - old_cnt;
+      for (Uint32 i = 0; i < num_new_frags; i++) {
+        /* Assign new fragment ids */
+        new_fids[old_cnt + i] = (last_old_fragid + i + 1) & 0xFFFF;
+      }
 
+#ifdef DEBUG_RANGE_MAP
+      g_eventLogger->info("New range map for table %u, ADD_PARTITION",
+        tablePtr.p->tableId);
+      printRangeMap(new_fids, new_cnt);
+#endif
       /* Copy ALL new boundaries from range_src (provided by ha_ndbcluster).
        * range_src contains the complete new boundary set for all new_cnt
        * partitions, correctly ordered.
@@ -10139,6 +10182,13 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
       return;
     }
 
+    DEB_RANGE(("DBDICT: Drop frag: tab: %u, old_cnt: %u, new_cnt: %u, "
+               "startFid_offset: %u",
+      tablePtr.p->tableId,
+      old_cnt,
+      new_cnt,
+      c_dih->getStartFidOffset(tablePtr.p->tableId)));
+
     const Range2FragmentMap *old_rmap = tablePtr.p->m_range_ptr;
     if (old_rmap == nullptr) {
       jam();
@@ -10176,6 +10226,11 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
       new_fids[i] = old_fids[num_dropped + i];
     }
 
+#ifdef DEBUG_RANGE_MAP
+    g_eventLogger->info("New range map for table %u, DROP PARTITION",
+      tablePtr.p->tableId);
+    printRangeMap(new_fids, new_cnt);
+#endif
     /* Copy surviving boundaries (skip first num_dropped entries) */
     const char *old_bounds = old_rmap->boundaries();
     char *new_bounds = rmap->boundaries();
@@ -14718,11 +14773,11 @@ void Dbdict::set_index_stat_frag(Signal *signal, TableRecordPtr indexPtr) {
   Uint32 noOfFragments = frag_data[1];
   const Uint32 noOfReplicas = frag_data[0];
   jamDebug();
-  g_eventLogger->info("DBDICT: set_index_stat_frag: indexId=%u"
-                      " primaryTableId=%u noOfFragments=%u"
-                      " noOfReplicas=%u",
-                      indexId, indexPtr.p->primaryTableId,
-                      noOfFragments, noOfReplicas);
+  DEB_FRAGID(("DBDICT: set_index_stat_frag: indexId=%u"
+              " primaryTableId=%u noOfFragments=%u"
+              " noOfReplicas=%u",
+              indexId, indexPtr.p->primaryTableId,
+              noOfFragments, noOfReplicas));
   ndbrequire(noOfFragments != 0 && noOfReplicas != 0);
 
   {
@@ -14754,9 +14809,9 @@ void Dbdict::set_index_stat_frag(Signal *signal, TableRecordPtr indexPtr) {
                 indexPtr.p->primaryTableId)) & 0xFFFF;
   }
   jamDebug();
-  g_eventLogger->info("DBDICT: set_index_stat_frag: fragNo=%u fragId=%u"
-                      " fragIndex=%u nodeIndex=%u",
-                      fragNo, fragId, fragIndex, nodeIndex);
+  DEB_FRAGID(("DBDICT: set_index_stat_frag: fragNo=%u fragId=%u"
+              " fragIndex=%u nodeIndex=%u",
+              fragNo, fragId, fragIndex, nodeIndex));
   indexPtr.p->indexStatFragId = fragId;
 
   /**
@@ -16473,7 +16528,7 @@ void Dbdict::execINDEX_STAT_REQ(Signal *signal) {
     impl_req->indexId = req->indexId;
     impl_req->indexVersion = req->indexVersion;
     impl_req->tableId = req->tableId;
-    impl_req->fragId = ZNIL;
+    impl_req->fragId = RNIL;
     impl_req->fragCount = ZNIL;
 
     handleClientReq(signal, op_ptr, handle);
@@ -16529,7 +16584,7 @@ void Dbdict::indexStat_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
   }
 
   // fragmentId is defined only in signals from DICT to TRIX,TUX
-  if (impl_req->fragId != ZNIL) {
+  if (impl_req->fragId != RNIL) {
     jam();
     setError(error, IndexStatRef::InvalidRequest, __LINE__);
     return;
@@ -16775,8 +16830,8 @@ void Dbdict::indexStat_toLocalStat(Signal *signal, SchemaOpPtr op_ptr) {
   *req = *impl_req;
   req->senderRef = reference();
   req->senderData = op_ptr.p->op_key;
-  ndbrequire(req->fragId == ZNIL);
-  ndbrequire(indexPtr.p->indexStatFragId != ZNIL);
+  ndbrequire(req->fragId == RNIL);
+  ndbrequire(indexPtr.p->indexStatFragId != RNIL);
   BlockReference ref = 0;
 
   switch (impl_req->requestType) {
@@ -16804,7 +16859,7 @@ void Dbdict::indexStat_toLocalStat(Signal *signal, SchemaOpPtr op_ptr) {
        * Index stats "v4" does scan deletes via TRIX-SUMA.  But SUMA does
        * only local scans so do it on all nodes.
        */
-      req->fragId = ZNIL;
+      req->fragId = RNIL;
       ref = TRIX_REF;
       break;
 
@@ -16825,13 +16880,13 @@ void Dbdict::indexStat_toLocalStat(Signal *signal, SchemaOpPtr op_ptr) {
       if (!do_action(trans_ptr.p->m_nodes, indexPtr.p->indexStatNodes,
                      getOwnNodeId())) {
         jam();
-        req->fragId = ZNIL;
+        req->fragId = RNIL;
       }
       ref = DBTUX_REF;
       break;
 
     case IndexStatReq::RT_STOP_MON:
-      req->fragId = ZNIL;
+      req->fragId = RNIL;
       ref = DBTUX_REF;
       break;
 

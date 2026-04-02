@@ -485,7 +485,7 @@ void Dbtux::statMonStart(Signal *signal, StatMon &mon) {
   FragPtr fragPtr;
   fragPtr.setNull();
 
-  if (req->fragId != ZNIL) {
+  if (req->fragId != RNIL) {
     jam();
     findFrag(jamBuffer(), req->indexId, req->fragId, fragPtr);
   }
@@ -509,8 +509,8 @@ void Dbtux::statMonStop(Signal *signal, StatMon &mon) {
   Index &index = *c_indexPool.getPtr(req->indexId);
   D("statMonStop" << V(mon));
 
-  // RT_STOP_MON simply sends ZNIL to every node
-  ndbrequire(req->fragId == ZNIL);
+  // RT_STOP_MON simply sends RNIL to every node
+  ndbrequire(req->fragId == RNIL);
   index.m_statFragPtrI = RNIL64;
 
   statMonConf(signal, mon);

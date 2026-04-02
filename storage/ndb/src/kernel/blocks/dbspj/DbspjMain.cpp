@@ -1482,7 +1482,7 @@ void Dbspj::do_init(Request *requestP, const ScanFragReq *req,
   requestP->m_transId[0] = req->transId1;
   requestP->m_transId[1] = req->transId2;
   requestP->m_rootResultData = req->resultData;
-  requestP->m_rootFragId = req->fragmentNoKeyLen;
+  requestP->m_rootFragId = req->fragId;
   requestP->m_rootFragCnt = 0;  // Filled in later
   {
     const Uint32 max_nodes = MAX_NDB_NODES;
@@ -7153,13 +7153,13 @@ Uint32 Dbspj::scanFrag_build(Build_context &ctx, Ptr<Request> requestPtr,
 
           const Uint32 ref = numberToRef(
               get_query_block_no(getOwnNodeId()),
-              getInstance(req->tableId, req->fragmentNoKeyLen), getOwnNodeId());
+              getInstance(req->tableId, req->fragId), getOwnNodeId());
 
           if (!ERROR_INSERTED_CLEAR(17004) &&
               likely(m_scanfraghandle_pool.seize(requestPtr.p->m_arena,
                                                  fragPtr))) {
             jam();
-            fragPtr.p->init(req->fragmentNoKeyLen, readBackup);
+            fragPtr.p->init(req->fragId, readBackup);
             fragPtr.p->m_treeNodePtrI = treeNodePtr.i;
             fragPtr.p->m_ref = ref;
             fragPtr.p->m_next_ref = ref;
@@ -7189,7 +7189,7 @@ Uint32 Dbspj::scanFrag_build(Build_context &ctx, Ptr<Request> requestPtr,
 
       dst->tableId = node->tableId;
       dst->schemaVersion = node->tableVersion;
-      dst->fragmentNoKeyLen = 0xff;  // Filled in after 'prepare'
+      dst->fragId = 0xFFFFFFFF;  // Filled in after 'prepare'
       dst->savePointId = ctx.m_savepointId;
       dst->transId1 = requestPtr.p->m_transId[0];
       dst->transId2 = requestPtr.p->m_transId[1];
@@ -8538,7 +8538,7 @@ Uint32 Dbspj::scanFrag_send(Signal *signal, Ptr<Request> requestPtr,
        * Set data specific for this fragment
        */
       req->senderData = fragPtr.i;
-      req->fragmentNoKeyLen = fragPtr.p->m_fragId;
+      req->fragId = fragPtr.p->m_fragId;
       req->variableData[var_index] = data.m_corrIdStart;
 
       /**

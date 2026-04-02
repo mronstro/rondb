@@ -79,6 +79,7 @@
 
 #define JAM_FILE_ID 467
 
+// #define DEBUG_DICT_TAB_INFO
 // #define HANDOVER_DEBUG
 // #define NODEFAIL_DEBUG
 // #define NODEFAIL_DEBUG2
@@ -2858,9 +2859,10 @@ void Suma::sendDIGETNODESREQ(Signal *signal, Uint32 synPtrI, Uint32 tableId,
   Uint32 loopCount = 0;
   for (; fragNo < ptr.p->m_frag_cnt; fragNo++) {
     loopCount++;
+    const Uint32 fragId = (fragNo + ptr.p->m_startFid_offset) & 0xFFFF;
     DiGetNodesReq *const req = (DiGetNodesReq *)signal->getDataPtrSend();
     req->tableId = tableId;
-    req->hashValue = (fragNo + ptr.p->m_startFid_offset) & 0xFFFF;
+    req->hashValue = fragId;
     req->distr_key_indicator = ZTRUE;
     req->anyNode = 0;
     req->scan_indicator = ZTRUE;
@@ -2888,11 +2890,11 @@ void Suma::sendDIGETNODESREQ(Signal *signal, Uint32 synPtrI, Uint32 tableId,
       fd.m_fragDesc.m_nodeId = nodeId;
       fd.m_fragDesc.m_fragId = conf->fragId;
       fd.m_fragDesc.m_lqhInstanceKey = instanceKey;
-      if (ptr.p->m_frag_id == ZNIL) {
+      if (ptr.p->m_frag_id == RNIL) {
         signal->theData[2] = fd.m_dummy[0];
         signal->theData[3] = fd.m_dummy[1];
         fragBuf.append(&signal->theData[2], 2);
-      } else if (ptr.p->m_frag_id == fragNo) {
+      } else if (ptr.p->m_frag_id == fragId) {
         /*
          * Given fragment must have a replica on this node.
          */
@@ -3230,7 +3232,7 @@ void Suma::SyncRecord::nextScan(Signal *signal) {
    */
   ScanFragReq::setTTLIgnoreFragFlag(req->requestInfo, 1);
 
-  req->fragmentNoKeyLen = fd.m_fragDesc.m_fragId;
+  req->fragId = fd.m_fragDesc.m_fragId;
   req->schemaVersion = tabPtr.p->m_schemaVersion;
   req->transId1 = 0;
   req->transId2 = (SUMA << 20) + (suma.getOwnNodeId() << 8);
@@ -6140,7 +6142,7 @@ void Suma::execALTER_TAB_REQ(Signal *signal) {
   }
   // dict coordinator sends info to API
 
-#ifndef NDEBUG
+#ifdef DEBUG_DICT_TAB_INFO
   g_eventLogger->info("DICT_TAB_INFO in SUMA,  tabInfoPtr.sz = %d",
                       tabInfoPtr.sz);
   SimplePropertiesSectionReader reader(handle.m_ptr[0],

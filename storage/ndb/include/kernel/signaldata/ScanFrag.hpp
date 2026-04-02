@@ -70,7 +70,7 @@ class ScanFragReq {
   Uint32 savePointId;
   Uint32 requestInfo;
   Uint32 tableId;
-  Uint32 fragmentNoKeyLen;
+  Uint32 fragId; //Only 16 lower bits used
   Uint32 schemaVersion;
   Uint32 transId1;
   Uint32 transId2;
