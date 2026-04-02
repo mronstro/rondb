@@ -2462,7 +2462,6 @@ Dbdict::Dbdict(Block_context &ctx)
     &c_tableRecordPool_;
   c_transient_pools[DBDICT_ATTRIBUTE_RECORD_TRANSIENT_POOL_INDEX] =
     &c_attributeRecordPool;
-  c_dih = (Dbdih *)globalData.getBlock(DBDIH, 0);
 }//Dbdict::Dbdict()
 
 Dbdict::~Dbdict() {}  // Dbdict::~Dbdict()
@@ -2913,6 +2912,7 @@ void Dbdict::execSTTOR(Signal *signal) {
     ndb_mgm_get_int_parameter(p, CFG_DB_NO_REPLICAS, &cnoReplicas);
     m_first_updated_table_entry = RNIL;
     m_last_updated_table_entry = RNIL;
+    c_dih = (Dbdih *)globalData.getBlock(DBDIH, 0);
     break;
   }
   case 2:

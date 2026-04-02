@@ -3648,6 +3648,7 @@ lc_mempool_long_lived_pool_malloc(size_t size_in_words,
       {
         NdbMutex_Unlock(&base_ptr->m_mutex);
       }
+      DEB_POOL_MALLOC(("lc_ndbd_pool_malloc failed"));
       return (void*) nullptr;
     }
   } while (true);

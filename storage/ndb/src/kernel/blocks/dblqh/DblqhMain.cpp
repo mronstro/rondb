@@ -166,6 +166,13 @@
 //#define DEBUG_INDEX_BUILD 1
 //#define DEBUG_JOIN_AGG 1
 //#define DEBUG_MATCH 1
+#define DEBUG_SCHEMA_MEMORY_FAIL 1
+#endif
+
+#ifdef DEBUG_SCHEMA_MEMORY_FAIL
+#define DEB_SCHEMA_MEMORY_FAIL(arglist) do { g_eventLogger->info arglist ; } while (0)
+#else
+#define DEB_SCHEMA_MEMORY_FAIL(arglist) do { } while (0)
 #endif
 
 #ifdef DEBUG_JOIN_AGG
@@ -3359,6 +3366,8 @@ void Dblqh::execLQHFRAGREQ(Signal* signal)
     if (tFragPtr.i == RNIL64)
     {
       jam();
+      DEB_SCHEMA_MEMORY_FAIL(("(%u) No free fragmentrec: line: %u",
+        instance(), __LINE__));
       fragrefLab(signal, ZNO_FREE_FRAGMENTREC, req);
       return;
     }
@@ -35081,10 +35090,14 @@ Uint32 Dblqh::insertFragrec(Signal* signal,
   // Return error if unsuccessful
   if (fragmentCount > MAX_NDB_PARTITIONS) {
     jam();
+    DEB_SCHEMA_MEMORY_FAIL(("(%u) No free fragmentrec: line: %u",
+      instance(), __LINE__));
     return ZNO_FREE_FRAGMENTREC;
   }
   if (c_fragment_pool.seize(fragptr) == false) {
     jam();
+    DEB_SCHEMA_MEMORY_FAIL(("(%u) No free fragmentrec: line: %u",
+      instance(), __LINE__));
     return ZNO_FREE_FRAGMENTREC;
   }
   fragptr.p = new (fragptr.p) Fragrecord();
@@ -35109,6 +35122,8 @@ Uint32 Dblqh::insertFragrec(Signal* signal,
     {
       jam();
       c_fragment_pool.release(fragptr);
+      DEB_SCHEMA_MEMORY_FAIL(("(%u) No free fragmentrec: line: %u",
+        instance(), __LINE__));
       return ZNO_FREE_FRAGMENTREC;
     }
     num_fragments_in_array = allocated_fragments_in_array;
