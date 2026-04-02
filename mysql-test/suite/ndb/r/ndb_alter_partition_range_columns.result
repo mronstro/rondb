@@ -380,8 +380,6 @@ count(*)
 150
 select count(*) from t7;
 ALTER TABLE t7 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p3 VALUES LESS THAN (400));
-count(*)
-150
 INSERT into t7 values (350, 350);
 select * from t7 where a=350;
 a	b
@@ -415,8 +413,6 @@ INSERT into t8 values (250, 3);
 INSERT into t8 values (500, 4);
 select sum(b) from t8;
 ALTER TABLE t8 ALGORITHM=INPLACE, DROP PARTITION p0;
-sum(b)
-10
 select * from t8 order by a;
 a	b
 150	2

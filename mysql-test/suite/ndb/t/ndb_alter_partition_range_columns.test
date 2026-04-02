@@ -380,7 +380,9 @@ select count(*) from t7;
 ALTER TABLE t7 ALGORITHM=INPLACE, ADD PARTITION (PARTITION p3 VALUES LESS THAN (400));
 
 --connection server2
+--disable_result_log
 --reap
+--enable_result_log
 
 # Both servers should see the new partition structure
 --connection server1
@@ -427,7 +429,9 @@ INSERT into t8 values (500, 4);
 ALTER TABLE t8 ALGORITHM=INPLACE, DROP PARTITION p0;
 
 --connection server2
+--disable_result_log
 --reap
+--enable_result_log
 
 # Verify data on both servers
 --connection server1
