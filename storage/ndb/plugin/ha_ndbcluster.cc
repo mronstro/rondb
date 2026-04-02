@@ -16414,6 +16414,7 @@ enum_alter_inplace_result ha_ndbcluster::check_inplace_alter_supported(
   if (alter_flags & Alter_inplace_info::ALTER_COLUMN_NAME ||
       alter_flags & Alter_inplace_info::ADD_STORED_BASE_COLUMN ||
       alter_flags & Alter_inplace_info::ADD_PARTITION ||
+      alter_flags & Alter_inplace_info::DROP_PARTITION ||
       alter_flags & Alter_inplace_info::ALTER_TABLE_REORG || max_rows_changed ||
       comment_changed) {
     result = HA_ALTER_INPLACE_EXCLUSIVE_LOCK;
