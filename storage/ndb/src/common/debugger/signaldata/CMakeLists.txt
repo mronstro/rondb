@@ -100,6 +100,7 @@ ADD_CONVENIENCE_LIBRARY(ndbsignaldata
   ProcessInfoRep.cpp
   QueryDatabase.cpp
   ReadNodesConf.cpp
+# RedoStateRep.cpp
   RestoreImpl.cpp
   ScanFrag.cpp
   ScanTab.cpp
