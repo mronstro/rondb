@@ -4654,7 +4654,7 @@ void Dblqh::removeTable(Uint32 tableId) {
   Uint32 num_fragments_in_array = tabptr.p->num_fragments_in_array;
   for (Uint32 i = 0; i < num_fragments_in_array; i++) {
     jam();
-    if (tabptr.p->fragid[i] != ZNIL) {
+    if (tabptr.p->fragid[i] != RNIL) {
       jam();
       deleteFragrec(tabptr.p->fragid[i]);
     }//if
@@ -4723,11 +4723,11 @@ Dblqh::seize_frag_array(Tablerec *tabPtrP,
     }
   }
   Uint64* new_fragrec = nullptr;
-  Uint16* new_fragid = nullptr;
+  Uint32* new_fragid = nullptr;
   if (tabPtrP->num_fragments_in_array < allocated_fragments_in_array)
   {
     jam();
-    size_t size_array = (sizeof(Uint64) + sizeof(Uint16)) *
+    size_t size_array = (sizeof(Uint64) + sizeof(Uint32)) *
                         allocated_fragments_in_array;
     new_fragrec = (Uint64*)lc_ndbd_pool_malloc(size_array,
                                                RG_SCHEMA_MEMORY,
@@ -4737,11 +4737,11 @@ Dblqh::seize_frag_array(Tablerec *tabPtrP,
     {
       jam();
       jamLine(Uint16(allocated_fragments_in_array));
-      new_fragid = (Uint16*)&new_fragrec[allocated_fragments_in_array];
+      new_fragid = (Uint32*)&new_fragrec[allocated_fragments_in_array];
       for (Uint32 i = 0; i < allocated_fragments_in_array; i++)
       {
         new_fragrec[i] = RNIL64;
-        new_fragid[i] = ZNIL;
+        new_fragid[i] = RNIL;
       }
     }
   }
@@ -24290,7 +24290,7 @@ void Dblqh::start_lcp_on_table(Signal *signal) {
       for (Uint32 i = 0; i < num_fragments_in_array; i++)
       {
         jam();
-        if (tabptr.p->fragid[i] != ZNIL) {
+        if (tabptr.p->fragid[i] != RNIL) {
           jam();
           fragptr.i = tabptr.p->fragrec[i];
           ndbrequire(c_fragment_pool.getPtr(fragptr));
@@ -33819,7 +33819,7 @@ void Dblqh::deleteFragrec(Uint32 fragId)
                    Fragrecord::LCP_EXECUTED_BY_CREATE_TABLE);
     fragptr.p->lcp_frag_ord_state = Fragrecord::LCP_EXECUTED;
     ndbrequire(fragptr.p->fragStatus != Fragrecord::FREE);
-    tabptr.p->fragid[indexFound] = ZNIL;
+    tabptr.p->fragid[indexFound] = RNIL;
     tabptr.p->fragrec[indexFound] = RNIL64;
     fragptr.p->fragStatus = Fragrecord::FREE;
     NdbMutex_Deinit(&fragptr.p->frag_mutex);
@@ -34218,7 +34218,7 @@ Dblqh::getNextTuxFragid(Uint32 tableId,
   for (Uint32 j = index; j < num_fragments_in_array; j++)
   {
     Uint32 fragid = tabPtr.p->fragid[j];
-    if (fragid != ZNIL)
+    if (fragid != RNIL)
     {
       fragPtr.i = tabPtr.p->fragrec[j];
       ndbrequire(c_fragment_pool.getPtr(fragPtr));
@@ -34250,7 +34250,7 @@ Dblqh::getNextTupFragid(Uint32 tableId,
   for (Uint32 j = index; j < num_fragments_in_array; j++)
   {
     Uint32 fragid = tabPtr.p->fragid[j];
-    if (fragid != ZNIL)
+    if (fragid != RNIL)
     {
       fragPtr.i = tabPtr.p->fragrec[j];
       ndbrequire(c_fragment_pool.getPtr(fragPtr));
@@ -34282,7 +34282,7 @@ Dblqh::getNextAccFragid(Uint32 tableId,
   for (Uint32 j = index; j < num_fragments_in_array; j++)
   {
     Uint32 fragid = tabPtr.p->fragid[j];
-    if (fragid != ZNIL)
+    if (fragid != RNIL)
     {
       fragPtr.i = tabPtr.p->fragrec[j];
       ndbrequire(c_fragment_pool.getPtr(fragPtr));
@@ -35069,7 +35069,7 @@ Dblqh::findFreeFragEntry(Uint32 num_fragments_in_array)
 {
   for (Uint32 i = 0; i < num_fragments_in_array; i++)
   {
-    if (tabptr.p->fragid[i] == ZNIL)
+    if (tabptr.p->fragid[i] == RNIL)
     {
       ndbrequire(tabptr.p->fragrec[i] == RNIL64);
       return i;

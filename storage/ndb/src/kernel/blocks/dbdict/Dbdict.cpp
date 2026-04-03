@@ -6112,7 +6112,7 @@ void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
     }
 
 #ifdef DEBUG_RANGE_MAP
-    g_eventLogger->info("New range map for table %u, CREATE TABLE",
+    g_eventLogger->info("New range map for table %u, Initial",
       tablePtr.p->tableId);
     printRangeMap(fids, nParts);
 #endif
@@ -7141,10 +7141,21 @@ void Dbdict::createTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
     Uint16 *frag_data = (Uint16 *)(signal->getDataPtr() + 25);
     DEB_RANGE(("createTable_parse: tab: %u, fragmentType=%u fragmentCount=%u "
                "c_fragDataLen=%u",
-               tabPtr.i,
+               impl_req->tableId,
                tabPtr.p->fragmentType,
                tabPtr.p->fragmentCount,
                c_fragDataLen));
+    Range2FragmentMap *rmap = tabPtr.p->m_range_ptr;
+    if (c_dih->setStartFidOffset(impl_req->tableId,
+                                 rmap,
+                                 tabPtr.p->partitionCount)) {
+#ifdef DEBUG_RANGE_MAP
+      Uint16* fids = rmap->frag_ids();
+      g_eventLogger->info("New range map for table %u, CREATE TABLE 7251",
+        tabPtr.p->tableId);
+      printRangeMap(fids, tabPtr.p->partitionCount);
+#endif
+    }
     Uint32 err =
         create_fragmentation(signal, tabPtr, c_fragData, c_fragDataLen / 2,
                              CreateFragmentationReq::RI_CREATE_FRAGMENTATION);
@@ -7230,7 +7241,6 @@ void Dbdict::createTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
   if (!master) {
     jam();
     createTabPtr.p->m_request.tableId = tableId;
-
     ParseDictTabInfoRecord parseRecord;
     parseRecord.requestType = DictTabInfo::AddTableFromDict;
     parseRecord.errorCode = 0;
@@ -7266,6 +7276,18 @@ void Dbdict::createTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
 
     TableRecordPtr tabPtr = parseRecord.tablePtr;
     ndbrequire(tabPtr.p->partitionCount != 0);
+
+    Range2FragmentMap *rmap = tabPtr.p->m_range_ptr;
+    if (c_dih->setStartFidOffset(tableId,
+                                 rmap,
+                                 tabPtr.p->partitionCount)) {
+#ifdef DEBUG_RANGE_MAP
+      Uint16* fids = rmap->frag_ids();
+      g_eventLogger->info("New range map for table %u, CREATE TABLE 7251",
+        tableId);
+      printRangeMap(fids, tabPtr.p->partitionCount);
+#endif
+    }
 
     // link operation to object seized in handleTabInfoInit
     {

@@ -55,6 +55,7 @@ ADD_CONVENIENCE_LIBRARY(ndbsignaldata
   CreateTrig.cpp
   CreateTrigImpl.cpp
   DbinfoScan.cpp
+  DiAddTab.cpp
   DictTabInfo.cpp
   DihContinueB.cpp
 # DihSwitchReplicaReq.cpp

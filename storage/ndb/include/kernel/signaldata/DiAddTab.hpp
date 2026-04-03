@@ -46,6 +46,7 @@ class DiAddTabReq {
   SECTION(FRAGMENTATION = 0);
   SECTION(TS_RANGE = 0);
 
+  friend bool printDIADDTABREQ(FILE *, const Uint32 *, Uint32, Uint16);
  private:
   Uint32 connectPtr;
   Uint32 tableId;
@@ -77,6 +78,7 @@ class DiAddTabRef {
  public:
   static constexpr Uint32 SignalLength = 2;
 
+  friend bool printDIADDTABREF(FILE *, const Uint32 *, Uint32, Uint16);
  private:
   union {
     Uint32 connectPtr;
@@ -99,6 +101,7 @@ class DiAddTabConf {
  public:
   static constexpr Uint32 SignalLength = 1;
 
+  friend bool printDIADDTABCONF(FILE *, const Uint32 *, Uint32, Uint16);
  private:
   union {
     Uint32 connectPtr;

@@ -12709,11 +12709,13 @@ Dbdih::calc_primary_replicas(TabRecord *tabPtrP,
   }
 }
 
-void Dbdih::setStartFidOffset(Uint32 tableId) {
-  TabRecordPtr tabPtr;
-  tabPtr.i = tableId;
-  ptrAss(tabPtr, tabRecord);
+bool Dbdih::setStartFidOffset(Uint32 tableId,
+                              Range2FragmentMap *rmap,
+                              Uint32 fragCount) {
   if (ERROR_INSERTED(7251)) {
+    TabRecordPtr tabPtr;
+    tabPtr.i = tableId;
+    ptrAss(tabPtr, tabRecord);
     jam();
     /**
      * Test fragId Uint16 wrap-around: force startFid_offset so that
@@ -12721,13 +12723,18 @@ void Dbdih::setStartFidOffset(Uint32 tableId) {
      */
     g_eventLogger->info("DBDIH: tab: %u, set startFid_offset to 65532",
                         tabPtr.i);
-    tabPtr.p->m_startFid_offset = 65532;
-  } else {
-    jam();
-    DEB_RANGE_PART(("Set m_startFid_offset to 0 for tab: %u",
-      tableId));
-    tabPtr.p->m_startFid_offset = 0;
+    Uint32 start_offset = 65532;
+    tabPtr.p->m_startFid_offset = start_offset;
+    if (rmap != nullptr) {
+      Uint16 *fids = rmap->frag_ids();
+      for (Uint32 i = 0; i < fragCount; i++) {
+        Uint32 fragId = (i + start_offset) & 0xFFFF;
+        fids[i] = Uint16(fragId);
+      }
+      return true;
+    }
   }
+  return false;
 }
 
 /**
@@ -14206,7 +14213,7 @@ void Dbdih::sendAddFragreq(Signal *signal, ConnectRecordPtr connectPtr,
     }
   }
   replicaPtr.i = RNIL64;
-  for(; fragNo<fragCount; fragNo++){
+  for(; fragNo < fragCount; fragNo++){
     jam();
     getFragstore(tabPtr.p, fragNo, fragPtr);
 
@@ -14410,8 +14417,9 @@ void Dbdih::execADD_FRAGCONF(Signal *signal) {
   TabRecordPtr tabPtr;
   tabPtr.i = connectPtr.p->table;
   ptrCheckGuard(tabPtr, ctabFileSize, tabRecord);
+  Uint32 fragNo = fragIdToNo(tabPtr.p, conf->fragId);
 
-  sendAddFragreq(signal, connectPtr, tabPtr, conf->fragId + 1, false);
+  sendAddFragreq(signal, connectPtr, tabPtr, fragNo + 1, false);
 }
 
 void Dbdih::execADD_FRAGREF(Signal *signal) {
@@ -14887,10 +14895,20 @@ void Dbdih::execALTER_TAB_REQ(Signal *signal) {
             tabPtr.p->totalfragments - 1;
         connectPtr.p->m_alter.m_partitionCount =
             tabPtr.p->partitionCount - 1;
+        connectPtr.p->m_alter.m_new_startFidSize =
+          (tabPtr.p->startFidSize - 1);
+      } else if (AlterTableReq::getAddFragFlag(req->changeMask)) {
+        connectPtr.p->m_alter.m_drop_frag_id = RNIL;
+        connectPtr.p->m_alter.m_new_startFid_offset =
+            tabPtr.p->m_startFid_offset;
+        connectPtr.p->m_alter.m_new_startFidSize =
+          (tabPtr.p->startFidSize + 1);
       } else {
         connectPtr.p->m_alter.m_drop_frag_id = RNIL;
         connectPtr.p->m_alter.m_new_startFid_offset =
             tabPtr.p->m_startFid_offset;
+        connectPtr.p->m_alter.m_new_startFidSize =
+          tabPtr.p->startFidSize;
       }
 
       DEB_RANGE_PART(("DBDIH: startFidSize: %u, startFid_offset: %u, mask: 0x%x"
@@ -15082,8 +15100,8 @@ Dbdih::add_fragments_to_table(Signal *signal,
     DEB_MEM_ALLOC(("DBDIH: lc_ndbd_pool_free(0x%p), line: %u",
                    startFidOld, __LINE__));
     lc_ndbd_pool_free(startFidOld);
-    DEB_RANGE_PART(("startFidSize: old: %u, new: %u, tableId: %u",
-      current, current + cnt, tabPtr.i));
+    DEB_RANGE_PART(("startFidSize: %u, old: %u, new: %u, tableId: %u",
+      tabPtr.p->startFidSize, current, current + cnt, tabPtr.i));
   }
   for (i = 0; i<cnt; i++)
   {
@@ -16712,8 +16730,13 @@ void Dbdih::make_new_table_read_and_writeable(TabRecordPtr tabPtr,
   DIH_TAB_WRITE_LOCK(tabPtr.p);
   tabPtr.p->totalfragments = connectPtr.p->m_alter.m_totalfragments;
   tabPtr.p->partitionCount = connectPtr.p->m_alter.m_partitionCount;
-  DEB_RANGE_PART(("New table RWable, #frags: %u, #parts: %u, tableId: %u",
-    tabPtr.p->totalfragments, tabPtr.p->partitionCount, tabPtr.i));
+  tabPtr.p->startFidSize = connectPtr.p->m_alter.m_new_startFidSize;
+  DEB_RANGE_PART(("New table RWable, startFidSize: %u, #frags: %u,"
+                  " #parts: %u, tableId: %u",
+    tabPtr.p->startFidSize,
+    tabPtr.p->totalfragments,
+    tabPtr.p->partitionCount,
+    tabPtr.i));
   if (AlterTableReq::getDropFragFlag(connectPtr.p->m_alter.m_changeMask)) {
     jam();
     tabPtr.p->m_startFid_offset = connectPtr.p->m_alter.m_new_startFid_offset;
@@ -16730,8 +16753,10 @@ void Dbdih::make_new_table_read_and_writeable(TabRecordPtr tabPtr,
     }
     tabPtr.p->startFid[newTotal] = RNIL64;
 
-    DEB_RANGE_PART(("New startFid_offset: %u tableId: %u, line: %u",
+    DEB_RANGE_PART(("New startFid_offset: %u startFidSize: %u, tableId: %u,"
+                    " line: %u",
       tabPtr.p->m_startFid_offset,
+      tabPtr.p->startFidSize,
       tabPtr.i,
       __LINE__));
   }

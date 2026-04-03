@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2003, 2025, Oracle and/or its affiliates.
-   Copyright (c) 2021, 2025, Hopsworks and/or its affiliates.
+   Copyright (c) 2021, 2026, Hopsworks and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -230,6 +230,9 @@ GSN_PRINT_SIGNATURE(printSUB_GCP_COMPLETE_REP);
 GSN_PRINT_SIGNATURE(printCREATE_FRAGMENTATION_REQ);
 GSN_PRINT_SIGNATURE(printCREATE_FRAGMENTATION_REF);
 GSN_PRINT_SIGNATURE(printCREATE_FRAGMENTATION_CONF);
+GSN_PRINT_SIGNATURE(printDIADDTABREQ);
+GSN_PRINT_SIGNATURE(printDIADDTABREF);
+GSN_PRINT_SIGNATURE(printDIADDTABCONF);
 GSN_PRINT_SIGNATURE(printUTIL_CREATE_LOCK_REQ);
 GSN_PRINT_SIGNATURE(printUTIL_CREATE_LOCK_REF);
 GSN_PRINT_SIGNATURE(printUTIL_CREATE_LOCK_CONF);

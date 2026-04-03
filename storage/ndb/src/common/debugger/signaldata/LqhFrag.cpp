@@ -63,7 +63,12 @@ bool printLQHFRAGCONF(FILE* output,
   const LqhFragConf* sig = (const LqhFragConf*)theData;
   
   fprintf(output, " senderData: %d lqhFragPtr: %d\n",
-	  sig->senderData, sig->lqhFragPtr);
+	  sig->senderData,
+          sig->lqhFragPtr);
+  fprintf(output, " tableId: %u fragId: %u, changeMask: 0x%x\n",
+	  sig->tableId,
+          sig->fragId,
+          sig->changeMask);
   return true;
 }
 

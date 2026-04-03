@@ -1057,7 +1057,7 @@ class Dblqh : public SimulatedBlock {
     /**
      *       The fragment id of this fragment.
      */
-    UintR fragId;
+    Uint32 fragId;
 
     /**
      *       Status of fragment
@@ -2703,7 +2703,7 @@ class Dblqh : public SimulatedBlock {
     Uint64 databaseRecord;
     Uint64 *old_fragrec;
     Uint64 *fragrec;
-    Uint16 *fragid;
+    Uint32 *fragid;
 
     /**
      * Status of the table

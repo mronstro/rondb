@@ -164,7 +164,9 @@ class Dbdih : public SimulatedBlock {
     ptrAss(tabPtr, tabRecord);
     return tabPtr.p->m_startFid_offset;
   }
-  void setStartFidOffset(Uint32 tableId);
+  bool setStartFidOffset(Uint32 tableId,
+                         Range2FragmentMap*,
+                         Uint32 fragCount);
 
   // Records
 
@@ -199,6 +201,7 @@ class Dbdih : public SimulatedBlock {
         Uint32 m_drop_frag_id;         // fragment ID being dropped (DROP PARTITION)
         Uint64 m_drop_frag_ptrI;       // pool index of dropped fragment
         Uint32 m_new_startFid_offset;  // new startFid offset after drop
+        Uint32 m_new_startFidSize;     // new startFidSize after drop
       } m_alter;
       struct {
         Uint32 m_map_ptr_i;
