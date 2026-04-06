@@ -7862,7 +7862,16 @@ Range2FragmentMap *Dbdict::getRangeMap(Uint32 tableId) {
   if (find_object(tabPtr, tableId)) {
     DEB_RANGE(("getRangeMap: found tabPtr.i=%u m_range_ptr=%p",
                tabPtr.i, tabPtr.p->m_range_ptr));
-    return tabPtr.p->m_range_ptr;
+    if (tabPtr.p->m_range_ptr != nullptr) {
+      return tabPtr.p->m_range_ptr;
+    }
+    /* Index tables don't have their own range map — follow the
+     * primaryTableId link to get the base table's range map. */
+    if (tabPtr.p->primaryTableId != RNIL) {
+      DEB_RANGE(("getRangeMap: following primaryTableId=%u",
+                 tabPtr.p->primaryTableId));
+      return getRangeMap(tabPtr.p->primaryTableId);
+    }
   }
   DEB_RANGE(("getRangeMap: find_object failed for tableId=%u", tableId));
   return nullptr;

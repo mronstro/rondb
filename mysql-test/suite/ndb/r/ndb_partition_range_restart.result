@@ -1,0 +1,280 @@
+#
+# Setup: create range-partitioned table with data in all partitions
+#
+CREATE TABLE t1 (
+a int not null,
+b int not null,
+c varchar(20),
+primary key(a, b))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+partition p1 values less than (200),
+partition p2 values less than (300),
+partition p3 values less than (1000));
+INSERT INTO t1 VALUES (10, 1, 'p0-row1');
+INSERT INTO t1 VALUES (50, 2, 'p0-row2');
+INSERT INTO t1 VALUES (99, 3, 'p0-boundary');
+INSERT INTO t1 VALUES (100, 1, 'p1-row1');
+INSERT INTO t1 VALUES (150, 2, 'p1-row2');
+INSERT INTO t1 VALUES (200, 1, 'p2-row1');
+INSERT INTO t1 VALUES (250, 2, 'p2-row2');
+INSERT INTO t1 VALUES (500, 1, 'p3-row1');
+INSERT INTO t1 VALUES (900, 2, 'p3-row2');
+# Verify initial data
+SELECT * FROM t1 ORDER BY a, b;
+a	b	c
+10	1	p0-row1
+50	2	p0-row2
+99	3	p0-boundary
+100	1	p1-row1
+150	2	p1-row2
+200	1	p2-row1
+250	2	p2-row2
+500	1	p3-row1
+900	2	p3-row2
+# PK lookups across partitions
+SELECT * FROM t1 WHERE a=10 AND b=1;
+a	b	c
+10	1	p0-row1
+SELECT * FROM t1 WHERE a=150 AND b=2;
+a	b	c
+150	2	p1-row2
+SELECT * FROM t1 WHERE a=250 AND b=2;
+a	b	c
+250	2	p2-row2
+SELECT * FROM t1 WHERE a=900 AND b=2;
+a	b	c
+900	2	p3-row2
+########################################
+# Test 1: Single node restart
+########################################
+# Restart node 1
+# Verify all data after node restart
+SELECT * FROM t1 ORDER BY a, b;
+a	b	c
+10	1	p0-row1
+50	2	p0-row2
+99	3	p0-boundary
+100	1	p1-row1
+150	2	p1-row2
+200	1	p2-row1
+250	2	p2-row2
+500	1	p3-row1
+900	2	p3-row2
+# PK lookups still work
+SELECT * FROM t1 WHERE a=10 AND b=1;
+a	b	c
+10	1	p0-row1
+SELECT * FROM t1 WHERE a=150 AND b=2;
+a	b	c
+150	2	p1-row2
+SELECT * FROM t1 WHERE a=500 AND b=1;
+a	b	c
+500	1	p3-row1
+# DML still works after node restart
+INSERT INTO t1 VALUES (75, 1, 'p0-new');
+UPDATE t1 SET c = 'p1-updated' WHERE a=100 AND b=1;
+DELETE FROM t1 WHERE a=75 AND b=1;
+SELECT * FROM t1 ORDER BY a, b;
+a	b	c
+10	1	p0-row1
+50	2	p0-row2
+99	3	p0-boundary
+100	1	p1-updated
+150	2	p1-row2
+200	1	p2-row1
+250	2	p2-row2
+500	1	p3-row1
+900	2	p3-row2
+########################################
+# Test 2: Full system restart
+########################################
+# System restart
+# Wait for MySQL to reconnect
+# Verify all data after system restart
+SELECT * FROM t1 ORDER BY a, b;
+a	b	c
+10	1	p0-row1
+50	2	p0-row2
+99	3	p0-boundary
+100	1	p1-updated
+150	2	p1-row2
+200	1	p2-row1
+250	2	p2-row2
+500	1	p3-row1
+900	2	p3-row2
+# PK lookups still work
+SELECT * FROM t1 WHERE a=10 AND b=1;
+a	b	c
+10	1	p0-row1
+SELECT * FROM t1 WHERE a=100 AND b=1;
+a	b	c
+100	1	p1-updated
+SELECT * FROM t1 WHERE a=250 AND b=2;
+a	b	c
+250	2	p2-row2
+SELECT * FROM t1 WHERE a=900 AND b=2;
+a	b	c
+900	2	p3-row2
+# DML still works after system restart
+INSERT INTO t1 VALUES (75, 1, 'after-sysrestart');
+SELECT * FROM t1 WHERE a=75 AND b=1;
+a	b	c
+75	1	after-sysrestart
+DELETE FROM t1 WHERE a=75 AND b=1;
+########################################
+# Test 3: DROP PARTITION + node restart
+########################################
+# Drop first partition (p0: values < 100)
+ALTER TABLE t1 ALGORITHM=INPLACE, DROP PARTITION p0;
+# Verify p0 data is gone
+SELECT * FROM t1 ORDER BY a, b;
+a	b	c
+100	1	p1-updated
+150	2	p1-row2
+200	1	p2-row1
+250	2	p2-row2
+500	1	p3-row1
+900	2	p3-row2
+# Inserts below lower bound should fail
+INSERT INTO t1 VALUES (10, 1, 'should-fail');
+Got one of the listed errors
+INSERT INTO t1 VALUES (99, 1, 'should-fail');
+Got one of the listed errors
+# Insert at the lower bound (100) should still work (p1 range)
+INSERT INTO t1 VALUES (100, 99, 'at-lower-bound');
+DELETE FROM t1 WHERE a=100 AND b=99;
+# Node restart after DROP PARTITION
+# Verify data after node restart (dropped data must stay gone)
+SELECT * FROM t1 ORDER BY a, b;
+a	b	c
+100	1	p1-updated
+150	2	p1-row2
+200	1	p2-row1
+250	2	p2-row2
+500	1	p3-row1
+900	2	p3-row2
+# Inserts below lower bound must still fail after restart
+INSERT INTO t1 VALUES (10, 1, 'should-fail-after-restart');
+Got one of the listed errors
+INSERT INTO t1 VALUES (50, 1, 'should-fail-after-restart');
+Got one of the listed errors
+# Inserts at or above lower bound must still work
+INSERT INTO t1 VALUES (100, 77, 'ok-after-restart');
+SELECT * FROM t1 WHERE a=100 AND b=77;
+a	b	c
+100	77	ok-after-restart
+DELETE FROM t1 WHERE a=100 AND b=77;
+########################################
+# Test 4: DROP PARTITION + system restart
+# (validates lower bound persistence)
+########################################
+# System restart
+# Verify data after system restart
+SELECT * FROM t1 ORDER BY a, b;
+a	b	c
+100	1	p1-updated
+150	2	p1-row2
+200	1	p2-row1
+250	2	p2-row2
+500	1	p3-row1
+900	2	p3-row2
+# Lower bound must persist across system restart
+INSERT INTO t1 VALUES (10, 1, 'should-fail-after-sysrestart');
+Got one of the listed errors
+INSERT INTO t1 VALUES (99, 1, 'should-fail-after-sysrestart');
+Got one of the listed errors
+# Valid inserts must still work
+INSERT INTO t1 VALUES (175, 1, 'ok-after-sysrestart');
+SELECT * FROM t1 WHERE a=175 AND b=1;
+a	b	c
+175	1	ok-after-sysrestart
+DELETE FROM t1 WHERE a=175 AND b=1;
+# Full table scan must return correct results
+SELECT * FROM t1 ORDER BY a, b;
+a	b	c
+100	1	p1-updated
+150	2	p1-row2
+200	1	p2-row1
+250	2	p2-row2
+500	1	p3-row1
+900	2	p3-row2
+########################################
+# Test 5: Second DROP PARTITION + restart
+# (validates cumulative lower bound)
+########################################
+# Drop p1 (values < 200), lower bound should advance to 200
+ALTER TABLE t1 ALGORITHM=INPLACE, DROP PARTITION p1;
+# Verify p1 data is gone
+SELECT * FROM t1 ORDER BY a, b;
+a	b	c
+200	1	p2-row1
+250	2	p2-row2
+500	1	p3-row1
+900	2	p3-row2
+# Inserts below new lower bound (200) should fail
+INSERT INTO t1 VALUES (10, 1, 'fail');
+Got one of the listed errors
+INSERT INTO t1 VALUES (100, 1, 'fail');
+Got one of the listed errors
+INSERT INTO t1 VALUES (199, 1, 'fail');
+Got one of the listed errors
+# System restart to test persistence of cumulative lower bound
+# Verify cumulative lower bound persists
+SELECT * FROM t1 ORDER BY a, b;
+a	b	c
+200	1	p2-row1
+250	2	p2-row2
+500	1	p3-row1
+900	2	p3-row2
+INSERT INTO t1 VALUES (100, 1, 'fail-after-restart');
+Got one of the listed errors
+INSERT INTO t1 VALUES (199, 1, 'fail-after-restart');
+Got one of the listed errors
+# Insert at 200 should work (p2 range)
+INSERT INTO t1 VALUES (200, 99, 'ok-at-200');
+SELECT * FROM t1 WHERE a=200 AND b=99;
+a	b	c
+200	99	ok-at-200
+DELETE FROM t1 WHERE a=200 AND b=99;
+########################################
+# Test 6: ADD PARTITION after DROP + restart
+# (lower bound carried forward through ADD)
+########################################
+# Add a new partition at the end
+ALTER TABLE t1 ALGORITHM=INPLACE,
+ADD PARTITION (partition p4 values less than (1500));
+# Verify structure works
+INSERT INTO t1 VALUES (1200, 1, 'new-p4-range');
+SELECT * FROM t1 ORDER BY a, b;
+a	b	c
+200	1	p2-row1
+250	2	p2-row2
+500	1	p3-row1
+900	2	p3-row2
+1200	1	new-p4-range
+# Lower bound must still be enforced after ADD
+INSERT INTO t1 VALUES (150, 1, 'fail-after-add');
+Got one of the listed errors
+# System restart to verify persistence after ADD PARTITION
+# Verify everything after ADD + system restart
+SELECT * FROM t1 ORDER BY a, b;
+a	b	c
+200	1	p2-row1
+250	2	p2-row2
+500	1	p3-row1
+900	2	p3-row2
+1200	1	new-p4-range
+# Lower bound still enforced
+INSERT INTO t1 VALUES (150, 1, 'fail-after-add-restart');
+Got one of the listed errors
+# New partition still works
+INSERT INTO t1 VALUES (1300, 1, 'ok-in-p4');
+SELECT * FROM t1 WHERE a=1300 AND b=1;
+a	b	c
+1300	1	ok-in-p4
+########################################
+# Cleanup
+########################################
+DROP TABLE t1;

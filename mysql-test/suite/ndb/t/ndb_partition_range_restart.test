@@ -1,0 +1,262 @@
+-- source include/have_ndb.inc
+
+#
+# Test node restart and system restart with RANGE COLUMNS partitioned tables.
+# Verifies:
+#   1. Data survives single node restart
+#   2. Data survives full system restart
+#   3. DROP PARTITION + node restart: dropped data stays gone
+#   4. DROP PARTITION + system restart: lower bound persists, inserts
+#      into the dropped range are rejected
+#   5. ADD PARTITION after DROP + restart: lower bound carried forward
+#
+
+# Suppress warnings from cluster disconnect during restart
+--disable_query_log ONCE
+call mtr.add_suppression("cluster disconnect An incident event has been written");
+
+--echo #
+--echo # Setup: create range-partitioned table with data in all partitions
+--echo #
+
+CREATE TABLE t1 (
+  a int not null,
+  b int not null,
+  c varchar(20),
+  primary key(a, b))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300),
+ partition p3 values less than (1000));
+
+INSERT INTO t1 VALUES (10, 1, 'p0-row1');
+INSERT INTO t1 VALUES (50, 2, 'p0-row2');
+INSERT INTO t1 VALUES (99, 3, 'p0-boundary');
+INSERT INTO t1 VALUES (100, 1, 'p1-row1');
+INSERT INTO t1 VALUES (150, 2, 'p1-row2');
+INSERT INTO t1 VALUES (200, 1, 'p2-row1');
+INSERT INTO t1 VALUES (250, 2, 'p2-row2');
+INSERT INTO t1 VALUES (500, 1, 'p3-row1');
+INSERT INTO t1 VALUES (900, 2, 'p3-row2');
+
+--echo # Verify initial data
+SELECT * FROM t1 ORDER BY a, b;
+
+--echo # PK lookups across partitions
+SELECT * FROM t1 WHERE a=10 AND b=1;
+SELECT * FROM t1 WHERE a=150 AND b=2;
+SELECT * FROM t1 WHERE a=250 AND b=2;
+SELECT * FROM t1 WHERE a=900 AND b=2;
+
+--echo ########################################
+--echo # Test 1: Single node restart
+--echo ########################################
+
+--echo # Restart node 1
+--exec $NDB_MGM -e "1 restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started --wait-nodes=1 >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "1 start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+
+--echo # Verify all data after node restart
+SELECT * FROM t1 ORDER BY a, b;
+
+--echo # PK lookups still work
+SELECT * FROM t1 WHERE a=10 AND b=1;
+SELECT * FROM t1 WHERE a=150 AND b=2;
+SELECT * FROM t1 WHERE a=500 AND b=1;
+
+--echo # DML still works after node restart
+INSERT INTO t1 VALUES (75, 1, 'p0-new');
+UPDATE t1 SET c = 'p1-updated' WHERE a=100 AND b=1;
+DELETE FROM t1 WHERE a=75 AND b=1;
+
+SELECT * FROM t1 ORDER BY a, b;
+
+--echo ########################################
+--echo # Test 2: Full system restart
+--echo ########################################
+
+--echo # System restart
+--exec $NDB_MGM -e "all restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "all start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+
+--echo # Wait for MySQL to reconnect
+--source include/ndb_not_readonly.inc
+
+--echo # Verify all data after system restart
+SELECT * FROM t1 ORDER BY a, b;
+
+--echo # PK lookups still work
+SELECT * FROM t1 WHERE a=10 AND b=1;
+SELECT * FROM t1 WHERE a=100 AND b=1;
+SELECT * FROM t1 WHERE a=250 AND b=2;
+SELECT * FROM t1 WHERE a=900 AND b=2;
+
+--echo # DML still works after system restart
+INSERT INTO t1 VALUES (75, 1, 'after-sysrestart');
+SELECT * FROM t1 WHERE a=75 AND b=1;
+DELETE FROM t1 WHERE a=75 AND b=1;
+
+--echo ########################################
+--echo # Test 3: DROP PARTITION + node restart
+--echo ########################################
+
+--echo # Drop first partition (p0: values < 100)
+ALTER TABLE t1 ALGORITHM=INPLACE, DROP PARTITION p0;
+
+--echo # Verify p0 data is gone
+SELECT * FROM t1 ORDER BY a, b;
+
+--echo # Inserts below lower bound should fail
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t1 VALUES (10, 1, 'should-fail');
+
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t1 VALUES (99, 1, 'should-fail');
+
+--echo # Insert at the lower bound (100) should still work (p1 range)
+INSERT INTO t1 VALUES (100, 99, 'at-lower-bound');
+DELETE FROM t1 WHERE a=100 AND b=99;
+
+--echo # Node restart after DROP PARTITION
+--exec $NDB_MGM -e "1 restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started --wait-nodes=1 >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "1 start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+
+--echo # Verify data after node restart (dropped data must stay gone)
+SELECT * FROM t1 ORDER BY a, b;
+
+--echo # Inserts below lower bound must still fail after restart
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t1 VALUES (10, 1, 'should-fail-after-restart');
+
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t1 VALUES (50, 1, 'should-fail-after-restart');
+
+--echo # Inserts at or above lower bound must still work
+INSERT INTO t1 VALUES (100, 77, 'ok-after-restart');
+SELECT * FROM t1 WHERE a=100 AND b=77;
+DELETE FROM t1 WHERE a=100 AND b=77;
+
+--echo ########################################
+--echo # Test 4: DROP PARTITION + system restart
+--echo # (validates lower bound persistence)
+--echo ########################################
+
+--echo # System restart
+--exec $NDB_MGM -e "all restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "all start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+
+--source include/ndb_not_readonly.inc
+
+--echo # Verify data after system restart
+SELECT * FROM t1 ORDER BY a, b;
+
+--echo # Lower bound must persist across system restart
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t1 VALUES (10, 1, 'should-fail-after-sysrestart');
+
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t1 VALUES (99, 1, 'should-fail-after-sysrestart');
+
+--echo # Valid inserts must still work
+INSERT INTO t1 VALUES (175, 1, 'ok-after-sysrestart');
+SELECT * FROM t1 WHERE a=175 AND b=1;
+DELETE FROM t1 WHERE a=175 AND b=1;
+
+--echo # Full table scan must return correct results
+SELECT * FROM t1 ORDER BY a, b;
+
+--echo ########################################
+--echo # Test 5: Second DROP PARTITION + restart
+--echo # (validates cumulative lower bound)
+--echo ########################################
+
+--echo # Drop p1 (values < 200), lower bound should advance to 200
+ALTER TABLE t1 ALGORITHM=INPLACE, DROP PARTITION p1;
+
+--echo # Verify p1 data is gone
+SELECT * FROM t1 ORDER BY a, b;
+
+--echo # Inserts below new lower bound (200) should fail
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t1 VALUES (10, 1, 'fail');
+
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t1 VALUES (100, 1, 'fail');
+
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t1 VALUES (199, 1, 'fail');
+
+--echo # System restart to test persistence of cumulative lower bound
+--exec $NDB_MGM -e "all restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "all start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+
+--source include/ndb_not_readonly.inc
+
+--echo # Verify cumulative lower bound persists
+SELECT * FROM t1 ORDER BY a, b;
+
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t1 VALUES (100, 1, 'fail-after-restart');
+
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t1 VALUES (199, 1, 'fail-after-restart');
+
+--echo # Insert at 200 should work (p2 range)
+INSERT INTO t1 VALUES (200, 99, 'ok-at-200');
+SELECT * FROM t1 WHERE a=200 AND b=99;
+DELETE FROM t1 WHERE a=200 AND b=99;
+
+--echo ########################################
+--echo # Test 6: ADD PARTITION after DROP + restart
+--echo # (lower bound carried forward through ADD)
+--echo ########################################
+
+--echo # Add a new partition at the end
+ALTER TABLE t1 ALGORITHM=INPLACE,
+  ADD PARTITION (partition p4 values less than (1500));
+
+--echo # Verify structure works
+INSERT INTO t1 VALUES (1200, 1, 'new-p4-range');
+SELECT * FROM t1 ORDER BY a, b;
+
+--echo # Lower bound must still be enforced after ADD
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t1 VALUES (150, 1, 'fail-after-add');
+
+--echo # System restart to verify persistence after ADD PARTITION
+--exec $NDB_MGM -e "all restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "all start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+
+--source include/ndb_not_readonly.inc
+
+--echo # Verify everything after ADD + system restart
+SELECT * FROM t1 ORDER BY a, b;
+
+--echo # Lower bound still enforced
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t1 VALUES (150, 1, 'fail-after-add-restart');
+
+--echo # New partition still works
+INSERT INTO t1 VALUES (1300, 1, 'ok-in-p4');
+SELECT * FROM t1 WHERE a=1300 AND b=1;
+
+--echo ########################################
+--echo # Cleanup
+--echo ########################################
+
+DROP TABLE t1;
+--remove_file $NDB_TOOLS_OUTPUT
