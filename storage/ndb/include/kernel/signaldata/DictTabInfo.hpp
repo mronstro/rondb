@@ -174,6 +174,8 @@ class DictTabInfo {
     TTLColumnNo = 165,
 
     RangeBoundaryType = 166,
+    RangeLowerBoundLen = 167,
+    RangeLowerBound = 168,
 
     TableEnd           = 999,
     
@@ -405,6 +407,8 @@ class DictTabInfo {
     Uint32 TTLColumnNo;
 
     Uint32 RangeBoundaryType;
+    Uint32 RangeLowerBoundLen;
+    Uint32 RangeLowerBound[2];  // up to 8 bytes (BIGINT/DATETIME2)
 
     Table() {}
     void init();

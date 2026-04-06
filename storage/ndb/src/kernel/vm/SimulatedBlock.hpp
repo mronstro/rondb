@@ -2791,10 +2791,16 @@ extern Hash2FragmentMap_pool g_hash_map;
  *   Header (m_cnt, m_boundary_len, m_boundary_type, ...)
  *   Uint16 frag_ids[m_cnt]          — fragment IDs
  *   char boundaries[m_cnt * m_boundary_len] — packed boundary values (8-aligned)
+ *   char lower_bound[m_boundary_len] — if m_has_lower_bound (after boundaries)
  *
  * Entry i is the EXCLUSIVE upper bound for partition i.
  * The last entry is the maximum possible value (catch-all).
  * frag_ids[i] is the fragment ID for values in partition i.
+ *
+ * m_has_lower_bound: set after DROP PARTITION. Keys below the lower bound
+ * are rejected (RNIL from range_lookup). The lower bound is the exclusive
+ * upper bound of the most recently dropped first partition — i.e., keys
+ * must be >= lower_bound to be accepted.
  */
 struct Range2FragmentMap {
   Uint32 m_cnt;            // number of partitions (= number of range entries)
@@ -2802,6 +2808,7 @@ struct Range2FragmentMap {
   Uint32 m_boundary_type;  // NDB attribute type of the partition key column
   Uint32 m_num_columns;    // number of partition key columns (1 for Phase 1)
   Uint32 m_object_id;      // associated table object ID
+  Uint32 m_has_lower_bound; // 1 if lower bound exists (after DROP PARTITION)
 
   Uint16 *frag_ids() {
     return reinterpret_cast<Uint16 *>(
@@ -2830,12 +2837,24 @@ struct Range2FragmentMap {
     return boundaries() + i * m_boundary_len;
   }
 
+  /** Lower bound bytes, stored after the boundary array */
+  char *lower_bound() {
+    return boundaries() + m_cnt * m_boundary_len;
+  }
+  const char *lower_bound() const {
+    return boundaries() + m_cnt * m_boundary_len;
+  }
+
   /** Total allocation size needed for cnt partitions with blen-byte bounds */
-  static Uint32 alloc_size(Uint32 cnt, Uint32 blen) {
+  static Uint32 alloc_size(Uint32 cnt, Uint32 blen,
+                           bool has_lower_bound = false) {
     Uint32 sz = sizeof(Range2FragmentMap);
     sz += cnt * sizeof(Uint16);    // frag_ids
     sz = (sz + 7) & ~Uint32(7);   // align to 8
     sz += cnt * blen;              // boundaries
+    if (has_lower_bound) {
+      sz += blen;                  // lower bound
+    }
     return sz;
   }
 };
@@ -2897,9 +2916,20 @@ static inline int range_compare(const char *bound, const char *key,
  */
 static inline Uint32 range_lookup(const Range2FragmentMap *map,
                                   const char *key, Uint32 key_len) {
+  const Uint32 btype = map->m_boundary_type;
+
+  /* Reject keys below the lower bound (set after DROP PARTITION).
+   * Lower bound is the exclusive upper bound of the dropped partition,
+   * so keys must be >= lower_bound. Reject if lower_bound > key. */
+  if (map->m_has_lower_bound) {
+    int cmp = range_compare(map->lower_bound(), key, btype);
+    if (cmp > 0) {
+      return RNIL;  // key is below the dropped partition range
+    }
+  }
+
   Uint32 lo = 0;
   Uint32 hi = map->m_cnt;
-  const Uint32 btype = map->m_boundary_type;
 
   while (lo < hi) {
     Uint32 mid = (lo + hi) >> 1;

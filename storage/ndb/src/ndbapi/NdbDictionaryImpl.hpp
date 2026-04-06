@@ -243,6 +243,8 @@ class NdbTableImpl : public NdbDictionary::Table, public NdbDictObjectImpl {
   Vector<Uint32> m_fd;
   Vector<Int32> m_range;
   Uint32 m_range_boundary_type;
+  Uint32 m_range_lower_bound_len;  // 0 = no lower bound
+  char m_range_lower_bound[8];     // up to 8 bytes (BIGINT/DATETIME2)
   NdbDictionary::Object::FragmentType m_fragmentType;
 
   int getDbName(char *buf, size_t len) const;

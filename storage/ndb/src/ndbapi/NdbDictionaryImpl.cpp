@@ -960,6 +960,8 @@ void NdbTableImpl::init() {
   m_fd.clear();
   m_range.clear();
   m_range_boundary_type = 0;
+  m_range_lower_bound_len = 0;
+  memset(m_range_lower_bound, 0, sizeof(m_range_lower_bound));
   m_fragmentType = NdbDictionary::Object::HashMapPartition;
   m_hashValueMask = 0;
   m_hashpointerValue = 0;
@@ -1240,6 +1242,9 @@ int NdbTableImpl::assign(const NdbTableImpl &org) {
   m_fd.assign(org.m_fd);
   m_range.assign(org.m_range);
   m_range_boundary_type = org.m_range_boundary_type;
+  m_range_lower_bound_len = org.m_range_lower_bound_len;
+  memcpy(m_range_lower_bound, org.m_range_lower_bound,
+         sizeof(m_range_lower_bound));
 
   m_fragmentType = org.m_fragmentType;
   if (m_fragmentType == NdbDictionary::Object::HashMapPartition) {
@@ -1730,6 +1735,50 @@ Uint32 NdbTableImpl::getRangeListDataLen() const { return m_range.size(); }
 Uint32 NdbTableImpl::getRangePartitionId(const void *keyValue) const {
   const Uint32 cnt = m_range.size();
   if (cnt == 0) return 0;
+
+  /* Check lower bound (set after DROP PARTITION).
+   * If key is below the lower bound, return partition 0 as fallback —
+   * the data node will reject the operation with error 311. */
+  if (m_range_lower_bound_len > 0) {
+    const char *lb = m_range_lower_bound;
+    int cmp;
+    switch (m_range_boundary_type) {
+      case NDB_TYPE_INT: {
+        Int32 b; memcpy(&b, lb, sizeof(b));
+        Int32 k = *static_cast<const Int32 *>(keyValue);
+        cmp = (b > k) ? 1 : 0;
+        break;
+      }
+      case NDB_TYPE_UNSIGNED:
+      case NDB_TYPE_DATE:
+      case NDB_TYPE_TIMESTAMP: {
+        Uint32 b; memcpy(&b, lb, sizeof(b));
+        Uint32 k = *static_cast<const Uint32 *>(keyValue);
+        cmp = (b > k) ? 1 : 0;
+        break;
+      }
+      case NDB_TYPE_BIGINT:
+      case NDB_TYPE_DATETIME:
+      case NDB_TYPE_DATETIME2:
+      case NDB_TYPE_TIMESTAMP2: {
+        Int64 b; memcpy(&b, lb, sizeof(b));
+        Int64 k = *static_cast<const Int64 *>(keyValue);
+        cmp = (b > k) ? 1 : 0;
+        break;
+      }
+      case NDB_TYPE_BIGUNSIGNED: {
+        Uint64 b; memcpy(&b, lb, sizeof(b));
+        Uint64 k = *static_cast<const Uint64 *>(keyValue);
+        cmp = (b > k) ? 1 : 0;
+        break;
+      }
+      default:
+        cmp = 0;
+    }
+    if (cmp > 0) {
+      return 0;  // Below lower bound — data node will reject
+    }
+  }
 
   const Int32 *bounds = m_range.getBase();
   const Uint32 btype = m_range_boundary_type;
@@ -3846,6 +3895,12 @@ NdbDictInterface::parseTableInfo(NdbTableImpl ** ret,
     DBUG_RETURN(4000);
   }
   impl->m_range_boundary_type = tableDesc->RangeBoundaryType;
+  impl->m_range_lower_bound_len = tableDesc->RangeLowerBoundLen;
+  if (tableDesc->RangeLowerBoundLen > 0 &&
+      tableDesc->RangeLowerBoundLen <= sizeof(impl->m_range_lower_bound)) {
+    memcpy(impl->m_range_lower_bound, tableDesc->RangeLowerBound,
+           tableDesc->RangeLowerBoundLen);
+  }
 
   {
     /**
@@ -4821,6 +4876,11 @@ int NdbDictInterface::serializeTableDesc(NdbTableImpl &impl,
   }
 
   tmpTab->RangeBoundaryType = impl.m_range_boundary_type;
+  tmpTab->RangeLowerBoundLen = impl.m_range_lower_bound_len;
+  if (impl.m_range_lower_bound_len > 0) {
+    memcpy(tmpTab->RangeLowerBound, impl.m_range_lower_bound,
+           impl.m_range_lower_bound_len);
+  }
 
   tmpTab->PartitionBalance = (Uint32)impl.m_partitionBalance;
   tmpTab->FragmentCount = impl.m_fragmentCount;
