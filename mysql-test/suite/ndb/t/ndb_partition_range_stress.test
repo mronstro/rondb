@@ -160,7 +160,7 @@ SELECT * FROM t_rapid WHERE a=10250;
 INSERT INTO t_rapid VALUES (50, 999);
 
 --error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
-INSERT INTO t_rapid VALUES (10050, 999);
+INSERT INTO t_rapid VALUES (-1, 999);
 
 --echo Insert into valid range
 INSERT INTO t_rapid VALUES (10150, 999);
