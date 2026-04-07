@@ -124,7 +124,7 @@ static const Uint32 WaitTableStateChangeMillis = 1;
 //#define DEBUG_ACTIVE_NODES 1
 //#define DEBUG_NODE_STATUS 1
 //#define DEBUG_USED_LOG_PARTS 1
-//#define DEBUG_RANGE_PART 1
+#define DEBUG_RANGE_PART 1
 //#define DEBUG_MEM_ALLOC 1
 #endif
 
@@ -14876,6 +14876,14 @@ void Dbdih::execALTER_TAB_REQ(Signal *signal) {
          * of the new table record containing the new range map. */
         connectPtr.p->m_alter.m_new_range_ptr =
             c_dict->getRangeMapByPtrI(req->new_map_ptr_i);
+        DEB_RANGE_PART(("AlterTablePrepare: tab %u new_range_ptr=%p "
+                        "new_map_ptr_i=%u cnt=%u changeMask=0x%x",
+                        tabPtr.i,
+                        connectPtr.p->m_alter.m_new_range_ptr,
+                        req->new_map_ptr_i,
+                        connectPtr.p->m_alter.m_new_range_ptr ?
+                          connectPtr.p->m_alter.m_new_range_ptr->m_cnt : 0,
+                        req->changeMask));
       } else {
         connectPtr.p->m_alter.m_new_range_ptr = nullptr;
       }
@@ -16128,6 +16136,27 @@ loop:
 
     if (unlikely(fragId == RNIL)) {
       thrjam(jambuf);
+      g_eventLogger->info(
+          "DBDIH: range_lookup RNIL: tableId=%u rangeKeyLen=%u "
+          "m_cnt=%u m_boundary_type=%u m_boundary_len=%u "
+          "m_has_lower_bound=%u m_startFid_offset=%u",
+          tabPtr.i, rangeKeyLen,
+          range_map->m_cnt, range_map->m_boundary_type,
+          range_map->m_boundary_len,
+          range_map->m_has_lower_bound,
+          tabPtr.p->m_startFid_offset);
+      if (rangeKeyLen >= 4) {
+        Int32 keyVal;
+        memcpy(&keyVal, rangeKey, sizeof(keyVal));
+        g_eventLogger->info("DBDIH: range key value (Int32): %d", keyVal);
+      }
+      for (Uint32 dbg_i = 0; dbg_i < range_map->m_cnt; dbg_i++) {
+        Int32 bval;
+        memcpy(&bval, range_map->boundary(dbg_i),
+               range_map->m_boundary_len < 4 ? range_map->m_boundary_len : 4);
+        g_eventLogger->info("DBDIH: boundary[%u] = %d, fragId = %u",
+                            dbg_i, bval, range_map->frag_ids()[dbg_i]);
+      }
       conf->zero = 1;  // Indicate error
       signal->theData[1] = ZUNDEFINED_FRAGMENT_ERROR;
       goto error;
@@ -16823,6 +16852,22 @@ void Dbdih::make_new_table_read_and_writeable(TabRecordPtr tabPtr,
     old_range_ptr = tabPtr.p->m_range_ptr;
     tabPtr.p->m_range_ptr = tabPtr.p->m_new_range_ptr;
     tabPtr.p->m_new_range_ptr = nullptr;
+    DEB_RANGE_PART(("make_new_rw: tab %u swap range_ptr=%p (cnt=%u) "
+                    "old=%p changeMask=0x%x",
+                    tabPtr.i, tabPtr.p->m_range_ptr,
+                    tabPtr.p->m_range_ptr ? tabPtr.p->m_range_ptr->m_cnt : 0,
+                    old_range_ptr,
+                    connectPtr.p->m_alter.m_changeMask));
+    if (tabPtr.p->m_range_ptr) {
+      for (Uint32 dbg = 0; dbg < tabPtr.p->m_range_ptr->m_cnt; dbg++) {
+        Int32 bval;
+        memcpy(&bval, tabPtr.p->m_range_ptr->boundary(dbg),
+               tabPtr.p->m_range_ptr->m_boundary_len < 4 ?
+               tabPtr.p->m_range_ptr->m_boundary_len : 4);
+        DEB_RANGE_PART(("  boundary[%u]=%d fid=%u",
+                        dbg, bval, tabPtr.p->m_range_ptr->frag_ids()[dbg]));
+      }
+    }
   }
   if (AlterTableReq::getReorgFragFlag(connectPtr.p->m_alter.m_changeMask)) {
     jam();

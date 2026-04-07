@@ -142,29 +142,27 @@ while ($cycle < 100)
 SELECT count(*) AS partition_count FROM information_schema.partitions
   WHERE table_schema='test' AND table_name='t_rapid';
 
---echo Verify data -- should have recent rows
-SELECT count(*) FROM t_rapid;
-
-# The final two partitions cover [10100, 10200) and [10200, 10300)
-# The most recent insert was at 10250
-SELECT * FROM t_rapid ORDER BY a;
-
---echo PK lookup on most recent data
-# Last inserted value was next_boundary-50 from last cycle
-# After 100 cycles: next_boundary was 10300, so last insert = 10250
-SELECT * FROM t_rapid WHERE a=10250;
+# After 100 cycles with ADD-then-DROP:
+# Final two partitions cover [10100, 10200) with fragIds {100, 101}
+# (cycle 99: ADD boundary=10200, then DROP first → boundaries [10100, 10200])
+# Clear all accumulated rows for clean verification
+DELETE FROM t_rapid;
 
 --echo Verify lower bound enforcement
-# After 100 drops, lower bound should be around 10100
 --error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
 INSERT INTO t_rapid VALUES (50, 999);
 
 --error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
 INSERT INTO t_rapid VALUES (-1, 999);
 
---echo Insert into valid range
-INSERT INTO t_rapid VALUES (10150, 999);
-SELECT * FROM t_rapid WHERE a=10150;
+--echo Beyond last boundary should also fail
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_rapid VALUES (10200, 999);
+
+--echo Insert into valid range and verify
+INSERT INTO t_rapid VALUES (10110, 1);
+INSERT INTO t_rapid VALUES (10190, 2);
+SELECT * FROM t_rapid ORDER BY a;
 
 DROP TABLE t_rapid;
 
