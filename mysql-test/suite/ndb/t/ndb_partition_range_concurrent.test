@@ -1,0 +1,294 @@
+-- source include/have_multi_ndb.inc
+
+#
+# Test concurrent DML during ALTER TABLE ADD/DROP PARTITION on
+# native RANGE COLUMNS partitioned NDB tables, including
+# fragId wrap-around with concurrent operations.
+#
+
+--echo ########################################
+--echo # C1. Concurrent INSERT + DROP PARTITION
+--echo ########################################
+
+--connection server1
+
+CREATE TABLE t_conc_drop (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300),
+ partition p3 values less than (1000));
+
+# Populate all partitions
+INSERT INTO t_conc_drop VALUES (10, 1);
+INSERT INTO t_conc_drop VALUES (50, 2);
+INSERT INTO t_conc_drop VALUES (150, 3);
+INSERT INTO t_conc_drop VALUES (250, 4);
+INSERT INTO t_conc_drop VALUES (500, 5);
+
+--echo Verify initial data
+SELECT * FROM t_conc_drop ORDER BY a;
+
+# Start a scan from server2
+--connection server2
+--send SELECT * FROM t_conc_drop ORDER BY a
+
+# DROP PARTITION from server1
+--connection server1
+ALTER TABLE t_conc_drop ALGORITHM=INPLACE, DROP PARTITION p0;
+
+# Collect scan result from server2 (may see pre- or post-DROP state)
+--connection server2
+--disable_result_log
+--reap
+--enable_result_log
+
+# Both servers should agree on current state
+--connection server1
+--echo Server1 after DROP:
+SELECT * FROM t_conc_drop ORDER BY a;
+SELECT * FROM t_conc_drop WHERE a=10;
+SELECT * FROM t_conc_drop WHERE a=50;
+
+--connection server2
+--echo Server2 after DROP:
+SELECT * FROM t_conc_drop ORDER BY a;
+SELECT * FROM t_conc_drop WHERE a=10;
+SELECT * FROM t_conc_drop WHERE a=50;
+
+# Insert into surviving partitions from server2
+--connection server2
+INSERT INTO t_conc_drop VALUES (160, 6);
+
+--connection server1
+SELECT * FROM t_conc_drop WHERE a=160;
+
+# Insert below lower bound should fail on both servers
+--connection server1
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_conc_drop VALUES (50, 99);
+
+--connection server2
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_conc_drop VALUES (50, 99);
+
+--connection server1
+DROP TABLE t_conc_drop;
+
+--echo ########################################
+--echo # C2. Concurrent scans during ADD PARTITION
+--echo ########################################
+
+--connection server1
+
+CREATE TABLE t_conc_add (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300));
+
+# Populate
+let $i = 1;
+while ($i <= 30)
+{
+  --disable_query_log
+  eval INSERT INTO t_conc_add VALUES ($i, $i * 10);
+  --enable_query_log
+  inc $i;
+}
+let $i = 101;
+while ($i <= 130)
+{
+  --disable_query_log
+  eval INSERT INTO t_conc_add VALUES ($i, $i * 10);
+  --enable_query_log
+  inc $i;
+}
+let $i = 201;
+while ($i <= 230)
+{
+  --disable_query_log
+  eval INSERT INTO t_conc_add VALUES ($i, $i * 10);
+  --enable_query_log
+  inc $i;
+}
+
+--echo Initial row count
+SELECT count(*) FROM t_conc_add;
+
+# Start scan from server2
+--connection server2
+--send SELECT count(*) FROM t_conc_add
+
+# ADD PARTITION from server1
+--connection server1
+ALTER TABLE t_conc_add ALGORITHM=INPLACE,
+  ADD PARTITION (PARTITION p3 VALUES LESS THAN (400));
+
+--connection server2
+--disable_result_log
+--reap
+--enable_result_log
+
+# Both servers should see the new partition
+--connection server1
+INSERT INTO t_conc_add VALUES (350, 3500);
+SELECT * FROM t_conc_add WHERE a=350;
+
+--connection server2
+SELECT * FROM t_conc_add WHERE a=350;
+
+# Row counts should match
+--connection server1
+SELECT count(*) AS server1_count FROM t_conc_add;
+
+--connection server2
+SELECT count(*) AS server2_count FROM t_conc_add;
+
+--connection server1
+DROP TABLE t_conc_add;
+
+--echo ########################################
+--echo # C3. Parallel transactions spanning partitions
+--echo ########################################
+
+--connection server1
+
+CREATE TABLE t_conc_txn (
+  a int not null,
+  b int not null,
+  c varchar(30),
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300));
+
+INSERT INTO t_conc_txn VALUES (10, 1, 'initial');
+INSERT INTO t_conc_txn VALUES (150, 2, 'initial');
+INSERT INTO t_conc_txn VALUES (250, 3, 'initial');
+
+ALTER TABLE t_conc_txn ALGORITHM=INPLACE,
+  ADD PARTITION (PARTITION p3 VALUES LESS THAN (400));
+
+--echo Server1: transaction spanning old and new partitions
+--connection server1
+BEGIN;
+INSERT INTO t_conc_txn VALUES (350, 4, 'srv1-new-part');
+UPDATE t_conc_txn SET c = 'srv1-updated' WHERE a=10;
+
+--echo Server2: concurrent update on old partition
+--connection server2
+BEGIN;
+UPDATE t_conc_txn SET c = 'srv2-updated' WHERE a=150;
+INSERT INTO t_conc_txn VALUES (280, 5, 'srv2-old-part');
+COMMIT;
+
+--echo Server1: commit
+--connection server1
+COMMIT;
+
+--echo Verify data consistency
+--connection server1
+SELECT * FROM t_conc_txn ORDER BY a;
+
+--connection server2
+SELECT * FROM t_conc_txn ORDER BY a;
+
+--connection server1
+DROP TABLE t_conc_txn;
+
+--echo ########################################
+--echo # F1. FragId wrap-around with concurrent DML
+--echo ########################################
+
+# Enable error insert on all data nodes to force fragIds near 65535
+--exec $NDB_MGM -e "all error 7251"
+
+--connection server1
+
+CREATE TABLE t_wrap_conc (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300),
+ partition p3 values less than (400));
+
+# Clear error insert
+--exec $NDB_MGM -e "all error 0"
+
+# Populate all partitions
+INSERT INTO t_wrap_conc VALUES (50, 1);
+INSERT INTO t_wrap_conc VALUES (150, 2);
+INSERT INTO t_wrap_conc VALUES (250, 3);
+INSERT INTO t_wrap_conc VALUES (350, 4);
+
+--echo Verify data before wrap
+SELECT * FROM t_wrap_conc ORDER BY a;
+
+# Start scan from server2
+--connection server2
+--send SELECT * FROM t_wrap_conc ORDER BY a
+
+# ADD PARTITION from server1 -- new fragId wraps to 0
+--connection server1
+ALTER TABLE t_wrap_conc ALGORITHM=INPLACE,
+  ADD PARTITION (PARTITION p4 VALUES LESS THAN (500));
+
+--connection server2
+--disable_result_log
+--reap
+--enable_result_log
+
+# Insert into the wrapped-fragId partition from server2
+--connection server2
+INSERT INTO t_wrap_conc VALUES (450, 5);
+SELECT * FROM t_wrap_conc WHERE a=450;
+
+# Verify from server1
+--connection server1
+SELECT * FROM t_wrap_conc WHERE a=450;
+SELECT * FROM t_wrap_conc ORDER BY a;
+
+# DROP PARTITION and verify both servers see correct state
+--connection server1
+ALTER TABLE t_wrap_conc ALGORITHM=INPLACE, DROP PARTITION p0;
+
+--connection server1
+SELECT * FROM t_wrap_conc ORDER BY a;
+
+--connection server2
+SELECT * FROM t_wrap_conc ORDER BY a;
+
+# Insert below lower bound fails on both servers
+--connection server1
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_wrap_conc VALUES (50, 99);
+
+--connection server2
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_wrap_conc VALUES (50, 99);
+
+# Insert into wrapped partition from server2 still works
+--connection server2
+INSERT INTO t_wrap_conc VALUES (480, 6);
+SELECT * FROM t_wrap_conc WHERE a=480;
+
+--connection server1
+SELECT * FROM t_wrap_conc WHERE a=480;
+
+--connection server1
+DROP TABLE t_wrap_conc;

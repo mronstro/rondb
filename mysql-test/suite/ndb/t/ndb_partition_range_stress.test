@@ -1,0 +1,251 @@
+-- source include/have_ndb.inc
+
+#
+# Stress tests for native RANGE COLUMNS partitioned NDB tables:
+#   F2. Table with many partitions (48)
+#   F3. Rapid alternating ADD/DROP PARTITION (100 cycles)
+#   I2. FragId wrap-around with rapid ADD/DROP cycles
+#
+
+--echo ########################################
+--echo # F2. Table with many partitions (48)
+--echo ########################################
+
+# Build CREATE TABLE statement with 48 partitions
+# Boundaries: 100, 200, ..., 4800
+
+--disable_query_log
+let $create_stmt = CREATE TABLE t_many (a int not null, b int not null, primary key(a)) engine=ndb partition by range columns (a) (;
+
+let $i = 1;
+let $boundary = 100;
+while ($i <= 47)
+{
+  let $create_stmt = $create_stmt partition p$i values less than ($boundary),;
+  let $boundary = `SELECT $boundary + 100`;
+  inc $i;
+}
+let $create_stmt = $create_stmt partition p48 values less than ($boundary));
+
+eval $create_stmt;
+--enable_query_log
+
+SELECT count(*) AS partition_count FROM information_schema.partitions
+  WHERE table_schema='test' AND table_name='t_many';
+
+# Insert one row per partition
+--disable_query_log
+let $i = 1;
+let $val = 50;
+while ($i <= 48)
+{
+  eval INSERT INTO t_many VALUES ($val, $i);
+  let $val = `SELECT $val + 100`;
+  inc $i;
+}
+--enable_query_log
+
+--echo Verify all rows inserted
+SELECT count(*) FROM t_many;
+
+--echo Full table scan
+--disable_result_log
+SELECT * FROM t_many ORDER BY a;
+--enable_result_log
+
+--echo PK lookups across partitions
+SELECT * FROM t_many WHERE a=50;
+SELECT * FROM t_many WHERE a=550;
+SELECT * FROM t_many WHERE a=2450;
+SELECT * FROM t_many WHERE a=4750;
+
+--echo DROP first partition
+ALTER TABLE t_many ALGORITHM=INPLACE, DROP PARTITION p1;
+
+--echo Verify after DROP
+SELECT count(*) FROM t_many;
+SELECT * FROM t_many WHERE a=50;
+
+--echo ADD partition at end
+ALTER TABLE t_many ALGORITHM=INPLACE,
+  ADD PARTITION (PARTITION p49 VALUES LESS THAN (5000));
+
+INSERT INTO t_many VALUES (4900, 49);
+SELECT * FROM t_many WHERE a=4900;
+
+--echo Final count
+SELECT count(*) FROM t_many;
+
+DROP TABLE t_many;
+
+--echo ########################################
+--echo # F3. Rapid alternating ADD/DROP (100 cycles)
+--echo # Start with 2 partitions, repeatedly: ADD at end, DROP first
+--echo ########################################
+
+CREATE TABLE t_rapid (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p_0 values less than (100),
+ partition p_1 values less than (200));
+
+# Insert initial data
+INSERT INTO t_rapid VALUES (50, 0);
+INSERT INTO t_rapid VALUES (150, 1);
+
+--echo Running 100 ADD/DROP cycles...
+
+--disable_query_log
+--disable_result_log
+
+# Track the current boundary window.
+# After each cycle: DROP first (lowest boundary shifts up by 100),
+# ADD at end (highest boundary shifts up by 100).
+# Start: boundaries at 100, 200
+# After cycle 1: DROP p_0 (lower=100), ADD p_2 (boundaries: 200, 300)
+# After cycle 2: DROP p_1 (lower=200), ADD p_3 (boundaries: 300, 400)
+# etc.
+# After cycle N: boundaries at (N*100 + 100, N*100 + 200)
+
+let $cycle = 0;
+let $next_boundary = 300;
+let $drop_idx = 0;
+let $add_idx = 2;
+while ($cycle < 100)
+{
+  # ADD partition at end
+  eval ALTER TABLE t_rapid ALGORITHM=INPLACE,
+    ADD PARTITION (PARTITION p_$add_idx VALUES LESS THAN ($next_boundary));
+
+  # Insert into new partition (value = next_boundary - 50)
+  let $insert_val = `SELECT $next_boundary - 50`;
+  eval INSERT INTO t_rapid VALUES ($insert_val, $add_idx);
+
+  # DROP first partition
+  eval ALTER TABLE t_rapid ALGORITHM=INPLACE, DROP PARTITION p_$drop_idx;
+
+  let $next_boundary = `SELECT $next_boundary + 100`;
+  let $drop_idx = `SELECT $drop_idx + 1`;
+  let $add_idx = `SELECT $add_idx + 1`;
+  let $cycle = `SELECT $cycle + 1`;
+}
+
+--enable_result_log
+--enable_query_log
+
+--echo 100 cycles complete
+
+--echo Verify partition count is still 2
+SELECT count(*) AS partition_count FROM information_schema.partitions
+  WHERE table_schema='test' AND table_name='t_rapid';
+
+--echo Verify data -- should have recent rows
+SELECT count(*) FROM t_rapid;
+
+# The final two partitions cover [10100, 10200) and [10200, 10300)
+# The most recent insert was at 10250
+SELECT * FROM t_rapid ORDER BY a;
+
+--echo PK lookup on most recent data
+# Last inserted value was next_boundary-50 from last cycle
+# After 100 cycles: next_boundary was 10300, so last insert = 10250
+SELECT * FROM t_rapid WHERE a=10250;
+
+--echo Verify lower bound enforcement
+# After 100 drops, lower bound should be around 10100
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_rapid VALUES (50, 999);
+
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_rapid VALUES (10050, 999);
+
+--echo Insert into valid range
+INSERT INTO t_rapid VALUES (10150, 999);
+SELECT * FROM t_rapid WHERE a=10150;
+
+DROP TABLE t_rapid;
+
+--echo ########################################
+--echo # I2. FragId wrap-around with rapid ADD/DROP cycles
+--echo # Uses ERROR_INSERT 7251 to force fragIds near 65535
+--echo ########################################
+
+# Force startFidOffset = 65532
+--exec $NDB_MGM -e "all error 7251"
+
+CREATE TABLE t_wrap_stress (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p_0 values less than (100),
+ partition p_1 values less than (200),
+ partition p_2 values less than (300));
+
+# Clear error insert
+--exec $NDB_MGM -e "all error 0"
+
+# Initial data
+INSERT INTO t_wrap_stress VALUES (50, 1);
+INSERT INTO t_wrap_stress VALUES (150, 2);
+INSERT INTO t_wrap_stress VALUES (250, 3);
+
+--echo Verify initial data
+SELECT * FROM t_wrap_stress ORDER BY a;
+
+--echo Running 10 ADD/DROP cycles to wrap fragIds through 65535 to low numbers...
+
+--disable_query_log
+--disable_result_log
+
+let $cycle = 0;
+let $next_boundary = 400;
+let $drop_idx = 0;
+let $add_idx = 3;
+while ($cycle < 10)
+{
+  eval ALTER TABLE t_wrap_stress ALGORITHM=INPLACE,
+    ADD PARTITION (PARTITION p_$add_idx VALUES LESS THAN ($next_boundary));
+
+  let $insert_val = `SELECT $next_boundary - 50`;
+  eval INSERT INTO t_wrap_stress VALUES ($insert_val, $add_idx);
+
+  eval ALTER TABLE t_wrap_stress ALGORITHM=INPLACE, DROP PARTITION p_$drop_idx;
+
+  let $next_boundary = `SELECT $next_boundary + 100`;
+  let $drop_idx = `SELECT $drop_idx + 1`;
+  let $add_idx = `SELECT $add_idx + 1`;
+  let $cycle = `SELECT $cycle + 1`;
+}
+
+--enable_result_log
+--enable_query_log
+
+--echo 10 wrap cycles complete
+
+--echo Verify partition count
+SELECT count(*) AS partition_count FROM information_schema.partitions
+  WHERE table_schema='test' AND table_name='t_wrap_stress';
+
+--echo Verify data
+SELECT count(*) FROM t_wrap_stress;
+SELECT * FROM t_wrap_stress ORDER BY a;
+
+--echo PK lookups
+# After 10 cycles, boundaries are at 1100, 1200, 1300
+# Last inserted was 1250
+SELECT * FROM t_wrap_stress WHERE a=1250;
+
+--echo Verify lower bound enforcement
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_wrap_stress VALUES (50, 999);
+
+--echo Valid insert
+INSERT INTO t_wrap_stress VALUES (1150, 99);
+SELECT * FROM t_wrap_stress WHERE a=1150;
+
+DROP TABLE t_wrap_stress;

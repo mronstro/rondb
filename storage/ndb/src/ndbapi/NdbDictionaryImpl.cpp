@@ -1728,13 +1728,51 @@ Uint32 NdbTableImpl::getRangeListDataLen() const { return m_range.size(); }
 /**
  * Client-side binary search on range boundaries.
  * Mirrors kernel's range_lookup() from SimulatedBlock.hpp.
- * m_range[] stores one Int32 boundary per partition, sorted ascending.
- * For 8-byte types, boundaries were truncated to Int32 by ha_ndbcluster
- * and sign-extended to Int64 in the kernel — we do the same here.
+ *
+ * m_range[] stores boundary values as raw bytes packed into Int32 words:
+ * - For 4-byte types (INT, UNSIGNED): 1 word per boundary, cnt = partition count
+ * - For 8-byte types (BIGINT, BIGUNSIGNED): 2 words per boundary,
+ *   cnt = 2 * partition count
  */
 Uint32 NdbTableImpl::getRangePartitionId(const void *keyValue) const {
-  const Uint32 cnt = m_range.size();
-  if (cnt == 0) return 0;
+  const Uint32 raw_cnt = m_range.size();
+  if (raw_cnt == 0) return 0;
+
+  const Uint32 btype = m_range_boundary_type;
+  const Uint32 blen = (btype == NDB_TYPE_BIGINT ||
+                       btype == NDB_TYPE_BIGUNSIGNED) ? 8 : 4;
+  const Uint32 cnt = (raw_cnt * 4) / blen;  // number of partitions
+  const char *bounds_raw = reinterpret_cast<const char *>(m_range.getBase());
+
+  /* Helper lambda: compare boundary[i] against key.
+   * Returns negative if bound < key, 0 if equal, positive if bound > key. */
+  auto cmp_boundary = [&](Uint32 i) -> int {
+    const char *b = bounds_raw + i * blen;
+    switch (btype) {
+      case NDB_TYPE_INT: {
+        Int32 bv; memcpy(&bv, b, sizeof(bv));
+        Int32 kv = *static_cast<const Int32 *>(keyValue);
+        return (bv < kv) ? -1 : (bv > kv) ? 1 : 0;
+      }
+      case NDB_TYPE_UNSIGNED: {
+        Uint32 bv; memcpy(&bv, b, sizeof(bv));
+        Uint32 kv = *static_cast<const Uint32 *>(keyValue);
+        return (bv < kv) ? -1 : (bv > kv) ? 1 : 0;
+      }
+      case NDB_TYPE_BIGINT: {
+        Int64 bv; memcpy(&bv, b, sizeof(bv));
+        Int64 kv = *static_cast<const Int64 *>(keyValue);
+        return (bv < kv) ? -1 : (bv > kv) ? 1 : 0;
+      }
+      case NDB_TYPE_BIGUNSIGNED: {
+        Uint64 bv; memcpy(&bv, b, sizeof(bv));
+        Uint64 kv = *static_cast<const Uint64 *>(keyValue);
+        return (bv < kv) ? -1 : (bv > kv) ? 1 : 0;
+      }
+      default:
+        return 0;
+    }
+  };
 
   /* Check lower bound (set after DROP PARTITION).
    * If key is below the lower bound, return partition 0 as fallback —
@@ -1742,34 +1780,29 @@ Uint32 NdbTableImpl::getRangePartitionId(const void *keyValue) const {
   if (m_range_lower_bound_len > 0) {
     const char *lb = m_range_lower_bound;
     int cmp;
-    switch (m_range_boundary_type) {
+    switch (btype) {
       case NDB_TYPE_INT: {
-        Int32 b; memcpy(&b, lb, sizeof(b));
-        Int32 k = *static_cast<const Int32 *>(keyValue);
-        cmp = (b > k) ? 1 : 0;
+        Int32 bv; memcpy(&bv, lb, sizeof(bv));
+        Int32 kv = *static_cast<const Int32 *>(keyValue);
+        cmp = (bv > kv) ? 1 : 0;
         break;
       }
-      case NDB_TYPE_UNSIGNED:
-      case NDB_TYPE_DATE:
-      case NDB_TYPE_TIMESTAMP: {
-        Uint32 b; memcpy(&b, lb, sizeof(b));
-        Uint32 k = *static_cast<const Uint32 *>(keyValue);
-        cmp = (b > k) ? 1 : 0;
+      case NDB_TYPE_UNSIGNED: {
+        Uint32 bv; memcpy(&bv, lb, sizeof(bv));
+        Uint32 kv = *static_cast<const Uint32 *>(keyValue);
+        cmp = (bv > kv) ? 1 : 0;
         break;
       }
-      case NDB_TYPE_BIGINT:
-      case NDB_TYPE_DATETIME:
-      case NDB_TYPE_DATETIME2:
-      case NDB_TYPE_TIMESTAMP2: {
-        Int64 b; memcpy(&b, lb, sizeof(b));
-        Int64 k = *static_cast<const Int64 *>(keyValue);
-        cmp = (b > k) ? 1 : 0;
+      case NDB_TYPE_BIGINT: {
+        Int64 bv; memcpy(&bv, lb, sizeof(bv));
+        Int64 kv = *static_cast<const Int64 *>(keyValue);
+        cmp = (bv > kv) ? 1 : 0;
         break;
       }
       case NDB_TYPE_BIGUNSIGNED: {
-        Uint64 b; memcpy(&b, lb, sizeof(b));
-        Uint64 k = *static_cast<const Uint64 *>(keyValue);
-        cmp = (b > k) ? 1 : 0;
+        Uint64 bv; memcpy(&bv, lb, sizeof(bv));
+        Uint64 kv = *static_cast<const Uint64 *>(keyValue);
+        cmp = (bv > kv) ? 1 : 0;
         break;
       }
       default:
@@ -1780,46 +1813,10 @@ Uint32 NdbTableImpl::getRangePartitionId(const void *keyValue) const {
     }
   }
 
-  const Int32 *bounds = m_range.getBase();
-  const Uint32 btype = m_range_boundary_type;
   Uint32 lo = 0, hi = cnt;
-
   while (lo < hi) {
     Uint32 mid = (lo + hi) >> 1;
-    int cmp;
-    switch (btype) {
-      case NDB_TYPE_INT: {
-        Int32 b = bounds[mid];
-        Int32 k = *static_cast<const Int32 *>(keyValue);
-        cmp = (b < k) ? -1 : (b > k) ? 1 : 0;
-        break;
-      }
-      case NDB_TYPE_UNSIGNED:
-      case NDB_TYPE_DATE:
-      case NDB_TYPE_TIMESTAMP: {
-        Uint32 b = static_cast<Uint32>(bounds[mid]);
-        Uint32 k = *static_cast<const Uint32 *>(keyValue);
-        cmp = (b < k) ? -1 : (b > k) ? 1 : 0;
-        break;
-      }
-      case NDB_TYPE_BIGINT:
-      case NDB_TYPE_DATETIME:
-      case NDB_TYPE_DATETIME2:
-      case NDB_TYPE_TIMESTAMP2: {
-        Int64 b = static_cast<Int64>(bounds[mid]);  // sign-extend
-        Int64 k = *static_cast<const Int64 *>(keyValue);
-        cmp = (b < k) ? -1 : (b > k) ? 1 : 0;
-        break;
-      }
-      case NDB_TYPE_BIGUNSIGNED: {
-        Uint64 b = static_cast<Uint64>(static_cast<Int64>(bounds[mid]));
-        Uint64 k = *static_cast<const Uint64 *>(keyValue);
-        cmp = (b < k) ? -1 : (b > k) ? 1 : 0;
-        break;
-      }
-      default:
-        return 0;  // Unsupported type, fall back to partition 0
-    }
+    int cmp = cmp_boundary(mid);
     if (cmp <= 0)
       lo = mid + 1;
     else

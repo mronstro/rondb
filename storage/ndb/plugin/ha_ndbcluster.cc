@@ -15580,23 +15580,32 @@ static int create_table_set_up_partition_info(partition_info *part_info,
     DBUG_PRINT("info", ("Using RangePartition fragmentation type"));
     ndbtab.setFragmentType(NDBTAB::RangePartition);
 
-    const uint parts = part_info->num_parts;
-    std::unique_ptr<int32[]> range_data(new (std::nothrow) int32[parts]);
-    if (!range_data) {
-      my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR), parts * sizeof(int32));
-      return 1;
-    }
-    if (ndb_extract_range_boundaries(part_info, range_data.get(), parts))
-      return 1;
-    ndbtab.setRangeListData(range_data.get(), parts);
-    ndbtab.setRangeBoundaryType(NDB_TYPE_INT);
-
     /* Mark partition column as distribution key (DKey)
      * so DBTC can extract it via create_distr_key().
      */
     Field **fields = part_info->part_field_array;
     NDBCOL *pk_col = colIdMap.getColumn(ndbtab, fields[0]->field_index());
     pk_col->setPartitionKey(true);
+
+    /* Determine boundary type from the partition key column */
+    const Uint32 btype = ndb_get_range_boundary_type(fields[0]);
+    const Uint32 blen = ndb_get_range_boundary_len(btype);
+    ndbtab.setRangeBoundaryType(btype);
+
+    const uint parts = part_info->num_parts;
+    const Uint32 total_bytes = parts * blen;
+    std::unique_ptr<char[]> range_buf(new (std::nothrow) char[total_bytes]);
+    if (!range_buf) {
+      my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR), total_bytes);
+      return 1;
+    }
+    if (ndb_extract_range_boundaries_native(part_info, btype, blen,
+                                            range_buf.get(), parts))
+      return 1;
+    /* setRangeListData takes Int32* and a count of Int32 words */
+    ndbtab.setRangeListData(
+        reinterpret_cast<const Int32 *>(range_buf.get()),
+        total_bytes / 4);
   } else {
     auto partition_type_description = [](partition_type pt) {
       switch (pt) {

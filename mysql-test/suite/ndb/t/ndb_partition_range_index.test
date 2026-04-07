@@ -1,0 +1,241 @@
+-- source include/have_ndb.inc
+
+#
+# Test ordered index, unique index, and index stat interactions
+# with native RANGE COLUMNS partitioned NDB tables.
+#
+
+--echo ########################################
+--echo # D1. Ordered index scan after DROP PARTITION
+--echo ########################################
+
+CREATE TABLE t_oidx (
+  a int not null,
+  b int not null,
+  c int not null,
+  primary key(a),
+  index idx_c(c))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300),
+ partition p3 values less than (1000));
+
+# Insert data with ordered index column values spread across partitions
+INSERT INTO t_oidx VALUES (10, 1, 500);
+INSERT INTO t_oidx VALUES (50, 2, 100);
+INSERT INTO t_oidx VALUES (110, 3, 300);
+INSERT INTO t_oidx VALUES (150, 4, 200);
+INSERT INTO t_oidx VALUES (210, 5, 400);
+INSERT INTO t_oidx VALUES (250, 6, 600);
+INSERT INTO t_oidx VALUES (500, 7, 350);
+INSERT INTO t_oidx VALUES (900, 8, 150);
+
+--echo Ordered index scan before DROP
+SELECT * FROM t_oidx WHERE c > 200 ORDER BY c;
+SELECT * FROM t_oidx WHERE c BETWEEN 100 AND 400 ORDER BY c;
+
+--echo DROP first partition
+ALTER TABLE t_oidx ALGORITHM=INPLACE, DROP PARTITION p0;
+
+--echo Ordered index scan after DROP -- should not return p0 data
+SELECT * FROM t_oidx WHERE c > 0 ORDER BY c;
+SELECT * FROM t_oidx WHERE c > 200 ORDER BY c;
+SELECT * FROM t_oidx WHERE c BETWEEN 100 AND 400 ORDER BY c;
+
+--echo Verify p0 data is gone
+SELECT * FROM t_oidx WHERE a=10;
+SELECT * FROM t_oidx WHERE a=50;
+
+--echo Verify remaining data via index
+SELECT * FROM t_oidx WHERE c=300;
+SELECT * FROM t_oidx WHERE c=200;
+SELECT * FROM t_oidx WHERE c=350;
+
+--echo INSERT new data and verify index covers it
+INSERT INTO t_oidx VALUES (120, 9, 250);
+SELECT * FROM t_oidx WHERE c=250;
+SELECT * FROM t_oidx WHERE c BETWEEN 200 AND 350 ORDER BY c;
+
+--echo DROP another partition and verify index still works
+ALTER TABLE t_oidx ALGORITHM=INPLACE, DROP PARTITION p1;
+
+SELECT * FROM t_oidx WHERE c > 0 ORDER BY c;
+
+# p1 data (a=110, a=150) should be gone
+SELECT * FROM t_oidx WHERE a=110;
+SELECT * FROM t_oidx WHERE a=150;
+SELECT * FROM t_oidx WHERE a=120;
+
+DROP TABLE t_oidx;
+
+--echo ########################################
+--echo # D2. Unique index + DROP PARTITION
+--echo ########################################
+
+CREATE TABLE t_uidx (
+  a int not null,
+  b int not null,
+  primary key(a),
+  unique key uk_b(b))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300),
+ partition p3 values less than (1000));
+
+INSERT INTO t_uidx VALUES (10, 1000);
+INSERT INTO t_uidx VALUES (50, 2000);
+INSERT INTO t_uidx VALUES (110, 3000);
+INSERT INTO t_uidx VALUES (150, 4000);
+INSERT INTO t_uidx VALUES (210, 5000);
+INSERT INTO t_uidx VALUES (500, 6000);
+
+--echo Verify unique constraint before DROP
+--error ER_DUP_ENTRY
+INSERT INTO t_uidx VALUES (999, 3000);
+
+--echo DROP first partition
+ALTER TABLE t_uidx ALGORITHM=INPLACE, DROP PARTITION p0;
+
+--echo Verify unique constraint on surviving data
+--error ER_DUP_ENTRY
+INSERT INTO t_uidx VALUES (999, 3000);
+
+--error ER_DUP_ENTRY
+INSERT INTO t_uidx VALUES (888, 5000);
+
+--echo b=1000 was in dropped partition -- should now be available
+INSERT INTO t_uidx VALUES (777, 1000);
+SELECT * FROM t_uidx WHERE b=1000;
+
+--echo b=2000 was in dropped partition -- should now be available
+INSERT INTO t_uidx VALUES (888, 2000);
+SELECT * FROM t_uidx WHERE b=2000;
+
+--echo Verify all data via unique index lookups
+SELECT * FROM t_uidx WHERE b=3000;
+SELECT * FROM t_uidx WHERE b=4000;
+SELECT * FROM t_uidx WHERE b=5000;
+SELECT * FROM t_uidx WHERE b=6000;
+
+SELECT * FROM t_uidx ORDER BY a;
+
+DROP TABLE t_uidx;
+
+--echo ########################################
+--echo # D3. CREATE INDEX after DROP PARTITION
+--echo ########################################
+
+CREATE TABLE t_cidx (
+  a int not null,
+  b int not null,
+  c int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300),
+ partition p3 values less than (1000));
+
+INSERT INTO t_cidx VALUES (10, 1, 500);
+INSERT INTO t_cidx VALUES (50, 2, 100);
+INSERT INTO t_cidx VALUES (110, 3, 300);
+INSERT INTO t_cidx VALUES (150, 4, 200);
+INSERT INTO t_cidx VALUES (210, 5, 400);
+INSERT INTO t_cidx VALUES (500, 6, 600);
+
+--echo DROP first partition
+ALTER TABLE t_cidx ALGORITHM=INPLACE, DROP PARTITION p0;
+
+--echo CREATE INDEX after DROP
+CREATE INDEX idx_c ON t_cidx(c);
+
+--echo Verify index scan works on remaining partitions
+SELECT * FROM t_cidx WHERE c > 0 ORDER BY c;
+SELECT * FROM t_cidx WHERE c BETWEEN 200 AND 400 ORDER BY c;
+SELECT * FROM t_cidx WHERE c = 300;
+
+--echo Insert new data and verify index includes it
+INSERT INTO t_cidx VALUES (120, 7, 250);
+SELECT * FROM t_cidx WHERE c = 250;
+
+--echo Verify p0 data not in index results
+# c=500 was in p0 (a=10) -- should be gone
+# c=100 was in p0 (a=50) -- should be gone
+SELECT * FROM t_cidx WHERE c = 500;
+SELECT * FROM t_cidx WHERE c = 100;
+
+SELECT * FROM t_cidx ORDER BY a;
+
+DROP TABLE t_cidx;
+
+--echo ########################################
+--echo # D4. ADD INDEX + ADD/DROP PARTITION lifecycle
+--echo ########################################
+
+CREATE TABLE t_lifecycle (
+  a int not null,
+  b int not null,
+  c int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300));
+
+INSERT INTO t_lifecycle VALUES (10, 1, 100);
+INSERT INTO t_lifecycle VALUES (50, 2, 200);
+INSERT INTO t_lifecycle VALUES (110, 3, 300);
+INSERT INTO t_lifecycle VALUES (150, 4, 400);
+INSERT INTO t_lifecycle VALUES (210, 5, 500);
+
+--echo Step 1: Add index on existing table
+ALTER TABLE t_lifecycle ADD INDEX idx_c(c);
+
+--echo Verify index scan
+SELECT * FROM t_lifecycle WHERE c >= 200 ORDER BY c;
+
+--echo Step 2: ADD PARTITION
+ALTER TABLE t_lifecycle ALGORITHM=INPLACE,
+  ADD PARTITION (PARTITION p3 VALUES LESS THAN (400));
+
+--echo Insert into new partition
+INSERT INTO t_lifecycle VALUES (350, 6, 600);
+
+--echo Verify index scan includes new partition data
+SELECT * FROM t_lifecycle WHERE c >= 400 ORDER BY c;
+SELECT * FROM t_lifecycle WHERE c = 600;
+
+--echo Step 3: DROP first partition
+ALTER TABLE t_lifecycle ALGORITHM=INPLACE, DROP PARTITION p0;
+
+--echo Verify index scan excludes dropped data
+SELECT * FROM t_lifecycle WHERE c > 0 ORDER BY c;
+
+# c=100 was in p0 (a=10), c=200 was in p0 (a=50) -- should be gone
+SELECT * FROM t_lifecycle WHERE c = 100;
+SELECT * FROM t_lifecycle WHERE c = 200;
+
+--echo Verify remaining data via index
+SELECT * FROM t_lifecycle WHERE c = 300;
+SELECT * FROM t_lifecycle WHERE c = 400;
+SELECT * FROM t_lifecycle WHERE c = 500;
+SELECT * FROM t_lifecycle WHERE c = 600;
+
+--echo Step 4: ADD another partition after index + DROP
+ALTER TABLE t_lifecycle ALGORITHM=INPLACE,
+  ADD PARTITION (PARTITION p4 VALUES LESS THAN (500));
+
+INSERT INTO t_lifecycle VALUES (450, 7, 700);
+SELECT * FROM t_lifecycle WHERE c = 700;
+SELECT * FROM t_lifecycle WHERE c > 0 ORDER BY c;
+
+--echo Full table scan
+SELECT * FROM t_lifecycle ORDER BY a;
+
+DROP TABLE t_lifecycle;

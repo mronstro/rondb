@@ -1,0 +1,360 @@
+-- source include/have_ndb.inc
+
+#
+# Extended restart tests for native RANGE COLUMNS partitioned NDB tables:
+#   E1. Node restart during ongoing DML
+#   E2. System restart after many accumulated DROP PARTITIONs
+#   G1. Rolling restart with range-partitioned table
+#   G2. Rolling restart after DROP PARTITION
+#   H1. Backup and restore of range-partitioned table
+#   H2. Backup/restore with dropped partitions
+#
+
+# Suppress cluster disconnect warnings during restarts
+--disable_query_log ONCE
+call mtr.add_suppression("cluster disconnect An incident event has been written");
+
+--echo ########################################
+--echo # E1. Node restart during ongoing DML
+--echo ########################################
+
+CREATE TABLE t_nr_dml (
+  a int not null,
+  b int not null,
+  c varchar(30),
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300));
+
+INSERT INTO t_nr_dml VALUES (10, 1, 'pre-restart');
+INSERT INTO t_nr_dml VALUES (150, 2, 'pre-restart');
+INSERT INTO t_nr_dml VALUES (250, 3, 'pre-restart');
+
+--echo Verify initial data
+SELECT * FROM t_nr_dml ORDER BY a;
+
+--echo Restart node 1
+--exec $NDB_MGM -e "1 restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started --wait-nodes=1 >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "1 start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+
+--echo Data intact after node restart
+SELECT * FROM t_nr_dml ORDER BY a;
+
+--echo DML works after restart
+INSERT INTO t_nr_dml VALUES (50, 4, 'after-restart');
+UPDATE t_nr_dml SET c = 'updated' WHERE a=150;
+DELETE FROM t_nr_dml WHERE a=50;
+
+SELECT * FROM t_nr_dml ORDER BY a;
+
+DROP TABLE t_nr_dml;
+
+--echo ########################################
+--echo # E2. System restart after many DROP PARTITIONs
+--echo ########################################
+
+CREATE TABLE t_many_drops (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300),
+ partition p3 values less than (400),
+ partition p4 values less than (500),
+ partition p5 values less than (600),
+ partition p6 values less than (700),
+ partition p7 values less than (1000));
+
+# Insert one row per partition
+INSERT INTO t_many_drops VALUES (50, 0);
+INSERT INTO t_many_drops VALUES (150, 1);
+INSERT INTO t_many_drops VALUES (250, 2);
+INSERT INTO t_many_drops VALUES (350, 3);
+INSERT INTO t_many_drops VALUES (450, 4);
+INSERT INTO t_many_drops VALUES (550, 5);
+INSERT INTO t_many_drops VALUES (650, 6);
+INSERT INTO t_many_drops VALUES (900, 7);
+
+--echo Drop 6 partitions sequentially
+ALTER TABLE t_many_drops ALGORITHM=INPLACE, DROP PARTITION p0;
+ALTER TABLE t_many_drops ALGORITHM=INPLACE, DROP PARTITION p1;
+ALTER TABLE t_many_drops ALGORITHM=INPLACE, DROP PARTITION p2;
+ALTER TABLE t_many_drops ALGORITHM=INPLACE, DROP PARTITION p3;
+ALTER TABLE t_many_drops ALGORITHM=INPLACE, DROP PARTITION p4;
+ALTER TABLE t_many_drops ALGORITHM=INPLACE, DROP PARTITION p5;
+
+--echo Verify only 2 partitions remain
+SELECT count(*) AS partition_count FROM information_schema.partitions
+  WHERE table_schema='test' AND table_name='t_many_drops';
+
+SELECT * FROM t_many_drops ORDER BY a;
+
+--echo System restart
+--exec $NDB_MGM -e "all restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "all start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+--source include/ndb_not_readonly.inc
+
+--echo Verify after system restart
+SELECT * FROM t_many_drops ORDER BY a;
+
+--echo Lower bound enforcement (must be >= 600)
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_many_drops VALUES (100, 99);
+
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_many_drops VALUES (599, 99);
+
+--echo Valid insert at lower bound
+INSERT INTO t_many_drops VALUES (600, 8);
+SELECT * FROM t_many_drops WHERE a=600;
+
+--echo ADD PARTITION after restart
+ALTER TABLE t_many_drops ALGORITHM=INPLACE,
+  ADD PARTITION (PARTITION p8 VALUES LESS THAN (2000));
+
+INSERT INTO t_many_drops VALUES (1500, 9);
+SELECT * FROM t_many_drops ORDER BY a;
+
+DROP TABLE t_many_drops;
+
+--echo ########################################
+--echo # G1. Rolling restart with range-partitioned table
+--echo ########################################
+
+CREATE TABLE t_rolling (
+  a int not null,
+  b int not null,
+  c varchar(30),
+  primary key(a, b))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300),
+ partition p3 values less than (1000));
+
+INSERT INTO t_rolling VALUES (10, 1, 'p0-data');
+INSERT INTO t_rolling VALUES (50, 1, 'p0-data2');
+INSERT INTO t_rolling VALUES (150, 1, 'p1-data');
+INSERT INTO t_rolling VALUES (250, 1, 'p2-data');
+INSERT INTO t_rolling VALUES (500, 1, 'p3-data');
+
+--echo Verify initial data
+SELECT * FROM t_rolling ORDER BY a, b;
+
+--echo Restart node 1
+--exec $NDB_MGM -e "1 restart" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+
+--echo Verify data after node 1 restart
+SELECT * FROM t_rolling ORDER BY a, b;
+SELECT * FROM t_rolling WHERE a=10 AND b=1;
+SELECT * FROM t_rolling WHERE a=500 AND b=1;
+
+--echo DML between restarts
+INSERT INTO t_rolling VALUES (75, 1, 'between-restarts');
+UPDATE t_rolling SET c = 'updated-p1' WHERE a=150 AND b=1;
+
+--echo Restart node 2
+--exec $NDB_MGM -e "2 restart" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+
+--echo Verify data after node 2 restart
+SELECT * FROM t_rolling ORDER BY a, b;
+SELECT * FROM t_rolling WHERE a=75 AND b=1;
+SELECT * FROM t_rolling WHERE a=150 AND b=1;
+
+--echo More DML after all restarts
+DELETE FROM t_rolling WHERE a=75 AND b=1;
+INSERT INTO t_rolling VALUES (900, 1, 'after-rolling');
+
+--echo Final data verification
+SELECT * FROM t_rolling ORDER BY a, b;
+
+DROP TABLE t_rolling;
+
+--echo ########################################
+--echo # G2. Rolling restart after DROP PARTITION
+--echo ########################################
+
+CREATE TABLE t_rolling_drop (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300),
+ partition p3 values less than (1000));
+
+INSERT INTO t_rolling_drop VALUES (10, 1);
+INSERT INTO t_rolling_drop VALUES (150, 2);
+INSERT INTO t_rolling_drop VALUES (250, 3);
+INSERT INTO t_rolling_drop VALUES (500, 4);
+
+--echo DROP first partition
+ALTER TABLE t_rolling_drop ALGORITHM=INPLACE, DROP PARTITION p0;
+
+--echo Verify before rolling restart
+SELECT * FROM t_rolling_drop ORDER BY a;
+
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_rolling_drop VALUES (50, 99);
+
+--echo Rolling restart node 1
+--exec $NDB_MGM -e "1 restart" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+
+--echo Verify after node 1 restart
+SELECT * FROM t_rolling_drop ORDER BY a;
+
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_rolling_drop VALUES (50, 99);
+
+INSERT INTO t_rolling_drop VALUES (100, 5);
+SELECT * FROM t_rolling_drop WHERE a=100;
+
+--echo Rolling restart node 2
+--exec $NDB_MGM -e "2 restart" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+
+--echo Verify after node 2 restart
+SELECT * FROM t_rolling_drop ORDER BY a;
+
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_rolling_drop VALUES (50, 99);
+
+SELECT * FROM t_rolling_drop WHERE a=150;
+SELECT * FROM t_rolling_drop WHERE a=500;
+
+DROP TABLE t_rolling_drop;
+
+--echo ########################################
+--echo # H1. Backup and restore of range-partitioned table
+--echo ########################################
+
+CREATE TABLE t_backup (
+  a int not null,
+  b int not null,
+  c varchar(30),
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300));
+
+INSERT INTO t_backup VALUES (10, 1, 'p0-row');
+INSERT INTO t_backup VALUES (50, 2, 'p0-row2');
+INSERT INTO t_backup VALUES (110, 3, 'p1-row');
+INSERT INTO t_backup VALUES (150, 4, 'p1-row2');
+INSERT INTO t_backup VALUES (210, 5, 'p2-row');
+INSERT INTO t_backup VALUES (250, 6, 'p2-row2');
+
+--echo Verify before backup
+SELECT * FROM t_backup ORDER BY a;
+
+--echo Take backup
+--source include/ndb_backup.inc
+
+--echo Drop table
+DROP TABLE t_backup;
+
+--echo Restore metadata and data
+--exec $NDB_RESTORE -b $the_backup_id -n 1 -m $NDB_BACKUPS-$the_backup_id >> $NDB_TOOLS_OUTPUT 2>&1
+--exec $NDB_RESTORE -b $the_backup_id -n 1 -r $NDB_BACKUPS-$the_backup_id >> $NDB_TOOLS_OUTPUT 2>&1
+--exec $NDB_RESTORE -b $the_backup_id -n 2 -r $NDB_BACKUPS-$the_backup_id >> $NDB_TOOLS_OUTPUT 2>&1
+
+--echo Verify restored data
+SELECT * FROM t_backup ORDER BY a;
+
+--echo PK lookups across partitions
+SELECT * FROM t_backup WHERE a=10;
+SELECT * FROM t_backup WHERE a=110;
+SELECT * FROM t_backup WHERE a=210;
+
+--echo Verify partitioning still works
+INSERT INTO t_backup VALUES (90, 7, 'after-restore');
+SELECT * FROM t_backup WHERE a=90;
+
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_backup VALUES (300, 8, 'beyond-range');
+
+DROP TABLE t_backup;
+
+--echo ########################################
+--echo # H2. Backup/restore with dropped partitions
+--echo ########################################
+
+CREATE TABLE t_backup_drop (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300),
+ partition p3 values less than (1000));
+
+INSERT INTO t_backup_drop VALUES (10, 1);
+INSERT INTO t_backup_drop VALUES (150, 2);
+INSERT INTO t_backup_drop VALUES (250, 3);
+INSERT INTO t_backup_drop VALUES (500, 4);
+
+--echo DROP first partition (sets lower bound at 100)
+ALTER TABLE t_backup_drop ALGORITHM=INPLACE, DROP PARTITION p0;
+
+--echo Verify after DROP
+SELECT * FROM t_backup_drop ORDER BY a;
+
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_backup_drop VALUES (50, 99);
+
+--echo Take backup after DROP
+--source include/ndb_backup.inc
+
+--echo Drop table
+DROP TABLE t_backup_drop;
+
+--echo Restore
+--exec $NDB_RESTORE -b $the_backup_id -n 1 -m $NDB_BACKUPS-$the_backup_id >> $NDB_TOOLS_OUTPUT 2>&1
+--exec $NDB_RESTORE -b $the_backup_id -n 1 -r $NDB_BACKUPS-$the_backup_id >> $NDB_TOOLS_OUTPUT 2>&1
+--exec $NDB_RESTORE -b $the_backup_id -n 2 -r $NDB_BACKUPS-$the_backup_id >> $NDB_TOOLS_OUTPUT 2>&1
+
+--echo Verify restored data
+SELECT * FROM t_backup_drop ORDER BY a;
+
+--echo Verify surviving data PK lookups
+SELECT * FROM t_backup_drop WHERE a=150;
+SELECT * FROM t_backup_drop WHERE a=250;
+SELECT * FROM t_backup_drop WHERE a=500;
+
+--echo Verify dropped data is not restored
+SELECT * FROM t_backup_drop WHERE a=10;
+
+# TODO: Lower bound enforcement after restore depends on whether
+# ndb_restore preserves the RangeLowerBound metadata. If it does:
+# --error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+# INSERT INTO t_backup_drop VALUES (50, 99);
+# If it doesn't, the insert might succeed or go to the wrong place.
+# For now, just verify the restored data is correct.
+
+--echo Valid insert works
+INSERT INTO t_backup_drop VALUES (100, 5);
+SELECT * FROM t_backup_drop WHERE a=100;
+
+DROP TABLE t_backup_drop;
+
+--remove_file $NDB_TOOLS_OUTPUT

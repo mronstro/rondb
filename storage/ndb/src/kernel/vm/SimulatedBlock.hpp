@@ -2867,12 +2867,18 @@ struct Range2FragmentMap {
 static inline int range_compare(const char *bound, const char *key,
                                 Uint32 boundary_type) {
   switch (boundary_type) {
-    case NDB_TYPE_INT: {
+    case NDB_TYPE_INT:
+    case NDB_TYPE_TINYINT:
+    case NDB_TYPE_SMALLINT:
+    case NDB_TYPE_MEDIUMINT: {
       Int32 b = *reinterpret_cast<const Int32 *>(bound);
       Int32 k = *reinterpret_cast<const Int32 *>(key);
       return (b < k) ? -1 : (b > k) ? 1 : 0;
     }
-    case NDB_TYPE_UNSIGNED: {
+    case NDB_TYPE_UNSIGNED:
+    case NDB_TYPE_TINYUNSIGNED:
+    case NDB_TYPE_SMALLUNSIGNED:
+    case NDB_TYPE_MEDIUMUNSIGNED: {
       Uint32 b = *reinterpret_cast<const Uint32 *>(bound);
       Uint32 k = *reinterpret_cast<const Uint32 *>(key);
       return (b < k) ? -1 : (b > k) ? 1 : 0;

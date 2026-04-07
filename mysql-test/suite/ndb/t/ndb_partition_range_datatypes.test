@@ -1,0 +1,392 @@
+-- source include/have_ndb.inc
+
+#
+# Test data type coverage, boundary conditions, and edge-case queries
+# for native RANGE COLUMNS partitioning in NDB (RangePartition fragment type).
+#
+
+--echo ########################################
+--echo # A1. Exact boundary insertion semantics
+--echo # LESS THAN is exclusive: value AT boundary goes to NEXT partition
+--echo ########################################
+
+CREATE TABLE t_boundary (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (5),
+ partition p1 values less than (10),
+ partition p2 values less than (20));
+
+# a=4 is in p0 (4 < 5)
+INSERT INTO t_boundary VALUES (4, 40);
+# a=5 is in p1 (5 >= 5, 5 < 10) -- boundary goes to NEXT partition
+INSERT INTO t_boundary VALUES (5, 50);
+# a=9 is in p1 (9 < 10)
+INSERT INTO t_boundary VALUES (9, 90);
+# a=10 is in p2 (10 >= 10, 10 < 20)
+INSERT INTO t_boundary VALUES (10, 100);
+# a=19 is in p2 (19 < 20)
+INSERT INTO t_boundary VALUES (19, 190);
+
+SELECT * FROM t_boundary ORDER BY a;
+
+# PK lookups to verify partition routing
+SELECT * FROM t_boundary WHERE a=4;
+SELECT * FROM t_boundary WHERE a=5;
+SELECT * FROM t_boundary WHERE a=9;
+SELECT * FROM t_boundary WHERE a=10;
+SELECT * FROM t_boundary WHERE a=19;
+
+# Beyond last boundary (no MAXVALUE) -- should fail
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_boundary VALUES (20, 200);
+
+DROP TABLE t_boundary;
+
+--echo ########################################
+--echo # A2. INT_MIN and INT_MAX values
+--echo ########################################
+
+CREATE TABLE t_extremes (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p_neg values less than (0),
+ partition p_mid values less than (100),
+ partition p_max values less than (2147483647));
+
+# INT_MIN goes to p_neg
+INSERT INTO t_extremes VALUES (-2147483648, 1);
+# -1 also goes to p_neg
+INSERT INTO t_extremes VALUES (-1, 2);
+# 0 is at boundary -- goes to p_mid (0 >= 0, 0 < 100)
+INSERT INTO t_extremes VALUES (0, 3);
+# 99 is in p_mid
+INSERT INTO t_extremes VALUES (99, 4);
+# 100 is in p_max (100 >= 100)
+INSERT INTO t_extremes VALUES (100, 5);
+# Large positive value in p_max
+INSERT INTO t_extremes VALUES (2147483646, 6);
+
+SELECT * FROM t_extremes ORDER BY a;
+
+# PK lookups
+SELECT * FROM t_extremes WHERE a=-2147483648;
+SELECT * FROM t_extremes WHERE a=-1;
+SELECT * FROM t_extremes WHERE a=0;
+SELECT * FROM t_extremes WHERE a=99;
+SELECT * FROM t_extremes WHERE a=100;
+SELECT * FROM t_extremes WHERE a=2147483646;
+
+# INT_MAX (2147483647) is the boundary itself -- should fail (no partition for it)
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_extremes VALUES (2147483647, 7);
+
+DROP TABLE t_extremes;
+
+--echo ########################################
+--echo # A3. Drop all partitions except last
+--echo ########################################
+
+CREATE TABLE t_dropall (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300),
+ partition p3 values less than (1000));
+
+INSERT INTO t_dropall VALUES (50, 1);
+INSERT INTO t_dropall VALUES (150, 2);
+INSERT INTO t_dropall VALUES (250, 3);
+INSERT INTO t_dropall VALUES (500, 4);
+
+--echo Drop first three partitions sequentially
+ALTER TABLE t_dropall ALGORITHM=INPLACE, DROP PARTITION p0;
+ALTER TABLE t_dropall ALGORITHM=INPLACE, DROP PARTITION p1;
+ALTER TABLE t_dropall ALGORITHM=INPLACE, DROP PARTITION p2;
+
+SELECT count(*) AS partition_count FROM information_schema.partitions
+  WHERE table_schema='test' AND table_name='t_dropall';
+
+# Only p3 data survives
+SELECT * FROM t_dropall ORDER BY a;
+
+# Insert into valid range (>= 300, < 1000) works
+INSERT INTO t_dropall VALUES (400, 5);
+SELECT * FROM t_dropall WHERE a=400;
+
+# Insert below lower bound (300) fails
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_dropall VALUES (50, 99);
+
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_dropall VALUES (299, 99);
+
+# Insert at lower bound (300) works -- p3 covers [300, 1000)
+INSERT INTO t_dropall VALUES (300, 6);
+SELECT * FROM t_dropall WHERE a=300;
+
+DROP TABLE t_dropall;
+
+--echo ########################################
+--echo # B1. UNSIGNED INT partition key
+--echo # Boundaries can now use the full Uint32 range (up to 4294967295).
+--echo ########################################
+
+CREATE TABLE t_uint (
+  a int unsigned not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (3000000000),
+ partition p2 values less than (4294967295));
+
+# Zero -- goes to p0
+INSERT INTO t_uint VALUES (0, 1);
+# Just below first boundary
+INSERT INTO t_uint VALUES (99, 2);
+# At first boundary -- goes to p1
+INSERT INTO t_uint VALUES (100, 3);
+# Large unsigned value > INT_MAX in p1 -- tests unsigned comparison
+INSERT INTO t_uint VALUES (2500000000, 4);
+# At second boundary -- goes to p2
+INSERT INTO t_uint VALUES (3000000000, 5);
+# Near UINT_MAX in p2
+INSERT INTO t_uint VALUES (4294967294, 6);
+
+SELECT * FROM t_uint ORDER BY a;
+
+# PK lookups -- including values > INT_MAX
+SELECT * FROM t_uint WHERE a=0;
+SELECT * FROM t_uint WHERE a=99;
+SELECT * FROM t_uint WHERE a=100;
+SELECT * FROM t_uint WHERE a=2500000000;
+SELECT * FROM t_uint WHERE a=3000000000;
+SELECT * FROM t_uint WHERE a=4294967294;
+
+# At UINT_MAX boundary -- should fail (no partition for values >= 4294967295)
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_uint VALUES (4294967295, 7);
+
+DROP TABLE t_uint;
+
+--echo ########################################
+--echo # B2. BIGINT partition key with large values
+--echo # Boundaries can now use the full Int64 range.
+--echo ########################################
+
+CREATE TABLE t_bigint (
+  a bigint not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (5000000000),
+ partition p1 values less than (100000000000),
+ partition p2 values less than (9000000000000000000));
+
+# Negative value -- goes to p0 (< 5000000000)
+INSERT INTO t_bigint VALUES (-9223372036854775808, 1);
+INSERT INTO t_bigint VALUES (-1, 2);
+
+# Small positive value in p0
+INSERT INTO t_bigint VALUES (100, 3);
+
+# Value > INT_MAX but below first boundary -- still in p0
+INSERT INTO t_bigint VALUES (4999999999, 4);
+
+# At first boundary -- goes to p1
+INSERT INTO t_bigint VALUES (5000000000, 5);
+
+# Large value in p1
+INSERT INTO t_bigint VALUES (50000000000, 6);
+
+# At second boundary -- goes to p2
+INSERT INTO t_bigint VALUES (100000000000, 7);
+
+# Very large positive value in p2
+INSERT INTO t_bigint VALUES (8999999999999999999, 8);
+
+SELECT * FROM t_bigint ORDER BY a;
+
+# PK lookups -- including values far beyond Int32 range
+SELECT * FROM t_bigint WHERE a=-9223372036854775808;
+SELECT * FROM t_bigint WHERE a=-1;
+SELECT * FROM t_bigint WHERE a=100;
+SELECT * FROM t_bigint WHERE a=4999999999;
+SELECT * FROM t_bigint WHERE a=5000000000;
+SELECT * FROM t_bigint WHERE a=50000000000;
+SELECT * FROM t_bigint WHERE a=100000000000;
+SELECT * FROM t_bigint WHERE a=8999999999999999999;
+
+# Beyond last boundary -- should fail (no MAXVALUE partition)
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_bigint VALUES (9000000000000000000, 9);
+
+SELECT * FROM t_bigint ORDER BY a;
+
+DROP TABLE t_bigint;
+
+--echo ########################################
+--echo # J1. Explicit partition selection: SELECT ... PARTITION (pN)
+--echo ########################################
+
+CREATE TABLE t_explicit (
+  a int not null,
+  b int not null,
+  c varchar(20),
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300));
+
+INSERT INTO t_explicit VALUES (10, 1, 'in-p0');
+INSERT INTO t_explicit VALUES (50, 2, 'in-p0');
+INSERT INTO t_explicit VALUES (110, 3, 'in-p1');
+INSERT INTO t_explicit VALUES (150, 4, 'in-p1');
+INSERT INTO t_explicit VALUES (210, 5, 'in-p2');
+INSERT INTO t_explicit VALUES (250, 6, 'in-p2');
+
+--echo Select from single partition
+SELECT * FROM t_explicit PARTITION (p0) ORDER BY a;
+SELECT * FROM t_explicit PARTITION (p1) ORDER BY a;
+SELECT * FROM t_explicit PARTITION (p2) ORDER BY a;
+
+--echo Select from multiple partitions
+SELECT * FROM t_explicit PARTITION (p0, p2) ORDER BY a;
+SELECT * FROM t_explicit PARTITION (p1, p2) ORDER BY a;
+SELECT * FROM t_explicit PARTITION (p0, p1, p2) ORDER BY a;
+
+--echo Insert targeting correct partition
+INSERT INTO t_explicit PARTITION (p0) VALUES (20, 7, 'targeted-p0');
+SELECT * FROM t_explicit WHERE a=20;
+
+--echo Insert targeting wrong partition -- should fail
+--error ER_ROW_DOES_NOT_MATCH_GIVEN_PARTITION_SET
+INSERT INTO t_explicit PARTITION (p0) VALUES (150, 8, 'wrong-partition');
+
+--echo UPDATE with explicit partition
+UPDATE t_explicit PARTITION (p1) SET c = 'updated-p1' WHERE a=110;
+SELECT * FROM t_explicit WHERE a=110;
+
+--echo DELETE with explicit partition
+DELETE FROM t_explicit PARTITION (p2) WHERE a=210;
+SELECT * FROM t_explicit PARTITION (p2) ORDER BY a;
+
+SELECT * FROM t_explicit ORDER BY a;
+
+DROP TABLE t_explicit;
+
+--echo ########################################
+--echo # J2. INSERT INTO ... SELECT across range tables
+--echo ########################################
+
+CREATE TABLE t_src (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+ partition p1 values less than (200),
+ partition p2 values less than (300));
+
+CREATE TABLE t_dest (
+  a int not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition q0 values less than (50),
+ partition q1 values less than (150),
+ partition q2 values less than (500));
+
+INSERT INTO t_src VALUES (10, 1);
+INSERT INTO t_src VALUES (50, 2);
+INSERT INTO t_src VALUES (110, 3);
+INSERT INTO t_src VALUES (199, 4);
+INSERT INTO t_src VALUES (250, 5);
+
+--echo Bulk copy from source to destination
+INSERT INTO t_dest SELECT * FROM t_src;
+
+--echo Verify all rows in destination
+SELECT * FROM t_dest ORDER BY a;
+
+--echo Verify partition routing in destination
+# a=10 should be in q0 (10 < 50)
+SELECT * FROM t_dest PARTITION (q0) ORDER BY a;
+# a=50, a=110 should be in q1 (50..149)
+SELECT * FROM t_dest PARTITION (q1) ORDER BY a;
+# a=199, a=250 should be in q2 (150..499)
+SELECT * FROM t_dest PARTITION (q2) ORDER BY a;
+
+--echo PK lookups on destination
+SELECT * FROM t_dest WHERE a=10;
+SELECT * FROM t_dest WHERE a=110;
+SELECT * FROM t_dest WHERE a=250;
+
+DROP TABLE t_src;
+DROP TABLE t_dest;
+
+--echo ########################################
+--echo # B3. BIGINT with ADD/DROP PARTITION
+--echo # Verifies large (>Int32) boundaries survive ALTER
+--echo ########################################
+
+CREATE TABLE t_bigint_alter (
+  a bigint not null,
+  b int not null,
+  primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (10000000000),
+ partition p1 values less than (50000000000),
+ partition p2 values less than (100000000000));
+
+INSERT INTO t_bigint_alter VALUES (5000000000, 1);
+INSERT INTO t_bigint_alter VALUES (30000000000, 2);
+INSERT INTO t_bigint_alter VALUES (80000000000, 3);
+
+--echo ADD PARTITION with large boundary
+ALTER TABLE t_bigint_alter ALGORITHM=INPLACE,
+  ADD PARTITION (PARTITION p3 VALUES LESS THAN (200000000000));
+
+INSERT INTO t_bigint_alter VALUES (150000000000, 4);
+SELECT * FROM t_bigint_alter ORDER BY a;
+
+--echo PK lookups on large values
+SELECT * FROM t_bigint_alter WHERE a=5000000000;
+SELECT * FROM t_bigint_alter WHERE a=150000000000;
+
+--echo DROP PARTITION
+ALTER TABLE t_bigint_alter ALGORITHM=INPLACE, DROP PARTITION p0;
+
+SELECT * FROM t_bigint_alter ORDER BY a;
+
+# Below lower bound should fail
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_bigint_alter VALUES (5000000000, 99);
+
+# Above lower bound works
+INSERT INTO t_bigint_alter VALUES (10000000001, 5);
+SELECT * FROM t_bigint_alter WHERE a=10000000001;
+
+# Beyond all boundaries -- should fail
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t_bigint_alter VALUES (200000000001, 99);
+
+DROP TABLE t_bigint_alter;

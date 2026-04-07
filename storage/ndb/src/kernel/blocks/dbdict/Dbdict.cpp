@@ -6084,6 +6084,12 @@ void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
     switch (btype) {
       case NDB_TYPE_INT:
       case NDB_TYPE_UNSIGNED:
+      case NDB_TYPE_TINYINT:
+      case NDB_TYPE_TINYUNSIGNED:
+      case NDB_TYPE_SMALLINT:
+      case NDB_TYPE_SMALLUNSIGNED:
+      case NDB_TYPE_MEDIUMINT:
+      case NDB_TYPE_MEDIUMUNSIGNED:
       case NDB_TYPE_DATE:
       case NDB_TYPE_TIMESTAMP:
         blen = 4;
@@ -6128,21 +6134,14 @@ void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
     printRangeMap(fids, nParts);
 #endif
     /* Copy boundary values from RangeListData.
-     * RangeListData is stored as int32 values from ha_ndbcluster.
-     * We need to convert to the target boundary type.
+     * RangeListData contains native-width boundary values (4 or 8 bytes
+     * each) as provided by ha_ndbcluster via NDB API.
      */
-    const Int32 *range_src =
-      reinterpret_cast<const Int32 *>(c_tableDesc.RangeListData);
+    const char *range_src =
+      reinterpret_cast<const char *>(c_tableDesc.RangeListData);
     char *bounds = rmap->boundaries();
     for (Uint32 i = 0; i < nParts; i++) {
-      if (blen == 4) {
-        Int32 val = range_src[i];
-        memcpy(bounds + i * blen, &val, sizeof(Int32));
-      } else {
-        /* 8-byte boundary: sign-extend int32 to int64 */
-        Int64 val = (Int64)range_src[i];
-        memcpy(bounds + i * blen, &val, sizeof(Int64));
-      }
+      memcpy(bounds + i * blen, range_src + i * blen, blen);
     }
 
     /* Restore lower bound from persisted DictTabInfo (after DROP PARTITION) */
@@ -9994,35 +9993,27 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
       const Uint32 blen = old_rmap->m_boundary_len;
 
       /* Validate: new RangeListData must have new_cnt boundary values */
-      if (c_tableDesc.RangeListDataLen < (Uint32)(new_cnt * 4)) {
+      if (c_tableDesc.RangeListDataLen < (Uint32)(new_cnt * blen)) {
         jam();
         setError(error, AlterTableRef::UnsupportedChange, __LINE__);
         return;
       }
 
-      const Int32 *range_src =
-        reinterpret_cast<const Int32 *>(c_tableDesc.RangeListData);
+      const char *range_src =
+        reinterpret_cast<const char *>(c_tableDesc.RangeListData);
 
-      /* Validate: last new boundary must be > last old boundary */
+      /* Validate: last new boundary must be > last old boundary.
+       * Use range_compare which handles all supported types.
+       */
       {
         const char *last_old = old_rmap->boundary(old_cnt - 1);
-        Int32 last_new_val = range_src[new_cnt - 1];
-        if (blen == 4) {
-          Int32 old_val;
-          memcpy(&old_val, last_old, sizeof(Int32));
-          if (last_new_val <= old_val) {
-            jam();
-            setError(error, AlterTableRef::UnsupportedChange, __LINE__);
-            return;
-          }
-        } else {
-          Int64 old_val;
-          memcpy(&old_val, last_old, sizeof(Int64));
-          if ((Int64)last_new_val <= old_val) {
-            jam();
-            setError(error, AlterTableRef::UnsupportedChange, __LINE__);
-            return;
-          }
+        const char *last_new = range_src + (new_cnt - 1) * blen;
+        /* range_compare returns negative if bound < key */
+        int cmp = range_compare(last_new, last_old, btype);
+        if (cmp <= 0) {
+          jam();
+          setError(error, AlterTableRef::UnsupportedChange, __LINE__);
+          return;
         }
       }
 
@@ -10071,19 +10062,11 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
       printRangeMap(new_fids, new_cnt);
 #endif
       /* Copy ALL new boundaries from range_src (provided by ha_ndbcluster).
-       * range_src contains the complete new boundary set for all new_cnt
+       * range_src contains native-width boundary values for all new_cnt
        * partitions, correctly ordered.
        */
       char *new_bounds = rmap->boundaries();
-      for (Uint32 i = 0; i < new_cnt; i++) {
-        Int32 val = range_src[i];
-        if (blen == 4) {
-          memcpy(new_bounds + i * blen, &val, sizeof(Int32));
-        } else {
-          Int64 val64 = (Int64)val;
-          memcpy(new_bounds + i * blen, &val64, sizeof(Int64));
-        }
-      }
+      memcpy(new_bounds, range_src, new_cnt * blen);
 
       /* Carry forward lower bound from old range map */
       if (has_lower) {
