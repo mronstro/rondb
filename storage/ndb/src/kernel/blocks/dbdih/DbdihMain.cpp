@@ -16569,6 +16569,22 @@ Dbdih::prepare_add_table(TabRecordPtr tabPtr,
      */
     jam();
     tabPtr.p->tabStatus = TabRecord::TS_CREATING;
+    /* Restore range map pointer for range-partitioned tables.
+     * DBDICT has already rebuilt the Range2FragmentMap (it sent this
+     * DIADDTABREQ). For index tables, use the primary table's map. */
+    if (tabPtr.p->method == TabRecord::RANGE_PARTITION &&
+        tabPtr.p->m_range_ptr == nullptr) {
+      jam();
+      Uint32 rangeTableId = tabPtr.i;
+      if (req->primaryTableId != RNIL) {
+        jam();
+        rangeTableId = req->primaryTableId;
+      }
+      Range2FragmentMap *rmap = c_dict->getRangeMap(rangeTableId);
+      ndbrequire(rmap != nullptr);
+      tabPtr.p->m_range_ptr = rmap;
+      tabPtr.p->m_new_range_ptr = nullptr;
+    }
     NdbMutex_Unlock(&tabPtr.p->theMutex);
     connectPtr.p->m_alter.m_totalfragments = tabPtr.p->totalfragments;
     sendAddFragreq(signal, connectPtr, tabPtr, 0, false);
@@ -20138,20 +20154,6 @@ void Dbdih::readPagesIntoTableLab(Signal *signal, Uint32 tableId) {
   /* ------------- */
   rf.rwfTabPtr.p->tabStorage = (TabRecord::Storage)(readPageWord(&rf));
   rf.rwfTabPtr.p->tabActiveLcpFragments = 0;
-
-  /* Restore range map pointer from DBDICT for range-partitioned tables.
-   * DBDICT has already rebuilt the Range2FragmentMap during its restart
-   * phases (via handleTabInfoInit). DBDIH only persists the method enum
-   * in its sysfile, not the range map pointer.
-   * For index tables, getRangeMap() follows the primaryTableId link
-   * in DBDICT to find the base table's range map. */
-  if (rf.rwfTabPtr.p->method == TabRecord::RANGE_PARTITION) {
-    jam();
-    Range2FragmentMap *rmap = c_dict->getRangeMap(rf.rwfTabPtr.i);
-    ndbrequire(rmap != nullptr);
-    rf.rwfTabPtr.p->m_range_ptr = rmap;
-    rf.rwfTabPtr.p->m_new_range_ptr = nullptr;
-  }
 
   Uint32 noOfFrags = rf.rwfTabPtr.p->totalfragments;
   ndbrequire(noOfFrags > 0);
