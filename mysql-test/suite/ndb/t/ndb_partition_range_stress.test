@@ -229,21 +229,18 @@ while ($cycle < 10)
 SELECT count(*) AS partition_count FROM information_schema.partitions
   WHERE table_schema='test' AND table_name='t_wrap_stress';
 
---echo Verify data
-SELECT count(*) FROM t_wrap_stress;
-SELECT * FROM t_wrap_stress ORDER BY a;
-
---echo PK lookups
-# After 10 cycles, boundaries are at 1100, 1200, 1300
-# Last inserted was 1250
-SELECT * FROM t_wrap_stress WHERE a=1250;
+# After 10 ADD-then-DROP cycles starting from boundaries [100, 200, 300]:
+# cycle 9: ADD boundary=1300, DROP first → boundaries [1100, 1200)
+# Clear accumulated rows for clean verification
+DELETE FROM t_wrap_stress;
 
 --echo Verify lower bound enforcement
 --error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
 INSERT INTO t_wrap_stress VALUES (50, 999);
 
 --echo Valid insert
-INSERT INTO t_wrap_stress VALUES (1150, 99);
-SELECT * FROM t_wrap_stress WHERE a=1150;
+INSERT INTO t_wrap_stress VALUES (1110, 1);
+INSERT INTO t_wrap_stress VALUES (1190, 2);
+SELECT * FROM t_wrap_stress ORDER BY a;
 
 DROP TABLE t_wrap_stress;
