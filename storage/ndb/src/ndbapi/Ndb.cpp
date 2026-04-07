@@ -652,17 +652,16 @@ NdbTransaction *Ndb::startTransaction(const NdbRecord *keyRec,
       return nullptr;
     }
     Uint32 partitionId = impl->getRangePartitionId(keyValue);
-    if (partitionId == RNIL) {
-      /* Key is below the dropped partition range. Route to partition 0
-       * (first surviving partition) — the PK lookup will naturally
-       * return "not found" since the row cannot exist. This avoids
-       * returning an error for SELECT on out-of-range keys. */
-      partitionId = 0;
+    if (partitionId != RNIL) {
+      return startTransaction(impl->m_facade, partitionId);
     }
-    return startTransaction(impl->m_facade, partitionId);
+    /* Key is below the dropped partition range — fall through to
+     * hash-based transaction start. The server-side DBDIH range lookup
+     * will handle routing. For reads, the PK lookup will return "not
+     * found". For writes, DBDIH returns ZUNDEFINED_FRAGMENT_ERROR. */
   }
 
-  // Existing hash path for non-range tables
+  // Hash path: used for non-range tables and out-of-range keys
   int ret;
   Uint32 hash;
   if ((ret = computeHash(&hash, keyRec, keyData, xfrmbuf, xfrmbuflen)) == 0) {
@@ -679,17 +678,16 @@ NdbTransaction *Ndb::startTransaction(const NdbDictionary::Table *table,
 
   // Range tables: extract partition key value, binary search for fragment ID
   if (impl->m_fragmentType == NdbDictionary::Object::RangePartition) {
-    assert(impl->m_noOfDistributionKeys == 1);  // Multi-column range keys not supported
-    const void *keyValue = keyData[0].ptr;  // Single dist key column
+    const void *keyValue = keyData[0].ptr;  // First dist key column
     if (keyValue == nullptr) {
       theError.code = 4316;  // Key is NULL
       return nullptr;
     }
     Uint32 partitionId = impl->getRangePartitionId(keyValue);
-    if (partitionId == RNIL) {
-      partitionId = 0;
+    if (partitionId != RNIL) {
+      return startTransaction(table, partitionId);
     }
-    return startTransaction(table, partitionId);
+    /* Out-of-range key — fall through to hash path */
   }
 
   // Existing hash path for non-range tables

@@ -4896,6 +4896,14 @@ void Dbtc::tckeyreq050Lab(Signal *signal, CacheRecordPtr const cachePtr,
   UintR TerrorIndicator = signal->theData[0];
   jamEntryDebug();
   if (unlikely(TerrorIndicator != 0)) {
+    if (regTcPtr->operation == ZREAD &&
+        signal->theData[1] == 311 &&  // ZUNDEFINED_FRAGMENT_ERROR
+        (localTabptr.p->m_flags & TableRecord::TR_RANGE_PARTITION)) {
+      jam();
+      /* Read on out-of-range key for range-partitioned table:
+       * return "tuple not found" so SELECT returns empty rows. */
+      signal->theData[1] = ZNOT_FOUND;
+    }
     execDIGETNODESREF(signal, apiConnectptr);
     return;
   }
