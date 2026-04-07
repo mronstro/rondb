@@ -22,7 +22,7 @@ call mtr.add_suppression("cluster disconnect An incident event has been written"
 CREATE TABLE t1 (
   a int not null,
   b int not null,
-  c varchar(20),
+  c varchar(40),
   primary key(a, b))
 engine = ndb
 partition by range columns (a)
@@ -208,10 +208,10 @@ INSERT INTO t1 VALUES (199, 1, 'fail');
 SELECT * FROM t1 ORDER BY a, b;
 
 --error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
-INSERT INTO t1 VALUES (100, 1, 'fail-after-restart');
+INSERT INTO t1 VALUES (100, 1, 'should-fail-after-restart');
 
 --error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
-INSERT INTO t1 VALUES (199, 1, 'fail-after-restart');
+INSERT INTO t1 VALUES (199, 1, 'should-fail-after-restart');
 
 --echo # Insert at 200 should work (p2 range)
 INSERT INTO t1 VALUES (200, 99, 'ok-at-200');

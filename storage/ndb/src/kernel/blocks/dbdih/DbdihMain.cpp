@@ -16582,6 +16582,19 @@ Dbdih::prepare_add_table(TabRecordPtr tabPtr,
       }
       Range2FragmentMap *rmap = c_dict->getRangeMap(rangeTableId);
       ndbrequire(rmap != nullptr);
+      /**
+       * Fix up frag_ids: DBDICT builds sequential ids {0,1,...} but after
+       * DROP PARTITION the actual fragment ids start at m_startFid_offset
+       * (read from COPY_TABREQ table pages). DBDICT doesn't know the
+       * offset when rebuilding its range map during restart.
+       */
+      if (tabPtr.p->m_startFid_offset > 0) {
+        jam();
+        Uint16 *fids = rmap->frag_ids();
+        for (Uint32 i = 0; i < rmap->m_cnt; i++) {
+          fids[i] = (Uint16)(i + tabPtr.p->m_startFid_offset);
+        }
+      }
       tabPtr.p->m_range_ptr = rmap;
       tabPtr.p->m_new_range_ptr = nullptr;
     }
@@ -16848,6 +16861,21 @@ void Dbdih::make_new_table_read_and_writeable(TabRecordPtr tabPtr,
     DEB_MEM_ALLOC(("DBDIH: lc_ndbd_pool_free(0x%p), line: %u",
                    old_range_ptr, __LINE__));
     lc_ndbd_pool_free(old_range_ptr);
+  }
+  if (AlterTableReq::getDropFragFlag(connectPtr.p->m_alter.m_changeMask)) {
+    jam();
+    /**
+     * Write updated table pages to disk so that DROP PARTITION changes
+     * (totalfragments, m_startFid_offset, fragment data) persist across
+     * system restart. Without this, a system restart before the next LCP
+     * would restore the pre-DROP state from the old table pages.
+     */
+    tabPtr.p->tabCopyStatus = TabRecord::CS_ALTER_TABLE;
+    Callback cb;
+    cb.m_callbackData = connectPtr.i;
+    cb.m_callbackFunction = safe_cast(&Dbdih::alter_table_writeTable_conf);
+    saveTableFile(signal, connectPtr, tabPtr, TabRecord::CS_ALTER_TABLE, cb);
+    return;
   }
   send_alter_tab_conf(signal, connectPtr);
   ndbrequire(tabPtr.p->connectrec == connectPtr.i);
@@ -20514,7 +20542,7 @@ void Dbdih::startFragment(Signal *signal, Uint32 tableId, Uint32 fragId) {
    * The setup of the node information will have been performed in
    * resetReplicaSr, nothing should have changed since this setup.
    */
-  sendStartFragreq(signal, tabPtr, fragId);
+  sendStartFragreq(signal, tabPtr, fragNoToId(tabPtr.p, fragId));
 
   /**
    * Don't wait for START_FRAGCONF
@@ -21086,6 +21114,43 @@ void Dbdih::execCOPY_TABCONF(Signal *signal) {
     ConnectRecordPtr connectPtr;
     connectPtr.i = tabPtr.p->connectrec;
     ptrCheckGuard(connectPtr, cconnectFileSize, connectRecord);
+
+    /**
+     * Restore range map pointer for range-partitioned tables on the master
+     * during system restart. The master's DIADDTABREQ handler takes an
+     * early-return path to read the table from disk and never reaches the
+     * code that fetches m_range_ptr from DBDICT. DBDICT has already rebuilt
+     * the Range2FragmentMap (it sent the DIADDTABREQ that started this
+     * flow), so we fetch it here before the table becomes active.
+     * primaryTableId was set in prepare_add_table() from the DIADDTABREQ
+     * signal before the disk read.
+     */
+    if (tabPtr.p->method == TabRecord::RANGE_PARTITION &&
+        tabPtr.p->m_range_ptr == nullptr) {
+      jam();
+      Uint32 rangeTableId = tabPtr.i;
+      if (tabPtr.p->primaryTableId != RNIL) {
+        jam();
+        rangeTableId = tabPtr.p->primaryTableId;
+      }
+      Range2FragmentMap *rmap = c_dict->getRangeMap(rangeTableId);
+      ndbrequire(rmap != nullptr);
+      /**
+       * Fix up frag_ids: DBDICT builds sequential ids {0,1,...} but after
+       * DROP PARTITION the actual fragment ids start at m_startFid_offset
+       * (read from DBDIH's own table pages on disk). DBDICT doesn't know
+       * the offset when rebuilding its range map during restart.
+       */
+      if (tabPtr.p->m_startFid_offset > 0) {
+        jam();
+        Uint16 *fids = rmap->frag_ids();
+        for (Uint32 i = 0; i < rmap->m_cnt; i++) {
+          fids[i] = (Uint16)(i + tabPtr.p->m_startFid_offset);
+        }
+      }
+      tabPtr.p->m_range_ptr = rmap;
+      tabPtr.p->m_new_range_ptr = nullptr;
+    }
 
     /**
      * No need to protect this as it happens during recovery when DBTC isn't

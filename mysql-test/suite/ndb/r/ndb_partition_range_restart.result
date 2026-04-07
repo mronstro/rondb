@@ -4,7 +4,7 @@
 CREATE TABLE t1 (
 a int not null,
 b int not null,
-c varchar(20),
+c varchar(40),
 primary key(a, b))
 engine = ndb
 partition by range columns (a)
@@ -228,9 +228,9 @@ a	b	c
 250	2	p2-row2
 500	1	p3-row1
 900	2	p3-row2
-INSERT INTO t1 VALUES (100, 1, 'fail-after-restart');
+INSERT INTO t1 VALUES (100, 1, 'should-fail-after-restart');
 Got one of the listed errors
-INSERT INTO t1 VALUES (199, 1, 'fail-after-restart');
+INSERT INTO t1 VALUES (199, 1, 'should-fail-after-restart');
 Got one of the listed errors
 # Insert at 200 should work (p2 range)
 INSERT INTO t1 VALUES (200, 99, 'ok-at-200');
