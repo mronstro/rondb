@@ -71,9 +71,11 @@ SELECT * FROM t_oidx WHERE a=120;
 DROP TABLE t_oidx;
 
 --echo ########################################
---echo # D2. Unique index + DROP PARTITION
+--echo # D2. Unique index not supported on range-partitioned tables
+--echo # (NDB rejects unique indexes on RangePartition tables)
 --echo ########################################
 
+--error ER_CANT_CREATE_TABLE
 CREATE TABLE t_uidx (
   a int not null,
   b int not null,
@@ -82,48 +84,7 @@ CREATE TABLE t_uidx (
 engine = ndb
 partition by range columns (a)
 (partition p0 values less than (100),
- partition p1 values less than (200),
- partition p2 values less than (300),
- partition p3 values less than (1000));
-
-INSERT INTO t_uidx VALUES (10, 1000);
-INSERT INTO t_uidx VALUES (50, 2000);
-INSERT INTO t_uidx VALUES (110, 3000);
-INSERT INTO t_uidx VALUES (150, 4000);
-INSERT INTO t_uidx VALUES (210, 5000);
-INSERT INTO t_uidx VALUES (500, 6000);
-
---echo Verify unique constraint before DROP
---error ER_DUP_ENTRY
-INSERT INTO t_uidx VALUES (999, 3000);
-
---echo DROP first partition
-ALTER TABLE t_uidx ALGORITHM=INPLACE, DROP PARTITION p0;
-
---echo Verify unique constraint on surviving data
---error ER_DUP_ENTRY
-INSERT INTO t_uidx VALUES (999, 3000);
-
---error ER_DUP_ENTRY
-INSERT INTO t_uidx VALUES (888, 5000);
-
---echo b=1000 was in dropped partition -- should now be available
-INSERT INTO t_uidx VALUES (777, 1000);
-SELECT * FROM t_uidx WHERE b=1000;
-
---echo b=2000 was in dropped partition -- should now be available
-INSERT INTO t_uidx VALUES (888, 2000);
-SELECT * FROM t_uidx WHERE b=2000;
-
---echo Verify all data via unique index lookups
-SELECT * FROM t_uidx WHERE b=3000;
-SELECT * FROM t_uidx WHERE b=4000;
-SELECT * FROM t_uidx WHERE b=5000;
-SELECT * FROM t_uidx WHERE b=6000;
-
-SELECT * FROM t_uidx ORDER BY a;
-
-DROP TABLE t_uidx;
+ partition p1 values less than (200));
 
 --echo ########################################
 --echo # D3. CREATE INDEX after DROP PARTITION
