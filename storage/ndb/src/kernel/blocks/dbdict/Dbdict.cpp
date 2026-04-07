@@ -1123,6 +1123,12 @@ void Dbdict::packTableIntoPages(SimpleProperties::Writer &w,
     w.add(DictTabInfo::RangeLowerBound,
           tablePtr.p->m_range_ptr->lower_bound(), blen);
   }
+  /* Persist fragment ID offset so the NDB API can convert partition
+   * index to real fragment ID for transaction hinting. */
+  {
+    Uint32 startFidOffset = c_dih->getStartFidOffset(tablePtr.p->tableId);
+    w.add(DictTabInfo::RangeStartFidOffset, startFidOffset);
+  }
 
   D("packTableIntoPages: tableId: "
     << tablePtr.p->tableId << " tablePtr.i = " << tablePtr.i

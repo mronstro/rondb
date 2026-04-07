@@ -962,6 +962,7 @@ void NdbTableImpl::init() {
   m_range_boundary_type = 0;
   m_range_lower_bound_len = 0;
   memset(m_range_lower_bound, 0, sizeof(m_range_lower_bound));
+  m_range_start_fid_offset = 0;
   m_fragmentType = NdbDictionary::Object::HashMapPartition;
   m_hashValueMask = 0;
   m_hashpointerValue = 0;
@@ -1245,6 +1246,7 @@ int NdbTableImpl::assign(const NdbTableImpl &org) {
   m_range_lower_bound_len = org.m_range_lower_bound_len;
   memcpy(m_range_lower_bound, org.m_range_lower_bound,
          sizeof(m_range_lower_bound));
+  m_range_start_fid_offset = org.m_range_start_fid_offset;
 
   m_fragmentType = org.m_fragmentType;
   if (m_fragmentType == NdbDictionary::Object::HashMapPartition) {
@@ -1827,7 +1829,9 @@ Uint32 NdbTableImpl::getRangePartitionId(const void *keyValue) const {
   if (lo >= cnt) {
     return RNIL;
   }
-  return lo;  // Fragment ID = partition index (sequential assignment)
+  // Convert partition index to actual fragment ID using the offset.
+  // After DROP PARTITION, fragment IDs don't start at 0.
+  return (lo + m_range_start_fid_offset) & 0xFFFF;
 }
 
 Uint32
@@ -3901,6 +3905,7 @@ NdbDictInterface::parseTableInfo(NdbTableImpl ** ret,
     memcpy(impl->m_range_lower_bound, tableDesc->RangeLowerBound,
            tableDesc->RangeLowerBoundLen);
   }
+  impl->m_range_start_fid_offset = tableDesc->RangeStartFidOffset;
 
   {
     /**
@@ -4881,6 +4886,7 @@ int NdbDictInterface::serializeTableDesc(NdbTableImpl &impl,
     memcpy(tmpTab->RangeLowerBound, impl.m_range_lower_bound,
            impl.m_range_lower_bound_len);
   }
+  tmpTab->RangeStartFidOffset = impl.m_range_start_fid_offset;
 
   tmpTab->PartitionBalance = (Uint32)impl.m_partitionBalance;
   tmpTab->FragmentCount = impl.m_fragmentCount;

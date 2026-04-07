@@ -176,6 +176,7 @@ class DictTabInfo {
     RangeBoundaryType = 166,
     RangeLowerBoundLen = 167,
     RangeLowerBound = 168,
+    RangeStartFidOffset = 169,
 
     TableEnd           = 999,
     
@@ -409,6 +410,7 @@ class DictTabInfo {
     Uint32 RangeBoundaryType;
     Uint32 RangeLowerBoundLen;
     Uint32 RangeLowerBound[2];  // up to 8 bytes (BIGINT/DATETIME2)
+    Uint32 RangeStartFidOffset; // fragment ID offset after DROP PARTITION
 
     Table() {}
     void init();
