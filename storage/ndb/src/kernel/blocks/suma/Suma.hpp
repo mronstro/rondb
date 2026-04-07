@@ -204,6 +204,7 @@ class Suma : public SimulatedBlock {
           cerrorInsert(s.cerrorInsert)
 #endif
     {
+      m_startFid_offset = 0;
     }
 
     void release();

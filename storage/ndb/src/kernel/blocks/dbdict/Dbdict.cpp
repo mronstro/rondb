@@ -144,9 +144,9 @@
 //#define DEBUG_QUOTAS 1
 //#define DEBUG_RESTART 1
 //#define DEBUG_META 1
-#define DEBUG_RANGE 1
-#define DEBUG_RANGE_MAP 1
-#define DEBUG_FRAGID 1
+//#define DEBUG_RANGE 1
+//#define DEBUG_RANGE_MAP 1
+//#define DEBUG_FRAGID 1
 #endif
 
 #ifdef DEBUG_FRAGID

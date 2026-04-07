@@ -16526,17 +16526,8 @@ enum_alter_inplace_result ha_ndbcluster::check_inplace_alter_supported(
 
       /* For range-partitioned tables: set updated range boundaries */
       if (old_tab->getFragmentType() == NDBTAB::RangePartition) {
-        const uint parts = part_info->num_parts;
-        std::unique_ptr<int32[]> range_data(new (std::nothrow) int32[parts]);
-        if (!range_data) {
-          my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR),
-                   parts * sizeof(int32));
+        if (ndb_set_range_boundaries(part_info, new_tab, old_tab))
           return HA_ALTER_ERROR;
-        }
-        if (ndb_extract_range_boundaries(part_info, range_data.get(), parts))
-          return HA_ALTER_ERROR;
-        new_tab.setRangeListData(range_data.get(), parts);
-        new_tab.setRangeBoundaryType(old_tab->getRangeBoundaryType());
       }
     } else if (alter_flags & Alter_inplace_info::DROP_PARTITION) {
       /* DROP PARTITION only supported for range-partitioned tables */
@@ -16576,17 +16567,8 @@ enum_alter_inplace_result ha_ndbcluster::check_inplace_alter_supported(
           NdbDictionary::Object::PartitionBalance_Specific);
 
       /* Set updated range boundaries (without dropped partitions) */
-      const uint parts = part_info->num_parts;
-      std::unique_ptr<int32[]> range_data(new (std::nothrow) int32[parts]);
-      if (!range_data) {
-        my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR),
-                 parts * sizeof(int32));
+      if (ndb_set_range_boundaries(part_info, new_tab, old_tab))
         return HA_ALTER_ERROR;
-      }
-      if (ndb_extract_range_boundaries(part_info, range_data.get(), parts))
-        return HA_ALTER_ERROR;
-      new_tab.setRangeListData(range_data.get(), parts);
-      new_tab.setRangeBoundaryType(old_tab->getRangeBoundaryType());
     }
 
     if (comment_changed) {
@@ -17166,17 +17148,8 @@ bool ha_ndbcluster::prepare_inplace_alter_table(
 
       /* For range tables: set updated range boundaries */
       if (old_tab->getFragmentType() == NDBTAB::RangePartition) {
-        const uint parts = part_info->num_parts;
-        std::unique_ptr<int32[]> range_data(new (std::nothrow) int32[parts]);
-        if (!range_data) {
-          my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR),
-                   parts * sizeof(int32));
+        if (ndb_set_range_boundaries(part_info, *new_tab, old_tab))
           goto abort;
-        }
-        if (ndb_extract_range_boundaries(part_info, range_data.get(), parts))
-          goto abort;
-        new_tab->setRangeListData(range_data.get(), parts);
-        new_tab->setRangeBoundaryType(old_tab->getRangeBoundaryType());
       }
     } else if (max_rows_changed) {
       ulonglong rows = create_info->max_rows;

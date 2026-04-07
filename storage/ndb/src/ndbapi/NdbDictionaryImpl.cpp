@@ -1776,7 +1776,7 @@ Uint32 NdbTableImpl::getRangePartitionId(const void *keyValue) const {
         cmp = 0;
     }
     if (cmp > 0) {
-      return 0;  // Below lower bound — data node will reject
+      return RNIL;  // Below lower bound — no matching partition
     }
   }
 
@@ -1826,7 +1826,10 @@ Uint32 NdbTableImpl::getRangePartitionId(const void *keyValue) const {
       hi = mid;
   }
   // lo = first boundary > key = the partition index
-  if (lo >= cnt) lo = cnt - 1;  // Safety: last partition is MAXVALUE
+  // If lo == cnt, key exceeds all boundaries (no MAXVALUE partition)
+  if (lo >= cnt) {
+    return RNIL;
+  }
   return lo;  // Fragment ID = partition index (sequential assignment)
 }
 

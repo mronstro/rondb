@@ -28,6 +28,7 @@
 
 #include "sql/partition_info.h"
 #include "my_base.h"
+#include "storage/ndb/include/ndbapi/NdbDictionary.hpp"
 
 /**
   Extract range boundary values from partition_info into an int32 array.
@@ -42,5 +43,21 @@
 */
 int ndb_extract_range_boundaries(const partition_info *part_info,
                                  int32 *range_data, uint parts);
+
+/**
+  Extract range boundaries from partition_info and apply them to an
+  NdbDictionary::Table.  Used during ALTER TABLE ADD/DROP PARTITION
+  to update the range map on the altered table definition.
+
+  @param part_info   Partition info from altered_table
+  @param tab         NdbDictionary::Table to update (setRangeListData +
+                     setRangeBoundaryType)
+  @param old_tab     Original table (boundary type is preserved from here)
+
+  @return 0 on success, non-zero on error (my_error already called)
+*/
+int ndb_set_range_boundaries(const partition_info *part_info,
+                             NdbDictionary::Table &tab,
+                             const NdbDictionary::Table *old_tab);
 
 #endif  // HA_NDBCLUSTER_RANGE_H

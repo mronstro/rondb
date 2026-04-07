@@ -640,18 +640,22 @@ NdbTransaction *Ndb::startTransaction(const NdbRecord *keyRec,
 
   // Range tables: extract partition key value, binary search for fragment ID
   if (impl->m_fragmentType == NdbDictionary::Object::RangePartition) {
+    assert(keyRec->distkey_index_length == 1);  // Multi-column range keys not supported
     const void *keyValue = nullptr;
-    for (Uint32 i = 0; i < keyRec->distkey_index_length; i++) {
+    if (keyRec->distkey_index_length >= 1) {
       const NdbRecord::Attr &attr =
-          keyRec->columns[keyRec->distkey_indexes[i]];
+          keyRec->columns[keyRec->distkey_indexes[0]];
       keyValue = keyData + attr.offset;
-      break;  // Single partition key column
     }
     if (keyValue == nullptr) {
       theError.code = 4316;  // Key is NULL
       return nullptr;
     }
     Uint32 partitionId = impl->getRangePartitionId(keyValue);
+    if (partitionId == RNIL) {
+      theError.code = 4574;  // Key out of range
+      return nullptr;
+    }
     return startTransaction(impl->m_facade, partitionId);
   }
 
@@ -672,12 +676,17 @@ NdbTransaction *Ndb::startTransaction(const NdbDictionary::Table *table,
 
   // Range tables: extract partition key value, binary search for fragment ID
   if (impl->m_fragmentType == NdbDictionary::Object::RangePartition) {
-    const void *keyValue = keyData[0].ptr;  // First dist key column
+    assert(impl->m_noOfDistributionKeys == 1);  // Multi-column range keys not supported
+    const void *keyValue = keyData[0].ptr;  // Single dist key column
     if (keyValue == nullptr) {
       theError.code = 4316;  // Key is NULL
       return nullptr;
     }
     Uint32 partitionId = impl->getRangePartitionId(keyValue);
+    if (partitionId == RNIL) {
+      theError.code = 4574;  // Key out of range
+      return nullptr;
+    }
     return startTransaction(table, partitionId);
   }
 

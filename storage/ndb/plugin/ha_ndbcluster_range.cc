@@ -25,6 +25,8 @@
 
 #include "storage/ndb/plugin/ha_ndbcluster_range.h"
 
+#include <memory>
+
 #include "my_byteorder.h"
 #include "mysqld_error.h"
 #include "sql/item.h"
@@ -72,5 +74,21 @@ int ndb_extract_range_boundaries(const partition_info *part_info,
       range_data[i] = static_cast<int32>(range_val);
     }
   }
+  return 0;
+}
+
+int ndb_set_range_boundaries(const partition_info *part_info,
+                             NdbDictionary::Table &tab,
+                             const NdbDictionary::Table *old_tab) {
+  const uint parts = part_info->num_parts;
+  std::unique_ptr<int32[]> range_data(new (std::nothrow) int32[parts]);
+  if (!range_data) {
+    my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR), parts * sizeof(int32));
+    return 1;
+  }
+  if (ndb_extract_range_boundaries(part_info, range_data.get(), parts))
+    return 1;
+  tab.setRangeListData(range_data.get(), parts);
+  tab.setRangeBoundaryType(old_tab->getRangeBoundaryType());
   return 0;
 }

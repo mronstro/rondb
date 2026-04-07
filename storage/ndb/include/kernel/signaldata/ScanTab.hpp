@@ -201,7 +201,7 @@ class ScanTabReq {
  e = TTL only expired      - 1  Bit 4
  r = Four receiver/part    - 1  Bit 2
  u = User Id flag          - 1  Bit 5
- F = Partition range flag  - 1  Bit 1
+ F = Partition range flag  - 1  Bit 0
 
            1111111111222222222233
  01234567890123456789012345678901

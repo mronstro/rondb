@@ -124,7 +124,8 @@ static const Uint32 WaitTableStateChangeMillis = 1;
 //#define DEBUG_ACTIVE_NODES 1
 //#define DEBUG_NODE_STATUS 1
 //#define DEBUG_USED_LOG_PARTS 1
-#define DEBUG_RANGE_PART 1
+//#define DEBUG_RANGE_PART 1
+//#define DEBUG_MEM_ALLOC 1
 #endif
 
 #ifdef DEBUG_RANGE_PART
@@ -133,7 +134,6 @@ static const Uint32 WaitTableStateChangeMillis = 1;
 #define DEB_RANGE_PART(arglist) do { } while (0)
 #endif
 
-#define DEBUG_MEM_ALLOC 1
 #ifdef DEBUG_MEM_ALLOC
 #define DEB_MEM_ALLOC(arglist) do { g_eventLogger->info arglist ; } while (0)
 #else
@@ -14745,6 +14745,19 @@ void Dbdih::releaseTable(TabRecordPtr tabPtr) {
     jam();
     if (tabPtr.p->primaryTableId == RNIL) {
       jam();
+#ifdef VM_TRACE
+      /* Verify no index tables still reference this range map. */
+      {
+        const Range2FragmentMap *rmap = tabPtr.p->m_range_ptr;
+        for (Uint32 i = 0; i < ctabFileSize; i++) {
+          if (i == tabPtr.i) continue;
+          if (tabRecord[i].primaryTableId == tabPtr.i &&
+              tabRecord[i].m_range_ptr == rmap) {
+            ndbassert(false);  // Index still references base table's range map
+          }
+        }
+      }
+#endif
       DEB_MEM_ALLOC(("DBDIH: lc_ndbd_pool_free(0x%p), line: %u",
                      tabPtr.p->m_range_ptr, __LINE__));
       lc_ndbd_pool_free(tabPtr.p->m_range_ptr);
@@ -16078,7 +16091,15 @@ loop:
   } else if (tabPtr.p->method == TabRecord::RANGE_PARTITION) {
     thrjam(jambuf);
     const Range2FragmentMap *range_map = tabPtr.p->m_range_ptr;
-    ndbassert(range_map != nullptr);
+    ndbrequire(range_map != nullptr);
+#ifdef VM_TRACE
+    {
+      const Uint32 expectedTableId =
+        (tabPtr.p->primaryTableId != RNIL) ? tabPtr.p->primaryTableId
+                                           : tabPtr.i;
+      ndbassert(range_map->m_object_id == expectedTableId);
+    }
+#endif
     const char *rangeKey =
       reinterpret_cast<const char *>(req->rangeKeyPtr);
     Uint32 rangeKeyLen = req->rangeKeyLen;
