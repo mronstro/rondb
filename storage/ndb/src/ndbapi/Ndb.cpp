@@ -638,27 +638,27 @@ NdbTransaction *Ndb::startTransaction(const NdbRecord *keyRec,
                                       Uint32 xfrmbuflen) {
   const NdbTableImpl *impl = keyRec->table;
 
-  // Range tables: extract partition key value, binary search for fragment ID
+  // Range tables: client-side partition routing for transaction hinting.
+  // Falls back to unhinted startTransaction if mapping fails (e.g. key
+  // out of range after DROP PARTITION, or stale cached offset).
   if (impl->m_fragmentType == NdbDictionary::Object::RangePartition) {
-    assert(keyRec->distkey_index_length == 1);  // Multi-column range keys not supported
     const void *keyValue = nullptr;
     if (keyRec->distkey_index_length >= 1) {
       const NdbRecord::Attr &attr =
           keyRec->columns[keyRec->distkey_indexes[0]];
       keyValue = keyData + attr.offset;
     }
-    if (keyValue == nullptr) {
-      theError.code = 4316;  // Key is NULL
-      return nullptr;
+    if (keyValue != nullptr) {
+      Uint32 partitionId = impl->getRangePartitionId(keyValue);
+      if (partitionId != RNIL) {
+        NdbTransaction *t = startTransaction(impl->m_facade, partitionId);
+        if (t != nullptr) {
+          return t;
+        }
+        // Mapping produced invalid partition — fall back below
+        theError.code = 0;
+      }
     }
-    Uint32 partitionId = impl->getRangePartitionId(keyValue);
-    if (partitionId != RNIL) {
-      return startTransaction(impl->m_facade, partitionId);
-    }
-    /* Key is below the dropped partition range — start transaction
-     * without partition hint. Server-side DBDIH range lookup will
-     * handle routing and return "not found" for reads or error for
-     * writes. */
     return startTransaction(impl->m_facade);
   }
 
@@ -677,18 +677,19 @@ NdbTransaction *Ndb::startTransaction(const NdbDictionary::Table *table,
                                       void *xfrmbuf, Uint32 xfrmbuflen) {
   const NdbTableImpl *impl = &NdbTableImpl::getImpl(*table);
 
-  // Range tables: extract partition key value, binary search for fragment ID
+  // Range tables: same pattern — try hinted, fall back to unhinted
   if (impl->m_fragmentType == NdbDictionary::Object::RangePartition) {
-    const void *keyValue = keyData[0].ptr;  // First dist key column
-    if (keyValue == nullptr) {
-      theError.code = 4316;  // Key is NULL
-      return nullptr;
+    const void *keyValue = keyData[0].ptr;
+    if (keyValue != nullptr) {
+      Uint32 partitionId = impl->getRangePartitionId(keyValue);
+      if (partitionId != RNIL) {
+        NdbTransaction *t = startTransaction(table, partitionId);
+        if (t != nullptr) {
+          return t;
+        }
+        theError.code = 0;
+      }
     }
-    Uint32 partitionId = impl->getRangePartitionId(keyValue);
-    if (partitionId != RNIL) {
-      return startTransaction(table, partitionId);
-    }
-    /* Out-of-range key — start without partition hint */
     return startTransaction(table);
   }
 
