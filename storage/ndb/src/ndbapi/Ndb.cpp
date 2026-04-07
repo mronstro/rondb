@@ -653,8 +653,11 @@ NdbTransaction *Ndb::startTransaction(const NdbRecord *keyRec,
     }
     Uint32 partitionId = impl->getRangePartitionId(keyValue);
     if (partitionId == RNIL) {
-      theError.code = 4574;  // Key out of range
-      return nullptr;
+      /* Key is below the dropped partition range. Route to partition 0
+       * (first surviving partition) — the PK lookup will naturally
+       * return "not found" since the row cannot exist. This avoids
+       * returning an error for SELECT on out-of-range keys. */
+      partitionId = 0;
     }
     return startTransaction(impl->m_facade, partitionId);
   }
@@ -684,8 +687,7 @@ NdbTransaction *Ndb::startTransaction(const NdbDictionary::Table *table,
     }
     Uint32 partitionId = impl->getRangePartitionId(keyValue);
     if (partitionId == RNIL) {
-      theError.code = 4574;  // Key out of range
-      return nullptr;
+      partitionId = 0;
     }
     return startTransaction(table, partitionId);
   }
