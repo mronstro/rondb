@@ -72,12 +72,6 @@ void Dbtux::execTUX_MAINT_REQ(Signal *signal) {
   // get the fragment
   FragPtr fragPtr;
   findFrag(jamBuffer(), indexPtr.i, fragId, fragPtr);
-  if (unlikely(fragPtr.i == RNIL64)) {
-    g_eventLogger->info(
-        "(%u) DBTUX: TUX_MAINT_REQ frag not found: indexId=%u fragId=%u "
-        "tableId=%u opCode=%u",
-        instance(), indexPtr.i, fragId, req->tableId, opCode);
-  }
   ndbrequire(fragPtr.i != RNIL64);
   Frag& frag = *fragPtr.p;
   prepare_build_ctx(c_ctx, fragPtr);

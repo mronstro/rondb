@@ -12721,8 +12721,7 @@ bool Dbdih::setStartFidOffset(Uint32 tableId,
      * Test fragId Uint16 wrap-around: force startFid_offset so that
      * fragment IDs start near 65535 and wrap to 0 on ADD PARTITION.
      */
-    g_eventLogger->info("DBDIH: tab: %u, set startFid_offset to 65532",
-                        tabPtr.i);
+    DEB_RANGE_PART(("tab: %u, set startFid_offset to 65532", tabPtr.i));
     Uint32 start_offset = 65532;
     tabPtr.p->m_startFid_offset = start_offset;
     if (rmap != nullptr) {
@@ -16136,27 +16135,13 @@ loop:
 
     if (unlikely(fragId == RNIL)) {
       thrjam(jambuf);
-      g_eventLogger->info(
-          "DBDIH: range_lookup RNIL: tableId=%u rangeKeyLen=%u "
-          "m_cnt=%u m_boundary_type=%u m_boundary_len=%u "
-          "m_has_lower_bound=%u m_startFid_offset=%u",
-          tabPtr.i, rangeKeyLen,
-          range_map->m_cnt, range_map->m_boundary_type,
-          range_map->m_boundary_len,
-          range_map->m_has_lower_bound,
-          tabPtr.p->m_startFid_offset);
-      if (rangeKeyLen >= 4) {
-        Int32 keyVal;
-        memcpy(&keyVal, rangeKey, sizeof(keyVal));
-        g_eventLogger->info("DBDIH: range key value (Int32): %d", keyVal);
-      }
-      for (Uint32 dbg_i = 0; dbg_i < range_map->m_cnt; dbg_i++) {
-        Int32 bval;
-        memcpy(&bval, range_map->boundary(dbg_i),
-               range_map->m_boundary_len < 4 ? range_map->m_boundary_len : 4);
-        g_eventLogger->info("DBDIH: boundary[%u] = %d, fragId = %u",
-                            dbg_i, bval, range_map->frag_ids()[dbg_i]);
-      }
+      DEB_RANGE_PART(("range_lookup RNIL: tab=%u keyLen=%u cnt=%u "
+                      "btype=%u blen=%u lower=%u offset=%u",
+                      tabPtr.i, rangeKeyLen,
+                      range_map->m_cnt, range_map->m_boundary_type,
+                      range_map->m_boundary_len,
+                      range_map->m_has_lower_bound,
+                      tabPtr.p->m_startFid_offset));
       conf->zero = 1;  // Indicate error
       signal->theData[1] = ZUNDEFINED_FRAGMENT_ERROR;
       goto error;
@@ -16852,6 +16837,7 @@ void Dbdih::make_new_table_read_and_writeable(TabRecordPtr tabPtr,
     old_range_ptr = tabPtr.p->m_range_ptr;
     tabPtr.p->m_range_ptr = tabPtr.p->m_new_range_ptr;
     tabPtr.p->m_new_range_ptr = nullptr;
+#ifdef DEBUG_RANGE_PART
     DEB_RANGE_PART(("make_new_rw: tab %u swap range_ptr=%p (cnt=%u) "
                     "old=%p changeMask=0x%x",
                     tabPtr.i, tabPtr.p->m_range_ptr,
@@ -16868,6 +16854,7 @@ void Dbdih::make_new_table_read_and_writeable(TabRecordPtr tabPtr,
                         dbg, bval, tabPtr.p->m_range_ptr->frag_ids()[dbg]));
       }
     }
+#endif
   }
   if (AlterTableReq::getReorgFragFlag(connectPtr.p->m_alter.m_changeMask)) {
     jam();
