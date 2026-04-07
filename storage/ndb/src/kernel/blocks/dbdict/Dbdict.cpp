@@ -13548,6 +13548,14 @@ void Dbdict::createIndex_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
     }
   }
 
+  // unique hash index not supported on range-partitioned tables
+  if (impl_req->indexType == DictTabInfo::UniqueHashIndex &&
+      tablePtr.p->fragmentType == DictTabInfo::RangePartition) {
+    jam();
+    setError(error, CreateIndxRef::InvalidIndexType, __LINE__);
+    return;
+  }
+
   // check that the temporary status of index is compatible with table
   {
     if (!(bits & TableRecord::TR_Temporary) &&

@@ -10610,6 +10610,14 @@ int ha_ndbcluster::create_index(THD *thd, const char *name, const KEY *key_info,
   DBUG_PRINT("enter", ("name: %s", name));
 
   if (idx_type == UNIQUE_ORDERED_INDEX || idx_type == UNIQUE_INDEX) {
+    if (ndbtab->getFragmentType() ==
+        NdbDictionary::Object::RangePartition) {
+      push_warning_printf(
+          thd, Sql_condition::SL_WARNING, ER_ILLEGAL_HA_CREATE_OPTION,
+          "Unique indexes are not supported on range-partitioned "
+          "NDB tables");
+      return HA_ERR_UNSUPPORTED;
+    }
     strxnmov(unique_name, FN_LEN, name, unique_suffix, NullS);
     DBUG_PRINT("info", ("unique_name: '%s'", unique_name));
   }
