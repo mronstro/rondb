@@ -655,13 +655,14 @@ NdbTransaction *Ndb::startTransaction(const NdbRecord *keyRec,
     if (partitionId != RNIL) {
       return startTransaction(impl->m_facade, partitionId);
     }
-    /* Key is below the dropped partition range — fall through to
-     * hash-based transaction start. The server-side DBDIH range lookup
-     * will handle routing. For reads, the PK lookup will return "not
-     * found". For writes, DBDIH returns ZUNDEFINED_FRAGMENT_ERROR. */
+    /* Key is below the dropped partition range — start transaction
+     * without partition hint. Server-side DBDIH range lookup will
+     * handle routing and return "not found" for reads or error for
+     * writes. */
+    return startTransaction(impl->m_facade);
   }
 
-  // Hash path: used for non-range tables and out-of-range keys
+  // Existing hash path for non-range tables
   int ret;
   Uint32 hash;
   if ((ret = computeHash(&hash, keyRec, keyData, xfrmbuf, xfrmbuflen)) == 0) {
@@ -687,7 +688,8 @@ NdbTransaction *Ndb::startTransaction(const NdbDictionary::Table *table,
     if (partitionId != RNIL) {
       return startTransaction(table, partitionId);
     }
-    /* Out-of-range key — fall through to hash path */
+    /* Out-of-range key — start without partition hint */
+    return startTransaction(table);
   }
 
   // Existing hash path for non-range tables
