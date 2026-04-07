@@ -15000,12 +15000,6 @@ void Dbdih::execALTER_TAB_REQ(Signal *signal) {
       /* For DROP PARTITION: send DROP_FRAG_REQ to LQH to delete data
        * and release the dropped fragment's LQH resources.
        */
-      g_eventLogger->info(
-          "DBDIH: AlterTableComplete: tableId=%u changeMask=0x%x "
-          "dropFragFlag=%u dropFragId=%u",
-          tabPtr.i, connectPtr.p->m_alter.m_changeMask,
-          AlterTableReq::getDropFragFlag(connectPtr.p->m_alter.m_changeMask),
-          connectPtr.p->m_alter.m_drop_frag_id);
       if (AlterTableReq::getDropFragFlag(
               connectPtr.p->m_alter.m_changeMask)) {
         jam();

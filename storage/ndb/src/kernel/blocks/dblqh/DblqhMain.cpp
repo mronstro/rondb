@@ -3980,9 +3980,6 @@ void Dblqh::execTUPFRAGREF(Signal *signal) {
 
 void Dblqh::execDROP_FRAG_REQ(Signal *signal) {
   DropFragReq *req = (DropFragReq *)signal->getDataPtr();
-  g_eventLogger->info(
-      "(%u) DBLQH: execDROP_FRAG_REQ: tableId=%u fragId=%u requestInfo=%u",
-      instance(), req->tableId, req->fragId, req->requestInfo);
   seizeAddfragrec(signal);
   addfragptr.p->m_dropFragReq = *req;
 
@@ -33793,16 +33790,7 @@ void Dblqh::deleteFragrec(Uint32 fragId)
   Uint32 indexFound= RNIL;
   fragptr.i = RNIL64;
   Uint32 num_fragments_in_array = tabptr.p->num_fragments_in_array;
-  g_eventLogger->info(
-      "(%u) DBLQH: deleteFragrec: tableId=%u fragId=%u "
-      "num_fragments_in_array=%u tableType=%u",
-      instance(), tabptr.i, fragId,
-      num_fragments_in_array, tabptr.p->tableType);
   for (Uint32 i = 0; i < num_fragments_in_array; i++) {
-    g_eventLogger->info(
-        "(%u) DBLQH: deleteFragrec: slot[%u] fragid=%u fragrec=0x%llx",
-        instance(), i, tabptr.p->fragid[i],
-        (unsigned long long)tabptr.p->fragrec[i]);
     jam();
     if (tabptr.p->fragid[i] == fragId) {
       fragptr.i = tabptr.p->fragrec[i];

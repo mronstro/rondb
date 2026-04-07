@@ -12155,6 +12155,12 @@ void Dbdict::alterTable_contComplete(Signal *signal, SchemaOpPtr op_ptr) {
     alterTable_toCommitComplete(signal, op_ptr,
                                 AlterTabReq::AlterTableSumaFilter);
     return;
+  } else if (AlterTableReq::getDropFragFlag(impl_req->changeMask)) {
+    jam();
+    D("alterTable_complete getDropFragFlag set");
+    alterTabPtr.p->m_blockNo[0] = DBDIH;
+    alterTable_toCommitComplete(signal, op_ptr);
+    return;
   }
   D("alterTable_complete no flag set");
   sendTransConf(signal, op_ptr);
