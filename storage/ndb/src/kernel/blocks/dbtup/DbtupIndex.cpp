@@ -701,6 +701,12 @@ void Dbtup::buildIndex(Signal *signal, Uint32 buildPtrI) {
     req->indexId = buildPtr.p->m_indexId;
     Uint32 save = buildPtr.p->m_fragNo;
     req->fragId = c_lqh->getNextTupFragid(tablePtr.i, buildPtr.p->m_fragNo);
+    g_eventLogger->info(
+        "(%u) DBTUP: buildIndex: tableId=%u indexId=%u "
+        "fragNo=%u->%u fragId=%u num_fragments=%u",
+        instance(), tablePtr.i, buildPtr.p->m_indexId,
+        save, buildPtr.p->m_fragNo, req->fragId,
+        buildPtr.p->m_num_fragments);
     ndbrequire(save == buildPtr.p->m_fragNo);
     req->pageId = realPageId;
     req->tupVersion = tupVersion;
