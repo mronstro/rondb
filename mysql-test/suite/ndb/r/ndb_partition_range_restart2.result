@@ -1,0 +1,244 @@
+########################################
+# E1. Node restart during ongoing DML
+########################################
+CREATE TABLE t_nr_dml (
+a int not null,
+b int not null,
+c varchar(30),
+primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+partition p1 values less than (200),
+partition p2 values less than (300));
+INSERT INTO t_nr_dml VALUES (10, 1, 'pre-restart');
+INSERT INTO t_nr_dml VALUES (150, 2, 'pre-restart');
+INSERT INTO t_nr_dml VALUES (250, 3, 'pre-restart');
+Verify initial data
+SELECT * FROM t_nr_dml ORDER BY a;
+a	b	c
+10	1	pre-restart
+150	2	pre-restart
+250	3	pre-restart
+Restart node 1
+Data intact after node restart
+SELECT * FROM t_nr_dml ORDER BY a;
+a	b	c
+10	1	pre-restart
+150	2	pre-restart
+250	3	pre-restart
+DML works after restart
+INSERT INTO t_nr_dml VALUES (50, 4, 'after-restart');
+UPDATE t_nr_dml SET c = 'updated' WHERE a=150;
+DELETE FROM t_nr_dml WHERE a=50;
+SELECT * FROM t_nr_dml ORDER BY a;
+a	b	c
+10	1	pre-restart
+150	2	updated
+250	3	pre-restart
+DROP TABLE t_nr_dml;
+########################################
+# E2. System restart after many DROP PARTITIONs
+########################################
+CREATE TABLE t_many_drops (
+a int not null,
+b int not null,
+primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+partition p1 values less than (200),
+partition p2 values less than (300),
+partition p3 values less than (400),
+partition p4 values less than (500),
+partition p5 values less than (600),
+partition p6 values less than (700),
+partition p7 values less than (1000));
+INSERT INTO t_many_drops VALUES (50, 0);
+INSERT INTO t_many_drops VALUES (150, 1);
+INSERT INTO t_many_drops VALUES (250, 2);
+INSERT INTO t_many_drops VALUES (350, 3);
+INSERT INTO t_many_drops VALUES (450, 4);
+INSERT INTO t_many_drops VALUES (550, 5);
+INSERT INTO t_many_drops VALUES (650, 6);
+INSERT INTO t_many_drops VALUES (900, 7);
+Drop 6 partitions sequentially
+ALTER TABLE t_many_drops ALGORITHM=INPLACE, DROP PARTITION p0;
+ALTER TABLE t_many_drops ALGORITHM=INPLACE, DROP PARTITION p1;
+ALTER TABLE t_many_drops ALGORITHM=INPLACE, DROP PARTITION p2;
+ALTER TABLE t_many_drops ALGORITHM=INPLACE, DROP PARTITION p3;
+ALTER TABLE t_many_drops ALGORITHM=INPLACE, DROP PARTITION p4;
+ALTER TABLE t_many_drops ALGORITHM=INPLACE, DROP PARTITION p5;
+Verify only 2 partitions remain
+SELECT count(*) AS partition_count FROM information_schema.partitions
+WHERE table_schema='test' AND table_name='t_many_drops';
+partition_count
+2
+SELECT * FROM t_many_drops ORDER BY a;
+a	b
+650	6
+900	7
+System restart
+Verify after system restart
+SELECT * FROM t_many_drops ORDER BY a;
+a	b
+650	6
+900	7
+Lower bound enforcement (must be >= 600)
+INSERT INTO t_many_drops VALUES (100, 99);
+Got one of the listed errors
+INSERT INTO t_many_drops VALUES (599, 99);
+Got one of the listed errors
+Valid insert at lower bound
+INSERT INTO t_many_drops VALUES (600, 8);
+SELECT * FROM t_many_drops WHERE a=600;
+a	b
+600	8
+ADD PARTITION after restart
+ALTER TABLE t_many_drops ALGORITHM=INPLACE,
+ADD PARTITION (PARTITION p8 VALUES LESS THAN (2000));
+INSERT INTO t_many_drops VALUES (1500, 9);
+SELECT * FROM t_many_drops ORDER BY a;
+a	b
+600	8
+650	6
+900	7
+1500	9
+DROP TABLE t_many_drops;
+########################################
+# G1. Rolling restart with range-partitioned table
+########################################
+CREATE TABLE t_rolling (
+a int not null,
+b int not null,
+c varchar(30),
+primary key(a, b))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+partition p1 values less than (200),
+partition p2 values less than (300),
+partition p3 values less than (1000));
+INSERT INTO t_rolling VALUES (10, 1, 'p0-data');
+INSERT INTO t_rolling VALUES (50, 1, 'p0-data2');
+INSERT INTO t_rolling VALUES (150, 1, 'p1-data');
+INSERT INTO t_rolling VALUES (250, 1, 'p2-data');
+INSERT INTO t_rolling VALUES (500, 1, 'p3-data');
+Verify initial data
+SELECT * FROM t_rolling ORDER BY a, b;
+a	b	c
+10	1	p0-data
+50	1	p0-data2
+150	1	p1-data
+250	1	p2-data
+500	1	p3-data
+Restart node 1
+Verify data after node 1 restart
+SELECT * FROM t_rolling ORDER BY a, b;
+a	b	c
+10	1	p0-data
+50	1	p0-data2
+150	1	p1-data
+250	1	p2-data
+500	1	p3-data
+SELECT * FROM t_rolling WHERE a=10 AND b=1;
+a	b	c
+10	1	p0-data
+SELECT * FROM t_rolling WHERE a=500 AND b=1;
+a	b	c
+500	1	p3-data
+DML between restarts
+INSERT INTO t_rolling VALUES (75, 1, 'between-restarts');
+UPDATE t_rolling SET c = 'updated-p1' WHERE a=150 AND b=1;
+Restart node 2
+Verify data after node 2 restart
+SELECT * FROM t_rolling ORDER BY a, b;
+a	b	c
+10	1	p0-data
+50	1	p0-data2
+75	1	between-restarts
+150	1	updated-p1
+250	1	p2-data
+500	1	p3-data
+SELECT * FROM t_rolling WHERE a=75 AND b=1;
+a	b	c
+75	1	between-restarts
+SELECT * FROM t_rolling WHERE a=150 AND b=1;
+a	b	c
+150	1	updated-p1
+More DML after all restarts
+DELETE FROM t_rolling WHERE a=75 AND b=1;
+INSERT INTO t_rolling VALUES (900, 1, 'after-rolling');
+Final data verification
+SELECT * FROM t_rolling ORDER BY a, b;
+a	b	c
+10	1	p0-data
+50	1	p0-data2
+150	1	updated-p1
+250	1	p2-data
+500	1	p3-data
+900	1	after-rolling
+DROP TABLE t_rolling;
+########################################
+# G2. Rolling restart after DROP PARTITION
+########################################
+CREATE TABLE t_rolling_drop (
+a int not null,
+b int not null,
+primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+partition p1 values less than (200),
+partition p2 values less than (300),
+partition p3 values less than (1000));
+INSERT INTO t_rolling_drop VALUES (10, 1);
+INSERT INTO t_rolling_drop VALUES (150, 2);
+INSERT INTO t_rolling_drop VALUES (250, 3);
+INSERT INTO t_rolling_drop VALUES (500, 4);
+DROP first partition
+ALTER TABLE t_rolling_drop ALGORITHM=INPLACE, DROP PARTITION p0;
+Verify before rolling restart
+SELECT * FROM t_rolling_drop ORDER BY a;
+a	b
+150	2
+250	3
+500	4
+INSERT INTO t_rolling_drop VALUES (50, 99);
+Got one of the listed errors
+Rolling restart node 1
+Verify after node 1 restart
+SELECT * FROM t_rolling_drop ORDER BY a;
+a	b
+150	2
+250	3
+500	4
+INSERT INTO t_rolling_drop VALUES (50, 99);
+Got one of the listed errors
+INSERT INTO t_rolling_drop VALUES (100, 5);
+SELECT * FROM t_rolling_drop WHERE a=100;
+a	b
+100	5
+Rolling restart node 2
+Verify after node 2 restart
+SELECT * FROM t_rolling_drop ORDER BY a;
+a	b
+100	5
+150	2
+250	3
+500	4
+INSERT INTO t_rolling_drop VALUES (50, 99);
+Got one of the listed errors
+SELECT * FROM t_rolling_drop WHERE a=150;
+a	b
+150	2
+SELECT * FROM t_rolling_drop WHERE a=500;
+a	b
+500	4
+DROP TABLE t_rolling_drop;
+########################################
+# H1/H2. Backup/restore of range-partitioned tables
+# TODO: ndb_restore does not yet support RangePartition fragment
+# type. Needs ndb_restore code changes to handle the new
+# DictTabInfo fields (RangeBoundaryType, RangeStartFidOffset, etc.)
+########################################
