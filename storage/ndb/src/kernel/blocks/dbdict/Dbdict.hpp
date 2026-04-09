@@ -292,6 +292,7 @@ class Dbdict : public SimulatedBlock {
       ttlColumnNo = RNIL;
       m_range_ptr = nullptr;
       m_range_boundary_type = 0;
+      m_num_subpartitions = 1;
     }
     static bool isCompatible(Uint32 type)
     { return DictTabInfo::isTable(type) || DictTabInfo::isIndex(type); }
@@ -499,6 +500,7 @@ class Dbdict : public SimulatedBlock {
      */
     Range2FragmentMap *m_range_ptr;  // allocated via lc_ndbd_pool_malloc
     Uint32 m_range_boundary_type;    // NDB type for boundary comparison
+    Uint32 m_num_subpartitions;      // hash subpartitions per range partition
   };
   typedef TransientPool<TableRecord> TableRecord_pool;
   typedef DLFifoList<TableRecord_pool> TableRecord_list;

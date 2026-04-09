@@ -99,6 +99,7 @@ DictTabInfo::TableMapping[] = {
   DTI_MAP_INT(Table, RangeLowerBoundLen, RangeLowerBoundLen),
   DTI_MAP_BIN(Table, RangeLowerBound, RangeLowerBound, 8, RangeLowerBoundLen),
   DTI_MAP_INT(Table, RangeStartFidOffset, RangeStartFidOffset),
+  DTI_MAP_INT(Table, RangeNumSubpartitions, RangeNumSubpartitions),
   DTIBREAK(AttributeName)
 };
 
@@ -225,6 +226,7 @@ void DictTabInfo::Table::init() {
   RangeLowerBoundLen = 0;
   std::memset(RangeLowerBound, 0, sizeof(RangeLowerBound));
   RangeStartFidOffset = 0;
+  RangeNumSubpartitions = 1;
 }
 
 void DictTabInfo::Attribute::init() {

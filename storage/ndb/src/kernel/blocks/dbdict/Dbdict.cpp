@@ -1129,6 +1129,7 @@ void Dbdict::packTableIntoPages(SimpleProperties::Writer &w,
     Uint32 startFidOffset = c_dih->getStartFidOffset(tablePtr.p->tableId);
     w.add(DictTabInfo::RangeStartFidOffset, startFidOffset);
   }
+  w.add(DictTabInfo::RangeNumSubpartitions, tablePtr.p->m_num_subpartitions);
 
   D("packTableIntoPages: tableId: "
     << tablePtr.p->tableId << " tablePtr.i = " << tablePtr.i
@@ -6081,7 +6082,9 @@ void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
      */
     const Uint32 nParts = tablePtr.p->fragmentCount;
     const Uint32 btype = c_tableDesc.RangeBoundaryType;
+    const Uint32 nSubParts = c_tableDesc.RangeNumSubpartitions;
     tabRequire(nParts > 0, CreateTableRef::InvalidFormat);
+    tabRequire(nSubParts >= 1, CreateTableRef::InvalidFormat);
     tabRequire(c_tableDesc.RangeListDataLen > 0,
                CreateTableRef::InvalidFormat);
 
@@ -6113,7 +6116,9 @@ void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
     }
 
     const bool has_lower = (c_tableDesc.RangeLowerBoundLen > 0);
-    Uint32 alloc_sz = Range2FragmentMap::alloc_size(nParts, blen, has_lower);
+    const Uint32 totalFrags = nParts * nSubParts;
+    Uint32 alloc_sz = Range2FragmentMap::alloc_size(nParts, blen,
+                                                    has_lower, nSubParts);
     void *mem = lc_ndbd_pool_malloc(alloc_sz, RG_SCHEMA_MEMORY,
                                     getThreadId(), true);
     DEB_MEM_ALLOC(("DBDICT: lc_ndbd_pool_malloc(0x%p), line: %u",
@@ -6127,11 +6132,11 @@ void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
     rmap->m_num_columns = 1;
     rmap->m_object_id = tablePtr.p->tableId;
     rmap->m_has_lower_bound = has_lower ? 1 : 0;
-    rmap->m_num_subpartitions = 1;
+    rmap->m_num_subpartitions = nSubParts;
 
-    /* Set sequential fragment IDs */
+    /* Set sequential fragment IDs for all range partitions * subpartitions */
     Uint16 *fids = rmap->frag_ids();
-    for (Uint32 i = 0; i < nParts; i++) {
+    for (Uint32 i = 0; i < totalFrags; i++) {
       fids[i] = (Uint16)i;
     }
 
@@ -6161,10 +6166,12 @@ void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
 
     tablePtr.p->m_range_ptr = rmap;
     tablePtr.p->m_range_boundary_type = btype;
-    tablePtr.p->partitionCount = nParts;
-    DEB_RANGE(("RangePartition: tab: %u, built range map nParts=%u blen=%u"
-               " btype=%u has_lower=%u",
-               tablePtr.p->tableId, nParts, blen, btype,
+    tablePtr.p->m_num_subpartitions = nSubParts;
+    tablePtr.p->partitionCount = totalFrags;
+    tablePtr.p->fragmentCount = totalFrags;
+    DEB_RANGE(("RangePartition: tab: %u, built range map nParts=%u nSubParts=%u"
+               " totalFrags=%u blen=%u btype=%u has_lower=%u",
+               tablePtr.p->tableId, nParts, nSubParts, totalFrags, blen, btype,
                (unsigned)has_lower));
   }
 
@@ -10026,8 +10033,9 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
 
       /* Allocate new Range2FragmentMap, carrying forward lower bound */
       const bool has_lower = (old_rmap->m_has_lower_bound != 0);
+      const Uint32 nsub = old_rmap->m_num_subpartitions;
       Uint32 alloc_sz = Range2FragmentMap::alloc_size(new_cnt, blen,
-                                                      has_lower);
+                                                      has_lower, nsub);
       void *mem = lc_ndbd_pool_malloc(alloc_sz, RG_SCHEMA_MEMORY,
                                       getThreadId(), true);
       DEB_MEM_ALLOC(("DBDICT: lc_ndbd_pool_malloc(0x%p), line: %u",
@@ -10045,23 +10053,22 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
       rmap->m_num_columns = old_rmap->m_num_columns;
       rmap->m_object_id = old_rmap->m_object_id;
       rmap->m_has_lower_bound = old_rmap->m_has_lower_bound;
-      rmap->m_num_subpartitions = old_rmap->m_num_subpartitions;
+      rmap->m_num_subpartitions = nsub;
 
-      /* Copy old frag_ids, assign new frag_id for new partition.
-       * Old partitions keep their fragment IDs.
-       * New partition gets the next sequential frag_id.
+      /* Copy old frag_ids, assign new frag_ids for new partition.
+       * Each range partition has nsub subpartition fragment IDs.
        */
       const Uint16 *old_fids = old_rmap->frag_ids();
       Uint16 *new_fids = rmap->frag_ids();
-      for (Uint32 i = 0; i < old_cnt; i++) {
+      const Uint32 old_total_fids = old_cnt * nsub;
+      for (Uint32 i = 0; i < old_total_fids; i++) {
         new_fids[i] = old_fids[i];
       }
-      ndbassert(old_cnt > 0);
-      Uint32 last_old_fragid = old_fids[old_cnt - 1];
-      Uint32 num_new_frags = new_cnt - old_cnt;
-      for (Uint32 i = 0; i < num_new_frags; i++) {
-        /* Assign new fragment ids */
-        new_fids[old_cnt + i] = (last_old_fragid + i + 1) & 0xFFFF;
+      ndbassert(old_total_fids > 0);
+      Uint32 last_old_fragid = old_fids[old_total_fids - 1];
+      Uint32 num_new_fids = (new_cnt - old_cnt) * nsub;
+      for (Uint32 i = 0; i < num_new_fids; i++) {
+        new_fids[old_total_fids + i] = (last_old_fragid + i + 1) & 0xFFFF;
       }
 
 #ifdef DEBUG_RANGE_MAP
@@ -10248,13 +10255,14 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
 
     const Uint32 btype = old_rmap->m_boundary_type;
     const Uint32 blen = old_rmap->m_boundary_len;
-    const Uint32 num_dropped = old_cnt - new_cnt;
+    const Uint32 nsub = old_rmap->m_num_subpartitions;
+    const Uint32 num_dropped_ranges = old_cnt - new_cnt;
 
     /* Allocate new Range2FragmentMap with lower bound.
      * The lower bound is the exclusive upper bound of the last dropped
      * partition — keys below this value are rejected. */
     Uint32 alloc_sz = Range2FragmentMap::alloc_size(new_cnt, blen,
-                                                    true /* has_lower_bound */);
+                                                    true, nsub);
     void *mem = lc_ndbd_pool_malloc(alloc_sz, RG_SCHEMA_MEMORY,
                                     getThreadId(), true);
     DEB_MEM_ALLOC(("DBDICT: lc_ndbd_pool_malloc(0x%p), line: %u",
@@ -10272,13 +10280,15 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
     rmap->m_num_columns = old_rmap->m_num_columns;
     rmap->m_object_id = old_rmap->m_object_id;
     rmap->m_has_lower_bound = 1;
-    rmap->m_num_subpartitions = old_rmap->m_num_subpartitions;
+    rmap->m_num_subpartitions = nsub;
 
-    /* Copy surviving frag_ids (skip first num_dropped entries) */
+    /* Copy surviving frag_ids (skip dropped range partitions' frag_ids) */
     const Uint16 *old_fids = old_rmap->frag_ids();
     Uint16 *new_fids = rmap->frag_ids();
-    for (Uint32 i = 0; i < new_cnt; i++) {
-      new_fids[i] = old_fids[num_dropped + i];
+    const Uint32 num_dropped_fids = num_dropped_ranges * nsub;
+    const Uint32 new_total_fids = new_cnt * nsub;
+    for (Uint32 i = 0; i < new_total_fids; i++) {
+      new_fids[i] = old_fids[num_dropped_fids + i];
     }
 
 #ifdef DEBUG_RANGE_MAP
@@ -10286,16 +10296,16 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
       tablePtr.p->tableId);
     printRangeMap(new_fids, new_cnt);
 #endif
-    /* Copy surviving boundaries (skip first num_dropped entries) */
+    /* Copy surviving boundaries (skip dropped range partitions) */
     const char *old_bounds = old_rmap->boundaries();
     char *new_bounds = rmap->boundaries();
-    memcpy(new_bounds, old_bounds + num_dropped * blen, new_cnt * blen);
+    memcpy(new_bounds, old_bounds + num_dropped_ranges * blen, new_cnt * blen);
 
-    /* Set lower bound to the boundary of the last dropped partition.
-     * boundary(num_dropped - 1) is the exclusive upper bound of the
+    /* Set lower bound to the boundary of the last dropped range partition.
+     * boundary(num_dropped_ranges - 1) is the exclusive upper bound of the
      * last partition being dropped. Keys < this value are rejected. */
     memcpy(rmap->lower_bound(),
-           old_rmap->boundary(num_dropped - 1), blen);
+           old_rmap->boundary(num_dropped_ranges - 1), blen);
 
     /* Free range map from handleTabInfoInit before replacing */
     if (newTablePtr.p->m_range_ptr != nullptr) {
