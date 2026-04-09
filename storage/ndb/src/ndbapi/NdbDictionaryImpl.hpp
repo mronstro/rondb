@@ -246,6 +246,7 @@ class NdbTableImpl : public NdbDictionary::Table, public NdbDictObjectImpl {
   Uint32 m_range_lower_bound_len;  // 0 = no lower bound
   char m_range_lower_bound[8];     // up to 8 bytes (BIGINT/DATETIME2)
   Uint32 m_range_start_fid_offset; // fragId = partitionIndex + offset
+  Uint32 m_num_subpartitions;      // hash subpartitions per range partition
   NdbDictionary::Object::FragmentType m_fragmentType;
 
   int getDbName(char *buf, size_t len) const;

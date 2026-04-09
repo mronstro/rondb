@@ -12256,7 +12256,8 @@ void ha_ndbcluster::set_part_info(partition_info *part_info, bool early) {
       if (m_part_info->part_type == partition_type::RANGE &&
           m_part_info->column_list &&
           m_part_info->num_part_fields == 1) {
-        /* Native RangePartition — NDB handles partitioning */
+        /* Native RangePartition — NDB handles partitioning.
+         * Also covers SUBPARTITION BY KEY(). */
       } else {
         m_use_partition_pruning = true;
         m_user_defined_partitioning = true;
@@ -15606,6 +15607,17 @@ static int create_table_set_up_partition_info(partition_info *part_info,
     ndbtab.setRangeListData(
         reinterpret_cast<const Int32 *>(range_buf.get()),
         total_bytes / 4);
+
+    /* Handle SUBPARTITION BY KEY() — hash subpartitions per range partition */
+    if (part_info->is_sub_partitioned()) {
+      if (!part_info->list_of_subpart_fields) {
+        my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+                 "SUBPARTITION BY HASH(expr) with RANGE COLUMNS. "
+                 "Use SUBPARTITION BY KEY()");
+        return 1;
+      }
+      ndbtab.setNumSubpartitions(part_info->num_subparts);
+    }
   } else {
     auto partition_type_description = [](partition_type pt) {
       switch (pt) {

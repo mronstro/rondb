@@ -963,6 +963,7 @@ void NdbTableImpl::init() {
   m_range_lower_bound_len = 0;
   memset(m_range_lower_bound, 0, sizeof(m_range_lower_bound));
   m_range_start_fid_offset = 0;
+  m_num_subpartitions = 1;
   m_fragmentType = NdbDictionary::Object::HashMapPartition;
   m_hashValueMask = 0;
   m_hashpointerValue = 0;
@@ -3906,6 +3907,8 @@ NdbDictInterface::parseTableInfo(NdbTableImpl ** ret,
            tableDesc->RangeLowerBoundLen);
   }
   impl->m_range_start_fid_offset = tableDesc->RangeStartFidOffset;
+  impl->m_num_subpartitions = tableDesc->RangeNumSubpartitions;
+  if (impl->m_num_subpartitions == 0) impl->m_num_subpartitions = 1;
 
   {
     /**
@@ -4887,6 +4890,7 @@ int NdbDictInterface::serializeTableDesc(NdbTableImpl &impl,
            impl.m_range_lower_bound_len);
   }
   tmpTab->RangeStartFidOffset = impl.m_range_start_fid_offset;
+  tmpTab->RangeNumSubpartitions = impl.m_num_subpartitions;
 
   tmpTab->PartitionBalance = (Uint32)impl.m_partitionBalance;
   tmpTab->FragmentCount = impl.m_fragmentCount;

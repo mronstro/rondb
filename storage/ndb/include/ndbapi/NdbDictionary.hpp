@@ -1176,6 +1176,14 @@ class NdbDictionary {
     Uint32 getRangeBoundaryType() const;
 
     /**
+     * Set/Get number of hash subpartitions per range partition.
+     * Only relevant for RangePartition fragment type with SUBPARTITION BY KEY().
+     * Default is 1 (no subpartitioning).
+     */
+    void setNumSubpartitions(Uint32 n);
+    Uint32 getNumSubpartitions() const;
+
+    /**
      * Get list of nodes storing given fragment, primary
      * is normally entry 0
      * Returns : 0 for error, > 0 for fragment count

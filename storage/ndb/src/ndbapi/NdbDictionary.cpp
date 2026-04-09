@@ -618,6 +618,14 @@ Uint32 NdbDictionary::Table::getRangeBoundaryType() const {
   return m_impl.m_range_boundary_type;
 }
 
+void NdbDictionary::Table::setNumSubpartitions(Uint32 n) {
+  m_impl.m_num_subpartitions = n;
+}
+
+Uint32 NdbDictionary::Table::getNumSubpartitions() const {
+  return m_impl.m_num_subpartitions;
+}
+
 Uint32 NdbDictionary::Table::getFragmentNodes(Uint32 fragmentId,
                                               Uint32 *nodeIdArrayPtr,
                                               Uint32 arraySize) const {
