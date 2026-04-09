@@ -14930,9 +14930,6 @@ void Dbdih::execALTER_TAB_REQ(Signal *signal) {
         connectPtr.p->m_alter.m_drop_frag_id = RNIL;
         connectPtr.p->m_alter.m_drop_frag_count = 0;
         connectPtr.p->m_alter.m_drop_frag_idx = 0;
-        const Range2FragmentMap *old_rmap = tabPtr.p->m_range_ptr;
-        const Uint32 nsub = (old_rmap != nullptr) ?
-            old_rmap->m_num_subpartitions : 1;
         connectPtr.p->m_alter.m_new_startFid_offset =
             tabPtr.p->m_startFid_offset;
         /* Placeholder: real value is captured in
