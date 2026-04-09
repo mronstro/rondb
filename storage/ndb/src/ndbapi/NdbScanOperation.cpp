@@ -371,7 +371,9 @@ int NdbScanOperation::handleScanOptions(const ScanOptions *options) {
   if (options->optionsPresent & ScanOptions::SO_PARTITION_RANGE) {
     assert(m_pruneState == SPS_UNKNOWN);
     if (unlikely(!(m_attribute_record->flags &
-                   NdbRecord::RecHasUserDefinedPartitioning))) {
+                   NdbRecord::RecHasUserDefinedPartitioning) &&
+                 m_currentTable->m_fragmentType !=
+                   NdbDictionary::Object::RangePartition)) {
       /* Explicit partitioning info not allowed for table and operation */
       setErrorCodeAbort(4546);
       return -1;

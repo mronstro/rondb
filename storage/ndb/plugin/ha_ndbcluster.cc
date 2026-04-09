@@ -3873,12 +3873,15 @@ int ha_ndbcluster::ordered_index_scan(const key_range *start_key,
       ERR_RETURN(query->getNdbError());
     if (prunable) m_thd_ndb->m_pruned_scan_count++;
 
-    if (!prunable && m_use_partition_pruning && m_user_defined_partitioning &&
-        part_spec != nullptr &&
+    if (!prunable && m_use_partition_pruning && part_spec != nullptr &&
         part_spec->start_part < part_spec->end_part) {
-      m_active_query->setPartitionRange(
-          part_spec->start_part,
-          part_spec->end_part - part_spec->start_part + 1);
+      if (m_user_defined_partitioning ||
+          (m_table != nullptr &&
+           m_table->getFragmentType() == NDBTAB::RangePartition)) {
+        m_active_query->setPartitionRange(
+            part_spec->start_part,
+            part_spec->end_part - part_spec->start_part + 1);
+      }
     }
 
     // Can't have BLOB in pushed joins (yet)
@@ -3907,6 +3910,21 @@ int ha_ndbcluster::ordered_index_scan(const key_range *start_key,
             NdbScanOperation::ScanOptions::SO_PARTITION_ID;
       } else if (part_spec->start_part < part_spec->end_part) {
         /* Multi-partition range pruning */
+        options.firstPartitionId = part_spec->start_part;
+        options.numPartitions =
+            part_spec->end_part - part_spec->start_part + 1;
+        options.optionsPresent |=
+            NdbScanOperation::ScanOptions::SO_PARTITION_RANGE;
+      }
+    } else if (m_use_partition_pruning &&
+               m_table != nullptr &&
+               m_table->getFragmentType() == NDBTAB::RangePartition &&
+               part_spec != nullptr &&
+               part_spec->start_part <= part_spec->end_part) {
+      /* Native RANGE COLUMNS scan pruning */
+      const uint total = m_part_info->get_tot_partitions();
+      if (part_spec->start_part != 0 ||
+          part_spec->end_part != total - 1) {
         options.firstPartitionId = part_spec->start_part;
         options.numPartitions =
             part_spec->end_part - part_spec->start_part + 1;
@@ -4037,6 +4055,26 @@ int ha_ndbcluster::full_table_scan(const KEY *key_info,
       /* Multi-partition range pruning: scan only the partitions
        * [start_part .. end_part] instead of all fragments.
        */
+      use_partition_range = true;
+    }
+  } else if (m_use_partition_pruning &&
+             m_table != nullptr &&
+             m_table->getFragmentType() == NDBTAB::RangePartition) {
+    /* Native RANGE COLUMNS partition pruning.
+     * MySQL determines which (sub)partitions match the WHERE clause.
+     * The partition IDs map directly to NDB fragment numbers. */
+    part_spec.start_part = 0;
+    part_spec.end_part = m_part_info->get_tot_partitions() - 1;
+    prune_partition_set(table, &part_spec);
+    DBUG_PRINT("info", ("range prune: start_part: %u  end_part: %u  total: %u",
+                        part_spec.start_part, part_spec.end_part,
+                        m_part_info->get_tot_partitions()));
+    if (part_spec.start_part > part_spec.end_part) {
+      return HA_ERR_END_OF_FILE;
+    }
+    if (part_spec.start_part != 0 ||
+        part_spec.end_part != m_part_info->get_tot_partitions() - 1) {
+      /* Pruned to a subset — use range mode */
       use_partition_range = true;
     }
   }
@@ -12257,7 +12295,10 @@ void ha_ndbcluster::set_part_info(partition_info *part_info, bool early) {
           m_part_info->column_list &&
           m_part_info->num_part_fields == 1) {
         /* Native RangePartition — NDB handles partitioning.
-         * Also covers SUBPARTITION BY KEY(). */
+         * Also covers SUBPARTITION BY KEY().
+         * Enable partition pruning so MySQL can identify which
+         * range partitions a query needs. */
+        m_use_partition_pruning = true;
       } else {
         m_use_partition_pruning = true;
         m_user_defined_partitioning = true;
