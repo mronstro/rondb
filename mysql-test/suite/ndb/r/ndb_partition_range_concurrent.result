@@ -1,0 +1,203 @@
+########################################
+# C1. Concurrent INSERT + DROP PARTITION
+########################################
+CREATE TABLE t_conc_drop (
+a int not null,
+b int not null,
+primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+partition p1 values less than (200),
+partition p2 values less than (300),
+partition p3 values less than (1000));
+INSERT INTO t_conc_drop VALUES (10, 1);
+INSERT INTO t_conc_drop VALUES (50, 2);
+INSERT INTO t_conc_drop VALUES (150, 3);
+INSERT INTO t_conc_drop VALUES (250, 4);
+INSERT INTO t_conc_drop VALUES (500, 5);
+Verify initial data
+SELECT * FROM t_conc_drop ORDER BY a;
+a	b
+10	1
+50	2
+150	3
+250	4
+500	5
+SELECT * FROM t_conc_drop ORDER BY a;
+ALTER TABLE t_conc_drop ALGORITHM=INPLACE, DROP PARTITION p0;
+Server1 after DROP:
+SELECT * FROM t_conc_drop ORDER BY a;
+a	b
+150	3
+250	4
+500	5
+SELECT * FROM t_conc_drop WHERE a=10;
+a	b
+SELECT * FROM t_conc_drop WHERE a=50;
+a	b
+Server2 after DROP:
+SELECT * FROM t_conc_drop ORDER BY a;
+a	b
+150	3
+250	4
+500	5
+SELECT * FROM t_conc_drop WHERE a=10;
+a	b
+SELECT * FROM t_conc_drop WHERE a=50;
+a	b
+INSERT INTO t_conc_drop VALUES (160, 6);
+SELECT * FROM t_conc_drop WHERE a=160;
+a	b
+160	6
+INSERT INTO t_conc_drop VALUES (50, 99);
+Got one of the listed errors
+INSERT INTO t_conc_drop VALUES (50, 99);
+Got one of the listed errors
+DROP TABLE t_conc_drop;
+########################################
+# C2. Concurrent scans during ADD PARTITION
+########################################
+CREATE TABLE t_conc_add (
+a int not null,
+b int not null,
+primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+partition p1 values less than (200),
+partition p2 values less than (300));
+Initial row count
+SELECT count(*) FROM t_conc_add;
+count(*)
+90
+SELECT count(*) FROM t_conc_add;
+ALTER TABLE t_conc_add ALGORITHM=INPLACE,
+ADD PARTITION (PARTITION p3 VALUES LESS THAN (400));
+INSERT INTO t_conc_add VALUES (350, 3500);
+SELECT * FROM t_conc_add WHERE a=350;
+a	b
+350	3500
+SELECT * FROM t_conc_add WHERE a=350;
+a	b
+350	3500
+SELECT count(*) AS server1_count FROM t_conc_add;
+server1_count
+91
+SELECT count(*) AS server2_count FROM t_conc_add;
+server2_count
+91
+DROP TABLE t_conc_add;
+########################################
+# C3. Parallel transactions spanning partitions
+########################################
+CREATE TABLE t_conc_txn (
+a int not null,
+b int not null,
+c varchar(30),
+primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+partition p1 values less than (200),
+partition p2 values less than (300));
+INSERT INTO t_conc_txn VALUES (10, 1, 'initial');
+INSERT INTO t_conc_txn VALUES (150, 2, 'initial');
+INSERT INTO t_conc_txn VALUES (250, 3, 'initial');
+ALTER TABLE t_conc_txn ALGORITHM=INPLACE,
+ADD PARTITION (PARTITION p3 VALUES LESS THAN (400));
+Server1: transaction spanning old and new partitions
+BEGIN;
+INSERT INTO t_conc_txn VALUES (350, 4, 'srv1-new-part');
+UPDATE t_conc_txn SET c = 'srv1-updated' WHERE a=10;
+Server2: concurrent update on old partition
+BEGIN;
+UPDATE t_conc_txn SET c = 'srv2-updated' WHERE a=150;
+INSERT INTO t_conc_txn VALUES (280, 5, 'srv2-old-part');
+COMMIT;
+Server1: commit
+COMMIT;
+Verify data consistency
+SELECT * FROM t_conc_txn ORDER BY a;
+a	b	c
+10	1	srv1-updated
+150	2	srv2-updated
+250	3	initial
+280	5	srv2-old-part
+350	4	srv1-new-part
+SELECT * FROM t_conc_txn ORDER BY a;
+a	b	c
+10	1	srv1-updated
+150	2	srv2-updated
+250	3	initial
+280	5	srv2-old-part
+350	4	srv1-new-part
+DROP TABLE t_conc_txn;
+########################################
+# F1. FragId wrap-around with concurrent DML
+########################################
+
+CREATE TABLE t_wrap_conc (
+a int not null,
+b int not null,
+primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+partition p1 values less than (200),
+partition p2 values less than (300),
+partition p3 values less than (400));
+
+INSERT INTO t_wrap_conc VALUES (50, 1);
+INSERT INTO t_wrap_conc VALUES (150, 2);
+INSERT INTO t_wrap_conc VALUES (250, 3);
+INSERT INTO t_wrap_conc VALUES (350, 4);
+Verify data before wrap
+SELECT * FROM t_wrap_conc ORDER BY a;
+a	b
+50	1
+150	2
+250	3
+350	4
+SELECT * FROM t_wrap_conc ORDER BY a;
+ALTER TABLE t_wrap_conc ALGORITHM=INPLACE,
+ADD PARTITION (PARTITION p4 VALUES LESS THAN (500));
+INSERT INTO t_wrap_conc VALUES (450, 5);
+SELECT * FROM t_wrap_conc WHERE a=450;
+a	b
+450	5
+SELECT * FROM t_wrap_conc WHERE a=450;
+a	b
+450	5
+SELECT * FROM t_wrap_conc ORDER BY a;
+a	b
+50	1
+150	2
+250	3
+350	4
+450	5
+ALTER TABLE t_wrap_conc ALGORITHM=INPLACE, DROP PARTITION p0;
+SELECT * FROM t_wrap_conc ORDER BY a;
+a	b
+150	2
+250	3
+350	4
+450	5
+SELECT * FROM t_wrap_conc ORDER BY a;
+a	b
+150	2
+250	3
+350	4
+450	5
+INSERT INTO t_wrap_conc VALUES (50, 99);
+Got one of the listed errors
+INSERT INTO t_wrap_conc VALUES (50, 99);
+Got one of the listed errors
+INSERT INTO t_wrap_conc VALUES (480, 6);
+SELECT * FROM t_wrap_conc WHERE a=480;
+a	b
+480	6
+SELECT * FROM t_wrap_conc WHERE a=480;
+a	b
+480	6
+DROP TABLE t_wrap_conc;

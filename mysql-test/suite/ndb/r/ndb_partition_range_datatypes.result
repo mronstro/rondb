@@ -1,0 +1,420 @@
+########################################
+# A1. Exact boundary insertion semantics
+# LESS THAN is exclusive: value AT boundary goes to NEXT partition
+########################################
+CREATE TABLE t_boundary (
+a int not null,
+b int not null,
+primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (5),
+partition p1 values less than (10),
+partition p2 values less than (20));
+INSERT INTO t_boundary VALUES (4, 40);
+INSERT INTO t_boundary VALUES (5, 50);
+INSERT INTO t_boundary VALUES (9, 90);
+INSERT INTO t_boundary VALUES (10, 100);
+INSERT INTO t_boundary VALUES (19, 190);
+SELECT * FROM t_boundary ORDER BY a;
+a	b
+4	40
+5	50
+9	90
+10	100
+19	190
+SELECT * FROM t_boundary WHERE a=4;
+a	b
+4	40
+SELECT * FROM t_boundary WHERE a=5;
+a	b
+5	50
+SELECT * FROM t_boundary WHERE a=9;
+a	b
+9	90
+SELECT * FROM t_boundary WHERE a=10;
+a	b
+10	100
+SELECT * FROM t_boundary WHERE a=19;
+a	b
+19	190
+INSERT INTO t_boundary VALUES (20, 200);
+Got one of the listed errors
+DROP TABLE t_boundary;
+########################################
+# A2. INT_MIN and INT_MAX values
+########################################
+CREATE TABLE t_extremes (
+a int not null,
+b int not null,
+primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p_neg values less than (0),
+partition p_mid values less than (100),
+partition p_max values less than (2147483647));
+INSERT INTO t_extremes VALUES (-2147483648, 1);
+INSERT INTO t_extremes VALUES (-1, 2);
+INSERT INTO t_extremes VALUES (0, 3);
+INSERT INTO t_extremes VALUES (99, 4);
+INSERT INTO t_extremes VALUES (100, 5);
+INSERT INTO t_extremes VALUES (2147483646, 6);
+SELECT * FROM t_extremes ORDER BY a;
+a	b
+-2147483648	1
+-1	2
+0	3
+99	4
+100	5
+2147483646	6
+SELECT * FROM t_extremes WHERE a=-2147483648;
+a	b
+-2147483648	1
+SELECT * FROM t_extremes WHERE a=-1;
+a	b
+-1	2
+SELECT * FROM t_extremes WHERE a=0;
+a	b
+0	3
+SELECT * FROM t_extremes WHERE a=99;
+a	b
+99	4
+SELECT * FROM t_extremes WHERE a=100;
+a	b
+100	5
+SELECT * FROM t_extremes WHERE a=2147483646;
+a	b
+2147483646	6
+INSERT INTO t_extremes VALUES (2147483647, 7);
+Got one of the listed errors
+DROP TABLE t_extremes;
+########################################
+# A3. Drop all partitions except last
+########################################
+CREATE TABLE t_dropall (
+a int not null,
+b int not null,
+primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+partition p1 values less than (200),
+partition p2 values less than (300),
+partition p3 values less than (1000));
+INSERT INTO t_dropall VALUES (50, 1);
+INSERT INTO t_dropall VALUES (150, 2);
+INSERT INTO t_dropall VALUES (250, 3);
+INSERT INTO t_dropall VALUES (500, 4);
+Drop first three partitions sequentially
+ALTER TABLE t_dropall ALGORITHM=INPLACE, DROP PARTITION p0;
+ALTER TABLE t_dropall ALGORITHM=INPLACE, DROP PARTITION p1;
+ALTER TABLE t_dropall ALGORITHM=INPLACE, DROP PARTITION p2;
+SELECT count(*) AS partition_count FROM information_schema.partitions
+WHERE table_schema='test' AND table_name='t_dropall';
+partition_count
+1
+SELECT * FROM t_dropall ORDER BY a;
+a	b
+500	4
+INSERT INTO t_dropall VALUES (400, 5);
+SELECT * FROM t_dropall WHERE a=400;
+a	b
+400	5
+INSERT INTO t_dropall VALUES (50, 99);
+Got one of the listed errors
+INSERT INTO t_dropall VALUES (299, 99);
+Got one of the listed errors
+INSERT INTO t_dropall VALUES (300, 6);
+SELECT * FROM t_dropall WHERE a=300;
+a	b
+300	6
+DROP TABLE t_dropall;
+########################################
+# B1. UNSIGNED INT partition key
+# Boundaries can now use the full Uint32 range (up to 4294967295).
+########################################
+CREATE TABLE t_uint (
+a int unsigned not null,
+b int not null,
+primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+partition p1 values less than (3000000000),
+partition p2 values less than (4294967295));
+INSERT INTO t_uint VALUES (0, 1);
+INSERT INTO t_uint VALUES (99, 2);
+INSERT INTO t_uint VALUES (100, 3);
+INSERT INTO t_uint VALUES (2500000000, 4);
+INSERT INTO t_uint VALUES (3000000000, 5);
+INSERT INTO t_uint VALUES (4294967294, 6);
+SELECT * FROM t_uint ORDER BY a;
+a	b
+0	1
+99	2
+100	3
+2500000000	4
+3000000000	5
+4294967294	6
+SELECT * FROM t_uint WHERE a=0;
+a	b
+0	1
+SELECT * FROM t_uint WHERE a=99;
+a	b
+99	2
+SELECT * FROM t_uint WHERE a=100;
+a	b
+100	3
+SELECT * FROM t_uint WHERE a=2500000000;
+a	b
+2500000000	4
+SELECT * FROM t_uint WHERE a=3000000000;
+a	b
+3000000000	5
+SELECT * FROM t_uint WHERE a=4294967294;
+a	b
+4294967294	6
+INSERT INTO t_uint VALUES (4294967295, 7);
+Got one of the listed errors
+DROP TABLE t_uint;
+########################################
+# B2. BIGINT partition key with large values
+# Boundaries can now use the full Int64 range.
+########################################
+CREATE TABLE t_bigint (
+a bigint not null,
+b int not null,
+primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (5000000000),
+partition p1 values less than (100000000000),
+partition p2 values less than (9000000000000000000));
+INSERT INTO t_bigint VALUES (-9223372036854775808, 1);
+INSERT INTO t_bigint VALUES (-1, 2);
+INSERT INTO t_bigint VALUES (100, 3);
+INSERT INTO t_bigint VALUES (4999999999, 4);
+INSERT INTO t_bigint VALUES (5000000000, 5);
+INSERT INTO t_bigint VALUES (50000000000, 6);
+INSERT INTO t_bigint VALUES (100000000000, 7);
+INSERT INTO t_bigint VALUES (8999999999999999999, 8);
+SELECT * FROM t_bigint ORDER BY a;
+a	b
+-9223372036854775808	1
+-1	2
+100	3
+4999999999	4
+5000000000	5
+50000000000	6
+100000000000	7
+8999999999999999999	8
+SELECT * FROM t_bigint WHERE a=-9223372036854775808;
+a	b
+-9223372036854775808	1
+SELECT * FROM t_bigint WHERE a=-1;
+a	b
+-1	2
+SELECT * FROM t_bigint WHERE a=100;
+a	b
+100	3
+SELECT * FROM t_bigint WHERE a=4999999999;
+a	b
+4999999999	4
+SELECT * FROM t_bigint WHERE a=5000000000;
+a	b
+5000000000	5
+SELECT * FROM t_bigint WHERE a=50000000000;
+a	b
+50000000000	6
+SELECT * FROM t_bigint WHERE a=100000000000;
+a	b
+100000000000	7
+SELECT * FROM t_bigint WHERE a=8999999999999999999;
+a	b
+8999999999999999999	8
+INSERT INTO t_bigint VALUES (9000000000000000000, 9);
+Got one of the listed errors
+SELECT * FROM t_bigint ORDER BY a;
+a	b
+-9223372036854775808	1
+-1	2
+100	3
+4999999999	4
+5000000000	5
+50000000000	6
+100000000000	7
+8999999999999999999	8
+DROP TABLE t_bigint;
+########################################
+# J1. Verify partition routing via range scans
+# Note: SELECT ... PARTITION (pN) is not supported with NDB native
+# RangePartition tables — NDB handles partitioning server-side.
+# Instead, verify routing by checking range scans and pruning.
+########################################
+CREATE TABLE t_routing (
+a int not null,
+b int not null,
+c varchar(20),
+primary key(a, b))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+partition p1 values less than (200),
+partition p2 values less than (300));
+INSERT INTO t_routing VALUES (10, 1, 'in-p0');
+INSERT INTO t_routing VALUES (50, 2, 'in-p0');
+INSERT INTO t_routing VALUES (110, 3, 'in-p1');
+INSERT INTO t_routing VALUES (150, 4, 'in-p1');
+INSERT INTO t_routing VALUES (210, 5, 'in-p2');
+INSERT INTO t_routing VALUES (250, 6, 'in-p2');
+Range scan covering only p0
+SELECT * FROM t_routing WHERE a < 100 ORDER BY a;
+a	b	c
+10	1	in-p0
+50	2	in-p0
+Range scan covering only p1
+SELECT * FROM t_routing WHERE a >= 100 AND a < 200 ORDER BY a;
+a	b	c
+110	3	in-p1
+150	4	in-p1
+Range scan covering only p2
+SELECT * FROM t_routing WHERE a >= 200 ORDER BY a;
+a	b	c
+210	5	in-p2
+250	6	in-p2
+Range scan covering p0 and p1
+SELECT * FROM t_routing WHERE a < 200 ORDER BY a;
+a	b	c
+10	1	in-p0
+50	2	in-p0
+110	3	in-p1
+150	4	in-p1
+PK lookups in each partition
+SELECT * FROM t_routing WHERE a=10 AND b=1;
+a	b	c
+10	1	in-p0
+SELECT * FROM t_routing WHERE a=110 AND b=3;
+a	b	c
+110	3	in-p1
+SELECT * FROM t_routing WHERE a=210 AND b=5;
+a	b	c
+210	5	in-p2
+Full table scan
+SELECT * FROM t_routing ORDER BY a;
+a	b	c
+10	1	in-p0
+50	2	in-p0
+110	3	in-p1
+150	4	in-p1
+210	5	in-p2
+250	6	in-p2
+DROP TABLE t_routing;
+########################################
+# J2. INSERT INTO ... SELECT across range tables
+########################################
+CREATE TABLE t_src (
+a int not null,
+b int not null,
+primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+partition p1 values less than (200),
+partition p2 values less than (300));
+CREATE TABLE t_dest (
+a int not null,
+b int not null,
+primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition q0 values less than (50),
+partition q1 values less than (150),
+partition q2 values less than (500));
+INSERT INTO t_src VALUES (10, 1);
+INSERT INTO t_src VALUES (50, 2);
+INSERT INTO t_src VALUES (110, 3);
+INSERT INTO t_src VALUES (199, 4);
+INSERT INTO t_src VALUES (250, 5);
+Bulk copy from source to destination
+INSERT INTO t_dest SELECT * FROM t_src;
+Verify all rows in destination
+SELECT * FROM t_dest ORDER BY a;
+a	b
+10	1
+50	2
+110	3
+199	4
+250	5
+Verify partition routing in destination via range scans
+SELECT * FROM t_dest WHERE a < 50 ORDER BY a;
+a	b
+10	1
+SELECT * FROM t_dest WHERE a >= 50 AND a < 150 ORDER BY a;
+a	b
+50	2
+110	3
+SELECT * FROM t_dest WHERE a >= 150 ORDER BY a;
+a	b
+199	4
+250	5
+PK lookups on destination
+SELECT * FROM t_dest WHERE a=10;
+a	b
+10	1
+SELECT * FROM t_dest WHERE a=110;
+a	b
+110	3
+SELECT * FROM t_dest WHERE a=250;
+a	b
+250	5
+DROP TABLE t_src;
+DROP TABLE t_dest;
+########################################
+# B3. BIGINT with ADD/DROP PARTITION
+# Verifies large (>Int32) boundaries survive ALTER
+########################################
+CREATE TABLE t_bigint_alter (
+a bigint not null,
+b int not null,
+primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (10000000000),
+partition p1 values less than (50000000000),
+partition p2 values less than (100000000000));
+INSERT INTO t_bigint_alter VALUES (5000000000, 1);
+INSERT INTO t_bigint_alter VALUES (30000000000, 2);
+INSERT INTO t_bigint_alter VALUES (80000000000, 3);
+ADD PARTITION with large boundary
+ALTER TABLE t_bigint_alter ALGORITHM=INPLACE,
+ADD PARTITION (PARTITION p3 VALUES LESS THAN (200000000000));
+INSERT INTO t_bigint_alter VALUES (150000000000, 4);
+SELECT * FROM t_bigint_alter ORDER BY a;
+a	b
+5000000000	1
+30000000000	2
+80000000000	3
+150000000000	4
+PK lookups on large values
+SELECT * FROM t_bigint_alter WHERE a=5000000000;
+a	b
+5000000000	1
+SELECT * FROM t_bigint_alter WHERE a=150000000000;
+a	b
+150000000000	4
+DROP PARTITION
+ALTER TABLE t_bigint_alter ALGORITHM=INPLACE, DROP PARTITION p0;
+SELECT * FROM t_bigint_alter ORDER BY a;
+a	b
+30000000000	2
+80000000000	3
+150000000000	4
+INSERT INTO t_bigint_alter VALUES (5000000000, 99);
+Got one of the listed errors
+INSERT INTO t_bigint_alter VALUES (10000000001, 5);
+SELECT * FROM t_bigint_alter WHERE a=10000000001;
+a	b
+10000000001	5
+INSERT INTO t_bigint_alter VALUES (200000000001, 99);
+Got one of the listed errors
+DROP TABLE t_bigint_alter;

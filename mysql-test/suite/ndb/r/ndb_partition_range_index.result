@@ -1,0 +1,265 @@
+########################################
+# D1. Ordered index scan after DROP PARTITION
+########################################
+CREATE TABLE t_oidx (
+a int not null,
+b int not null,
+c int not null,
+primary key(a),
+index idx_c(c))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+partition p1 values less than (200),
+partition p2 values less than (300),
+partition p3 values less than (1000));
+INSERT INTO t_oidx VALUES (10, 1, 500);
+INSERT INTO t_oidx VALUES (50, 2, 100);
+INSERT INTO t_oidx VALUES (110, 3, 300);
+INSERT INTO t_oidx VALUES (150, 4, 200);
+INSERT INTO t_oidx VALUES (210, 5, 400);
+INSERT INTO t_oidx VALUES (250, 6, 600);
+INSERT INTO t_oidx VALUES (500, 7, 350);
+INSERT INTO t_oidx VALUES (900, 8, 150);
+Ordered index scan before DROP
+SELECT * FROM t_oidx WHERE c > 200 ORDER BY c;
+a	b	c
+110	3	300
+500	7	350
+210	5	400
+10	1	500
+250	6	600
+SELECT * FROM t_oidx WHERE c BETWEEN 100 AND 400 ORDER BY c;
+a	b	c
+50	2	100
+900	8	150
+150	4	200
+110	3	300
+500	7	350
+210	5	400
+DROP first partition
+ALTER TABLE t_oidx ALGORITHM=INPLACE, DROP PARTITION p0;
+Ordered index scan after DROP -- should not return p0 data
+SELECT * FROM t_oidx WHERE c > 0 ORDER BY c;
+a	b	c
+900	8	150
+150	4	200
+110	3	300
+500	7	350
+210	5	400
+250	6	600
+SELECT * FROM t_oidx WHERE c > 200 ORDER BY c;
+a	b	c
+110	3	300
+500	7	350
+210	5	400
+250	6	600
+SELECT * FROM t_oidx WHERE c BETWEEN 100 AND 400 ORDER BY c;
+a	b	c
+900	8	150
+150	4	200
+110	3	300
+500	7	350
+210	5	400
+Verify p0 data is gone
+SELECT * FROM t_oidx WHERE a=10;
+a	b	c
+SELECT * FROM t_oidx WHERE a=50;
+a	b	c
+Verify remaining data via index
+SELECT * FROM t_oidx WHERE c=300;
+a	b	c
+110	3	300
+SELECT * FROM t_oidx WHERE c=200;
+a	b	c
+150	4	200
+SELECT * FROM t_oidx WHERE c=350;
+a	b	c
+500	7	350
+INSERT new data and verify index covers it
+INSERT INTO t_oidx VALUES (120, 9, 250);
+SELECT * FROM t_oidx WHERE c=250;
+a	b	c
+120	9	250
+SELECT * FROM t_oidx WHERE c BETWEEN 200 AND 350 ORDER BY c;
+a	b	c
+150	4	200
+120	9	250
+110	3	300
+500	7	350
+DROP another partition and verify index still works
+ALTER TABLE t_oidx ALGORITHM=INPLACE, DROP PARTITION p1;
+SELECT * FROM t_oidx WHERE c > 0 ORDER BY c;
+a	b	c
+900	8	150
+500	7	350
+210	5	400
+250	6	600
+SELECT * FROM t_oidx WHERE a=110;
+a	b	c
+SELECT * FROM t_oidx WHERE a=150;
+a	b	c
+SELECT * FROM t_oidx WHERE a=120;
+a	b	c
+DROP TABLE t_oidx;
+########################################
+# D2. Unique index not supported on range-partitioned tables
+# (NDB rejects unique indexes on RangePartition tables)
+########################################
+CREATE TABLE t_uidx (
+a int not null,
+b int not null,
+primary key(a),
+unique key uk_b(b))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+partition p1 values less than (200));
+ERROR HY000: Can't create table 't_uidx' (use SHOW WARNINGS for more info).
+########################################
+# D3. CREATE INDEX after DROP PARTITION
+########################################
+CREATE TABLE t_cidx (
+a int not null,
+b int not null,
+c int not null,
+primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+partition p1 values less than (200),
+partition p2 values less than (300),
+partition p3 values less than (1000));
+INSERT INTO t_cidx VALUES (10, 1, 500);
+INSERT INTO t_cidx VALUES (50, 2, 100);
+INSERT INTO t_cidx VALUES (110, 3, 300);
+INSERT INTO t_cidx VALUES (150, 4, 200);
+INSERT INTO t_cidx VALUES (210, 5, 400);
+INSERT INTO t_cidx VALUES (500, 6, 600);
+DROP first partition
+ALTER TABLE t_cidx ALGORITHM=INPLACE, DROP PARTITION p0;
+CREATE INDEX after DROP
+CREATE INDEX idx_c ON t_cidx(c);
+Verify index scan works on remaining partitions
+SELECT * FROM t_cidx WHERE c > 0 ORDER BY c;
+a	b	c
+150	4	200
+110	3	300
+210	5	400
+500	6	600
+SELECT * FROM t_cidx WHERE c BETWEEN 200 AND 400 ORDER BY c;
+a	b	c
+150	4	200
+110	3	300
+210	5	400
+SELECT * FROM t_cidx WHERE c = 300;
+a	b	c
+110	3	300
+Insert new data and verify index includes it
+INSERT INTO t_cidx VALUES (120, 7, 250);
+SELECT * FROM t_cidx WHERE c = 250;
+a	b	c
+120	7	250
+Verify p0 data not in index results
+SELECT * FROM t_cidx WHERE c = 500;
+a	b	c
+SELECT * FROM t_cidx WHERE c = 100;
+a	b	c
+SELECT * FROM t_cidx ORDER BY a;
+a	b	c
+110	3	300
+120	7	250
+150	4	200
+210	5	400
+500	6	600
+DROP TABLE t_cidx;
+########################################
+# D4. ADD INDEX + ADD/DROP PARTITION lifecycle
+########################################
+CREATE TABLE t_lifecycle (
+a int not null,
+b int not null,
+c int not null,
+primary key(a))
+engine = ndb
+partition by range columns (a)
+(partition p0 values less than (100),
+partition p1 values less than (200),
+partition p2 values less than (300));
+INSERT INTO t_lifecycle VALUES (10, 1, 100);
+INSERT INTO t_lifecycle VALUES (50, 2, 200);
+INSERT INTO t_lifecycle VALUES (110, 3, 300);
+INSERT INTO t_lifecycle VALUES (150, 4, 400);
+INSERT INTO t_lifecycle VALUES (210, 5, 500);
+Step 1: Add index on existing table
+ALTER TABLE t_lifecycle ADD INDEX idx_c(c);
+Verify index scan
+SELECT * FROM t_lifecycle WHERE c >= 200 ORDER BY c;
+a	b	c
+50	2	200
+110	3	300
+150	4	400
+210	5	500
+Step 2: ADD PARTITION
+ALTER TABLE t_lifecycle ALGORITHM=INPLACE,
+ADD PARTITION (PARTITION p3 VALUES LESS THAN (400));
+Insert into new partition
+INSERT INTO t_lifecycle VALUES (350, 6, 600);
+Verify index scan includes new partition data
+SELECT * FROM t_lifecycle WHERE c >= 400 ORDER BY c;
+a	b	c
+150	4	400
+210	5	500
+350	6	600
+SELECT * FROM t_lifecycle WHERE c = 600;
+a	b	c
+350	6	600
+Step 3: DROP first partition
+ALTER TABLE t_lifecycle ALGORITHM=INPLACE, DROP PARTITION p0;
+Verify index scan excludes dropped data
+SELECT * FROM t_lifecycle WHERE c > 0 ORDER BY c;
+a	b	c
+110	3	300
+150	4	400
+210	5	500
+350	6	600
+SELECT * FROM t_lifecycle WHERE c = 100;
+a	b	c
+SELECT * FROM t_lifecycle WHERE c = 200;
+a	b	c
+Verify remaining data via index
+SELECT * FROM t_lifecycle WHERE c = 300;
+a	b	c
+110	3	300
+SELECT * FROM t_lifecycle WHERE c = 400;
+a	b	c
+150	4	400
+SELECT * FROM t_lifecycle WHERE c = 500;
+a	b	c
+210	5	500
+SELECT * FROM t_lifecycle WHERE c = 600;
+a	b	c
+350	6	600
+Step 4: ADD another partition after index + DROP
+ALTER TABLE t_lifecycle ALGORITHM=INPLACE,
+ADD PARTITION (PARTITION p4 VALUES LESS THAN (500));
+INSERT INTO t_lifecycle VALUES (450, 7, 700);
+SELECT * FROM t_lifecycle WHERE c = 700;
+a	b	c
+450	7	700
+SELECT * FROM t_lifecycle WHERE c > 0 ORDER BY c;
+a	b	c
+110	3	300
+150	4	400
+210	5	500
+350	6	600
+450	7	700
+Full table scan
+SELECT * FROM t_lifecycle ORDER BY a;
+a	b	c
+110	3	300
+150	4	400
+210	5	500
+350	6	600
+450	7	700
+DROP TABLE t_lifecycle;
