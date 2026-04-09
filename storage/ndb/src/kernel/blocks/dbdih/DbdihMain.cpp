@@ -16114,13 +16114,14 @@ loop:
     const char *rangeKey =
       reinterpret_cast<const char *>(req->rangeKeyPtr);
     Uint32 rangeKeyLen = req->rangeKeyLen;
-    fragId = range_lookup(range_map, rangeKey, rangeKeyLen);
+    Uint32 hv = req->hashValue;
+    fragId = range_lookup(range_map, rangeKey, rangeKeyLen, hv);
 
     /* Check new map during ALTER TABLE transition */
     if (unlikely(tabPtr.p->m_new_range_ptr != nullptr)) {
       thrjam(jambuf);
       newFragId = range_lookup(tabPtr.p->m_new_range_ptr,
-                               rangeKey, rangeKeyLen);
+                               rangeKey, rangeKeyLen, hv);
       thrjamDataDebug(jambuf, fragId);
       thrjamDataDebug(jambuf, newFragId);
       thrjamDataDebug(jambuf, tabPtr.p->m_startFid_offset);

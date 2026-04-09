@@ -6127,6 +6127,7 @@ void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
     rmap->m_num_columns = 1;
     rmap->m_object_id = tablePtr.p->tableId;
     rmap->m_has_lower_bound = has_lower ? 1 : 0;
+    rmap->m_num_subpartitions = 1;
 
     /* Set sequential fragment IDs */
     Uint16 *fids = rmap->frag_ids();
@@ -10044,6 +10045,7 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
       rmap->m_num_columns = old_rmap->m_num_columns;
       rmap->m_object_id = old_rmap->m_object_id;
       rmap->m_has_lower_bound = old_rmap->m_has_lower_bound;
+      rmap->m_num_subpartitions = old_rmap->m_num_subpartitions;
 
       /* Copy old frag_ids, assign new frag_id for new partition.
        * Old partitions keep their fragment IDs.
@@ -10270,6 +10272,7 @@ void Dbdict::alterTable_parse(Signal *signal, bool master, SchemaOpPtr op_ptr,
     rmap->m_num_columns = old_rmap->m_num_columns;
     rmap->m_object_id = old_rmap->m_object_id;
     rmap->m_has_lower_bound = 1;
+    rmap->m_num_subpartitions = old_rmap->m_num_subpartitions;
 
     /* Copy surviving frag_ids (skip first num_dropped entries) */
     const Uint16 *old_fids = old_rmap->frag_ids();

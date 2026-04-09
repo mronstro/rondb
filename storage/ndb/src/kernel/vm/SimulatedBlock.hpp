@@ -2809,6 +2809,7 @@ struct Range2FragmentMap {
   Uint32 m_num_columns;    // number of partition key columns (1 for Phase 1)
   Uint32 m_object_id;      // associated table object ID
   Uint32 m_has_lower_bound; // 1 if lower bound exists (after DROP PARTITION)
+  Uint32 m_num_subpartitions; // hash subpartitions per range partition (>= 1)
 
   Uint16 *frag_ids() {
     return reinterpret_cast<Uint16 *>(
@@ -2820,14 +2821,16 @@ struct Range2FragmentMap {
   }
 
   char *boundaries() {
-    char *after_frags = reinterpret_cast<char *>(frag_ids() + m_cnt);
+    Uint32 total_fids = m_cnt * m_num_subpartitions;
+    char *after_frags = reinterpret_cast<char *>(frag_ids() + total_fids);
     Uint64 addr = reinterpret_cast<Uint64>(after_frags);
     addr = (addr + 7) & ~Uint64(7);
     return reinterpret_cast<char *>(addr);
   }
   const char *boundaries() const {
+    Uint32 total_fids = m_cnt * m_num_subpartitions;
     const char *after_frags =
-      reinterpret_cast<const char *>(frag_ids() + m_cnt);
+      reinterpret_cast<const char *>(frag_ids() + total_fids);
     Uint64 addr = reinterpret_cast<Uint64>(after_frags);
     addr = (addr + 7) & ~Uint64(7);
     return reinterpret_cast<const char *>(addr);
@@ -2845,13 +2848,15 @@ struct Range2FragmentMap {
     return boundaries() + m_cnt * m_boundary_len;
   }
 
-  /** Total allocation size needed for cnt partitions with blen-byte bounds */
+  /** Total allocation size needed for cnt range partitions with blen-byte
+   *  bounds and num_subpartitions hash subpartitions per range partition. */
   static Uint32 alloc_size(Uint32 cnt, Uint32 blen,
-                           bool has_lower_bound = false) {
+                           bool has_lower_bound = false,
+                           Uint32 num_subpartitions = 1) {
     Uint32 sz = sizeof(Range2FragmentMap);
-    sz += cnt * sizeof(Uint16);    // frag_ids
+    sz += cnt * num_subpartitions * sizeof(Uint16);  // frag_ids
     sz = (sz + 7) & ~Uint32(7);   // align to 8
-    sz += cnt * blen;              // boundaries
+    sz += cnt * blen;              // boundaries (one per range partition)
     if (has_lower_bound) {
       sz += blen;                  // lower bound
     }
@@ -2917,11 +2922,14 @@ static inline int range_compare(const char *bound, const char *key,
  * @param map       Range map (Tier 1, fixed-size boundaries)
  * @param key       Partition key bytes (native endian)
  * @param key_len   Length of partition key in bytes
+ * @param hashValue Hash of the full primary key; used to select among
+ *                  subpartitions when m_num_subpartitions > 1.
  * @return fragment ID for the matching partition, or RNIL if the value
  *         is beyond all boundaries (no MAXVALUE partition)
  */
 static inline Uint32 range_lookup(const Range2FragmentMap *map,
-                                  const char *key, Uint32 key_len) {
+                                  const char *key, Uint32 key_len,
+                                  Uint32 hashValue = 0) {
   const Uint32 btype = map->m_boundary_type;
 
   /* Reject keys below the lower bound (set after DROP PARTITION).
@@ -2951,7 +2959,16 @@ static inline Uint32 range_lookup(const Range2FragmentMap *map,
   if (lo >= map->m_cnt) {
     return RNIL;
   }
-  return map->frag_ids()[lo];
+
+  /* Select subpartition within this range partition.
+   * When m_num_subpartitions == 1, sub_idx is always 0 and the
+   * frag_ids layout is identical to the non-subpartitioned case. */
+  const Uint32 nsub = map->m_num_subpartitions;
+  Uint32 sub_idx = 0;
+  if (nsub > 1) {
+    sub_idx = hashValue % nsub;
+  }
+  return map->frag_ids()[lo * nsub + sub_idx];
 }
 
 /**
