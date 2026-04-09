@@ -13998,9 +13998,12 @@ void Dbdih::execDIADDTABREQ(Signal *signal) {
       ptrCheckGuard(primTabPtr, ctabFileSize, tabRecord);
       tabPtr.p->method = primTabPtr.p->method;
       tabPtr.p->m_startFid_offset = primTabPtr.p->m_startFid_offset;
+      tabPtr.p->m_num_subpartitions = primTabPtr.p->m_num_subpartitions;
       req->hashMapPtrI = primTabPtr.p->m_map_ptr_i;
-      DEB_RANGE_PART(("tab: %u, set m_startFid_offset to %u ordered index",
-        tabPtr.i, tabPtr.p->m_startFid_offset));
+      DEB_RANGE_PART(("tab: %u, set m_startFid_offset to %u nsub=%u"
+        " ordered index",
+        tabPtr.i, tabPtr.p->m_startFid_offset,
+        tabPtr.p->m_num_subpartitions));
       break;
     }
     case DictTabInfo::UserDefined:
@@ -14081,7 +14084,9 @@ void Dbdih::execDIADDTABREQ(Signal *signal) {
     ndbrequire(rmap != nullptr);
     tabPtr.p->m_range_ptr = rmap;
     tabPtr.p->m_new_range_ptr = nullptr;
-    ndbrequire(tabPtr.p->totalfragments == rmap->m_cnt);
+    tabPtr.p->m_num_subpartitions = rmap->m_num_subpartitions;
+    ndbrequire(tabPtr.p->totalfragments ==
+               rmap->m_cnt * rmap->m_num_subpartitions);
   }
 
   Uint32 index = 2;
@@ -14775,6 +14780,7 @@ void Dbdih::releaseTable(TabRecordPtr tabPtr) {
   }
   tabPtr.p->totalfragments = 0;
   tabPtr.p->m_startFid_offset = 0;
+  tabPtr.p->m_num_subpartitions = 1;
   tabPtr.p->schemaVersion = Uint32(~0);
 }//Dbdih::releaseTable()
 
@@ -25232,6 +25238,7 @@ void Dbdih::initTable(TabRecordPtr tabPtr) {
   tabPtr.p->startFid = nullptr;
   tabPtr.p->startFidSize = 0;
   tabPtr.p->m_startFid_offset = 0;
+  tabPtr.p->m_num_subpartitions = 1;
   tabPtr.p->m_range_ptr = nullptr;
   tabPtr.p->m_new_range_ptr = nullptr;
   Uint32 i;

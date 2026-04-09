@@ -803,6 +803,7 @@ class Dbdih : public SimulatedBlock {
      *             fragNo = fragId - m_startFid_offset
      */
     Uint32 m_startFid_offset;
+    Uint32 m_num_subpartitions; // hash subpartitions per range partition (>= 1)
 
     CopyStatus tabCopyStatus;
     UpdateState tabUpdateState;
