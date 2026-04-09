@@ -6080,10 +6080,8 @@ void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
      * RangeListData contains int32 boundary values, one per partition.
      * RangeBoundaryType tells us what NDB type to use for comparison.
      */
-    const Uint32 nParts = tablePtr.p->fragmentCount;
     const Uint32 btype = c_tableDesc.RangeBoundaryType;
     const Uint32 nSubParts = c_tableDesc.RangeNumSubpartitions;
-    tabRequire(nParts > 0, CreateTableRef::InvalidFormat);
     tabRequire(nSubParts >= 1, CreateTableRef::InvalidFormat);
     tabRequire(c_tableDesc.RangeListDataLen > 0,
                CreateTableRef::InvalidFormat);
@@ -6114,6 +6112,16 @@ void Dbdict::handleTabInfoInit(Signal *signal, SchemaTransPtr &trans_ptr,
         tabRequire(false, CreateTableRef::InvalidFormat);
         blen = 0;  // unreachable
     }
+
+    /* Derive nParts (number of range partitions) from the boundary data.
+     * RangeListData has exactly one boundary per range partition regardless
+     * of subpartitions. This is reliable on both first CREATE and restart
+     * (fragmentCount may already be totalFrags on restart). */
+    const Uint32 rangeDataBytes = c_tableDesc.RangeListDataLen * 4;
+    tabRequire(rangeDataBytes > 0 && (rangeDataBytes % blen) == 0,
+               CreateTableRef::InvalidFormat);
+    const Uint32 nParts = rangeDataBytes / blen;
+    tabRequire(nParts > 0, CreateTableRef::InvalidFormat);
 
     const bool has_lower = (c_tableDesc.RangeLowerBoundLen > 0);
     const Uint32 totalFrags = nParts * nSubParts;
