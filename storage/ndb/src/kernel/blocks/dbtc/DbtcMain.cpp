@@ -78,6 +78,7 @@
 #include <signaldata/SetDomainId.hpp>
 #include <signaldata/CteScan.hpp>
 #include <signaldata/JoinAgg.hpp>
+#include <signaldata/QueryTree.hpp>
 
 #include <AttributeDescriptor.hpp>
 #include <AttributeHeader.hpp>
@@ -16312,7 +16313,7 @@ void Dbtc::execSCAN_TABREQ(Signal *signal) {
     scanptr.p->scanAttrInfoPtr = handle.m_ptr[ScanTabReq::AttrInfoSectionNum].i;
     if (ScanTabReq::getJoinAggFlag(ri) && keyLen) {
       jam();
-      parseJoinAggKeyInfo(scanptr, handle, keyLen);
+      parseJoinAggKeyInfo(signal, scanptr, handle, keyLen);
     } else if (keyLen) {
       jamDebug();
       scanptr.p->scanKeyInfoPtr = handle.m_ptr[ScanTabReq::KeyInfoSectionNum].i;
@@ -28628,8 +28629,8 @@ void Dbtc::debug_db_no_queue(DatabaseRecordPtr databaseRecordPtr,
  *   Remaining words:     aggregation program
  * Splits bounds from agg program into separate scan record fields.
  */
-void Dbtc::parseJoinAggKeyInfo(ScanRecordPtr scanptr, SectionHandle &handle,
-                               Uint32 keyLen) {
+void Dbtc::parseJoinAggKeyInfo(Signal *signal, ScanRecordPtr scanptr,
+                               SectionHandle &handle, Uint32 keyLen) {
   scanptr.p->m_joinAgg = true;
   scanptr.p->scanKeyInfoPtr = RNIL;
   scanptr.p->m_aggProgramPtrI = RNIL;
