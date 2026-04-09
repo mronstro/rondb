@@ -80,7 +80,9 @@ a	b	c
 10	1	1
 drop table t1;
 #
-# RANGE COLUMNS with MAXVALUE partition
+# RANGE COLUMNS rejects MAXVALUE
+# Native range partitioning has fixed boundary widths and cannot
+# represent MAXVALUE. Use a finite high boundary instead.
 #
 CREATE TABLE t2 (
 id int not null,
@@ -91,29 +93,7 @@ partition by range columns (id)
 (partition p0 values less than (100),
 partition p1 values less than (200),
 partition pmax values less than (maxvalue));
-INSERT into t2 values (50, 1);
-INSERT into t2 values (150, 2);
-INSERT into t2 values (999, 3);
-INSERT into t2 values (2147483647, 4);
-select * from t2 order by id;
-id	val
-50	1
-150	2
-999	3
-2147483647	4
-select * from t2 where id=50;
-id	val
-50	1
-select * from t2 where id=150;
-id	val
-150	2
-select * from t2 where id=999;
-id	val
-999	3
-select * from t2 where id=2147483647;
-id	val
-2147483647	4
-drop table t2;
+ERROR HY000: The NDB handler only supports 32 bit integers in VALUES
 #
 # Scan pruning for RANGE COLUMNS
 #
@@ -126,7 +106,7 @@ engine=ndb
 partition by range columns (a)
 (partition part0 values less than (3),
 partition part1 values less than (6),
-partition part2 values less than (maxvalue));
+partition part2 values less than (1000));
 insert into t3 values (0, 0, 0);
 insert into t3 values (0, 1, 1);
 insert into t3 values (0, 2, 2);
@@ -208,7 +188,7 @@ primary key(a))
 engine = ndb
 partition by range columns (a)
 (partition p0 values less than (10),
-partition p1 values less than (maxvalue));
+partition p1 values less than (1000));
 show create table t4;
 Table	Create Table
 t4	CREATE TABLE `t4` (
@@ -218,7 +198,7 @@ t4	CREATE TABLE `t4` (
 ) ENGINE=ndbcluster DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 /*!50500 PARTITION BY RANGE  COLUMNS(a)
 (PARTITION p0 VALUES LESS THAN (10) ENGINE = ndbcluster,
- PARTITION p1 VALUES LESS THAN (MAXVALUE) ENGINE = ndbcluster) */
+ PARTITION p1 VALUES LESS THAN (1000) ENGINE = ndbcluster) */
 select column_name from information_schema.columns
 where table_schema='test' and table_name='t4' order by ordinal_position;
 COLUMN_NAME
@@ -242,7 +222,7 @@ engine = ndb
 partition by range columns (a)
 (partition p0 values less than (100),
 partition p1 values less than (200),
-partition p2 values less than (maxvalue));
+partition p2 values less than (1000));
 BEGIN;
 INSERT into t5 values (1, 1);
 INSERT into t5 values (101, 2);
@@ -281,7 +261,7 @@ partition by range columns (a)
 partition p1 values less than (20),
 partition p2 values less than (30),
 partition p3 values less than (40),
-partition p4 values less than (maxvalue));
+partition p4 values less than (1000));
 INSERT into t6 values (5), (15), (25), (35), (100);
 select * from t6 order by a;
 a

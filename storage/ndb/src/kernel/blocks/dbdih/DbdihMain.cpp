@@ -14921,8 +14921,12 @@ void Dbdih::execALTER_TAB_REQ(Signal *signal) {
         connectPtr.p->m_alter.m_drop_frag_id = RNIL;
         connectPtr.p->m_alter.m_new_startFid_offset =
             tabPtr.p->m_startFid_offset;
+        /* Placeholder: real value is captured in
+         * start_add_fragments_in_new_table once add_fragments_to_table
+         * has grown startFidSize by the actual number of new fragments.
+         */
         connectPtr.p->m_alter.m_new_startFidSize =
-          (tabPtr.p->startFidSize + 1);
+          tabPtr.p->startFidSize;
       } else {
         connectPtr.p->m_alter.m_drop_frag_id = RNIL;
         connectPtr.p->m_alter.m_new_startFid_offset =
@@ -16705,6 +16709,14 @@ void Dbdih::start_add_fragments_in_new_table(TabRecordPtr tabPtr,
 
   tabPtr.p->tabCopyStatus = TabRecord::CS_ALTER_TABLE;
   connectPtr.p->m_alter.m_totalfragments = tabPtr.p->totalfragments;
+  /* Capture the actual new startFidSize that add_fragments_to_table just
+   * grew. The prepare-phase placeholder did not know how many fragments
+   * would be added (e.g. add partition partitions 1 on FOR_RP_BY_LDM may
+   * add several fragments). Without this, make_new_table_read_and_writeable
+   * would later roll startFidSize back and getFragstore would fail with
+   * fragNo < startFidSize.
+   */
+  connectPtr.p->m_alter.m_new_startFidSize = tabPtr.p->startFidSize;
   if ((tabPtr.p->m_flags & TabRecord::TF_FULLY_REPLICATED) == 0) {
     jam();
     connectPtr.p->m_alter.m_partitionCount = tabPtr.p->totalfragments;
