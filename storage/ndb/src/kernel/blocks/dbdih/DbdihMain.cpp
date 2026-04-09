@@ -14908,17 +14908,25 @@ void Dbdih::execALTER_TAB_REQ(Signal *signal) {
         jam();
         const Range2FragmentMap *old_rmap = tabPtr.p->m_range_ptr;
         ndbassert(old_rmap != nullptr);
+        const Uint32 nsub = old_rmap->m_num_subpartitions;
         connectPtr.p->m_alter.m_drop_frag_id = old_rmap->frag_ids()[0];
+        connectPtr.p->m_alter.m_drop_frag_count = nsub;
+        connectPtr.p->m_alter.m_drop_frag_idx = 0;
         connectPtr.p->m_alter.m_new_startFid_offset =
-            (tabPtr.p->m_startFid_offset + 1) & 0xFFFF;
+            (tabPtr.p->m_startFid_offset + nsub) & 0xFFFF;
         connectPtr.p->m_alter.m_totalfragments =
-            tabPtr.p->totalfragments - 1;
+            tabPtr.p->totalfragments - nsub;
         connectPtr.p->m_alter.m_partitionCount =
-            tabPtr.p->partitionCount - 1;
+            tabPtr.p->partitionCount - nsub;
         connectPtr.p->m_alter.m_new_startFidSize =
-          (tabPtr.p->startFidSize - 1);
+          (tabPtr.p->startFidSize - nsub);
       } else if (AlterTableReq::getAddFragFlag(req->changeMask)) {
         connectPtr.p->m_alter.m_drop_frag_id = RNIL;
+        connectPtr.p->m_alter.m_drop_frag_count = 0;
+        connectPtr.p->m_alter.m_drop_frag_idx = 0;
+        const Range2FragmentMap *old_rmap = tabPtr.p->m_range_ptr;
+        const Uint32 nsub = (old_rmap != nullptr) ?
+            old_rmap->m_num_subpartitions : 1;
         connectPtr.p->m_alter.m_new_startFid_offset =
             tabPtr.p->m_startFid_offset;
         /* Placeholder: real value is captured in
@@ -14929,6 +14937,8 @@ void Dbdih::execALTER_TAB_REQ(Signal *signal) {
           tabPtr.p->startFidSize;
       } else {
         connectPtr.p->m_alter.m_drop_frag_id = RNIL;
+        connectPtr.p->m_alter.m_drop_frag_count = 0;
+        connectPtr.p->m_alter.m_drop_frag_idx = 0;
         connectPtr.p->m_alter.m_new_startFid_offset =
             tabPtr.p->m_startFid_offset;
         connectPtr.p->m_alter.m_new_startFidSize =
@@ -15431,17 +15441,14 @@ void Dbdih::execDROP_FRAG_CONF(Signal *signal) {
 
   if (AlterTableReq::getDropFragFlag(connectPtr.p->m_alter.m_changeMask)) {
     jam();
-    /* DROP PARTITION complete: release the dropped fragment's resources */
+    /* DROP PARTITION: release the current dropped fragment's resources */
     TabRecordPtr tabPtr;
     tabPtr.i = connectPtr.p->table;
     ptrCheckGuard(tabPtr, ctabFileSize, tabRecord);
 
-    /**
-     * The dropped fragment was removed from startFid[] during
-     * make_new_table_read_and_writeable. Use the saved pool index.
-     */
+    const Uint32 idx = connectPtr.p->m_alter.m_drop_frag_idx;
     FragmentstorePtr fragPtr;
-    fragPtr.i = connectPtr.p->m_alter.m_drop_frag_ptrI;
+    fragPtr.i = connectPtr.p->m_alter.m_drop_frag_ptrIs[idx];
     ndbrequire(c_fragmentRecordPool.getPtr(fragPtr));
 
     /* Release replica records */
@@ -15451,6 +15458,27 @@ void Dbdih::execDROP_FRAG_CONF(Signal *signal) {
     /* Release Fragmentstore */
     c_fragmentRecordPool.release(fragPtr);
 
+    connectPtr.p->m_alter.m_drop_frag_idx = idx + 1;
+
+    /* If more subpartition fragments to drop, chain next DROP_FRAG_REQ */
+    if (connectPtr.p->m_alter.m_drop_frag_idx <
+        connectPtr.p->m_alter.m_drop_frag_count) {
+      jam();
+      Uint32 nextFragId = connectPtr.p->m_alter.m_drop_frag_id +
+                           connectPtr.p->m_alter.m_drop_frag_idx;
+      DropFragReq *dropReq =
+          (DropFragReq *)signal->getDataPtrSend();
+      dropReq->senderRef = reference();
+      dropReq->senderData = connectPtr.i;
+      dropReq->tableId = tabPtr.i;
+      dropReq->fragId = nextFragId;
+      dropReq->requestInfo = DropFragReq::AlterTableDrop;
+      sendSignal(DBLQH_REF, GSN_DROP_FRAG_REQ, signal,
+                 DropFragReq::SignalLength, JBB);
+      return;
+    }
+
+    /* All subpartition fragments dropped. Finalize. */
     /* Old range map already freed in make_new_table_read_and_writeable */
     NdbMutex_Lock(&tabPtr.p->theMutex);
     DIH_TAB_WRITE_LOCK(tabPtr.p);
@@ -16823,12 +16851,21 @@ void Dbdih::make_new_table_read_and_writeable(TabRecordPtr tabPtr,
      * so startFid[0] always holds the first live fragment.
      * The fragment is released later in execDROP_FRAG_CONF.
      */
-    connectPtr.p->m_alter.m_drop_frag_ptrI = tabPtr.p->startFid[0];
-    const Uint32 newTotal = tabPtr.p->totalfragments;
-    for (Uint32 i = 0; i < newTotal; i++) {
-      tabPtr.p->startFid[i] = tabPtr.p->startFid[i + 1];
+    const Uint32 dropCount = connectPtr.p->m_alter.m_drop_frag_count;
+    ndbassert(dropCount > 0);
+    ndbassert(dropCount <= NDB_MAX_RANGE_SUBPARTITIONS);
+    /* Save pool indices of ALL fragments to drop */
+    for (Uint32 d = 0; d < dropCount; d++) {
+      connectPtr.p->m_alter.m_drop_frag_ptrIs[d] = tabPtr.p->startFid[d];
     }
-    tabPtr.p->startFid[newTotal] = RNIL64;
+    const Uint32 newTotal = tabPtr.p->totalfragments;
+    /* Shift startFid[] down by dropCount positions */
+    for (Uint32 i = 0; i < newTotal; i++) {
+      tabPtr.p->startFid[i] = tabPtr.p->startFid[i + dropCount];
+    }
+    for (Uint32 i = newTotal; i < newTotal + dropCount; i++) {
+      tabPtr.p->startFid[i] = RNIL64;
+    }
 
     DEB_RANGE_PART(("New startFid_offset: %u startFidSize: %u, tableId: %u,"
                     " line: %u",

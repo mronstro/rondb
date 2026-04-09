@@ -198,8 +198,10 @@ class Dbdih : public SimulatedBlock {
         Uint32 m_org_totalfragments;
         Uint32 m_new_map_ptr_i;
         Range2FragmentMap *m_new_range_ptr;  // new range map during ALTER
-        Uint32 m_drop_frag_id;         // fragment ID being dropped (DROP PARTITION)
-        Uint64 m_drop_frag_ptrI;       // pool index of dropped fragment
+        Uint32 m_drop_frag_id;         // first fragment ID being dropped
+        Uint32 m_drop_frag_count;      // number of fragments to drop (nsub)
+        Uint32 m_drop_frag_idx;        // current index in drop chain (0..count-1)
+        Uint64 m_drop_frag_ptrIs[NDB_MAX_RANGE_SUBPARTITIONS];
         Uint32 m_new_startFid_offset;  // new startFid offset after drop
         Uint32 m_new_startFidSize;     // new startFidSize after drop
       } m_alter;

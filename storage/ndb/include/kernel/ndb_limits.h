@@ -192,6 +192,12 @@
 #define MAX_NDB_PARTITIONS 8160
 #endif
 
+/**
+ * Maximum number of hash subpartitions per range partition.
+ * Used with PARTITION BY RANGE COLUMNS ... SUBPARTITION BY KEY().
+ */
+#define NDB_MAX_RANGE_SUBPARTITIONS 16
+
 #define NDB_PARTITION_BITS 16
 #define NDB_PARTITION_MASK ((Uint32)((1 << NDB_PARTITION_BITS) - 1))
 
