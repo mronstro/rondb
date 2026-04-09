@@ -1,0 +1,122 @@
+-- source include/have_ndb.inc
+
+#
+# Test that RANGE COLUMNS tables with hash subpartitioning survive
+# node restarts. The range map, m_num_subpartitions, and data
+# must be intact after restart.
+#
+
+--echo ##############################
+--echo # 1. Create subpartitioned table and insert data
+--echo ##############################
+
+CREATE TABLE t1 (
+  id BIGINT NOT NULL,
+  d DATE NOT NULL,
+  v VARCHAR(100),
+  PRIMARY KEY (id, d)
+) ENGINE=NDB
+PARTITION BY RANGE COLUMNS (d)
+SUBPARTITION BY KEY()
+SUBPARTITIONS 4
+(
+  PARTITION p0 VALUES LESS THAN ('2025-01-01'),
+  PARTITION p1 VALUES LESS THAN ('2026-01-01'),
+  PARTITION p2 VALUES LESS THAN ('2027-01-01')
+);
+
+# 3 * 4 = 12
+select count(*) as subpartition_count from information_schema.partitions
+  where table_schema='test' and table_name='t1';
+
+INSERT INTO t1 VALUES (1, '2024-06-15', 'p0-before-restart');
+INSERT INTO t1 VALUES (2, '2025-06-15', 'p1-before-restart');
+INSERT INTO t1 VALUES (3, '2026-06-15', 'p2-before-restart');
+
+# Multiple rows per partition for distribution test
+INSERT INTO t1 VALUES (10, '2025-03-01', 'p1-multi-1');
+INSERT INTO t1 VALUES (11, '2025-03-02', 'p1-multi-2');
+INSERT INTO t1 VALUES (12, '2025-03-03', 'p1-multi-3');
+INSERT INTO t1 VALUES (13, '2025-03-04', 'p1-multi-4');
+
+SELECT * FROM t1 ORDER BY d, id;
+
+--echo ##############################
+--echo # 2. Restart data nodes (initial node restart)
+--echo ##############################
+
+--exec $NDB_MGM --no-defaults --ndb-connectstring="$NDB_CONNECTSTRING" -e "1 restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM --no-defaults --ndb-connectstring="$NDB_CONNECTSTRING" -e "2 restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --no-defaults --ndb-connectstring="$NDB_CONNECTSTRING" --not-started >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM --no-defaults --ndb-connectstring="$NDB_CONNECTSTRING" -e "all start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --no-defaults --ndb-connectstring="$NDB_CONNECTSTRING" >> $NDB_TOOLS_OUTPUT
+
+--echo ##############################
+--echo # 3. Verify data after restart
+--echo ##############################
+
+# Partition count intact
+select count(*) as subpartition_count from information_schema.partitions
+  where table_schema='test' and table_name='t1';
+
+# All data intact
+SELECT * FROM t1 ORDER BY d, id;
+
+# PK lookups work
+SELECT * FROM t1 WHERE id=1 AND d='2024-06-15';
+SELECT * FROM t1 WHERE id=2 AND d='2025-06-15';
+SELECT * FROM t1 WHERE id=3 AND d='2026-06-15';
+
+# Insert after restart works
+INSERT INTO t1 VALUES (4, '2024-12-01', 'after-restart-p0');
+INSERT INTO t1 VALUES (5, '2025-12-01', 'after-restart-p1');
+SELECT * FROM t1 WHERE id=4 AND d='2024-12-01';
+SELECT * FROM t1 WHERE id=5 AND d='2025-12-01';
+
+--echo ##############################
+--echo # 4. DROP PARTITION + restart
+--echo ##############################
+
+ALTER TABLE t1 ALGORITHM=INPLACE, DROP PARTITION p0;
+
+SELECT * FROM t1 ORDER BY d, id;
+
+# Verify lower bound enforced before restart
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t1 VALUES (99, '2024-01-01', 'below-lower-bound');
+
+--echo Restart after DROP PARTITION
+
+--exec $NDB_MGM --no-defaults --ndb-connectstring="$NDB_CONNECTSTRING" -e "1 restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM --no-defaults --ndb-connectstring="$NDB_CONNECTSTRING" -e "2 restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --no-defaults --ndb-connectstring="$NDB_CONNECTSTRING" --not-started >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM --no-defaults --ndb-connectstring="$NDB_CONNECTSTRING" -e "all start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --no-defaults --ndb-connectstring="$NDB_CONNECTSTRING" >> $NDB_TOOLS_OUTPUT
+
+--echo ##############################
+--echo # 5. Verify after second restart
+--echo ##############################
+
+# Partition count reflects DROP
+select count(*) as subpartition_count from information_schema.partitions
+  where table_schema='test' and table_name='t1';
+
+# Data from dropped partition gone, surviving data intact
+SELECT * FROM t1 ORDER BY d, id;
+
+# Lower bound still enforced after restart
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t1 VALUES (99, '2024-01-01', 'below-lower-bound-post-restart');
+
+# Insert into surviving partitions works
+INSERT INTO t1 VALUES (6, '2025-09-01', 'post-restart-p1');
+SELECT * FROM t1 WHERE id=6 AND d='2025-09-01';
+
+# ADD PARTITION after restart
+ALTER TABLE t1 ALGORITHM=INPLACE,
+  ADD PARTITION (PARTITION p3 VALUES LESS THAN ('2028-01-01'));
+
+INSERT INTO t1 VALUES (7, '2027-06-15', 'new-p3');
+SELECT * FROM t1 WHERE id=7 AND d='2027-06-15';
+
+DROP TABLE t1;

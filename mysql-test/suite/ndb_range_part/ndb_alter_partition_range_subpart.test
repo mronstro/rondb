@@ -1,0 +1,227 @@
+-- source include/have_multi_ndb.inc
+
+#
+# Test ALTER TABLE ADD/DROP PARTITION for native RANGE COLUMNS
+# with hash subpartitioning. DROP PARTITION drops N subpartition
+# fragments, ADD PARTITION adds N subpartition fragments.
+#
+
+--echo ##############################
+--echo # 1. Setup: RANGE COLUMNS with 4 subpartitions
+--echo ##############################
+
+CREATE TABLE t1 (
+  id BIGINT NOT NULL,
+  d DATE NOT NULL,
+  v VARCHAR(100),
+  PRIMARY KEY (id, d)
+) ENGINE=NDB
+PARTITION BY RANGE COLUMNS (d)
+SUBPARTITION BY KEY()
+SUBPARTITIONS 4
+(
+  PARTITION p0 VALUES LESS THAN ('2024-01-01'),
+  PARTITION p1 VALUES LESS THAN ('2025-01-01'),
+  PARTITION p2 VALUES LESS THAN ('2026-01-01'),
+  PARTITION p3 VALUES LESS THAN ('2027-01-01')
+);
+
+# 4 range * 4 subparts = 16 subpartitions
+select count(*) as subpartition_count from information_schema.partitions
+  where table_schema='test' and table_name='t1';
+
+# Insert data across all partitions
+INSERT INTO t1 VALUES (1, '2023-06-15', 'p0-data');
+INSERT INTO t1 VALUES (2, '2024-06-15', 'p1-data');
+INSERT INTO t1 VALUES (3, '2025-06-15', 'p2-data');
+INSERT INTO t1 VALUES (4, '2026-06-15', 'p3-data');
+
+SELECT * FROM t1 ORDER BY d;
+
+--echo ##############################
+--echo # 2. DROP first partition (drops 4 subpartition fragments)
+--echo ##############################
+
+ALTER TABLE t1 ALGORITHM=INPLACE, DROP PARTITION p0;
+
+# Now 3 range * 4 subparts = 12 subpartitions
+select count(*) as subpartition_count from information_schema.partitions
+  where table_schema='test' and table_name='t1';
+
+# p0 data gone
+SELECT * FROM t1 ORDER BY d;
+
+# PK lookups on surviving data still work
+SELECT * FROM t1 WHERE id=2 AND d='2024-06-15';
+SELECT * FROM t1 WHERE id=3 AND d='2025-06-15';
+SELECT * FROM t1 WHERE id=4 AND d='2026-06-15';
+
+# Insert below dropped range should fail (lower bound enforcement)
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t1 VALUES (5, '2023-06-15', 'should-fail');
+
+# Insert into surviving partitions works
+INSERT INTO t1 VALUES (5, '2024-03-01', 'new-p1');
+SELECT * FROM t1 WHERE id=5 AND d='2024-03-01';
+
+--echo ##############################
+--echo # 3. ADD new partition (adds 4 subpartition fragments)
+--echo ##############################
+
+ALTER TABLE t1 ALGORITHM=INPLACE,
+  ADD PARTITION (PARTITION p4 VALUES LESS THAN ('2028-01-01'));
+
+# Now 4 range * 4 subparts = 16 subpartitions
+select count(*) as subpartition_count from information_schema.partitions
+  where table_schema='test' and table_name='t1';
+
+# All existing data preserved
+SELECT * FROM t1 ORDER BY d, id;
+
+# Insert into new partition
+INSERT INTO t1 VALUES (6, '2027-06-15', 'p4-data');
+SELECT * FROM t1 WHERE id=6 AND d='2027-06-15';
+
+--echo ##############################
+--echo # 4. Sliding window: DROP oldest + ADD newest
+--echo ##############################
+
+# Drop p1 (now the first partition after p0 was dropped)
+ALTER TABLE t1 ALGORITHM=INPLACE, DROP PARTITION p1;
+
+# 3 range * 4 subparts = 12
+select count(*) as subpartition_count from information_schema.partitions
+  where table_schema='test' and table_name='t1';
+
+# p1 data gone
+SELECT * FROM t1 ORDER BY d, id;
+
+# Add p5
+ALTER TABLE t1 ALGORITHM=INPLACE,
+  ADD PARTITION (PARTITION p5 VALUES LESS THAN ('2029-01-01'));
+
+# 4 range * 4 subparts = 16
+select count(*) as subpartition_count from information_schema.partitions
+  where table_schema='test' and table_name='t1';
+
+INSERT INTO t1 VALUES (7, '2028-06-15', 'p5-data');
+SELECT * FROM t1 ORDER BY d, id;
+
+--echo ##############################
+--echo # 5. Multiple inserts to verify subpartition routing after ALTER
+--echo ##############################
+
+# Insert multiple rows in each surviving partition
+let $i = 100;
+while ($i < 108)
+{
+  eval INSERT INTO t1 VALUES ($i, '2025-06-15', CONCAT('bulk-p2-', $i));
+  inc $i;
+}
+let $i = 200;
+while ($i < 208)
+{
+  eval INSERT INTO t1 VALUES ($i, '2026-06-15', CONCAT('bulk-p3-', $i));
+  inc $i;
+}
+let $i = 300;
+while ($i < 308)
+{
+  eval INSERT INTO t1 VALUES ($i, '2027-06-15', CONCAT('bulk-p4-', $i));
+  inc $i;
+}
+
+SELECT COUNT(*) as total_rows FROM t1;
+
+# PK lookups on bulk-inserted rows
+SELECT * FROM t1 WHERE id=100 AND d='2025-06-15';
+SELECT * FROM t1 WHERE id=200 AND d='2026-06-15';
+SELECT * FROM t1 WHERE id=300 AND d='2027-06-15';
+
+--echo ##############################
+--echo # 6. Full scan returns all rows
+--echo ##############################
+
+SELECT COUNT(*) as total_rows FROM t1;
+
+DROP TABLE t1;
+
+--echo ##############################
+--echo # 7. Subpartitions with 2 subpartitions
+--echo ##############################
+
+CREATE TABLE t2 (
+  a INT NOT NULL,
+  b INT NOT NULL,
+  PRIMARY KEY (a, b)
+) ENGINE=NDB
+PARTITION BY RANGE COLUMNS (a)
+SUBPARTITION BY KEY()
+SUBPARTITIONS 2
+(
+  PARTITION p0 VALUES LESS THAN (100),
+  PARTITION p1 VALUES LESS THAN (200),
+  PARTITION p2 VALUES LESS THAN (300)
+);
+
+# 3 * 2 = 6
+select count(*) as subpartition_count from information_schema.partitions
+  where table_schema='test' and table_name='t2';
+
+INSERT INTO t2 VALUES (50, 1);
+INSERT INTO t2 VALUES (150, 1);
+INSERT INTO t2 VALUES (250, 1);
+
+# DROP first
+ALTER TABLE t2 ALGORITHM=INPLACE, DROP PARTITION p0;
+
+# 2 * 2 = 4
+select count(*) as subpartition_count from information_schema.partitions
+  where table_schema='test' and table_name='t2';
+
+SELECT * FROM t2 ORDER BY a;
+
+# ADD at end
+ALTER TABLE t2 ALGORITHM=INPLACE,
+  ADD PARTITION (PARTITION p3 VALUES LESS THAN (400));
+
+INSERT INTO t2 VALUES (350, 1);
+SELECT * FROM t2 ORDER BY a;
+
+# 3 * 2 = 6
+select count(*) as subpartition_count from information_schema.partitions
+  where table_schema='test' and table_name='t2';
+
+DROP TABLE t2;
+
+--echo ##############################
+--echo # 8. DROP PARTITION only on first partition
+--echo ##############################
+
+CREATE TABLE t3 (
+  id INT NOT NULL,
+  d DATE NOT NULL,
+  PRIMARY KEY (id, d)
+) ENGINE=NDB
+PARTITION BY RANGE COLUMNS (d)
+SUBPARTITION BY KEY()
+SUBPARTITIONS 4
+(
+  PARTITION p0 VALUES LESS THAN ('2025-01-01'),
+  PARTITION p1 VALUES LESS THAN ('2026-01-01'),
+  PARTITION p2 VALUES LESS THAN ('2027-01-01')
+);
+
+# Dropping non-first partition should fail
+--error ER_DROP_PARTITION_NON_EXISTENT,ER_GET_ERRMSG
+ALTER TABLE t3 ALGORITHM=INPLACE, DROP PARTITION p1;
+
+--error ER_DROP_PARTITION_NON_EXISTENT,ER_GET_ERRMSG
+ALTER TABLE t3 ALGORITHM=INPLACE, DROP PARTITION p2;
+
+# Dropping first partition works
+ALTER TABLE t3 ALGORITHM=INPLACE, DROP PARTITION p0;
+SELECT count(*) as subpartition_count from information_schema.partitions
+  where table_schema='test' and table_name='t3';
+
+DROP TABLE t3;

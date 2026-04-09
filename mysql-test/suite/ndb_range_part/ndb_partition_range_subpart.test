@@ -1,0 +1,212 @@
+-- source include/have_ndb.inc
+
+#
+# Test native RANGE COLUMNS partitioning with hash subpartitioning.
+# SUBPARTITION BY KEY() distributes rows across subpartitions within
+# each range partition using the primary key hash.
+#
+
+--echo ##############################
+--echo # 1. Basic CREATE with subpartitions
+--echo ##############################
+
+CREATE TABLE t1 (
+  id BIGINT NOT NULL,
+  d DATE NOT NULL,
+  v VARCHAR(100),
+  PRIMARY KEY (id, d)
+) ENGINE=NDB
+PARTITION BY RANGE COLUMNS (d)
+SUBPARTITION BY KEY()
+SUBPARTITIONS 4
+(
+  PARTITION p0 VALUES LESS THAN ('2025-01-01'),
+  PARTITION p1 VALUES LESS THAN ('2026-01-01'),
+  PARTITION p2 VALUES LESS THAN ('2027-01-01')
+);
+
+# Verify partition count: 3 range * 4 subparts = 12 subpartitions
+# information_schema shows subpartitions
+select count(*) as subpartition_count from information_schema.partitions
+  where table_schema='test' and table_name='t1';
+
+--echo ##############################
+--echo # 2. INSERT across range partitions
+--echo ##############################
+
+INSERT INTO t1 VALUES (1, '2024-06-15', 'p0-row1');
+INSERT INTO t1 VALUES (2, '2024-12-31', 'p0-row2');
+INSERT INTO t1 VALUES (10, '2025-01-01', 'p1-row1');
+INSERT INTO t1 VALUES (11, '2025-06-15', 'p1-row2');
+INSERT INTO t1 VALUES (12, '2025-12-31', 'p1-row3');
+INSERT INTO t1 VALUES (20, '2026-01-01', 'p2-row1');
+INSERT INTO t1 VALUES (21, '2026-06-15', 'p2-row2');
+
+# Full table scan
+SELECT * FROM t1 ORDER BY d, id;
+
+--echo ##############################
+--echo # 3. PK lookups
+--echo ##############################
+
+SELECT * FROM t1 WHERE id=1 AND d='2024-06-15';
+SELECT * FROM t1 WHERE id=10 AND d='2025-01-01';
+SELECT * FROM t1 WHERE id=20 AND d='2026-01-01';
+SELECT * FROM t1 WHERE id=21 AND d='2026-06-15';
+
+# Non-existent row
+SELECT * FROM t1 WHERE id=999 AND d='2024-06-15';
+
+--echo ##############################
+--echo # 4. Boundary values
+--echo ##############################
+
+# Exact boundary goes to next partition
+INSERT INTO t1 VALUES (30, '2025-01-01', 'boundary-exact');
+SELECT * FROM t1 WHERE id=30 AND d='2025-01-01';
+
+# Day before boundary stays in current partition
+INSERT INTO t1 VALUES (31, '2024-12-31', 'boundary-before');
+SELECT * FROM t1 WHERE id=31 AND d='2024-12-31';
+
+# Value beyond all partitions should fail
+--error ER_NO_PARTITION_FOR_GIVEN_VALUE,ER_GET_ERRMSG
+INSERT INTO t1 VALUES (99, '2027-01-01', 'beyond-range');
+
+--echo ##############################
+--echo # 5. UPDATE and DELETE
+--echo ##############################
+
+UPDATE t1 SET v = 'updated' WHERE id = 11 AND d = '2025-06-15';
+SELECT * FROM t1 WHERE id=11 AND d='2025-06-15';
+
+DELETE FROM t1 WHERE id = 2 AND d = '2024-12-31';
+SELECT * FROM t1 WHERE id=2 AND d='2024-12-31';
+
+SELECT * FROM t1 ORDER BY d, id;
+
+--echo ##############################
+--echo # 6. Subpartition distribution
+--echo ##############################
+
+# Insert many rows with same date but different IDs to verify
+# they distribute across subpartitions via hash
+let $i = 100;
+while ($i < 140)
+{
+  eval INSERT INTO t1 VALUES ($i, '2025-06-15', CONCAT('dist-row-', $i));
+  inc $i;
+}
+
+# All rows should be retrievable
+SELECT COUNT(*) as row_count FROM t1 WHERE d = '2025-06-15';
+
+DROP TABLE t1;
+
+--echo ##############################
+--echo # 7. INT partition key with subpartitions
+--echo ##############################
+
+CREATE TABLE t2 (
+  a INT NOT NULL,
+  b INT NOT NULL,
+  c VARCHAR(50),
+  PRIMARY KEY (a, b)
+) ENGINE=NDB
+PARTITION BY RANGE COLUMNS (a)
+SUBPARTITION BY KEY()
+SUBPARTITIONS 2
+(
+  PARTITION p0 VALUES LESS THAN (100),
+  PARTITION p1 VALUES LESS THAN (200),
+  PARTITION p2 VALUES LESS THAN (300)
+);
+
+# 3 range * 2 subparts = 6 subpartitions
+select count(*) as subpartition_count from information_schema.partitions
+  where table_schema='test' and table_name='t2';
+
+INSERT INTO t2 VALUES (10, 1, 'a');
+INSERT INTO t2 VALUES (150, 1, 'b');
+INSERT INTO t2 VALUES (250, 1, 'c');
+
+SELECT * FROM t2 ORDER BY a;
+
+SELECT * FROM t2 WHERE a=10 AND b=1;
+SELECT * FROM t2 WHERE a=150 AND b=1;
+SELECT * FROM t2 WHERE a=250 AND b=1;
+
+DROP TABLE t2;
+
+--echo ##############################
+--echo # 8. BIGINT partition key with subpartitions
+--echo ##############################
+
+CREATE TABLE t3 (
+  ts BIGINT NOT NULL,
+  id INT NOT NULL,
+  data VARCHAR(100),
+  PRIMARY KEY (ts, id)
+) ENGINE=NDB
+PARTITION BY RANGE COLUMNS (ts)
+SUBPARTITION BY KEY()
+SUBPARTITIONS 4
+(
+  PARTITION p0 VALUES LESS THAN (1000000),
+  PARTITION p1 VALUES LESS THAN (2000000)
+);
+
+# 2 range * 4 subparts = 8 subpartitions
+select count(*) as subpartition_count from information_schema.partitions
+  where table_schema='test' and table_name='t3';
+
+INSERT INTO t3 VALUES (500000, 1, 'low');
+INSERT INTO t3 VALUES (1500000, 1, 'high');
+
+SELECT * FROM t3 ORDER BY ts;
+SELECT * FROM t3 WHERE ts=500000 AND id=1;
+SELECT * FROM t3 WHERE ts=1500000 AND id=1;
+
+DROP TABLE t3;
+
+--echo ##############################
+--echo # 9. Non-subpartitioned table still works
+--echo ##############################
+
+CREATE TABLE t4 (
+  id INT NOT NULL,
+  d DATE NOT NULL,
+  PRIMARY KEY (id, d)
+) ENGINE=NDB
+PARTITION BY RANGE COLUMNS (d)
+(
+  PARTITION p0 VALUES LESS THAN ('2025-01-01'),
+  PARTITION p1 VALUES LESS THAN ('2026-01-01')
+);
+
+INSERT INTO t4 VALUES (1, '2024-06-15');
+INSERT INTO t4 VALUES (2, '2025-06-15');
+
+SELECT * FROM t4 ORDER BY id;
+SELECT * FROM t4 WHERE id=1 AND d='2024-06-15';
+
+DROP TABLE t4;
+
+--echo ##############################
+--echo # 10. Reject SUBPARTITION BY HASH(expr)
+--echo ##############################
+
+# Only SUBPARTITION BY KEY() is supported
+--error ER_NOT_SUPPORTED_YET,ER_GET_ERRMSG
+CREATE TABLE t_bad (
+  id INT NOT NULL,
+  d DATE NOT NULL,
+  PRIMARY KEY (id, d)
+) ENGINE=NDB
+PARTITION BY RANGE COLUMNS (d)
+SUBPARTITION BY HASH(id)
+SUBPARTITIONS 2
+(
+  PARTITION p0 VALUES LESS THAN ('2025-01-01'),
+  PARTITION p1 VALUES LESS THAN ('2026-01-01')
+);
