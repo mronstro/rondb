@@ -1,0 +1,1562 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RONDB-588: Native RANGE Partitioning for RonDB</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --surface: #1e293b;
+    --accent: #38bdf8;
+    --accent2: #818cf8;
+    --accent3: #34d399;
+    --accent4: #fb923c;
+    --accent5: #f472b6;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --border: #334155;
+    --code-bg: #0d1117;
+    --highlight: #fbbf24;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+    height: 100vh;
+  }
+
+  .slide {
+    display: none;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    padding: 60px 80px;
+    position: relative;
+    animation: fadeIn 0.4s ease;
+  }
+
+  .slide.active { display: flex; }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  h1 {
+    font-size: 3.2rem;
+    font-weight: 800;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    text-align: center;
+    line-height: 1.2;
+    margin-bottom: 20px;
+  }
+
+  h2 {
+    font-size: 2.2rem;
+    font-weight: 700;
+    color: var(--accent);
+    margin-bottom: 30px;
+    text-align: left;
+    width: 100%;
+    max-width: 1100px;
+    border-bottom: 2px solid var(--border);
+    padding-bottom: 12px;
+  }
+
+  h3 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--accent2);
+    margin: 16px 0 10px;
+  }
+
+  .subtitle {
+    font-size: 1.4rem;
+    color: var(--muted);
+    text-align: center;
+    margin-bottom: 10px;
+  }
+
+  .content {
+    width: 100%;
+    max-width: 1100px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+
+  .content ul {
+    list-style: none;
+    padding: 0;
+  }
+
+  .content ul li {
+    font-size: 1.25rem;
+    line-height: 1.7;
+    padding: 8px 0 8px 30px;
+    position: relative;
+    color: var(--text);
+  }
+
+  .content ul li::before {
+    content: '▸';
+    position: absolute;
+    left: 0;
+    color: var(--accent);
+    font-weight: bold;
+  }
+
+  .content ul li strong { color: var(--accent3); }
+
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 40px;
+    width: 100%;
+    max-width: 1100px;
+  }
+
+  .three-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 30px;
+    width: 100%;
+    max-width: 1100px;
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px;
+    transition: transform 0.2s;
+  }
+
+  .card:hover { transform: translateY(-2px); }
+
+  .card h3 { margin-top: 0; }
+
+  .card p, .card li {
+    font-size: 1.05rem;
+    line-height: 1.6;
+    color: var(--muted);
+  }
+
+  .card ul li::before { color: var(--accent2); }
+
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 24px;
+    width: 100%;
+    max-width: 1100px;
+    margin-top: 20px;
+  }
+
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 30px 24px;
+    text-align: center;
+  }
+
+  .stat-card .number {
+    font-size: 3rem;
+    font-weight: 800;
+    background: linear-gradient(135deg, var(--accent), var(--accent3));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .stat-card .label {
+    font-size: 1rem;
+    color: var(--muted);
+    margin-top: 8px;
+  }
+
+  code, pre {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+    background: var(--code-bg);
+    border-radius: 6px;
+  }
+
+  code {
+    padding: 2px 8px;
+    font-size: 0.95em;
+    color: var(--accent3);
+  }
+
+  pre {
+    padding: 20px 24px;
+    font-size: 1rem;
+    line-height: 1.6;
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    width: 100%;
+    max-width: 1100px;
+  }
+
+  /* Diagram styles */
+  .diagram {
+    width: 100%;
+    max-width: 1000px;
+    margin: 20px auto;
+  }
+
+  .diagram svg {
+    width: 100%;
+    height: auto;
+  }
+
+  /* Flow diagram */
+  .flow-container {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    flex-wrap: wrap;
+    margin: 30px 0;
+  }
+
+  .flow-box {
+    background: var(--surface);
+    border: 2px solid var(--accent);
+    border-radius: 10px;
+    padding: 16px 24px;
+    text-align: center;
+    min-width: 140px;
+  }
+
+  .flow-box.dict { border-color: var(--accent2); }
+  .flow-box.dih { border-color: var(--accent3); }
+  .flow-box.tc { border-color: var(--accent4); }
+  .flow-box.spj { border-color: var(--accent5); }
+  .flow-box.api { border-color: var(--highlight); }
+
+  .flow-box .label {
+    font-size: 0.8rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 4px;
+  }
+
+  .flow-box .name {
+    font-size: 1.15rem;
+    font-weight: 700;
+  }
+
+  .flow-arrow {
+    font-size: 1.8rem;
+    color: var(--muted);
+    padding: 0 8px;
+  }
+
+  /* Timeline */
+  .timeline {
+    position: relative;
+    width: 100%;
+    max-width: 1100px;
+    padding-left: 40px;
+  }
+
+  .timeline::before {
+    content: '';
+    position: absolute;
+    left: 16px;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    background: linear-gradient(to bottom, var(--accent), var(--accent2), var(--accent3));
+    border-radius: 2px;
+  }
+
+  .timeline-item {
+    position: relative;
+    padding: 12px 0 12px 30px;
+  }
+
+  .timeline-item::before {
+    content: '';
+    position: absolute;
+    left: -32px;
+    top: 18px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid var(--bg);
+  }
+
+  .timeline-item.done::before { background: var(--accent3); }
+  .timeline-item.partial::before { background: var(--accent4); }
+  .timeline-item.future::before { background: var(--border); }
+
+  .timeline-item .phase-title {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--text);
+  }
+
+  .timeline-item .phase-desc {
+    font-size: 0.95rem;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
+  .badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-left: 8px;
+  }
+
+  .badge.done { background: rgba(52, 211, 153, 0.2); color: var(--accent3); }
+  .badge.partial { background: rgba(251, 146, 60, 0.2); color: var(--accent4); }
+  .badge.future { background: rgba(148, 163, 184, 0.15); color: var(--muted); }
+
+  /* Memory layout diagram */
+  .mem-layout {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    width: 100%;
+    max-width: 800px;
+    margin: 20px auto;
+    border: 2px solid var(--accent);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  .mem-row {
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+    min-height: 48px;
+  }
+
+  .mem-row:last-child { border-bottom: none; }
+
+  .mem-label {
+    width: 120px;
+    padding: 10px 14px;
+    font-size: 0.85rem;
+    color: var(--muted);
+    text-align: right;
+    border-right: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .mem-cells {
+    display: flex;
+    flex: 1;
+  }
+
+  .mem-cell {
+    flex: 1;
+    padding: 10px 14px;
+    text-align: center;
+    font-size: 0.9rem;
+    font-weight: 600;
+    border-right: 1px solid var(--border);
+  }
+
+  .mem-cell:last-child { border-right: none; }
+
+  .mem-cell.header { background: rgba(56, 189, 248, 0.1); color: var(--accent); }
+  .mem-cell.frag { background: rgba(129, 140, 248, 0.1); color: var(--accent2); }
+  .mem-cell.boundary { background: rgba(52, 211, 153, 0.1); color: var(--accent3); }
+
+  /* Pagination */
+  .nav {
+    position: fixed;
+    bottom: 30px;
+    right: 40px;
+    display: flex;
+    gap: 12px;
+    z-index: 100;
+  }
+
+  .nav button {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 10px 20px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 1rem;
+    transition: all 0.2s;
+  }
+
+  .nav button:hover {
+    background: var(--accent);
+    color: var(--bg);
+    border-color: var(--accent);
+  }
+
+  .progress {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    height: 3px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    transition: width 0.3s ease;
+  }
+
+  .page-num {
+    position: fixed;
+    bottom: 36px;
+    left: 40px;
+    font-size: 0.9rem;
+    color: var(--muted);
+  }
+
+  /* Architecture blocks */
+  .arch-diagram {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    width: 100%;
+    max-width: 1000px;
+    margin: 20px auto;
+  }
+
+  .arch-layer {
+    display: flex;
+    gap: 16px;
+    justify-content: center;
+    width: 100%;
+  }
+
+  .arch-block {
+    background: var(--surface);
+    border: 2px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 28px;
+    text-align: center;
+    position: relative;
+    min-width: 160px;
+  }
+
+  .arch-block .block-name {
+    font-size: 1.1rem;
+    font-weight: 700;
+  }
+
+  .arch-block .block-detail {
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+
+  .arch-block.changed {
+    border-color: var(--accent);
+    box-shadow: 0 0 20px rgba(56, 189, 248, 0.15);
+  }
+
+  .arch-block.new {
+    border-color: var(--accent3);
+    box-shadow: 0 0 20px rgba(52, 211, 153, 0.15);
+  }
+
+  .arch-arrow-down {
+    font-size: 1.6rem;
+    color: var(--muted);
+    text-align: center;
+  }
+
+  /* Comparison table */
+  .comp-table {
+    width: 100%;
+    max-width: 1100px;
+    border-collapse: collapse;
+    margin: 10px 0;
+  }
+
+  .comp-table th {
+    background: var(--surface);
+    color: var(--accent);
+    padding: 14px 20px;
+    text-align: left;
+    font-size: 1rem;
+    border-bottom: 2px solid var(--accent);
+  }
+
+  .comp-table td {
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+    font-size: 1rem;
+    color: var(--text);
+  }
+
+  .comp-table tr:nth-child(even) td {
+    background: rgba(30, 41, 59, 0.5);
+  }
+
+  .comp-table .check { color: var(--accent3); font-weight: bold; }
+  .comp-table .cross { color: #ef4444; }
+  .comp-table .partial-check { color: var(--accent4); }
+
+  .highlight-box {
+    background: rgba(56, 189, 248, 0.08);
+    border: 1px solid var(--accent);
+    border-radius: 10px;
+    padding: 24px 28px;
+    margin: 16px 0;
+    width: 100%;
+    max-width: 1100px;
+  }
+
+  .highlight-box p {
+    font-size: 1.1rem;
+    line-height: 1.7;
+    color: var(--text);
+  }
+
+  .tag-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin: 8px 0;
+  }
+
+  .tag {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-size: 0.9rem;
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .tag.type { border-color: var(--accent3); color: var(--accent3); }
+
+  /* Use case cards */
+  .usecase-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    width: 100%;
+    max-width: 1100px;
+  }
+
+  .usecase-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px;
+    border-top: 3px solid var(--accent);
+  }
+
+  .usecase-card:nth-child(2) { border-top-color: var(--accent2); }
+  .usecase-card:nth-child(3) { border-top-color: var(--accent3); }
+  .usecase-card:nth-child(4) { border-top-color: var(--accent4); }
+
+  .usecase-card h3 { margin-top: 0; font-size: 1.3rem; }
+  .usecase-card p { font-size: 1rem; line-height: 1.6; color: var(--muted); margin-top: 8px; }
+
+  /* Limitation badge list */
+  .limitation-list {
+    list-style: none;
+    padding: 0;
+    width: 100%;
+    max-width: 1100px;
+  }
+
+  .limitation-list li {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 24px;
+    margin-bottom: 12px;
+    font-size: 1.1rem;
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+  }
+
+  .limitation-list .icon {
+    font-size: 1.3rem;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+
+  .limitation-list .lim-text { color: var(--text); }
+  .limitation-list .lim-note { color: var(--muted); font-size: 0.95rem; margin-top: 4px; }
+
+  /* Window diagram */
+  .window-diagram {
+    width: 100%;
+    max-width: 1000px;
+    margin: 20px auto;
+  }
+
+  .window-strip {
+    display: flex;
+    height: 70px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 2px solid var(--border);
+    margin-bottom: 10px;
+  }
+
+  .window-seg {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.95rem;
+    font-weight: 600;
+    flex: 1;
+    border-right: 1px solid var(--border);
+    position: relative;
+  }
+
+  .window-seg:last-child { border-right: none; }
+
+  .window-seg.active { background: rgba(56, 189, 248, 0.15); color: var(--accent); }
+  .window-seg.old { background: rgba(239, 68, 68, 0.1); color: #ef4444; }
+  .window-seg.new { background: rgba(52, 211, 153, 0.1); color: var(--accent3); }
+  .window-seg.empty { background: rgba(148, 163, 184, 0.05); color: var(--muted); }
+
+  .window-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.85rem;
+    color: var(--muted);
+    padding: 0 4px;
+  }
+
+  .center-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    max-width: 1100px;
+  }
+
+  .big-quote {
+    font-size: 1.6rem;
+    font-style: italic;
+    color: var(--accent);
+    text-align: center;
+    max-width: 800px;
+    line-height: 1.6;
+    margin: 30px 0;
+    padding: 0 20px;
+    border-left: 4px solid var(--accent);
+    text-align: left;
+  }
+
+  .small { font-size: 0.9rem; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<!-- Slide 1: Title -->
+<div class="slide active" id="slide-1">
+  <h1>Native RANGE Partitioning<br>for RonDB</h1>
+  <p class="subtitle">RONDB-588 — Server-Side Range Resolution</p>
+  <div style="margin-top: 40px; text-align: center;">
+    <p style="color: var(--muted); font-size: 1.1rem;">Mikael Ronstr&ouml;m</p>
+    <p style="color: var(--muted); font-size: 1rem;">March &ndash; April 2026</p>
+  </div>
+  <div style="margin-top: 50px; text-align: center;">
+    <div class="tag-row" style="justify-content: center;">
+      <span class="tag">58 commits</span>
+      <span class="tag">64 files changed</span>
+      <span class="tag">8,151 insertions</span>
+      <span class="tag">3 MTR test suites</span>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 2: The Problem -->
+<div class="slide" id="slide-2">
+  <h2>The Problem</h2>
+  <div class="content">
+    <div class="big-quote">
+      NDB Cluster has no native RANGE partitioning. Hash-based distribution means every scan touches all fragments &mdash; even when data is naturally time-ordered.
+    </div>
+    <ul>
+      <li><strong>Time-series data</strong> is the most common use case for range partitioning</li>
+      <li>Without it, you cannot efficiently <strong>expire old data</strong> &mdash; DELETE is row-by-row</li>
+      <li>Scans on time-bounded queries <strong>hit every data node</strong> regardless of time range</li>
+      <li>MySQL's generic partitioning layer adds overhead and <strong>doesn't integrate with NDB's kernel</strong></li>
+      <li>No way to <strong>DROP PARTITION</strong> for instant data removal of old time windows</li>
+    </ul>
+  </div>
+</div>
+
+<!-- Slide 3: The Solution -->
+<div class="slide" id="slide-3">
+  <h2>The Solution: Server-Side Range Resolution</h2>
+  <div class="content">
+    <div class="highlight-box">
+      <p>A new <code>RANGE_PARTITION</code> fragment type in DBDIH that performs binary search on a <strong>Range2FragmentMap</strong> structure, routing operations to the correct fragment without any hash computation for partition selection.</p>
+    </div>
+    <div style="margin-top: 30px;">
+      <h3>Key Design Decisions</h3>
+      <ul>
+        <li>Range boundaries stored in a <strong>contiguous memory block</strong> alongside fragment IDs</li>
+        <li>Partition key extracted in DBTC, passed to DBDIH via <strong>pointer in EXECUTE_DIRECT</strong> signal</li>
+        <li>Binary search with <strong>type-aware native comparison</strong> (not memcmp)</li>
+        <li>Full tuple hash still computed for <strong>LQH/DBACC distribution</strong> within fragments</li>
+        <li>RCU-safe map swap for <strong>online ADD/DROP PARTITION</strong></li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 4: Architecture Overview -->
+<div class="slide" id="slide-4">
+  <h2>Architecture: Signal Flow</h2>
+  <div class="content">
+    <div class="arch-diagram">
+      <div class="arch-layer">
+        <div class="arch-block" style="border-color: var(--highlight);">
+          <div class="block-name" style="color: var(--highlight);">MySQL Server</div>
+          <div class="block-detail">ha_ndbcluster</div>
+        </div>
+      </div>
+      <div class="arch-arrow-down">&#x25BC;</div>
+      <div class="arch-layer">
+        <div class="arch-block changed">
+          <div class="block-name" style="color: var(--accent);">NDB API</div>
+          <div class="block-detail">Accept RangePartition type</div>
+        </div>
+      </div>
+      <div class="arch-arrow-down">&#x25BC;</div>
+      <div class="arch-layer">
+        <div class="arch-block changed">
+          <div class="block-name" style="color: var(--accent4);">DBTC</div>
+          <div class="block-detail">Extract partition key<br>Compute hash for LQH</div>
+        </div>
+        <div class="arch-block changed">
+          <div class="block-name" style="color: var(--accent5);">DBSPJ</div>
+          <div class="block-detail">Pushed-join routing</div>
+        </div>
+      </div>
+      <div class="arch-arrow-down">&#x25BC; EXECUTE_DIRECT (pointer to key)</div>
+      <div class="arch-layer">
+        <div class="arch-block new">
+          <div class="block-name" style="color: var(--accent3);">DBDIH</div>
+          <div class="block-detail">Range2FragmentMap<br>Binary search lookup</div>
+        </div>
+      </div>
+      <div class="arch-arrow-down">&#x25BC; fragment &rarr; node mapping</div>
+      <div class="arch-layer">
+        <div class="arch-block">
+          <div class="block-name">DBLQH</div>
+          <div class="block-detail">Local query handling</div>
+        </div>
+        <div class="arch-block">
+          <div class="block-name">DBACC / DBTUP</div>
+          <div class="block-detail">Storage engine</div>
+        </div>
+      </div>
+    </div>
+    <p class="small" style="text-align:center; margin-top: 10px;">
+      <span style="color: var(--accent3);">&#9632;</span> New &nbsp;
+      <span style="color: var(--accent);">&#9632;</span> Modified &nbsp;
+      <span style="color: var(--border);">&#9632;</span> Unchanged
+    </p>
+  </div>
+</div>
+
+<!-- Slide 5: Range2FragmentMap -->
+<div class="slide" id="slide-5">
+  <h2>Range2FragmentMap: Memory Layout</h2>
+  <div class="content">
+    <div class="mem-layout">
+      <div class="mem-row">
+        <div class="mem-label">Header</div>
+        <div class="mem-cells">
+          <div class="mem-cell header">m_cnt</div>
+          <div class="mem-cell header">m_boundary_len</div>
+          <div class="mem-cell header">m_boundary_type</div>
+          <div class="mem-cell header">m_num_columns</div>
+          <div class="mem-cell header">m_object_id</div>
+        </div>
+      </div>
+      <div class="mem-row">
+        <div class="mem-label">Frag IDs</div>
+        <div class="mem-cells">
+          <div class="mem-cell frag">frag_id[0]</div>
+          <div class="mem-cell frag">frag_id[1]</div>
+          <div class="mem-cell frag">frag_id[2]</div>
+          <div class="mem-cell frag">frag_id[3]</div>
+          <div class="mem-cell frag" style="color: var(--muted);">...</div>
+        </div>
+      </div>
+      <div class="mem-row">
+        <div class="mem-label">Boundaries</div>
+        <div class="mem-cells">
+          <div class="mem-cell boundary">bound[0]</div>
+          <div class="mem-cell boundary">bound[1]</div>
+          <div class="mem-cell boundary">bound[2]</div>
+          <div class="mem-cell boundary">bound[3]</div>
+          <div class="mem-cell boundary" style="color: var(--muted);">...</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="two-col" style="margin-top: 24px;">
+      <div class="card">
+        <h3>Single Allocation</h3>
+        <p>Header + fragment IDs + boundaries in one contiguous block via <code>lc_ndbd_pool_malloc</code>. Cache-friendly binary search. Max ~82 KB for 8,160 partitions.</p>
+      </div>
+      <div class="card">
+        <h3>Type-Aware Comparison</h3>
+        <p>Boundaries stored in native endian format. <code>range_compare()</code> casts to <code>Int32</code>, <code>Int64</code>, etc. based on <code>m_boundary_type</code>. Not memcmp &mdash; correct on little-endian (x86/ARM).</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 6: Lookup Flow -->
+<div class="slide" id="slide-6">
+  <h2>PK Lookup Flow: Range Resolution</h2>
+  <div class="content">
+    <div class="flow-container">
+      <div class="flow-box api">
+        <div class="label">NDB API</div>
+        <div class="name">pk_operation()</div>
+      </div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-box tc">
+        <div class="label">DBTC</div>
+        <div class="name">hash()</div>
+      </div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-box tc">
+        <div class="label">DBTC</div>
+        <div class="name">create_distr_key()</div>
+      </div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-box dih">
+        <div class="label">DBDIH</div>
+        <div class="name">range_lookup()</div>
+      </div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-box" style="border-color: var(--text);">
+        <div class="label">Result</div>
+        <div class="name">fragId &rarr; nodeId</div>
+      </div>
+    </div>
+
+    <pre style="margin-top: 20px;">
+<span style="color: var(--accent);">// DBTC::hash() — extract partition key for range tables</span>
+<span style="color: var(--accent2);">if</span> (regCachePtr->m_flags & TR_RANGE_PARTITION) {
+  <span style="color: var(--accent3);">// Always compute hash for LQH distribution</span>
+  rondb_calc_hash(&hashValue, key, keyLen, tabDesc);
+
+  <span style="color: var(--accent3);">// Extract partition columns into local buffer</span>
+  create_distr_key(key, c_range_key_buf, &rangeKeyLen);
+  regCachePtr->m_range_key_ptr = c_range_key_buf;
+  regCachePtr->m_range_key_len = rangeKeyLen;
+}
+
+<span style="color: var(--accent);">// DBDIH::execDIGETNODESREQ — binary search</span>
+<span style="color: var(--accent2);">case</span> RANGE_PARTITION: {
+  Uint32 fragId = range_lookup(m_range_ptr,
+                               req->rangeKeyPtr,
+                               req->rangeKeyLen);
+  <span style="color: var(--accent3);">// fragId → node mapping via existing getFragstore()</span>
+}</pre>
+  </div>
+</div>
+
+<!-- Slide 7: DROP PARTITION — The Key Feature -->
+<div class="slide" id="slide-7">
+  <h2>DROP PARTITION: Instant Data Expiry</h2>
+  <div class="content">
+    <div class="highlight-box">
+      <p><strong>DROP PARTITION is O(1)</strong> &mdash; removes the first (oldest) partition by deallocating the fragment. No row-by-row DELETE. Millions of rows removed in milliseconds.</p>
+    </div>
+
+    <div style="margin-top: 24px;">
+      <h3>How It Works</h3>
+    </div>
+
+    <div class="window-diagram" style="margin-top: 16px;">
+      <p style="color: var(--muted); margin-bottom: 8px; font-size: 0.9rem;">Before DROP: 4 partitions</p>
+      <div class="window-strip">
+        <div class="window-seg old">P0: &lt; 2024</div>
+        <div class="window-seg active">P1: 2024</div>
+        <div class="window-seg active">P2: 2025</div>
+        <div class="window-seg active">P3: 2026</div>
+      </div>
+      <p style="color: var(--muted); margin-bottom: 8px; margin-top: 16px; font-size: 0.9rem;">After DROP PARTITION p0: 3 partitions remain</p>
+      <div class="window-strip">
+        <div class="window-seg active">P1: 2024</div>
+        <div class="window-seg active">P2: 2025</div>
+        <div class="window-seg active">P3: 2026</div>
+        <div class="window-seg empty" style="border: 1px dashed var(--border);">(freed)</div>
+      </div>
+      <p style="color: var(--muted); margin-bottom: 8px; margin-top: 16px; font-size: 0.9rem;">After ADD PARTITION p4: sliding window</p>
+      <div class="window-strip">
+        <div class="window-seg active">P1: 2024</div>
+        <div class="window-seg active">P2: 2025</div>
+        <div class="window-seg active">P3: 2026</div>
+        <div class="window-seg new">P4: 2027</div>
+      </div>
+    </div>
+
+    <ul style="margin-top: 16px;">
+      <li><strong>Lower bound enforcement</strong> &mdash; inserts below the dropped boundary are rejected</li>
+      <li><strong>RCU-safe swap</strong> &mdash; concurrent operations see consistent range map via NdbSeqLock</li>
+      <li><strong>Online operation</strong> &mdash; uses ALGORITHM=INPLACE, no table copy</li>
+    </ul>
+  </div>
+</div>
+
+<!-- Slide 8: fragId / fragNo Separation -->
+<div class="slide" id="slide-8">
+  <h2>Key Innovation: fragId / fragNo Separation</h2>
+  <div class="content">
+    <div class="two-col">
+      <div class="card">
+        <h3>Before (Hash Partitioning)</h3>
+        <ul>
+          <li>fragId = fragNo (always equal)</li>
+          <li>Fragment 0 is always the first fragment</li>
+          <li>Fragments are never removed</li>
+          <li>No concept of "real" vs "logical" ID</li>
+        </ul>
+      </div>
+      <div class="card" style="border-color: var(--accent3);">
+        <h3>After (Range Partitioning)</h3>
+        <ul>
+          <li><strong>fragId</strong> = permanent identifier (inter-block)</li>
+          <li><strong>fragNo</strong> = position in current array (0..N-1)</li>
+          <li>After DROP: fragNo 0 may be fragId 3</li>
+          <li><strong>m_startFid_offset</strong> tracks the delta</li>
+        </ul>
+      </div>
+    </div>
+    <div class="highlight-box" style="margin-top: 24px;">
+      <p>This separation required <strong>auditing and fixing every use of fragment identifiers</strong> across DBDIH, DBLQH, SUMA, TRIX, DBTUX, Backup, and LCP signals. Phases 3&ndash;8 were dedicated to getting this right &mdash; the single hardest part of the implementation.</p>
+    </div>
+    <pre style="margin-top: 16px;">
+<span style="color: var(--accent);">// The fundamental conversion</span>
+fragNo = fragId - tabPtr.p->m_startFid_offset;   <span style="color: var(--muted);">// real → array index</span>
+fragId = fragNo + tabPtr.p->m_startFid_offset;   <span style="color: var(--muted);">// array index → real</span>
+
+<span style="color: var(--accent);">// After dropping partition 0, then 1:</span>
+<span style="color: var(--muted);">// m_startFid_offset = 2</span>
+<span style="color: var(--muted);">// fragNo=0 → fragId=2, fragNo=1 → fragId=3, ...</span></pre>
+  </div>
+</div>
+
+<!-- Slide 9: Implementation Scope -->
+<div class="slide" id="slide-9">
+  <h2>Implementation Scope</h2>
+  <div class="stat-grid">
+    <div class="stat-card">
+      <div class="number">58</div>
+      <div class="label">Commits</div>
+    </div>
+    <div class="stat-card">
+      <div class="number">64</div>
+      <div class="label">Files Changed</div>
+    </div>
+    <div class="stat-card">
+      <div class="number">8,151</div>
+      <div class="label">Lines Added</div>
+    </div>
+    <div class="stat-card">
+      <div class="number">2,558</div>
+      <div class="label">Lines of Tests</div>
+    </div>
+  </div>
+  <div class="three-col" style="margin-top: 30px;">
+    <div class="card">
+      <h3>Kernel Blocks</h3>
+      <ul>
+        <li>DBDICT (875+ lines)</li>
+        <li>DBDIH (792+ lines)</li>
+        <li>DBTC (110+ lines)</li>
+        <li>DBSPJ (68+ lines)</li>
+        <li>DBLQH, SUMA, TRIX</li>
+        <li>DBTUX, Backup</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Signal Changes</h3>
+      <ul>
+        <li>DiGetNodesReq</li>
+        <li>AlterTabReq/Conf</li>
+        <li>DictTabInfo</li>
+        <li>DiAddTabReq</li>
+        <li>ScanTab signals</li>
+        <li>LCP signals</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>MySQL Integration</h3>
+      <ul>
+        <li>ha_ndbcluster.cc</li>
+        <li>ha_ndbcluster_range (new)</li>
+        <li>NDB API metadata</li>
+        <li>NdbScanOperation</li>
+        <li>NdbQueryOperation</li>
+        <li>ndb_dd_client</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 10: Implementation Timeline -->
+<div class="slide" id="slide-10">
+  <h2>Implementation Phases</h2>
+  <div class="content">
+    <div class="timeline" style="padding-left: 50px;">
+      <div class="timeline-item done">
+        <div class="phase-title">Phase 1: Core Infrastructure <span class="badge done">complete</span></div>
+        <div class="phase-desc">CREATE TABLE with RANGE COLUMNS, PK lookups, full scans. INT, BIGINT, DATE, DATETIME, TIMESTAMP.</div>
+      </div>
+      <div class="timeline-item done">
+        <div class="phase-title">Phase 2: DBSPJ Support <span class="badge done">complete</span></div>
+        <div class="phase-desc">Pushed-down joins route to correct fragment on range-partitioned tables.</div>
+      </div>
+      <div class="timeline-item done">
+        <div class="phase-title">Phase 3: ALTER TABLE ADD/DROP PARTITION <span class="badge done">complete</span></div>
+        <div class="phase-desc">Online ADD PARTITION at end, DROP first partition. INPLACE algorithm, RCU-safe map swap.</div>
+      </div>
+      <div class="timeline-item done">
+        <div class="phase-title">Phase 4: Scan Pruning <span class="badge done">complete</span></div>
+        <div class="phase-desc">Scans with WHERE on partition column skip irrelevant fragments. Multi-partition range support.</div>
+      </div>
+      <div class="timeline-item done">
+        <div class="phase-title">Phase 5&ndash;8: Hardening <span class="badge done">complete</span></div>
+        <div class="phase-desc">fragId/fragNo separation, LCP fixes, Uint16 wrap-around, signal printer registration, restart persistence.</div>
+      </div>
+      <div class="timeline-item future">
+        <div class="phase-title">Future: Variable-Size Boundaries (Tier 2) <span class="badge future">planned</span></div>
+        <div class="phase-desc">VARCHAR/multi-column range keys via B-tree node structure.</div>
+      </div>
+      <div class="timeline-item future">
+        <div class="phase-title">Future: NDB API Transaction Hinting <span class="badge future">planned</span></div>
+        <div class="phase-desc">Client-side range resolution for optimal TC node selection in startTransaction().</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 11: Supported Column Types -->
+<div class="slide" id="slide-11">
+  <h2>Supported Partition Column Types</h2>
+  <div class="content">
+    <table class="comp-table">
+      <thead>
+        <tr>
+          <th>Column Type</th>
+          <th>Status</th>
+          <th>Boundary Size</th>
+          <th>Comparison</th>
+          <th>Use Case</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>INT</code></td>
+          <td class="check">&#10003; Supported</td>
+          <td>4 bytes</td>
+          <td>Native Int32</td>
+          <td>Epoch timestamps, counters</td>
+        </tr>
+        <tr>
+          <td><code>BIGINT</code></td>
+          <td class="check">&#10003; Supported</td>
+          <td>8 bytes</td>
+          <td>Native Int64</td>
+          <td>Millisecond timestamps</td>
+        </tr>
+        <tr>
+          <td><code>DATE</code></td>
+          <td class="check">&#10003; Supported</td>
+          <td>4 bytes</td>
+          <td>Native Uint32</td>
+          <td>Daily/monthly partitions</td>
+        </tr>
+        <tr>
+          <td><code>DATETIME</code></td>
+          <td class="check">&#10003; Supported</td>
+          <td>8 bytes</td>
+          <td>Native Int64</td>
+          <td>Hourly/minute partitions</td>
+        </tr>
+        <tr>
+          <td><code>TIMESTAMP</code></td>
+          <td class="check">&#10003; Supported</td>
+          <td>4 bytes</td>
+          <td>Native Uint32</td>
+          <td>UTC time windows</td>
+        </tr>
+        <tr>
+          <td><code>VARCHAR</code></td>
+          <td class="partial-check">&#9711; Future (Tier 2)</td>
+          <td>Variable</td>
+          <td>B-tree + xfrm</td>
+          <td>Alphabetical ranges</td>
+        </tr>
+        <tr>
+          <td><code>Multi-column</code></td>
+          <td class="partial-check">&#9711; Future (Tier 2)</td>
+          <td>Variable</td>
+          <td>Composite</td>
+          <td>Compound range keys</td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="highlight-box" style="margin-top: 20px;">
+      <p>Partition columns must be part of the <strong>primary key</strong>. The <code>RANGE COLUMNS</code> syntax is used (not <code>RANGE(expr)</code>), ensuring the raw column value is available for binary search without expression evaluation.</p>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 12: SQL Usage -->
+<div class="slide" id="slide-12">
+  <h2>SQL Usage Examples</h2>
+  <div class="content">
+    <pre>
+<span style="color: var(--accent);">-- Create a time-partitioned table</span>
+<span style="color: var(--accent2);">CREATE TABLE</span> events (
+    event_id   BIGINT <span style="color: var(--accent2);">NOT NULL</span>,
+    event_date DATE   <span style="color: var(--accent2);">NOT NULL</span>,
+    payload    VARCHAR(1000),
+    <span style="color: var(--accent2);">PRIMARY KEY</span> (event_id, event_date)
+) <span style="color: var(--accent2);">ENGINE</span>=NDB
+<span style="color: var(--accent2);">PARTITION BY RANGE COLUMNS</span> (event_date) (
+    PARTITION p2024 VALUES LESS THAN ('2025-01-01'),
+    PARTITION p2025 VALUES LESS THAN ('2026-01-01'),
+    PARTITION p2026 VALUES LESS THAN ('2027-01-01'),
+    PARTITION p2027 VALUES LESS THAN ('2028-01-01')
+);
+
+<span style="color: var(--accent);">-- Insert data — routed to correct partition automatically</span>
+<span style="color: var(--accent2);">INSERT INTO</span> events <span style="color: var(--accent2);">VALUES</span> (1, '2025-06-15', 'data...');
+
+<span style="color: var(--accent);">-- Drop oldest partition — instant, O(1)</span>
+<span style="color: var(--accent2);">ALTER TABLE</span> events <span style="color: var(--accent2);">DROP PARTITION</span> p2024
+    <span style="color: var(--accent2);">ALGORITHM</span>=INPLACE;
+
+<span style="color: var(--accent);">-- Add new partition for next year</span>
+<span style="color: var(--accent2);">ALTER TABLE</span> events <span style="color: var(--accent2);">ADD PARTITION</span> (
+    PARTITION p2028 VALUES LESS THAN ('2029-01-01')
+);
+
+<span style="color: var(--accent);">-- Scan pruning: only touches relevant partitions</span>
+<span style="color: var(--accent2);">SELECT</span> * <span style="color: var(--accent2);">FROM</span> events
+<span style="color: var(--accent2);">WHERE</span> event_date <span style="color: var(--accent2);">BETWEEN</span> '2025-01-01' <span style="color: var(--accent2);">AND</span> '2025-12-31';</pre>
+  </div>
+</div>
+
+<!-- Slide 13: Time Window Data Solution -->
+<div class="slide" id="slide-13">
+  <h2>Time Window Data in RonDB</h2>
+  <div class="content">
+    <div class="big-quote">
+      Range partitioning transforms RonDB into a <strong>time-window data store</strong>: new partitions appear as time advances, old partitions vanish when data expires &mdash; with zero row-level overhead.
+    </div>
+    <div class="usecase-grid">
+      <div class="usecase-card">
+        <h3>IoT / Telemetry</h3>
+        <p>Sensor data partitioned by day or hour. Drop yesterday's high-frequency data, keep weekly summaries. Scan pruning limits queries to the relevant time slice.</p>
+      </div>
+      <div class="usecase-card">
+        <h3>Financial Trading</h3>
+        <p>Tick data partitioned by trading day. End-of-day: DROP PARTITION to archive, ADD PARTITION for tomorrow. PK lookups route directly to the correct day's fragment.</p>
+      </div>
+      <div class="usecase-card">
+        <h3>Log / Event Storage</h3>
+        <p>Application logs with a 30-day retention window. Monthly partitions with automated DROP of the oldest. No costly DELETE FROM ... WHERE ts &lt; cutoff.</p>
+      </div>
+      <div class="usecase-card">
+        <h3>Session / Cache Data</h3>
+        <p>User sessions partitioned by epoch ranges. Expired sessions removed in bulk via partition drop. Active sessions accessed via PK lookup at full NDB speed.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 14: Sliding Window Pattern -->
+<div class="slide" id="slide-14">
+  <h2>The Sliding Window Pattern</h2>
+  <div class="content">
+    <div class="center-content">
+      <p style="font-size: 1.15rem; color: var(--muted); margin-bottom: 24px;">
+        A cron job or application timer maintains the window:
+      </p>
+
+      <div class="window-diagram">
+        <p style="color: var(--accent); font-weight: 600; margin-bottom: 8px;">Week 1: Initial state</p>
+        <div class="window-strip">
+          <div class="window-seg active">Mon</div>
+          <div class="window-seg active">Tue</div>
+          <div class="window-seg active">Wed</div>
+          <div class="window-seg active">Thu</div>
+          <div class="window-seg active">Fri</div>
+          <div class="window-seg active">Sat</div>
+          <div class="window-seg active">Sun</div>
+        </div>
+
+        <p style="color: var(--accent4); font-weight: 600; margin-bottom: 8px; margin-top: 20px;">Week 2: DROP Mon, ADD next Mon</p>
+        <div class="window-strip">
+          <div class="window-seg old" style="opacity: 0.4; text-decoration: line-through;">Mon</div>
+          <div class="window-seg active">Tue</div>
+          <div class="window-seg active">Wed</div>
+          <div class="window-seg active">Thu</div>
+          <div class="window-seg active">Fri</div>
+          <div class="window-seg active">Sat</div>
+          <div class="window-seg active">Sun</div>
+        </div>
+        <div class="window-strip" style="margin-top: 4px;">
+          <div class="window-seg empty"></div>
+          <div class="window-seg active">Tue</div>
+          <div class="window-seg active">Wed</div>
+          <div class="window-seg active">Thu</div>
+          <div class="window-seg active">Fri</div>
+          <div class="window-seg active">Sat</div>
+          <div class="window-seg active">Sun</div>
+          <div class="window-seg new">Mon+7</div>
+        </div>
+      </div>
+
+      <pre style="margin-top: 24px; font-size: 0.95rem;">
+<span style="color: var(--accent);">-- Daily maintenance (cron or application)</span>
+<span style="color: var(--accent2);">ALTER TABLE</span> events <span style="color: var(--accent2);">DROP PARTITION</span> p_oldest <span style="color: var(--accent2);">ALGORITHM</span>=INPLACE;  <span style="color: var(--muted);">-- instant</span>
+<span style="color: var(--accent2);">ALTER TABLE</span> events <span style="color: var(--accent2);">ADD PARTITION</span> (
+  PARTITION p_new VALUES LESS THAN ('2026-04-16')
+);
+
+<span style="color: var(--accent);">-- Queries are automatically pruned to relevant partitions</span>
+<span style="color: var(--accent2);">SELECT</span> COUNT(*) <span style="color: var(--accent2);">FROM</span> events
+<span style="color: var(--accent2);">WHERE</span> event_date >= CURDATE() - <span style="color: var(--accent2);">INTERVAL</span> 3 <span style="color: var(--accent2);">DAY</span>;  <span style="color: var(--muted);">-- only scans 3 partitions</span></pre>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 15: Scan Pruning Impact -->
+<div class="slide" id="slide-15">
+  <h2>Impact: Scan Pruning</h2>
+  <div class="content">
+    <div class="two-col">
+      <div class="card" style="border-color: #ef4444;">
+        <h3 style="color: #ef4444;">Without Range Partitioning</h3>
+        <div style="margin: 20px 0;">
+          <svg viewBox="0 0 400 200" style="width:100%;">
+            <rect x="10" y="10" width="80" height="40" rx="6" fill="#1e293b" stroke="#ef4444" stroke-width="2"/>
+            <text x="50" y="35" fill="#e2e8f0" text-anchor="middle" font-size="11" font-weight="600">Query</text>
+            <line x1="90" y1="30" x2="140" y2="30" stroke="#ef4444" stroke-width="2" marker-end="url(#arr-red)"/>
+            <line x1="90" y1="30" x2="140" y2="70" stroke="#ef4444" stroke-width="2"/>
+            <line x1="90" y1="30" x2="140" y2="110" stroke="#ef4444" stroke-width="2"/>
+            <line x1="90" y1="30" x2="140" y2="150" stroke="#ef4444" stroke-width="2"/>
+            <rect x="140" y="12" width="90" height="36" rx="5" fill="rgba(239,68,68,0.15)" stroke="#ef4444"/>
+            <text x="185" y="34" fill="#ef4444" text-anchor="middle" font-size="10">Frag 0 (2023)</text>
+            <rect x="140" y="52" width="90" height="36" rx="5" fill="rgba(239,68,68,0.15)" stroke="#ef4444"/>
+            <text x="185" y="74" fill="#ef4444" text-anchor="middle" font-size="10">Frag 1 (2024)</text>
+            <rect x="140" y="92" width="90" height="36" rx="5" fill="rgba(239,68,68,0.15)" stroke="#ef4444"/>
+            <text x="185" y="114" fill="#ef4444" text-anchor="middle" font-size="10">Frag 2 (2025)</text>
+            <rect x="140" y="132" width="90" height="36" rx="5" fill="rgba(239,68,68,0.15)" stroke="#ef4444"/>
+            <text x="185" y="154" fill="#ef4444" text-anchor="middle" font-size="10">Frag 3 (2026)</text>
+            <text x="300" y="90" fill="#ef4444" font-size="12" font-weight="700">ALL fragments</text>
+            <text x="300" y="108" fill="#94a3b8" font-size="10">scanned</text>
+          </svg>
+        </div>
+        <p style="color: var(--muted);">Hash distribution scatters time-ordered data across all fragments. Every query must scan everything.</p>
+      </div>
+      <div class="card" style="border-color: var(--accent3);">
+        <h3 style="color: var(--accent3);">With Range Partitioning</h3>
+        <div style="margin: 20px 0;">
+          <svg viewBox="0 0 400 200" style="width:100%;">
+            <rect x="10" y="10" width="80" height="40" rx="6" fill="#1e293b" stroke="#34d399" stroke-width="2"/>
+            <text x="50" y="28" fill="#e2e8f0" text-anchor="middle" font-size="11" font-weight="600">Query</text>
+            <text x="50" y="42" fill="#94a3b8" text-anchor="middle" font-size="9">WHERE 2025</text>
+            <line x1="90" y1="30" x2="140" y2="110" stroke="#34d399" stroke-width="2"/>
+            <rect x="140" y="12" width="90" height="36" rx="5" fill="rgba(148,163,184,0.05)" stroke="#334155"/>
+            <text x="185" y="34" fill="#64748b" text-anchor="middle" font-size="10">Frag 0 (2023)</text>
+            <rect x="140" y="52" width="90" height="36" rx="5" fill="rgba(148,163,184,0.05)" stroke="#334155"/>
+            <text x="185" y="74" fill="#64748b" text-anchor="middle" font-size="10">Frag 1 (2024)</text>
+            <rect x="140" y="92" width="90" height="36" rx="5" fill="rgba(56,189,248,0.2)" stroke="#34d399" stroke-width="2"/>
+            <text x="185" y="114" fill="#34d399" text-anchor="middle" font-size="10" font-weight="700">Frag 2 (2025)</text>
+            <rect x="140" y="132" width="90" height="36" rx="5" fill="rgba(148,163,184,0.05)" stroke="#334155"/>
+            <text x="185" y="154" fill="#64748b" text-anchor="middle" font-size="10">Frag 3 (2026)</text>
+            <text x="300" y="90" fill="#34d399" font-size="12" font-weight="700">1 fragment</text>
+            <text x="300" y="108" fill="#94a3b8" font-size="10">scanned (75% saved)</text>
+          </svg>
+        </div>
+        <p style="color: var(--muted);">Range-partitioned queries only touch the fragments that contain matching data. Binary search identifies them.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 16: Test Coverage -->
+<div class="slide" id="slide-16">
+  <h2>Test Coverage</h2>
+  <div class="content">
+    <div class="three-col">
+      <div class="card" style="border-top: 3px solid var(--accent);">
+        <h3>ndb_partition_range_columns</h3>
+        <p style="font-size: 0.95rem; color: var(--muted); line-height: 1.6;">
+          CREATE TABLE with INT, BIGINT, DATE, DATETIME, TIMESTAMP partition columns. PK lookups, full scans, boundary routing, out-of-range rejection, multi-column variations.
+        </p>
+        <p style="margin-top: 8px;"><code>231 lines</code></p>
+      </div>
+      <div class="card" style="border-top: 3px solid var(--accent2);">
+        <h3>ndb_alter_partition_range_columns</h3>
+        <p style="font-size: 0.95rem; color: var(--muted); line-height: 1.6;">
+          ADD PARTITION, DROP first partition, concurrent DML during ALTER, lower-bound rejection after DROP, sliding window sequences, INPLACE verification.
+        </p>
+        <p style="margin-top: 8px;"><code>738 lines</code></p>
+      </div>
+      <div class="card" style="border-top: 3px solid var(--accent3);">
+        <h3>ndb_partition_range_restart</h3>
+        <p style="font-size: 0.95rem; color: var(--muted); line-height: 1.6;">
+          Node restart with range-partitioned tables. Verifies range map persistence and restore. Data integrity across initial restart and system restart.
+        </p>
+        <p style="margin-top: 8px;"><code>262 lines</code></p>
+      </div>
+    </div>
+    <div class="highlight-box" style="margin-top: 24px;">
+      <p><strong>2,558 lines</strong> of test code across 6 test/result files. Tests verify correct behavior across CREATE, INSERT, SELECT, ALTER ADD/DROP PARTITION, node restarts, and concurrent operations.</p>
+    </div>
+  </div>
+</div>
+
+<!-- Slide 17: Current Limitations -->
+<div class="slide" id="slide-17">
+  <h2>Current Limitations</h2>
+  <div class="content">
+    <ul class="limitation-list">
+      <li>
+        <div class="icon" style="color: var(--accent4);">&#9888;</div>
+        <div>
+          <div class="lim-text"><strong>DROP only the first (oldest) partition</strong></div>
+          <div class="lim-note">By design: maintains contiguous fragment ID space. Matches the sliding-window use case where you always remove the oldest data.</div>
+        </div>
+      </li>
+      <li>
+        <div class="icon" style="color: var(--accent4);">&#9888;</div>
+        <div>
+          <div class="lim-text"><strong>ADD only at the end (highest boundary)</strong></div>
+          <div class="lim-note">New partitions must have boundaries greater than all existing ones. Consistent with MySQL RANGE semantics.</div>
+        </div>
+      </li>
+      <li>
+        <div class="icon" style="color: var(--accent4);">&#9888;</div>
+        <div>
+          <div class="lim-text"><strong>Fixed-size column types only (Tier 1)</strong></div>
+          <div class="lim-note">INT, BIGINT, DATE, DATETIME, TIMESTAMP. VARCHAR and multi-column composite keys require Tier 2 B-tree implementation (planned).</div>
+        </div>
+      </li>
+      <li>
+        <div class="icon" style="color: var(--accent4);">&#9888;</div>
+        <div>
+          <div class="lim-text"><strong>Not compatible with FULLY_REPLICATED tables</strong></div>
+          <div class="lim-note">Explicitly rejected at CREATE TABLE time. Range partitioning and full replication have conflicting distribution models.</div>
+        </div>
+      </li>
+      <li>
+        <div class="icon" style="color: var(--accent4);">&#9888;</div>
+        <div>
+          <div class="lim-text"><strong>No client-side transaction hinting yet</strong></div>
+          <div class="lim-note">startTransaction() does not yet use range resolution for optimal TC node selection. Planned for a future phase.</div>
+        </div>
+      </li>
+      <li>
+        <div class="icon" style="color: var(--accent4);">&#9888;</div>
+        <div>
+          <div class="lim-text"><strong>Partition column must be in the primary key</strong></div>
+          <div class="lim-note">Required so that partition key is available during PK operations for range lookup. Standard MySQL partition requirement.</div>
+        </div>
+      </li>
+    </ul>
+  </div>
+</div>
+
+<!-- Slide 18: Before vs After Comparison -->
+<div class="slide" id="slide-18">
+  <h2>Before vs. After: Data Lifecycle</h2>
+  <div class="content">
+    <table class="comp-table">
+      <thead>
+        <tr>
+          <th>Operation</th>
+          <th>Before (Hash Partitioning)</th>
+          <th>After (Range Partitioning)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Expire old data</strong></td>
+          <td class="cross">DELETE FROM ... WHERE ts &lt; X<br><span class="small">Row-by-row, all nodes involved</span></td>
+          <td class="check">ALTER TABLE DROP PARTITION<br><span class="small">Instant O(1), metadata-only</span></td>
+        </tr>
+        <tr>
+          <td><strong>Query recent data</strong></td>
+          <td class="cross">Full scan of all fragments<br><span class="small">Even if only 1 day matters</span></td>
+          <td class="check">Scan pruned to matching partitions<br><span class="small">Binary search identifies range</span></td>
+        </tr>
+        <tr>
+          <td><strong>Add capacity</strong></td>
+          <td class="partial-check">Fixed fragment count at creation<br><span class="small">Requires table recreation</span></td>
+          <td class="check">ALTER TABLE ADD PARTITION<br><span class="small">Online, INPLACE</span></td>
+        </tr>
+        <tr>
+          <td><strong>PK lookup routing</strong></td>
+          <td class="check">Hash → fragment<br><span class="small">O(1) hash computation</span></td>
+          <td class="check">Binary search → fragment<br><span class="small">O(log N) on partition count</span></td>
+        </tr>
+        <tr>
+          <td><strong>Data locality</strong></td>
+          <td class="cross">Scattered across fragments<br><span class="small">No time-based grouping</span></td>
+          <td class="check">Time ranges co-located<br><span class="small">One partition = one time window</span></td>
+        </tr>
+        <tr>
+          <td><strong>Storage reclaim</strong></td>
+          <td class="cross">Fragmented free space<br><span class="small">Deleted rows leave gaps</span></td>
+          <td class="check">Fragment deallocation<br><span class="small">Entire fragment memory reclaimed</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Slide 19: Restart Persistence -->
+<div class="slide" id="slide-19">
+  <h2>Restart Persistence</h2>
+  <div class="content">
+    <div class="highlight-box">
+      <p>Range maps and the <code>m_startFid_offset</code> are <strong>persisted on disk</strong> and fully restored during node restart and system restart. Data survives cluster restarts without any re-creation.</p>
+    </div>
+    <div class="two-col" style="margin-top: 24px;">
+      <div class="card">
+        <h3>What Gets Persisted</h3>
+        <ul>
+          <li>Range2FragmentMap structure (boundaries + frag IDs)</li>
+          <li>m_startFid_offset (tracks dropped partitions)</li>
+          <li>Boundary type metadata</li>
+          <li>Fragment count and mapping</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Restore Flow</h3>
+        <ul>
+          <li>DBDICT restores table metadata on restart</li>
+          <li>Range map allocated and populated in prepare_add_table</li>
+          <li>DBDIH receives map pointer via DiAddTabReq</li>
+          <li>Verified by ndb_partition_range_restart test</li>
+        </ul>
+      </div>
+    </div>
+    <pre style="margin-top: 20px;">
+<span style="color: var(--accent);">-- Test scenario: create, insert, restart, verify</span>
+<span style="color: var(--accent2);">CREATE TABLE</span> t_restart (...) <span style="color: var(--accent2);">PARTITION BY RANGE COLUMNS</span> (d) (...);
+<span style="color: var(--accent2);">INSERT INTO</span> t_restart <span style="color: var(--accent2);">VALUES</span> (...);   <span style="color: var(--muted);">-- data across partitions</span>
+<span style="color: var(--accent2);">ALTER TABLE</span> t_restart <span style="color: var(--accent2);">DROP PARTITION</span> p0;
+<span style="color: var(--accent);">-- Restart all nodes</span>
+<span style="color: var(--muted);">-- After restart: range map, offset, and data all intact</span>
+<span style="color: var(--accent2);">SELECT</span> * <span style="color: var(--accent2);">FROM</span> t_restart;              <span style="color: var(--muted);">-- returns surviving rows</span>
+<span style="color: var(--accent2);">INSERT INTO</span> t_restart <span style="color: var(--accent2);">VALUES</span> (...);   <span style="color: var(--muted);">-- routes correctly</span></pre>
+  </div>
+</div>
+
+<!-- Slide 20: Summary -->
+<div class="slide" id="slide-20">
+  <h2>Summary</h2>
+  <div class="content">
+    <div class="center-content">
+      <div class="big-quote" style="border-left-color: var(--accent3);">
+        Native RANGE partitioning gives RonDB the ability to manage <strong>time-window data</strong> at scale &mdash; with instant partition drops, scan pruning, and full NDB kernel integration.
+      </div>
+
+      <div class="three-col" style="margin-top: 30px;">
+        <div class="card" style="text-align: center; border-top: 3px solid var(--accent);">
+          <h3 style="font-size: 2rem; color: var(--accent);">O(1)</h3>
+          <p>Data expiry via<br>DROP PARTITION</p>
+        </div>
+        <div class="card" style="text-align: center; border-top: 3px solid var(--accent3);">
+          <h3 style="font-size: 2rem; color: var(--accent3);">O(log N)</h3>
+          <p>Partition lookup via<br>binary search</p>
+        </div>
+        <div class="card" style="text-align: center; border-top: 3px solid var(--accent2);">
+          <h3 style="font-size: 2rem; color: var(--accent2);">100%</h3>
+          <p>Online operations<br>INPLACE algorithm</p>
+        </div>
+      </div>
+
+      <ul style="margin-top: 30px; max-width: 900px;">
+        <li><strong>Deep kernel integration</strong> &mdash; DBDICT, DBDIH, DBTC, DBSPJ, NDB API all aware of range partitions</li>
+        <li><strong>Sliding window pattern</strong> &mdash; DROP oldest + ADD newest for continuous time-based data management</li>
+        <li><strong>Scan pruning</strong> &mdash; WHERE clauses on partition column skip irrelevant fragments</li>
+        <li><strong>Restart-safe</strong> &mdash; range maps persisted and restored across node and system restarts</li>
+        <li><strong>Standard SQL</strong> &mdash; uses MySQL PARTITION BY RANGE COLUMNS syntax</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- Navigation -->
+<div class="nav">
+  <button onclick="prevSlide()">&#8592; Prev</button>
+  <button onclick="nextSlide()">Next &#8594;</button>
+</div>
+<div class="progress" id="progress"></div>
+<div class="page-num" id="page-num"></div>
+
+<script>
+  let current = 1;
+  const total = document.querySelectorAll('.slide').length;
+
+  function showSlide(n) {
+    document.querySelectorAll('.slide').forEach(s => s.classList.remove('active'));
+    const slide = document.getElementById('slide-' + n);
+    if (slide) {
+      slide.classList.add('active');
+      current = n;
+    }
+    document.getElementById('progress').style.width = ((current / total) * 100) + '%';
+    document.getElementById('page-num').textContent = current + ' / ' + total;
+  }
+
+  function nextSlide() { if (current < total) showSlide(current + 1); }
+  function prevSlide() { if (current > 1) showSlide(current - 1); }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') { e.preventDefault(); nextSlide(); }
+    if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); prevSlide(); }
+    if (e.key === 'Home') { e.preventDefault(); showSlide(1); }
+    if (e.key === 'End') { e.preventDefault(); showSlide(total); }
+  });
+
+  // Touch support
+  let touchStartX = 0;
+  document.addEventListener('touchstart', e => touchStartX = e.touches[0].clientX);
+  document.addEventListener('touchend', e => {
+    const diff = touchStartX - e.changedTouches[0].clientX;
+    if (Math.abs(diff) > 50) { diff > 0 ? nextSlide() : prevSlide(); }
+  });
+
+  showSlide(1);
+</script>
+
+</body>
+</html>
