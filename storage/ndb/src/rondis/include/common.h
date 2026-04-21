@@ -60,7 +60,7 @@ Uint32 get_length(char* buf);
 #define FAILED_EXECUTE_MSET "Failed to execute MSET operation"
 #define FAILED_EXECUTE_DEL "Failed to execute DEL operation"
 #define FAILED_MALLOC "Failed to allocate memory for operation"
-#define FAILED_INCRBY_DECRBY_PARAMETER "Wrong parameter, should be Int64"
+#define FAILED_INCRBY_DECRBY_PARAMETER "value is not an integer or out of range"
 #define FAILED_SELECT_COMMAND "Wrong parameter to SELECT command"
 #define FAILLED_SELECT_NO_SUCH_DATABASE "The database selected doesn't exist"
 
@@ -72,5 +72,6 @@ Uint32 get_length(char* buf);
 #define REDIS_MAX_VALUE_LEN 33586
 #define REDIS_VALUE_TOO_LARGE "value too large (33586 bytes max)"
 #define REDIS_SYNTAX_ERROR "syntax error"
-#define REDIS_INVALID_INTEGER "invalid integer '%s' in command"
+#define REDIS_INVALID_INTEGER "value is not an integer or out of range"
+#define REDIS_OFFSET_OUT_OF_RANGE "offset is out of range"
 #endif
