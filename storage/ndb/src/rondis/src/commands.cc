@@ -2944,6 +2944,8 @@ void rondb_mset(Ndb *ndb,
     hset_done = true;
   }
   if (get_cmd_part) {
+    assert(!is_hash_command);
+    assert(num_keys == 1);
     int ret_code = rondb_get_func(ndb,
                                   tab,
                                   response,
@@ -2963,6 +2965,7 @@ void rondb_mset(Ndb *ndb,
   }
   DEB_MSET_CMD(("MSET of %u keys\n", num_keys));
   if (!hset_done) {
+    assert(!is_hash_command);
     Uint32 current_index = 0;
     do {
       Uint32 loop_count = std::min(num_keys - current_index,
