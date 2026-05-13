@@ -620,12 +620,13 @@ int rondb_redis_handler(const pink::RedisCmdArgsType &argv,
                              1);
       return 0;
     }
-    if (val >= g_num_databases) {
+    if (val < 0 || val >= (Int64)g_num_databases) {
       assign_err_to_response(response,
                              FAILLED_SELECT_NO_SUCH_DATABASE,
                              1);
+      return 0;
     }
-    set_current_database(worker_id, (int)val);
+    set_current_database(worker_id, (Uint32)val);
     response->append("+OK\r\n");
     return 0;
   } else {
