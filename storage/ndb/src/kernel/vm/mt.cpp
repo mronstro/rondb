@@ -1449,6 +1449,13 @@ struct alignas(NDB_CL) thr_data {
   struct thr_data *m_my_fibers[MAX_NUM_FIBERS];
   tiny_fiber::FiberHandle m_fiber_context[MAX_NUM_FIBERS];
   struct thr_wait *m_waiter_ptr;
+  /**
+   * Counts intra-signal yields (cold-load prefetch + SwitchFiber) issued
+   * during the previous signal execution. The signal-execute boundary
+   * forces a fairness yield only when this is 0 (no fiber has yet
+   * shared the OS thread for this signal). Reset at every boundary check.
+   */
+  Uint32 m_intra_yields;
 
   /**
    * Is this a recv thread
@@ -6770,6 +6777,28 @@ static void prepare_congested_execution(thr_data *selfptr) {
 
 static void recheck_congested_job_buffers(thr_data *selfptr);
 
+/**
+ * Cooperatively yield from the current fiber to the next sibling fiber
+ * on the same OS thread, in round-robin order. Updates the per-OS-thread
+ * TLS to point at the destination fiber's jam/self pointers before the
+ * SwitchFiber, so any code on the destination that consults TLS sees its
+ * own thr_data.
+ *
+ * Caller must hold selfptr->m_num_fibers > 1.
+ */
+static inline void
+fiber_yield(thr_data *selfptr) {
+  Uint32 my_fid = selfptr->m_fiber_id;
+  Uint32 next_fid = my_fid + 1;
+  if (next_fid >= selfptr->m_num_fibers) next_fid = 0;
+  thr_data *next_self = selfptr->m_my_fibers[next_fid];
+  NDB_THREAD_TLS_JAM = &next_self->m_jam;
+  NDB_THREAD_TLS_THREAD = next_self;
+  tiny_fiber::SwitchFiber(selfptr->m_fiber_context[my_fid],
+                          selfptr->m_fiber_context[next_fid]);
+  // On resume, the fiber that switched into us has set TLS for us.
+}
+
 /*
  * Execute at most MAX_SIGNALS signals from one job queue, updating local read
  * state as appropriate.
@@ -6840,7 +6869,22 @@ execute_signals(thr_data *selfptr,
     /* Now execute the signal. */
     SignalHeader *s =
         reinterpret_cast<SignalHeader *>(read_buffer->m_data + read_pos);
-    /* SWITCH_FIBER */
+    /**
+     * Signal-boundary fairness yield (RONDB-732 Phase 1).
+     *
+     * If no intra-signal cold-load yield (PREFETCH_AND_YIELD, added in
+     * later phases) was executed during the previous signal on this
+     * fiber, force one yield here so no fiber monopolises the OS
+     * thread. The counter is always reset after the check; intra-signal
+     * yields will set it for the next iteration. See plan §3 in
+     * storage/ndb/claude_files/fibers/plan.md.
+     */
+    if (selfptr->m_num_fibers > 1) {
+      if (selfptr->m_intra_yields == 0) {
+        fiber_yield(selfptr);
+      }
+      selfptr->m_intra_yields = 0;
+    }
     Uint32 seccnt = s->m_noOfSections;
     Uint32 siglen = (sizeof(*s)>>2) + s->theLength;
 
@@ -8144,6 +8188,9 @@ handle_full_job_buffers(struct thr_data* selfptr,
   return sleeploop > 0;
 }
 
+/* Forward declaration; defined below mt_job_thread_main. */
+extern "C" void mt_fiber_main(void *fiber_arg);
+
 /**
  * mt_job_thread_main is the function called by all block threads
  * except the recv thread.
@@ -8153,28 +8200,34 @@ void *
 mt_job_thread_main(void *thr_arg) {
   struct thr_data *selfptr = (struct thr_data *)thr_arg;
   /**
-   * The following call starts the first fiber in the thread and we will never
-   * return after this call.
+   * Only the fiber-0 thr_data of each LDM group is passed here (the spawn
+   * loop skips non-base fiber slots). Non-LDM thread classes (TC, MAIN,
+   * etc.) also arrive here with m_num_fibers == 0; they run as a single
+   * fiber and never switch.
+   *
+   * Run fiber 0 directly on this OS thread. When the signal loop hits its
+   * boundary fairness yield (in execute_signals()), it switches into
+   * fiber 1, 2, ... cooperatively. When all fibers have observed
+   * perform_stop, fiber 0 falls through and we drive the siblings to
+   * completion below.
    */
-  tiny_fiber::SwitchFiber(selfptr->m_fiber_handle, selfptr->m_fiber_context[0]);
-  globalEmulatorData.theWatchDog->unregisterWatchedThread(selfptr->m_thr_no);
-  Uint32 num_fibers = globalData.theNumberOfFibersPerThread;
-  Uint32 i = 1;
-  do {
-    struct thr_data *next_selfptr = selfptr->m_my_fibers[i];
-    if (next_selfptr->m_fiber_deleted) {
-      DeleteFiber(selfptr->m_fiber_context[i]);
-      i++;
-    } else {
-      /* Switch to fiber not yet deleted, give it time to complete */
-      tiny_fiber::SwitchFiber(selfptr->m_fiber_handle,
+  mt_fiber_main(selfptr);
+
+  Uint32 num_fibers = selfptr->m_num_fibers;
+  for (Uint32 i = 1; i < num_fibers; i++) {
+    struct thr_data *sibling = selfptr->m_my_fibers[i];
+    while (!sibling->m_fiber_deleted) {
+      // Give the sibling fiber CPU time to observe perform_stop, exit its
+      // loop, and switch back to us marking m_fiber_deleted.
+      NDB_THREAD_TLS_JAM = &sibling->m_jam;
+      NDB_THREAD_TLS_THREAD = sibling;
+      tiny_fiber::SwitchFiber(selfptr->m_fiber_context[0],
                               selfptr->m_fiber_context[i]);
+      NDB_THREAD_TLS_JAM = &selfptr->m_jam;
+      NDB_THREAD_TLS_THREAD = selfptr;
     }
-  } while (i < num_fibers);
-  /**
-   * All fibers in this thread have stopped, we can now also stop the
-   * thread.
-   */
+    tiny_fiber::DeleteFiber(selfptr->m_fiber_context[i]);
+  }
   return nullptr;
 }
 
@@ -8346,10 +8399,22 @@ mt_fiber_main(void *fiber_arg)
           }
           selfptr->m_watchdog_counter = 18;
           const Uint32 used_maxwait_in_ns = maxwait_in_ns;
-          bool waited = yield(&selfptr->m_waiter,
-                              used_maxwait_in_ns,
-                              check_queues_empty,
-                              selfptr);
+          bool waited;
+          if (selfptr->m_num_fibers > 1 && selfptr->m_fiber_id != 0) {
+            /**
+             * Non-base fiber: never block the OS thread directly.
+             * Cooperatively yield to the next sibling fiber. Producers
+             * always wake the OS thread (fiber 0) via m_waiter_ptr, so
+             * fiber 0 is the only fiber that actually pthread_cond_waits.
+             */
+            fiber_yield(selfptr);
+            waited = true;
+          } else {
+            waited = yield(&selfptr->m_waiter,
+                           used_maxwait_in_ns,
+                           check_queues_empty,
+                           selfptr);
+          }
           if (waited)
           {
             waits++;
@@ -8467,12 +8532,22 @@ mt_fiber_main(void *fiber_arg)
       waits = loops = 0;
     }
   }
+  /**
+   * Each fiber unregisters its own watchdog slot. Fiber 0 then returns
+   * to mt_job_thread_main which drives the siblings to completion via
+   * SwitchFiber.
+   */
+  globalEmulatorData.theWatchDog->unregisterWatchedThread(selfptr->m_thr_no);
   if (selfptr->m_fiber_id != 0) {
     /**
-     * Fibers finish by switching to Fiber that runs the thread. Will never
-     * return from this call and thread will cleanup the fiber data structures.
+     * Non-base fibers finish by marking themselves deleted and switching
+     * back to fiber 0, which is sitting in the cleanup loop in
+     * mt_job_thread_main. Never returns.
      */
     selfptr->m_fiber_deleted = true;
+    thr_data *base_self = selfptr->m_my_fibers[0];
+    NDB_THREAD_TLS_JAM = &base_self->m_jam;
+    NDB_THREAD_TLS_THREAD = base_self;
     tiny_fiber::SwitchFiber(selfptr->m_fiber_context[selfptr->m_fiber_id],
                             selfptr->m_fiber_context[0]);
   }
@@ -9744,8 +9819,16 @@ static void thr_init(struct thr_repository *rep, struct thr_data *selfptr,
 
 static void thr_init_fiber(struct thr_repository *rep,
                            struct thr_data *selfptr) {
+  selfptr->m_intra_yields = 0;
   /**
-   * Initialising Fibers in the thread */
+   * Initialise fiber state for LDM threads only. Other thread classes run
+   * as ordinary OS threads with no sibling fibers.
+   *
+   * Each LDM "fiber slot" is a thr_data of its own (with its own job
+   * buffer, jam, watchdog counter, scan state, etc.). At runtime,
+   * fiber 0 of each LDM owns the OS thread; fibers 1..N-1 run
+   * cooperatively in the same OS thread via tiny_fiber::SwitchFiber.
+   */
   if (globalData.theNumberOfFibersPerThread > 0 &&
       is_ldm_thread(selfptr->m_thr_no))
   {
@@ -9756,14 +9839,17 @@ static void thr_init_fiber(struct thr_repository *rep,
     selfptr->m_fiber_id = fiber_id;
     selfptr->m_fiber_deleted = false;
     if (fiber_id == 0) {
-      tiny_fiber::FiberHandle thread_handle;
-      thread_handle = tiny_fiber::CreateFiberFromThread();
-      selfptr->m_fiber_handle = thread_handle;
+      // Fiber 0 owns the OS thread. CreateFiberFromThread on POSIX just
+      // allocates an empty Fiber context; it will be populated when the
+      // OS thread first switches AWAY from this handle.
+      selfptr->m_fiber_handle = tiny_fiber::CreateFiberFromThread();
     } else {
-      tiny_fiber::FiberHandle fiber_handle;
+      // Fibers 1..N-1 are cooperative; entry point mt_fiber_main(selfptr).
       uint32_t stack_size = uint32_t(2 * 1024 * 1024);
-      tiny_fiber::CreateFiber(stack_size, mt_fiber_main, &fiber_handle);
-      selfptr->m_fiber_handle = fiber_handle;
+      selfptr->m_fiber_handle = tiny_fiber::CreateFiber(stack_size,
+                                                       mt_fiber_main,
+                                                       selfptr);
+      require(selfptr->m_fiber_handle != nullptr);
     }
     selfptr->m_num_fibers = num_fibers;
     struct thr_data* base_selfptr = &rep->m_thread[base_thr_no];
@@ -9779,8 +9865,8 @@ static void thr_init_fiber(struct thr_repository *rep,
   } else {
     selfptr->m_fiber_id = 0;
     selfptr->m_num_fibers = 0;
+    selfptr->m_waiter_ptr = &selfptr->m_waiter;
   }
-
 }
 
 static void
@@ -10332,6 +10418,22 @@ void ThreadConfig::ipControlLoop(NdbThread *pThis) {
     if (thr_no == g_first_receiver_thread_no)
       continue;                 // Will run in the main thread.
 
+    /**
+     * Fiber slots for fiber_id > 0 of an LDM do not own an OS thread.
+     * They share the OS thread of fiber 0 in the same LDM group via
+     * cooperative SwitchFiber. Copy fiber 0's NdbThread* into the
+     * sibling's thr_data so init_thread()'s wait-for-m_thread loop
+     * succeeds, and skip the spawn.
+     */
+    if (thr_no < globalData.ndbMtLqhThreadFibers &&
+        thr_no >= globalData.ndbMtLqhThreads) {
+      Uint32 base_thr_no = thr_no % globalData.ndbMtLqhThreads;
+      rep->m_thread[thr_no].m_thread = rep->m_thread[base_thr_no].m_thread;
+      rep->m_thread[thr_no].m_thr_index =
+          rep->m_thread[base_thr_no].m_thr_index;
+      continue;
+    }
+
     /*
      * The NdbThread_Create() takes void **, but that is cast to void * when
      * passed to the thread function. Which is kind of strange ...
@@ -10371,6 +10473,17 @@ void ThreadConfig::ipControlLoop(NdbThread *pThis) {
   for (thr_no = 0; thr_no < glob_num_threads; thr_no++) {
     if (thr_no == g_first_receiver_thread_no)
       continue;
+    /**
+     * Non-base fiber slots share the OS thread of fiber 0 in the same
+     * LDM group; they don't own an NdbThread to join. Their m_thread
+     * pointer aliases fiber 0's, so just clear the alias to avoid a
+     * double join / double destroy.
+     */
+    if (thr_no < globalData.ndbMtLqhThreadFibers &&
+        thr_no >= globalData.ndbMtLqhThreads) {
+      rep->m_thread[thr_no].m_thread = nullptr;
+      continue;
+    }
     void *dummy_return_status;
     NdbThread_WaitFor(rep->m_thread[thr_no].m_thread, &dummy_return_status);
     globalEmulatorData.theConfiguration->removeThread(

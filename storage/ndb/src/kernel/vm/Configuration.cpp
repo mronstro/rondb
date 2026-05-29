@@ -43,6 +43,7 @@
 #include <NdbOut.hpp>
 #include <WatchDog.hpp>
 
+#include <kernel/ndb_limits.h>
 #include <kernel_config_parameters.h>
 #include <mgmapi_configuration.hpp>
 
@@ -1898,6 +1899,28 @@ Configuration::setupConfiguration()
 
     globalData.ndbMtLqhWorkers = ldm_workers;
     globalData.ndbMtLqhThreads = ldm_threads;
+    /**
+     * RONDB-732: Env-var override for cooperative fibers per LDM thread.
+     * Default remains 1 (no fiber-level parallelism). Cap at
+     * MAX_NUM_FIBERS. See storage/ndb/claude_files/fibers/plan.md.
+     */
+    {
+      const char *env_fibers = std::getenv("RONDB_FIBERS_PER_THREAD");
+      if (env_fibers != nullptr) {
+        char *end = nullptr;
+        unsigned long v = std::strtoul(env_fibers, &end, 10);
+        if (end != env_fibers && v >= 1 && v <= MAX_NUM_FIBERS) {
+          globalData.theNumberOfFibersPerThread = (Uint32)v;
+          g_eventLogger->info(
+              "NDBMT: RONDB_FIBERS_PER_THREAD=%u (env override)",
+              (unsigned)v);
+        } else {
+          g_eventLogger->warning(
+              "NDBMT: RONDB_FIBERS_PER_THREAD=%s invalid; ignoring "
+              "(must be 1..%u)", env_fibers, (unsigned)MAX_NUM_FIBERS);
+        }
+      }
+    }
     globalData.ndbMtLqhThreadFibers =
       globalData.ndbMtLqhThreads *
       globalData.theNumberOfFibersPerThread;
