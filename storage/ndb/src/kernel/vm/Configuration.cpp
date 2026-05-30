@@ -1927,6 +1927,15 @@ Configuration::setupConfiguration()
     /**
      * Each block thread will have one Query worker, thus no more
      * any need for recover threads.
+     *
+     * For Phase 1 fiber prototype we deliberately keep ndbMtQueryWorkers
+     * tied to the LDM thread count (not fiber count). Creating extra
+     * DBQLQH/DBQACC instances per fiber would route signals to fiber-1
+     * slots whose underlying DBLQH/DBACC/DBTUP data lives on fiber 0,
+     * breaking signal routing. Fiber-1 slots stay block-instance-less;
+     * the THRMAN check that fired with the previous formula is handled
+     * in send_measure_to_rep_thrman by silently returning instead of
+     * ndbrequire(false).
      */
     globalData.ndbMtQueryWorkers = ldm_threads +
                                    globalData.ndbMtTcThreads +

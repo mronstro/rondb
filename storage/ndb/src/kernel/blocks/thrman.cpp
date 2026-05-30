@@ -1990,11 +1990,11 @@ void Thrman::send_measure_to_rep_thrman(Signal *signal,
     jam();
     /**
      * Only THRMAN in LDM and threads with query blocks need to send
-     * this signal.
-     * Since all block threads have query blocks this should never be
-     * true.
+     * this signal. With RONDB-732 fibers, fiber-slot THRMANs (instance
+     * > ndbMtQueryWorkers) and non-block-thread THRMANs reach this
+     * function via their periodic 50ms tick but have no query worker
+     * to report for. Silently skip rather than ndbrequire(false).
      */
-    ndbrequire(false);
     return;
   }
   jam();

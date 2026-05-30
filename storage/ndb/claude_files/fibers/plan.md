@@ -217,6 +217,56 @@ Headlines:
   O(N²) in block-thread count, so M = 4 with 16 LDMs scales the LDM
   section from 16 to 64 slots. Probably fine for M = 2 on small
   installs but should be measured.
+- **Thrman + two-step scheduling** (see §7.5). Substantial change;
+  needs Phase 1 fully stable first.
+
+### 7.5 Thrman performance tracking + two-step fiber scheduling (deferred)
+
+Phase 1 redirects `mt_getPerformanceTimers` for non-base fibers to fiber
+0's thr_data as a tactical workaround: every fiber on an OS thread
+reports fiber 0's sleep/spin/send accounting. That stops the assertion
+from firing but is conceptually wrong in both directions:
+
+- Fiber 0's counters reflect the entire OS thread's sleep/spin/send
+  activity. Reporting them as fiber 1's "load" double-counts the same
+  time across siblings.
+- Fiber 1's own counters (the ones we hide) are near-zero anyway —
+  non-base fibers don't pthread_cond_wait, they only `fiber_yield`.
+
+The right model is the one Mikael proposed:
+
+1. **Thrman measures CPU usage at the OS-thread level** — total CPU
+   time consumed by the OS thread that owns this LDM group, attributed
+   equally across the M fibers on it. All siblings then carry the same
+   load weight by construction.
+2. **Scheduling becomes two-step**: when something needs to pick a
+   target LDM thread for a signal (e.g. round-robin dispatch, load-aware
+   placement), step 1 picks an *OS thread* using the OS-thread-level
+   load metric, then step 2 round-robins among that OS thread's M
+   fibers. This avoids the failure mode where the scheduler treats two
+   siblings as independent low-load targets and floods the OS thread
+   they share.
+
+Why this is non-trivial:
+
+- Thrman currently runs per-block-instance (one Thrman per thr_no).
+  With M fibers per OS thread, there are M Thrman instances per OS
+  thread; they need to coordinate on OS-thread-level measurements
+  rather than each measure independently.
+- The "OS-thread CPU usage" measurement itself isn't free — `clock_gettime`
+  with CLOCK_THREAD_CPUTIME_ID per OS thread, summed across whatever
+  sample window thrman uses, with care that the sampling itself happens
+  on a known fiber (so we don't measure "current fiber" but "current
+  OS thread").
+- Every place that uses thrman load output for routing (mt_get_addressable_threads,
+  TC instance maps, send-thread balancing) needs to learn the two-step
+  pattern. Some places may already work because they iterate by
+  thr_no — but they iterate over every fiber slot, which compounds the
+  attribution error.
+
+Sequencing — do this only **after** Phase 1 is stable (cluster boots,
+runs basic workloads, M=1 = M=2 behaviour for non-fiber paths). Doing
+both restructures concurrently makes the result impossible to bisect.
 
 ## 8. Risks
 

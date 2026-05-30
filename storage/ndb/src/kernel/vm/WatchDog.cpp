@@ -310,6 +310,20 @@ void WatchDog::run() {
     NdbMutex_Lock(m_mutex);
     numThreads = m_watchedCount;
     for (Uint32 i = 0; i < numThreads; i++) {
+      /**
+       * RONDB-732: a fiber suspended inside SwitchFiber stores the
+       * sentinel 0xFFFFFFFF in its counter and is not "stuck" — it is
+       * parked waiting for a sibling to yield back. Skip these without
+       * clearing; the counter is updated atomically on resume.
+       */
+      Uint32 raw = *(m_watchedList[i].m_watchCounter);
+      if (raw == 0xFFFFFFFFu) {
+        counterValue[i] = raw;                 // treat as "responded"
+        m_watchedList[i].m_startTicks = now;
+        m_watchedList[i].m_slowWarnDelay = theInterval;
+        m_watchedList[i].m_lastCounterValue = raw;
+        continue;
+      }
 #ifdef NDB_HAVE_XCNG
       /* atomically read and clear watchdog counter */
       counterValue[i] = xcng(m_watchedList[i].m_watchCounter, 0);

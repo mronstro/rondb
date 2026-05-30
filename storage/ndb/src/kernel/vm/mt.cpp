@@ -1136,7 +1136,16 @@ is_ldm_thread(unsigned thr_no)
 {
   if (globalData.ndbMtLqhThreadFibers > 0)
   {
-    return (thr_no < globalData.ndbMtLqhWorkers);
+    /**
+     * The LDM section of thr_data spans [0, ndbMtLqhThreadFibers): one
+     * slot per (LDM thread, fiber) pair. Every slot in this range is an
+     * LDM and must be treated as such for fiber init, send-thread
+     * assignment, etc. The first stab compared against ndbMtLqhWorkers
+     * which left non-base fiber slots out of the LDM set and made
+     * thr_init_fiber take the non-LDM path for them — leaving their
+     * m_fiber_handle uninitialised.
+     */
+    return (thr_no < globalData.ndbMtLqhThreadFibers);
   }
   else
   {
@@ -6778,6 +6787,18 @@ static void prepare_congested_execution(thr_data *selfptr) {
 static void recheck_congested_job_buffers(thr_data *selfptr);
 
 /**
+ * Sentinel value stored in m_watchdog_counter while a fiber is suspended
+ * inside a SwitchFiber call. The watchdog skips counters set to this
+ * value — a suspended fiber is not "stuck", it is parked waiting for a
+ * sibling to yield back to it. Set on yield-out, cleared on resume.
+ *
+ * A fiber stuck inside a long-running signal handler is still detected
+ * normally: its counter stays at whatever value the handler last wrote
+ * (e.g. 12 / 21) and the watchdog detects the non-update.
+ */
+static constexpr Uint32 WD_FIBER_SUSPENDED = 0xFFFFFFFFu;
+
+/**
  * Cooperatively yield from the current fiber to the next sibling fiber
  * on the same OS thread, in round-robin order. Updates the per-OS-thread
  * TLS to point at the destination fiber's jam/self pointers before the
@@ -6792,11 +6813,27 @@ fiber_yield(thr_data *selfptr) {
   Uint32 next_fid = my_fid + 1;
   if (next_fid >= selfptr->m_num_fibers) next_fid = 0;
   thr_data *next_self = selfptr->m_my_fibers[next_fid];
+  require(next_self != nullptr);
+  tiny_fiber::FiberHandle from_h = selfptr->m_fiber_context[my_fid];
+  tiny_fiber::FiberHandle to_h   = selfptr->m_fiber_context[next_fid];
+  if (unlikely(from_h == nullptr || to_h == nullptr)) {
+    g_eventLogger->error(
+        "fiber_yield: null fiber context. thr_no=%u fiber_id=%u "
+        "num_fibers=%u my_fid=%u next_fid=%u from=%p to=%p",
+        selfptr->m_thr_no, selfptr->m_fiber_id, selfptr->m_num_fibers,
+        my_fid, next_fid, (void*)from_h, (void*)to_h);
+    require(from_h != nullptr);
+    require(to_h != nullptr);
+  }
   NDB_THREAD_TLS_JAM = &next_self->m_jam;
   NDB_THREAD_TLS_THREAD = next_self;
-  tiny_fiber::SwitchFiber(selfptr->m_fiber_context[my_fid],
-                          selfptr->m_fiber_context[next_fid]);
-  // On resume, the fiber that switched into us has set TLS for us.
+  // Mark our fiber as suspended for the watchdog before yielding.
+  selfptr->m_watchdog_counter = WD_FIBER_SUSPENDED;
+  tiny_fiber::SwitchFiber(from_h, to_h);
+  // On resume, clear the suspended marker so the watchdog observes a
+  // counter update on next loop iteration.
+  selfptr->m_watchdog_counter = 21;
+  // The fiber that switched into us has set TLS for us.
 }
 
 /*
@@ -7476,6 +7513,43 @@ void mt_finalize_thr_map() {
             require(bno == PGMAN);
             require(false);
           }
+        }
+      }
+    }
+  }
+
+  /**
+   * RONDB-732 Phase 1: propagate per-thr_data block state from fiber 0
+   * to sibling fibers within the same LDM group.
+   *
+   * mt_add_thr_map maps each LDM block instance to exactly one thr_no —
+   * the base (fiber 0) slot. Sibling fiber slots (thr_no >= ndbMtLqhThreads)
+   * are otherwise empty. Iterators that walk every thr_no slot, such as
+   * thr_send_threads::assign_threads_to_assist_send_threads, then call
+   * THRConfigApplier::find_thread on an empty instance_list and crash
+   * because find_thread returns nullptr.
+   *
+   * Copy fiber 0's m_instance_list/m_instance_count into sibling slots.
+   * This makes find_thread succeed for the sibling and effectively treats
+   * the sibling as another instance of the same logical LDM thread from
+   * the configuration's point of view. Block ownership (assignToThread,
+   * send_packer registration) stays on fiber 0; signal routing is
+   * unchanged.
+   */
+  if (globalData.theNumberOfFibersPerThread > 1 &&
+      globalData.ndbMtLqhThreads > 0) {
+    struct thr_repository *rep = g_thr_repository;
+    Uint32 num_ldm_threads = globalData.ndbMtLqhThreads;
+    Uint32 num_fibers = globalData.theNumberOfFibersPerThread;
+    for (Uint32 base = 0; base < num_ldm_threads; base++) {
+      thr_data *base_self = &rep->m_thread[base];
+      for (Uint32 f = 1; f < num_fibers; f++) {
+        Uint32 sib_thr_no = base + f * num_ldm_threads;
+        if (sib_thr_no >= globalData.ndbMtLqhThreadFibers) break;
+        thr_data *sib_self = &rep->m_thread[sib_thr_no];
+        sib_self->m_instance_count = base_self->m_instance_count;
+        for (Uint32 i = 0; i < base_self->m_instance_count; i++) {
+          sib_self->m_instance_list[i] = base_self->m_instance_list[i];
         }
       }
     }
@@ -8236,7 +8310,17 @@ void
 mt_fiber_main(void *fiber_arg)
 {
   struct thr_data *selfptr = (struct thr_data *)fiber_arg;
-  unsigned char signal_buf[SIGBUF_SIZE];
+  /**
+   * SIGBUF_SIZE is ~185 KB. As a stack local it makes the function frame
+   * large enough that the compiler emits a __chkstk_darwin probe on
+   * macOS, which compares sp against the pthread stack bounds and
+   * SIGSEGVs when this function runs on a fiber's malloc'd stack
+   * instead of the pthread stack. Move the buffer to the heap to keep
+   * the frame small. Lives until the fiber exits (process shutdown).
+   */
+  std::unique_ptr<unsigned char[]> signal_buf_owner(
+      new unsigned char[SIGBUF_SIZE]);
+  unsigned char *signal_buf = signal_buf_owner.get();
   Signal *signal;
 
   init_thread(selfptr);
@@ -8400,15 +8484,42 @@ mt_fiber_main(void *fiber_arg)
           selfptr->m_watchdog_counter = 18;
           const Uint32 used_maxwait_in_ns = maxwait_in_ns;
           bool waited;
-          if (selfptr->m_num_fibers > 1 && selfptr->m_fiber_id != 0) {
+          if (selfptr->m_num_fibers > 1) {
             /**
-             * Non-base fiber: never block the OS thread directly.
-             * Cooperatively yield to the next sibling fiber. Producers
-             * always wake the OS thread (fiber 0) via m_waiter_ptr, so
-             * fiber 0 is the only fiber that actually pthread_cond_waits.
+             * In fiber mode, no fiber blocks the OS thread directly.
+             * Before any fiber pthread_cond_waits, every sibling fiber
+             * on this OS thread must agree there is no work — otherwise
+             * we deadlock the sibling, which is suspended inside an
+             * earlier SwitchFiber and only resumes when we yield to it.
+             *
+             * Strategy:
+             *  - Non-base fibers (fiber_id != 0): yield to next sibling
+             *    unconditionally. Treat the round-trip as "waited".
+             *  - Base fiber (fiber_id == 0): yield through every sibling
+             *    first to drain any work they might have. On resume,
+             *    if our own queues are still empty, then it is safe for
+             *    the OS thread to sleep on our m_waiter. Producers wake
+             *    us via m_waiter_ptr, so any new work routed to any
+             *    fiber on this OS thread will wake us.
              */
-            fiber_yield(selfptr);
-            waited = true;
+            if (selfptr->m_fiber_id != 0) {
+              fiber_yield(selfptr);
+              waited = true;
+            } else {
+              // Base fiber: poll each sibling once to give it a turn.
+              for (Uint32 sib = 1; sib < selfptr->m_num_fibers; sib++) {
+                fiber_yield(selfptr);
+              }
+              if (check_queues_empty(selfptr)) {
+                waited = yield(&selfptr->m_waiter,
+                               used_maxwait_in_ns,
+                               check_queues_empty,
+                               selfptr);
+              } else {
+                // A sibling-yield surfaced work for us; skip the sleep.
+                waited = true;
+              }
+            }
           } else {
             waited = yield(&selfptr->m_waiter,
                            used_maxwait_in_ns,
@@ -8532,11 +8643,6 @@ mt_fiber_main(void *fiber_arg)
       waits = loops = 0;
     }
   }
-  /**
-   * Each fiber unregisters its own watchdog slot. Fiber 0 then returns
-   * to mt_job_thread_main which drives the siblings to completion via
-   * SwitchFiber.
-   */
   globalEmulatorData.theWatchDog->unregisterWatchedThread(selfptr->m_thr_no);
   if (selfptr->m_fiber_id != 0) {
     /**
@@ -8948,8 +9054,16 @@ void mt_getPerformanceTimers(Uint32 self, Uint64 &micros_sleep,
   struct thr_repository *rep = g_thr_repository;
   struct thr_data *selfptr = &rep->m_thread[self];
 
-  require(selfptr->m_fiber_id == 0);
-  assert(selfptr->m_num_fibers > 0);
+  /**
+   * For non-base fibers, redirect to the base fiber's thr_data — the
+   * sleep/spin/send accounting all happens on the OS thread (which is
+   * fiber 0) since non-base fibers never actually pthread_cond_wait.
+   * The base's counters are the meaningful ones for performance
+   * reporting.
+   */
+  if (selfptr->m_num_fibers > 1 && selfptr->m_fiber_id != 0) {
+    selfptr = selfptr->m_my_fibers[0];
+  }
   /**
    * Internally in mt.cpp sleep time now includes spin time. However
    * to ensure backwards compatibility we report them separate to
