@@ -217,23 +217,78 @@ Headlines:
   O(N²) in block-thread count, so M = 4 with 16 LDMs scales the LDM
   section from 16 to 64 slots. Probably fine for M = 2 on small
   installs but should be measured.
-- **Thrman + two-step scheduling** (see §7.5). Substantial change;
+- **Scheduler per-event timers under fibers** (see §7.5): Stage 1
+  (only fiber 0 records) is done; Stage 2 (per-OS-thread recording
+  token) is deferred.
+- **Thrman + two-step scheduling** (see §7.6). Substantial change;
   needs Phase 1 fully stable first.
 
-### 7.5 Thrman performance tracking + two-step fiber scheduling (deferred)
+### 7.5 Scheduler per-event timers under fibers
 
-Phase 1 redirects `mt_getPerformanceTimers` for non-base fibers to fiber
-0's thr_data as a tactical workaround: every fiber on an OS thread
-reports fiber 0's sleep/spin/send accounting. That stops the assertion
-from firing but is conceptually wrong in both directions:
+The scheduler records "time between events" — the wall-clock time the OS
+thread spends in each non-execution state — into four `thr_data` counters:
+`m_nanos_sleep`, `m_measured_spintime_ns`, `m_buffer_full_nanos_sleep`,
+`m_nanos_send`. Thrman reads them via `mt_getPerformanceTimers()` to derive
+CPU load (`exec = elapsed − sleep − spin − send − buffer_full`).
 
-- Fiber 0's counters reflect the entire OS thread's sleep/spin/send
-  activity. Reporting them as fiber 1's "load" double-counts the same
-  time across siblings.
-- Fiber 1's own counters (the ones we hide) are near-zero anyway —
-  non-base fibers don't pthread_cond_wait, they only `fiber_yield`.
+These cannot be measured independently per fiber: M fibers share one
+physical CPU, so an interval bracketed by `NdbTick` across a `SwitchFiber`
+boundary includes time a sibling ran. Summing siblings' intervals would
+multiply-count the single core.
 
-The right model is the one Mikael proposed:
+#### Stage 1 — only fiber 0 records (DONE)
+
+Every recording site is gated on `m_fiber_id == 0` (the OS-thread owner).
+Non-base fibers skip recording; `mt_getPerformanceTimers()` already
+redirects each sibling to fiber 0's counters, so all M fibers on an OS
+thread report one shared load figure. Non-fiber threads (TC/MAIN/recv, or
+LDM with fibers off) have `m_fiber_id == 0` and are unaffected.
+
+Implemented in `mt.cpp`: helper methods `thr_data::add_nanos_sleep` /
+`add_spintime_ns` / `add_buffer_full_nanos_sleep` / `add_nanos_send`
+(self-gating) replace the raw `+=` at the fiber-reachable sites in
+`check_yield`, `do_send`, and `handle_full_job_buffers`; the two
+`mt_fiber_main` sleep sites carry an explicit `m_fiber_id == 0` guard
+because they bundle `wait_time_tracking()`. The `check_recv_yield` /
+recv-loop sites are left raw (recv is never fiberized).
+
+Known approximation: send-assist done by a non-base fiber is attributed to
+exec, not send. Bounded, and removed by Stage 2.
+
+#### Stage 2 — per-OS-thread recording token (deferred)
+
+Give each OS thread a single *recording slot* (held on fiber 0's thr_data,
+reachable by all siblings via `m_my_fibers[0]`): a state
+`{IDLE, RECORDING}`, the owning fiber id, the start tick, and a per-fiber
+"pending recorder" flag. The slot is a cooperative token, not a lock —
+there is no contention because the fibers never run concurrently.
+
+- A fiber about to enter a measured state tries to take the token:
+  - **IDLE** → claim it (state = RECORDING, owner = me, start = now),
+    run the activity, and on completion add `now − start` to the
+    OS-thread counter, then hand off.
+  - **RECORDING** (a sibling owns it) → set my "pending recorder" flag
+    ("in a recording state, but recording hasn't started") and do *not*
+    bracket my own interval.
+- Fiber 0 is **not** special: it also defers if another fiber already
+  holds the token.
+- On completion the owner records its interval, then **hands the token
+  to a waiting sibling**: if any fiber has its pending flag set, transfer
+  ownership and set that fiber's `start = now` (begin measuring it from
+  this instant), clearing the flag; otherwise set IDLE.
+
+Effect: the measured intervals tile the timeline with no overlap and no
+gap, so the OS-thread counters equal the union of all fibers' measured
+activity — no double-count (Stage 1's send approximation goes away) and no
+loss. It also fixes the subtle case where a sibling surfaces work during
+fiber 0's pre-sleep drain: that exec time transfers to the sibling's slot
+instead of being mislabeled as fiber 0 sleep.
+
+### 7.6 Thrman OS-thread CPU measurement + two-step scheduling (deferred)
+
+Stage 2 above tiles the *scheduler's own* timers correctly, but Thrman's
+CPU-load model and the load-aware scheduler still treat each fiber slot as
+an independent thread. The right model is the one Mikael proposed:
 
 1. **Thrman measures CPU usage at the OS-thread level** — total CPU
    time consumed by the OS thread that owns this LDM group, attributed

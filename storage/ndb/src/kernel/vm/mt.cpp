@@ -1433,10 +1433,12 @@ struct alignas(NDB_CL) thr_data {
    * Sending packed signals
    * Flushing local send buffers
    *
-   * Fiber id 0 representing thread has always m_num_fibers > 0
-   * and the array represents the fibers the thread handles.
-   * In fibers the m_num_fibers == 0 and the m_my_fibers is filled
-   * with nullptr's.
+   * On an LDM thread with fibers enabled, *every* fiber slot (base and
+   * non-base) has m_num_fibers == M and m_my_fibers[] populated with the
+   * sibling thr_data pointers; the base fiber has m_fiber_id == 0, the
+   * others 1..M-1. Non-fiber threads (TC/MAIN/recv, or LDM with fibers
+   * disabled) have m_fiber_id == 0 and m_num_fibers == 0. Thus
+   * "is this the OS-thread owner?" is exactly (m_fiber_id == 0).
    *
    * FiberContext contains the context of the fibers in this thread.
    * This includes storage of stack state and saved registers.
@@ -1862,6 +1864,48 @@ struct alignas(NDB_CL) thr_data {
                     (OverloadStatus)LIGHT_LOAD_CONST) ? false :
                      pending_send);
     return pending_send;
+  }
+
+  /**
+   * Fiber performance accounting (RONDB-732, plan.md §7.5).
+   *
+   * The scheduler measures the wall-clock time the OS thread spends in
+   * each non-execution state (sleeping, spinning, send-assist, blocked on
+   * full job buffers) and accumulates it into m_nanos_sleep / _spintime /
+   * _send / _buffer_full above. Thrman reads them via
+   * mt_getPerformanceTimers() to derive CPU load:
+   *   exec_time = elapsed_wall_clock - sleep - spin - send - buffer_full
+   *
+   * With M fibers cooperatively multiplexed on one OS thread, every fiber
+   * observes the *same* physical wall clock: when fiber 1 runs, it is the
+   * OS thread running, not an independent CPU. So a per-fiber interval
+   * bracketed across a SwitchFiber boundary includes time a sibling ran,
+   * and summing siblings' intervals would multiply-count the one CPU.
+   *
+   * Stage 1 (here): only fiber 0 -- the OS-thread owner -- records into the
+   * counters. Non-base fibers (m_fiber_id != 0) skip recording entirely;
+   * mt_getPerformanceTimers() reports fiber 0's counters for every sibling,
+   * so all fibers on an OS thread share one load figure. Non-fiber threads
+   * (TC/MAIN/recv, or LDM with fibers disabled) have m_fiber_id == 0 and
+   * record exactly as before -- the gate is transparent for them.
+   *
+   * Known Stage-1 approximation: send-assist performed by a non-base fiber
+   * is not recorded as send time, so it is attributed to exec instead. The
+   * Stage 2 recording-token design (plan.md §7.5) hands a single per-OS-
+   * thread recording slot between fibers to remove this approximation.
+   */
+  bool records_perf_timers() const { return m_fiber_id == 0; }
+  void add_nanos_sleep(Uint64 ns) {
+    if (m_fiber_id == 0) m_nanos_sleep += ns;
+  }
+  void add_spintime_ns(Uint64 ns) {
+    if (m_fiber_id == 0) m_measured_spintime_ns += ns;
+  }
+  void add_buffer_full_nanos_sleep(Uint64 ns) {
+    if (m_fiber_id == 0) m_buffer_full_nanos_sleep += ns;
+  }
+  void add_nanos_send(Uint64 ns) {
+    if (m_fiber_id == 0) m_nanos_send += ns;
   }
 };
 
@@ -3535,7 +3579,7 @@ check_yield(thr_data *selfptr,
         *spin_time_in_ns = Uint32(spin_nanos);
         selfptr->m_curr_ticks = now;
         selfptr->m_spin_stat.m_sleep_longer_spin_time++;
-        selfptr->m_measured_spintime_ns += spin_nanos;
+        selfptr->add_spintime_ns(spin_nanos);  // fiber 0 only, see thr_data
         return true;
       }
       if ((i & 15) == 15)
@@ -3572,9 +3616,9 @@ check_yield(thr_data *selfptr,
    */
   Uint64 spin_nanos = NdbTick_Elapsed(start_spin_ticks, now).nanoSec();
   selfptr->m_curr_ticks = now;
-  selfptr->m_measured_spintime_ns += spin_nanos;
+  selfptr->add_spintime_ns(spin_nanos);  // fiber 0 only, see thr_data
   selfptr->m_spin_stat.m_sleep_shorter_spin_time++;
-  selfptr->m_nanos_sleep += spin_nanos;
+  selfptr->add_nanos_sleep(spin_nanos);  // fiber 0 only, see thr_data
   wait_time_tracking(selfptr, spin_nanos);
   return false;
 #endif
@@ -5988,7 +6032,7 @@ static bool do_send(struct thr_data *selfptr, bool must_send,
                                          selfptr->m_send_buffer_pool);
       pending_send = selfptr->check_pending_send(pending_send);
       NDB_TICKS after = NdbTick_getCurrentTicks();
-      selfptr->m_nanos_send += NdbTick_Elapsed(now, after).nanoSec();
+      selfptr->add_nanos_send(NdbTick_Elapsed(now, after).nanoSec());  // fiber 0 only
     }
     return pending_send;  // send-buffers empty
   }
@@ -6077,7 +6121,7 @@ static bool do_send(struct thr_data *selfptr, bool must_send,
         pending_send = selfptr->check_pending_send(pending_send);
       }
       NDB_TICKS after = NdbTick_getCurrentTicks();
-      selfptr->m_nanos_send += NdbTick_Elapsed(now, after).nanoSec();
+      selfptr->add_nanos_send(NdbTick_Elapsed(now, after).nanoSec());  // fiber 0 only
     }
     return pending_send;
   }
@@ -8248,8 +8292,8 @@ handle_full_job_buffers(struct thr_data* selfptr,
       const NDB_TICKS after = NdbTick_getCurrentTicks();
       selfptr->m_curr_ticks = after;
       selfptr->m_read_jbb_state_consumed = true;
-      selfptr->m_buffer_full_nanos_sleep +=
-        NdbTick_Elapsed(before, after).nanoSec();
+      selfptr->add_buffer_full_nanos_sleep(  // fiber 0 only, see thr_data
+        NdbTick_Elapsed(before, after).nanoSec());
       sleeploop++;
     }
     /**
@@ -8533,9 +8577,19 @@ mt_fiber_main(void *fiber_arg)
             now = NdbTick_getCurrentTicks();
             selfptr->m_curr_ticks = now;
             yield_ticks = now;
-            Uint64 nanos_sleep = NdbTick_Elapsed(before, now).nanoSec();
-            selfptr->m_nanos_sleep += nanos_sleep;
-            wait_time_tracking(selfptr, nanos_sleep);
+            /**
+             * Stage 1 fiber accounting (see thr_data): only fiber 0 records
+             * sleep time. For a non-base fiber, waited==true was produced by
+             * fiber_yield() above, so [before, now] is the time a sibling ran
+             * (exec), not a real cond_wait -- recording it would mislabel
+             * sibling execution as sleep. m_curr_ticks/yield_ticks above must
+             * still advance for every fiber, so only the recording is gated.
+             */
+            if (selfptr->m_fiber_id == 0) {
+              Uint64 nanos_sleep = NdbTick_Elapsed(before, now).nanoSec();
+              selfptr->m_nanos_sleep += nanos_sleep;
+              wait_time_tracking(selfptr, nanos_sleep);
+            }
             selfptr->m_stat.m_wait_cnt += waits;
             selfptr->m_stat.m_loop_cnt += loops;
             selfptr->m_read_jbb_state_consumed = true;
@@ -8553,8 +8607,9 @@ mt_fiber_main(void *fiber_arg)
               check_for_input_from_ndbfs(selfptr, signal);
             }
           }
-          else if (has_spun)
+          else if (has_spun && selfptr->m_fiber_id == 0)
           {
+            // Stage 1 fiber accounting: only fiber 0 records spin/sleep time.
             selfptr->m_nanos_sleep += (spin_time_in_ns);
             wait_time_tracking(selfptr, spin_time_in_ns);
           }
@@ -9055,11 +9110,12 @@ void mt_getPerformanceTimers(Uint32 self, Uint64 &micros_sleep,
   struct thr_data *selfptr = &rep->m_thread[self];
 
   /**
-   * For non-base fibers, redirect to the base fiber's thr_data — the
-   * sleep/spin/send accounting all happens on the OS thread (which is
-   * fiber 0) since non-base fibers never actually pthread_cond_wait.
-   * The base's counters are the meaningful ones for performance
-   * reporting.
+   * For non-base fibers, redirect to the base fiber's thr_data. Stage 1
+   * fiber accounting (see thr_data) gates every recording site on
+   * m_fiber_id == 0, so a non-base fiber's own counters are always zero;
+   * fiber 0 holds the only meaningful sleep/spin/send/buffer-full figures
+   * for the OS thread. Reporting fiber 0's counters for each sibling makes
+   * all M fibers on an OS thread carry the same load by construction.
    */
   if (selfptr->m_num_fibers > 1 && selfptr->m_fiber_id != 0) {
     selfptr = selfptr->m_my_fibers[0];
