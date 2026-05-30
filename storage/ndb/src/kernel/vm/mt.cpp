@@ -6709,6 +6709,55 @@ static bool check_queues_empty(thr_data *selfptr) {
   return read_all_jbb_state(selfptr, true);
 }
 
+/**
+ * Read-only peek (RONDB-732): does sibling fiber 'f' -- a fiber on this OS
+ * thread other than the running one, currently parked inside a SwitchFiber
+ * -- have any pending work?
+ *
+ * Unlike check_queues_empty(), this must NOT call scan_zero_queue(): moving
+ * a fiber's due timer signals into its job buffer mutates buffers and has
+ * to run in that fiber's own context, not on behalf of a sibling. We peek
+ * the zero-queue count instead. read_jba_state()/read_all_jbb_state() only
+ * refresh the reader's cached view of producer-published write positions
+ * (with the required rmb), so they are safe to evaluate on a parked
+ * sibling, and they carry the membars needed to not miss a just-queued
+ * signal. The sibling is not running (cooperative scheduling), so reading
+ * its thread-local state is race-free.
+ */
+static bool fiber_has_pending_work(thr_data *f) {
+  if (f->m_tq.m_cnt[2] > 0) return true;          // timer signals already due
+  if (!read_jba_state(f)) return true;            // prio A pending
+  if (!read_all_jbb_state(f, true)) return true;  // prio B pending
+  return false;
+}
+
+/**
+ * The OS thread (fiber 0) is the only entity that pthread_cond_waits;
+ * producers wake it via m_waiter_ptr no matter which fiber a signal is
+ * routed to (see thr_init_fiber). Hence the OS thread may sleep only when
+ * *every* fiber on it is out of work. Checking just fiber 0's own queues
+ * races with work queued to a sibling in the window between fiber 0's
+ * pre-sleep sibling drain and its sleep-commit: the producer's wakeup
+ * no-ops (fiber 0 not yet flagged sleeping), then fiber 0 sleeps having
+ * only looked at its own empty queues -- a lost wakeup that starves the
+ * sibling until an unrelated wakeup arrives (startup stall -> heartbeat
+ * timeout).
+ *
+ * Used both as the pre-sleep gate and as the yield() re-check callback, so
+ * the all-fibers test runs *after* the sleep-intent barrier inside yield()
+ * and reliably observes the sibling's just-queued work.
+ *
+ * 'selfptr' is the base fiber: full check_queues_empty() on ourselves (own
+ * context; may move our own timer signals), read-only peek on each sibling.
+ */
+static bool check_all_fiber_queues_empty(thr_data *selfptr) {
+  if (!check_queues_empty(selfptr)) return false;
+  for (Uint32 i = 1; i < selfptr->m_num_fibers; i++) {
+    if (fiber_has_pending_work(selfptr->m_my_fibers[i])) return false;
+  }
+  return true;
+}
+
 static inline void sendpacked(struct thr_data *thr_ptr, Signal *signal) {
   thr_ptr->m_watchdog_counter = 15;
   thr_ptr->m_send_packer.pack(signal);
@@ -8540,11 +8589,13 @@ mt_fiber_main(void *fiber_arg)
              *  - Non-base fibers (fiber_id != 0): yield to next sibling
              *    unconditionally. Treat the round-trip as "waited".
              *  - Base fiber (fiber_id == 0): yield through every sibling
-             *    first to drain any work they might have. On resume,
-             *    if our own queues are still empty, then it is safe for
-             *    the OS thread to sleep on our m_waiter. Producers wake
-             *    us via m_waiter_ptr, so any new work routed to any
-             *    fiber on this OS thread will wake us.
+             *    first to drain any work they might have. On resume, sleep
+             *    on our m_waiter only if *every* fiber on this OS thread is
+             *    out of work (check_all_fiber_queues_empty) -- checking just
+             *    our own queues loses wakeups for work queued to a sibling
+             *    in the drain/commit race window. Producers wake us via
+             *    m_waiter_ptr, so any new work routed to any fiber on this
+             *    OS thread will wake the OS thread (i.e. fiber 0).
              */
             if (selfptr->m_fiber_id != 0) {
               fiber_yield(selfptr);
@@ -8554,10 +8605,18 @@ mt_fiber_main(void *fiber_arg)
               for (Uint32 sib = 1; sib < selfptr->m_num_fibers; sib++) {
                 fiber_yield(selfptr);
               }
-              if (check_queues_empty(selfptr)) {
+              /**
+               * Sleep only when *all* fibers on this OS thread are out of
+               * work, and re-check the same all-fibers condition inside
+               * yield() after the sleep-intent barrier. Using just
+               * check_queues_empty(selfptr) here would lose wakeups for work
+               * queued to a sibling in the drain/commit race window. See
+               * check_all_fiber_queues_empty().
+               */
+              if (check_all_fiber_queues_empty(selfptr)) {
                 waited = yield(&selfptr->m_waiter,
                                used_maxwait_in_ns,
-                               check_queues_empty,
+                               check_all_fiber_queues_empty,
                                selfptr);
               } else {
                 // A sibling-yield surfaced work for us; skip the sleep.
