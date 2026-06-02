@@ -957,6 +957,7 @@ int rondb_redis_handler(const pink::RedisCmdArgsType &argv,
       return 0;
     }
     if (val < 0 || val >= (Int64)g_num_databases) {
+      RONDIS_SECURITY_EVENT("rondis_select_out_of_range");
       assign_err_to_response(response,
                              FAILED_SELECT_NO_SUCH_DATABASE,
                              0);

@@ -26,16 +26,16 @@ if (!$RONDB_CLI) {
 --echo #
 
 --echo #
---echo # Test 1: SET value at the limit (33586 bytes) must succeed
+--echo # Test 1: SET value at the limit (512000 bytes) must succeed
 --echo #
 
---exec python3 -c "import socket,time; d=chr(36); s=socket.socket(); s.connect(('127.0.0.1',$RONDIS_PORT)); s.settimeout(5); v=b'x'*33586; msg=f'*3\r\n{d}3\r\nSET\r\n{d}7\r\nseckey1\r\n{d}{len(v)}\r\n'.encode()+v+b'\r\n'; s.sendall(msg); time.sleep(0.1); print(s.recv(256).decode(errors='replace').strip()); s.close()"
+--exec python3 -c "import socket,time; d=chr(36); s=socket.socket(); s.connect(('127.0.0.1',$RONDIS_PORT)); s.settimeout(10); v=b'x'*512000; msg=f'*3\r\n{d}3\r\nSET\r\n{d}7\r\nseckey1\r\n{d}{len(v)}\r\n'.encode()+v+b'\r\n'; s.sendall(msg); time.sleep(0.2); print(s.recv(256).decode(errors='replace').strip()); s.close()"
 
 --echo #
---echo # Test 2: SET value one byte over the limit (33587 bytes) must be rejected
+--echo # Test 2: SET value one byte over the limit (512001 bytes) must be rejected
 --echo #
 
---exec python3 -c "import socket,time; d=chr(36); s=socket.socket(); s.connect(('127.0.0.1',$RONDIS_PORT)); s.settimeout(5); v=b'x'*33587; msg=f'*3\r\n{d}3\r\nSET\r\n{d}7\r\nseckey1\r\n{d}{len(v)}\r\n'.encode()+v+b'\r\n'; s.sendall(msg); time.sleep(0.1); print(s.recv(256).decode(errors='replace').strip()); s.close()"
+--exec python3 -c "import socket,time; d=chr(36); s=socket.socket(); s.connect(('127.0.0.1',$RONDIS_PORT)); s.settimeout(10); v=b'x'*512001; msg=f'*3\r\n{d}3\r\nSET\r\n{d}7\r\nseckey1\r\n{d}{len(v)}\r\n'.encode()+v+b'\r\n'; s.sendall(msg); time.sleep(0.2); print(s.recv(256).decode(errors='replace').strip()); s.close()"
 
 --echo #
 --echo # Test 3: Server stays alive after rejected oversized SET
