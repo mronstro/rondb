@@ -1,0 +1,38 @@
+# Bug RONDB-881
+-- source include/have_ndb.inc
+
+CREATE TABLE t1 (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    value INT NOT NULL
+) ENGINE = InnoDB;
+INSERT INTO t1 (id, value) VALUES (1, 100);
+INSERT INTO t1 (id, value) VALUES (2, 100);
+INSERT INTO t1 (id, value) VALUES (3, 100);
+INSERT INTO t1 (id, value) VALUES (4, 100);
+INSERT INTO t1 (id, value) VALUES (5, 100);
+INSERT INTO t1 (id, value) VALUES (6, 100);
+
+DELIMITER $$;
+CREATE PROCEDURE lock_read_loop(IN read_count INT)
+BEGIN
+    START TRANSACTION;
+    WHILE 0 < read_count DO
+        -- Locked read of the same row
+        SELECT * FROM t1 WHERE id = 1 FOR SHARE;
+        SELECT * FROM t1 WHERE id = 2 FOR UPDATE;
+        SELECT * FROM t1 WHERE id = 3 FOR SHARE NOWAIT;
+        SELECT * FROM t1 WHERE id = 4 FOR UPDATE NOWAIT;
+        SELECT * FROM t1 WHERE id = 5 FOR SHARE;
+        SET read_count = read_count - 1;
+    END WHILE;
+    COMMIT;
+END$$
+DELIMITER ;$$
+
+disable_query_log;
+CALL lock_read_loop(100000);
+enable_query_log;
+
+# Cleanup
+DROP PROCEDURE lock_read_loop;
+DROP TABLE t1;

@@ -1,0 +1,11 @@
+!include suite/ndb_ddl/my.cnf
+
+[cluster_config]
+MaxNoOfConcurrentOperations= 10000
+DataMemory=                  3000M
+DiskPageBufferMemory=         400M
+SharedGlobalMemory=          2000M
+LongMessageBuffer=            800M
+RedoBuffer=                   400M
+BackupDataBufferSize=         200M
+BackupLogBufferSize=          200M
