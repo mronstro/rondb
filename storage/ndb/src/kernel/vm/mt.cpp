@@ -1352,6 +1352,23 @@ struct thr_first_signal {
 
 struct thr_send_thread_instance;
 
+/**
+ * RONDB-732 Phase 1 — fiber start-hang instrumentation.
+ *
+ * Set to 1 to compile in low-overhead per-fiber progress counters and a
+ * ~1/second reporter (driven by fiber 0) that dumps every sibling fiber's
+ * loop/exec/yield counts and current watchdog code to the node out-log.
+ * Purpose: localise the M>=2 start stall (start phase 2 -> heartbeat
+ * timeout) without a live debugger — a starved sibling shows frozen
+ * counters, and a non-base fiber that parks the OS thread inside
+ * handle_full_job_buffers (the prime suspect, see
+ * storage/ndb/claude_files/fibers/phase1_status.md) prints a loud marker
+ * right before it cond_waits on m_congestion_waiter.
+ *
+ * Set to 0 to remove all instrumentation (zero production cost).
+ */
+#define RONDB732_FIBER_DEBUG 1
+
 struct alignas(NDB_CL) thr_data {
   thr_data()
       : m_signal_id_counter(0),
@@ -1456,17 +1473,37 @@ struct alignas(NDB_CL) thr_data {
   unsigned m_fiber_id;
   unsigned m_num_fibers;
   bool m_fiber_deleted;
+  bool m_fiber_started;
   tiny_fiber::FiberHandle m_fiber_handle;
   struct thr_data *m_my_fibers[MAX_NUM_FIBERS];
   tiny_fiber::FiberHandle m_fiber_context[MAX_NUM_FIBERS];
   struct thr_wait *m_waiter_ptr;
   /**
-   * Counts intra-signal yields (cold-load prefetch + SwitchFiber) issued
-   * during the previous signal execution. The signal-execute boundary
-   * forces a fairness yield only when this is 0 (no fiber has yet
-   * shared the OS thread for this signal). Reset at every boundary check.
+   * Counts completed signals since this fiber last switched away. If no
+   * sibling is visibly ready, the signal boundary still forces a switch after
+   * FIBER_SIGNAL_FORCE_SWITCH_INTERVAL completed signals.
    */
   Uint32 m_intra_yields;
+  /**
+   * Cheap sibling-visible readiness flag. Set while this fiber is inside
+   * execute_signals(); queue peeking is only used at periodic fairness points.
+   */
+  bool m_fiber_processing_signals;
+
+#if RONDB732_FIBER_DEBUG
+  /**
+   * RONDB-732 fiber start-hang diagnostics (see RONDB732_FIBER_DEBUG above).
+   * All per-fiber; fiber 0 aggregates the siblings via m_my_fibers[] for the
+   * periodic report. Initialised in mt_fiber_main() before the main loop.
+   */
+  Uint64 m_dbg_loops;          // mt_fiber_main main-loop iterations
+  Uint64 m_dbg_exec_signals;   // signals reached for execution in execute_signals
+  Uint64 m_dbg_fiber_yields;   // cooperative fiber_yield() calls this fiber made
+  Uint64 m_dbg_fulljb_enter;   // handle_full_job_buffers() entries
+  Uint64 m_dbg_fulljb_wait;    // times it cond_waited on a m_congestion_waiter
+  bool   m_dbg_first_loop_done; // has this fiber executed its first loop yet
+  NDB_TICKS m_dbg_last_report; // fiber-0 throttle for the periodic dump
+#endif
 
   /**
    * Is this a recv thread
@@ -3515,6 +3552,12 @@ wait_time_tracking(thr_data *selfptr, Uint64 wait_time_in_ns)
 static bool check_queues_empty(thr_data *selfptr);
 static Uint32 scan_time_queues(struct thr_data *selfptr, NDB_TICKS now);
 static bool do_send(struct thr_data *selfptr, bool must_send, bool assist_send);
+static inline void fiber_yield(thr_data *selfptr);
+static inline bool fiber_yield_if_ready(thr_data *selfptr);
+
+static constexpr Uint32 FIBER_SPIN_FORCE_SWITCH_NDBSPINS = 10;
+static constexpr Uint32 FIBER_SIGNAL_FORCE_SWITCH_INTERVAL = 16;
+
 /**
  * We call this function only after executing no jobs and thus it is
  * safe to spin for a short time.
@@ -3549,6 +3592,70 @@ check_yield(thr_data *selfptr,
    */
   assert(NdbSpin_is_supported());
   assert(min_spin_timer_us > 0);
+  if (selfptr->m_num_fibers > 1)
+  {
+    Uint32 ndb_spins = 0;
+    Uint32 spin_checks = 0;
+    do
+    {
+      /**
+       * In fiber mode, switch immediately if a sibling is already executing
+       * signals. If not, spend the spin window in NdbSpin(), but force a
+       * switch periodically since external wakeups target the base fiber.
+       */
+      if (fiber_yield_if_ready(selfptr))
+      {
+        now = NdbTick_getCurrentTicks();
+        if (!check_queues_empty(selfptr))
+        {
+          cont_flag = false;
+          break;
+        }
+      }
+      else
+      {
+        NdbSpin();
+        ndb_spins++;
+        if ((ndb_spins % FIBER_SPIN_FORCE_SWITCH_NDBSPINS) == 0)
+        {
+          fiber_yield(selfptr);
+        }
+      }
+      now = NdbTick_getCurrentTicks();
+      if (!check_queues_empty(selfptr))
+      {
+        cont_flag = false;
+        break;
+      }
+      Uint64 spin_nanos = NdbTick_Elapsed(start_spin_ticks, now).nanoSec();
+      if (spin_nanos > min_spin_timer_ns)
+      {
+        *spin_time_in_ns = Uint32(spin_nanos);
+        selfptr->m_curr_ticks = now;
+        selfptr->m_spin_stat.m_sleep_longer_spin_time++;
+        selfptr->add_spintime_ns(spin_nanos);  // fiber 0 only, see thr_data
+        return true;
+      }
+      if ((++spin_checks & 15) == 0)
+      {
+        do_send(selfptr, true, true);
+        const Uint32 lagging_timers = scan_time_queues(selfptr, now);
+        if (lagging_timers != 0 || !check_queues_empty(selfptr))
+        {
+          cont_flag = false;
+          break;
+        }
+      }
+    } while (cont_flag);
+
+    Uint64 spin_nanos = NdbTick_Elapsed(start_spin_ticks, now).nanoSec();
+    selfptr->m_curr_ticks = now;
+    selfptr->add_spintime_ns(spin_nanos);  // fiber 0 only, see thr_data
+    selfptr->m_spin_stat.m_sleep_shorter_spin_time++;
+    selfptr->add_nanos_sleep(spin_nanos);  // fiber 0 only, see thr_data
+    wait_time_tracking(selfptr, spin_nanos);
+    return false;
+  }
   do
   {
     for (Uint32 i = 0; i < 30; i++)
@@ -6891,20 +6998,12 @@ static void recheck_congested_job_buffers(thr_data *selfptr);
  */
 static constexpr Uint32 WD_FIBER_SUSPENDED = 0xFFFFFFFFu;
 
-/**
- * Cooperatively yield from the current fiber to the next sibling fiber
- * on the same OS thread, in round-robin order. Updates the per-OS-thread
- * TLS to point at the destination fiber's jam/self pointers before the
- * SwitchFiber, so any code on the destination that consults TLS sees its
- * own thr_data.
- *
- * Caller must hold selfptr->m_num_fibers > 1.
- */
 static inline void
-fiber_yield(thr_data *selfptr) {
+fiber_yield_to(thr_data *selfptr, Uint32 next_fid) {
   Uint32 my_fid = selfptr->m_fiber_id;
-  Uint32 next_fid = my_fid + 1;
-  if (next_fid >= selfptr->m_num_fibers) next_fid = 0;
+  require(selfptr->m_num_fibers > 1);
+  require(next_fid < selfptr->m_num_fibers);
+  require(next_fid != my_fid);
   thr_data *next_self = selfptr->m_my_fibers[next_fid];
   require(next_self != nullptr);
   tiny_fiber::FiberHandle from_h = selfptr->m_fiber_context[my_fid];
@@ -6920,14 +7019,124 @@ fiber_yield(thr_data *selfptr) {
   }
   NDB_THREAD_TLS_JAM = &next_self->m_jam;
   NDB_THREAD_TLS_THREAD = next_self;
+  selfptr->m_intra_yields = 0;
   // Mark our fiber as suspended for the watchdog before yielding.
   selfptr->m_watchdog_counter = WD_FIBER_SUSPENDED;
+#if RONDB732_FIBER_DEBUG
+  selfptr->m_dbg_fiber_yields++;
+#endif
   tiny_fiber::SwitchFiber(from_h, to_h);
   // On resume, clear the suspended marker so the watchdog observes a
   // counter update on next loop iteration.
   selfptr->m_watchdog_counter = 21;
   // The fiber that switched into us has set TLS for us.
 }
+
+static inline bool
+fiber_find_processing_sibling(thr_data *selfptr, Uint32 *ready_fid) {
+  if (selfptr->m_num_fibers <= 1) return false;
+  const Uint32 my_fid = selfptr->m_fiber_id;
+  for (Uint32 step = 1; step < selfptr->m_num_fibers; step++) {
+    const Uint32 fid = (my_fid + step) % selfptr->m_num_fibers;
+    thr_data *f = selfptr->m_my_fibers[fid];
+    require(f != nullptr);
+    if (f->m_fiber_processing_signals) {
+      *ready_fid = fid;
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Heavier sibling readiness probe. This refreshes sibling queue read state and
+ * is intentionally kept out of spin/idle hot checks. It is used at signal
+ * execution boundaries and at the base fiber sleep gate, where the same work
+ * must already be checked before the OS thread can safely sleep.
+ */
+static inline bool
+fiber_find_pending_work_sibling(thr_data *selfptr, Uint32 *ready_fid) {
+  if (selfptr->m_num_fibers <= 1) return false;
+  const Uint32 my_fid = selfptr->m_fiber_id;
+  for (Uint32 step = 1; step < selfptr->m_num_fibers; step++) {
+    const Uint32 fid = (my_fid + step) % selfptr->m_num_fibers;
+    thr_data *f = selfptr->m_my_fibers[fid];
+    require(f != nullptr);
+    if (fiber_has_pending_work(f)) {
+      *ready_fid = fid;
+      return true;
+    }
+  }
+  return false;
+}
+
+static inline bool
+fiber_yield_if_ready(thr_data *selfptr) {
+  Uint32 ready_fid;
+  if (!fiber_find_processing_sibling(selfptr, &ready_fid)) return false;
+  fiber_yield_to(selfptr, ready_fid);
+  return true;
+}
+
+static inline bool
+fiber_yield_if_pending_work(thr_data *selfptr) {
+  Uint32 ready_fid;
+  if (!fiber_find_pending_work_sibling(selfptr, &ready_fid)) return false;
+  fiber_yield_to(selfptr, ready_fid);
+  return true;
+}
+
+/**
+ * Cooperatively yield from the current fiber to the next sibling fiber
+ * on the same OS thread, in round-robin order. Updates the per-OS-thread
+ * TLS to point at the destination fiber's jam/self pointers before the
+ * SwitchFiber, so any code on the destination that consults TLS sees its
+ * own thr_data.
+ *
+ * Caller must hold selfptr->m_num_fibers > 1.
+ */
+static inline void
+fiber_yield(thr_data *selfptr) {
+  Uint32 next_fid = selfptr->m_fiber_id + 1;
+  if (next_fid >= selfptr->m_num_fibers) next_fid = 0;
+  fiber_yield_to(selfptr, next_fid);
+}
+
+#if RONDB732_FIBER_DEBUG
+/**
+ * RONDB-732 fiber start-hang reporter. Called once per main-loop iteration
+ * by the base fiber only; throttles to ~1/second and emits one line per
+ * fiber on this OS thread showing its progress counters and current
+ * watchdog code. Because the fibers share one OS thread, a sibling that is
+ * never scheduled (frozen loops/sigs, "(never-ran)") or parked at a known
+ * watchdog code is directly visible in the node out-log. If the OS thread
+ * is fully parked (suspect: a non-base fiber blocked on m_congestion_waiter)
+ * the report simply goes silent after the last line — combined with the
+ * FULLJB-WAIT marker that confirms the stall location.
+ */
+static void
+fiber_dbg_report(thr_data *selfptr, const NDB_TICKS now)
+{
+  if (selfptr->m_fiber_id != 0 || selfptr->m_num_fibers <= 1) return;
+  if (NdbTick_Elapsed(selfptr->m_dbg_last_report, now).milliSec() < 1000) {
+    return;
+  }
+  selfptr->m_dbg_last_report = now;
+  for (Uint32 i = 0; i < selfptr->m_num_fibers; i++) {
+    const thr_data *f = selfptr->m_my_fibers[i];
+    g_eventLogger->info(
+        "RONDB732 DBG thr_no=%u fiber=%u wd=%u loops=%llu sigs=%llu "
+        "yields=%llu fulljb[enter=%llu wait=%llu]%s",
+        f->m_thr_no, f->m_fiber_id, f->m_watchdog_counter,
+        (unsigned long long)f->m_dbg_loops,
+        (unsigned long long)f->m_dbg_exec_signals,
+        (unsigned long long)f->m_dbg_fiber_yields,
+        (unsigned long long)f->m_dbg_fulljb_enter,
+        (unsigned long long)f->m_dbg_fulljb_wait,
+        f->m_dbg_first_loop_done ? "" : " (never-ran)");
+  }
+}
+#endif
 
 /*
  * Execute at most MAX_SIGNALS signals from one job queue, updating local read
@@ -6956,6 +7165,7 @@ execute_signals(thr_data *selfptr,
   if (read_index == write_index && read_pos >= read_end)
     return 0;  // empty read_state
 
+  selfptr->m_fiber_processing_signals = true;
   thr_job_buffer *read_buffer = r->m_read_buffer;
   NDB_PREFETCH_READ(read_buffer->m_data + read_pos);  // Load cache
 
@@ -6965,6 +7175,7 @@ execute_signals(thr_data *selfptr,
       if (read_index == write_index) {
         /* No more available now. */
         selfptr->m_stat.m_exec_cnt += num_signals;
+        selfptr->m_fiber_processing_signals = false;
         return num_signals;
       } else {
         /* Move to next buffer. */
@@ -6999,22 +7210,9 @@ execute_signals(thr_data *selfptr,
     /* Now execute the signal. */
     SignalHeader *s =
         reinterpret_cast<SignalHeader *>(read_buffer->m_data + read_pos);
-    /**
-     * Signal-boundary fairness yield (RONDB-732 Phase 1).
-     *
-     * If no intra-signal cold-load yield (PREFETCH_AND_YIELD, added in
-     * later phases) was executed during the previous signal on this
-     * fiber, force one yield here so no fiber monopolises the OS
-     * thread. The counter is always reset after the check; intra-signal
-     * yields will set it for the next iteration. See plan §3 in
-     * storage/ndb/claude_files/fibers/plan.md.
-     */
-    if (selfptr->m_num_fibers > 1) {
-      if (selfptr->m_intra_yields == 0) {
-        fiber_yield(selfptr);
-      }
-      selfptr->m_intra_yields = 0;
-    }
+#if RONDB732_FIBER_DEBUG
+    selfptr->m_dbg_exec_signals++;
+#endif
     Uint32 seccnt = s->m_noOfSections;
     Uint32 siglen = (sizeof(*s)>>2) + s->theLength;
 
@@ -7089,12 +7287,27 @@ execute_signals(thr_data *selfptr,
       assert(sender_thr_no < NDB_MAX_BLOCK_THREADS);
       selfptr->m_exec_thread_signal_id[sender_thr_no] = thread_signal_id;
     }
+    if (selfptr->m_num_fibers > 1 &&
+        ++selfptr->m_intra_yields >= FIBER_SIGNAL_FORCE_SWITCH_INTERVAL) {
+      bool switched = fiber_yield_if_ready(selfptr);
+      if (!switched && selfptr->m_fiber_id == 0) {
+        switched = fiber_yield_if_pending_work(selfptr);
+      }
+      if (!switched) {
+        if (selfptr->m_fiber_id == 0) {
+          fiber_yield(selfptr);
+        } else {
+          selfptr->m_intra_yields = 0;
+        }
+      }
+    }
   }
   /**
    * Only count signals causing real-time break and not the one used to
    * balance the scheduler.
    */
   selfptr->m_stat.m_exec_cnt += num_signals;
+  selfptr->m_fiber_processing_signals = false;
 
   return num_signals + extra_signals;
 }
@@ -8280,6 +8493,9 @@ handle_full_job_buffers(struct thr_data* selfptr,
   unsigned sleeploop = 0;
   const unsigned self_jbb = selfptr->m_thr_no % NUM_JOB_BUFFERS_PER_THREAD;
   selfptr->m_watchdog_counter = 16;
+#if RONDB732_FIBER_DEBUG
+  selfptr->m_dbg_fulljb_enter++;
+#endif
 
   while (selfptr->m_max_signals_per_jb == 0)  // or return
   {
@@ -8331,6 +8547,26 @@ handle_full_job_buffers(struct thr_data* selfptr,
      * after latch has been set, and *before* going to sleep.
      */
     selfptr->m_watchdog_counter = 18;  // "Yielding to OS"
+#if RONDB732_FIBER_DEBUG
+    selfptr->m_dbg_fulljb_wait++;
+    /**
+     * Prime-suspect marker (see phase1_status.md): a *non-base* fiber is
+     * about to pthread_cond_wait on a sibling thread's m_congestion_waiter,
+     * which parks the *entire* OS thread on a waiter that ordinary work
+     * routed to this OS thread does NOT signal (producers wake m_waiter via
+     * m_waiter_ptr, not m_congestion_waiter). If the node goes silent right
+     * after this line, the start stall is confirmed here. Throttled to the
+     * first 50 occurrences per fiber to avoid flooding the out-log.
+     */
+    if (selfptr->m_fiber_id != 0 && selfptr->m_dbg_fulljb_wait <= 50) {
+      g_eventLogger->info(
+          "RONDB732 FULLJB-WAIT  thr_no=%u fiber_id=%u  <== NON-BASE FIBER "
+          "PARKS OS THREAD on m_congestion_waiter of congested thr_no=%u "
+          "(sleeploop=%u, n=%llu)",
+          selfptr->m_thr_no, selfptr->m_fiber_id, congested->m_thr_no,
+          sleeploop, (unsigned long long)selfptr->m_dbg_fulljb_wait);
+    }
+#endif
     const NDB_TICKS before = NdbTick_getCurrentTicks();
     const bool waited = yield(&congested->m_congestion_waiter,
                               nano_wait_1ms,
@@ -8462,10 +8698,34 @@ mt_fiber_main(void *fiber_arg)
   selfptr->m_curr_ticks = now;
   Ndb_GetRUsage(&selfptr->m_scan_time_queue_rusage, false);
   init_jbb_estimate(selfptr, now);
+  selfptr->m_fiber_started = true;
+
+#if RONDB732_FIBER_DEBUG
+  selfptr->m_dbg_loops = 0;
+  selfptr->m_dbg_exec_signals = 0;
+  selfptr->m_dbg_fiber_yields = 0;
+  selfptr->m_dbg_fulljb_enter = 0;
+  selfptr->m_dbg_fulljb_wait = 0;
+  selfptr->m_dbg_first_loop_done = false;
+  selfptr->m_dbg_last_report = now;
+#endif
 
   //Uint32 fiber_id = selfptr->m_fiber_id;
   while (globalData.theRestartFlag != perform_stop) {
     loops++;
+#if RONDB732_FIBER_DEBUG
+    selfptr->m_dbg_loops++;
+    if (unlikely(!selfptr->m_dbg_first_loop_done)) {
+      selfptr->m_dbg_first_loop_done = true;
+      if (selfptr->m_num_fibers > 1) {
+        g_eventLogger->info(
+            "RONDB732 DBG first loop reached: thr_no=%u fiber_id=%u "
+            "num_fibers=%u",
+            selfptr->m_thr_no, selfptr->m_fiber_id, selfptr->m_num_fibers);
+      }
+    }
+    fiber_dbg_report(selfptr, now);
+#endif
 
     /**
      * prefill our thread local send buffers
@@ -8586,25 +8846,28 @@ mt_fiber_main(void *fiber_arg)
              * earlier SwitchFiber and only resumes when we yield to it.
              *
              * Strategy:
-             *  - Non-base fibers (fiber_id != 0): yield to next sibling
-             *    unconditionally. Treat the round-trip as "waited".
-             *  - Base fiber (fiber_id == 0): yield through every sibling
-             *    first to drain any work they might have. On resume, sleep
-             *    on our m_waiter only if *every* fiber on this OS thread is
-             *    out of work (check_all_fiber_queues_empty) -- checking just
-             *    our own queues loses wakeups for work queued to a sibling
-             *    in the drain/commit race window. Producers wake us via
-             *    m_waiter_ptr, so any new work routed to any fiber on this
-             *    OS thread will wake the OS thread (i.e. fiber 0).
+             *  - Non-base fibers yield to a ready sibling. If nobody is ready,
+             *    yield to fiber 0 so the OS thread can reach the real waiter.
+             *  - Base fiber starts each sibling once, drains siblings that are
+             *    already processing, then at the sleep gate probes for queued
+             *    sibling work. Only if no sibling can run does it sleep on
+             *    m_waiter, and then only if *every* fiber on this OS thread is
+             *    out of work (check_all_fiber_queues_empty). Producers wake
+             *    m_waiter_ptr, so any new work routed to any fiber wakes the
+             *    OS thread.
              */
             if (selfptr->m_fiber_id != 0) {
-              fiber_yield(selfptr);
+              if (!fiber_yield_if_ready(selfptr)) {
+                fiber_yield_to(selfptr, 0);
+              }
               waited = true;
             } else {
-              // Base fiber: poll each sibling once to give it a turn.
-              for (Uint32 sib = 1; sib < selfptr->m_num_fibers; sib++) {
-                fiber_yield(selfptr);
+              for (Uint32 fid = 1; fid < selfptr->m_num_fibers; fid++) {
+                if (!selfptr->m_my_fibers[fid]->m_fiber_started) {
+                  fiber_yield_to(selfptr, fid);
+                }
               }
+              while (fiber_yield_if_ready(selfptr)) {}
               /**
                * Sleep only when *all* fibers on this OS thread are out of
                * work, and re-check the same all-fibers condition inside
@@ -8613,13 +8876,19 @@ mt_fiber_main(void *fiber_arg)
                * queued to a sibling in the drain/commit race window. See
                * check_all_fiber_queues_empty().
                */
-              if (check_all_fiber_queues_empty(selfptr)) {
+              if (fiber_yield_if_pending_work(selfptr)) {
+                waited = true;
+              } else if (check_all_fiber_queues_empty(selfptr)) {
                 waited = yield(&selfptr->m_waiter,
                                used_maxwait_in_ns,
                                check_all_fiber_queues_empty,
                                selfptr);
               } else {
-                // A sibling-yield surfaced work for us; skip the sleep.
+                /**
+                 * check_all_fiber_queues_empty() can still observe work after
+                 * the pending-work yield probe due to fresh producer activity.
+                 * Skip sleep and let the scheduler loop re-evaluate.
+                 */
                 waited = true;
               }
             }
@@ -9241,6 +9510,22 @@ void mt_getSendPerformanceTimers(Uint32 send_instance, Uint64 &exec_time,
 Uint32 mt_getNumSendThreads() { return globalData.ndbMtSendThreads; }
 
 Uint32 mt_getNumThreads() { return glob_num_threads; }
+
+bool mt_isBlockThreadFiber(Uint32 thr_no) {
+  if (globalData.theNumberOfFibersPerThread <= 1) return false;
+  return (thr_no < globalData.ndbMtLqhThreadFibers &&
+          thr_no >= globalData.ndbMtLqhThreads);
+}
+
+Uint32 mt_getNumFreezeThreads() {
+  Uint32 num_threads = 0;
+  for (Uint32 thr_no = 0; thr_no < glob_num_threads; thr_no++) {
+    if (!mt_isBlockThreadFiber(thr_no)) {
+      num_threads++;
+    }
+  }
+  return num_threads;
+}
 
 /**
  * Copy out signals one-by-one from the 'm_local_buffer' into the thread-shared
@@ -10049,6 +10334,8 @@ static void thr_init(struct thr_repository *rep, struct thr_data *selfptr,
 static void thr_init_fiber(struct thr_repository *rep,
                            struct thr_data *selfptr) {
   selfptr->m_intra_yields = 0;
+  selfptr->m_fiber_started = false;
+  selfptr->m_fiber_processing_signals = false;
   /**
    * Initialise fiber state for LDM threads only. Other thread classes run
    * as ordinary OS threads with no sibling fibers.

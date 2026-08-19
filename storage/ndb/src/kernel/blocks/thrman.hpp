@@ -77,6 +77,7 @@ public:
   Uint32 m_current_send_delay;
   Uint32 m_num_send_threads;
   Uint32 m_num_threads;
+  Uint32 m_num_freeze_threads;
   Uint32 m_send_thread_percentage;
   Uint32 m_send_thread_assistance_level;
   Uint32 m_node_overload_level;

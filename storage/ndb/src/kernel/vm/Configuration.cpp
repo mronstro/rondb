@@ -1886,19 +1886,7 @@ Configuration::setupConfiguration()
                    "Multithreaded classic is no longer supported");
       }
     }
-    Uint32 ldm_threads = m_thr_config.getThreadCount(THRConfig::T_LDM);
-    Uint32 ldm_workers = ldm_threads;
-    if (ldm_threads == 0)
-    {
-      /**
-       * If there are no LDM Threads we will use 1 LDM worker per
-       * receive thread.
-       */
-      ldm_workers = globalData.ndbMtReceiveThreads;
-    }
-
-    globalData.ndbMtLqhWorkers = ldm_workers;
-    globalData.ndbMtLqhThreads = ldm_threads;
+    Uint32 configured_ldm_workers = m_thr_config.getThreadCount(THRConfig::T_LDM);
     /**
      * RONDB-732: Env-var override for cooperative fibers per LDM thread.
      * Default remains 1 (no fiber-level parallelism). Cap at
@@ -1921,23 +1909,61 @@ Configuration::setupConfiguration()
         }
       }
     }
-    globalData.ndbMtLqhThreadFibers =
-      globalData.ndbMtLqhThreads *
-      globalData.theNumberOfFibersPerThread;
+    Uint32 ldm_workers = configured_ldm_workers;
+    Uint32 ldm_threads = configured_ldm_workers;
+    if (ldm_threads != 0 && globalData.theNumberOfFibersPerThread > 1)
+    {
+      if (auto_thread_config != 0)
+      {
+        /**
+         * AutomaticThreadConfig/NumCPUs chooses the number of physical LDM
+         * threads from the available CPUs. Fibers add cooperative LDM slots
+         * on top of those physical threads.
+         */
+        ldm_workers =
+          configured_ldm_workers * globalData.theNumberOfFibersPerThread;
+      }
+      else
+      {
+        /**
+         * Explicit ThreadConfig names the desired logical LDM worker count.
+         * Fibers pack those workers onto fewer physical LDM OS threads.
+         */
+        if ((configured_ldm_workers %
+             globalData.theNumberOfFibersPerThread) != 0)
+        {
+          ERROR_SET(fatal, NDBD_EXIT_INVALID_CONFIG,
+                    "Invalid configuration fetched. ",
+                    "LDM thread count must be divisible by "
+                    "RONDB_FIBERS_PER_THREAD");
+        }
+        ldm_threads =
+          configured_ldm_workers / globalData.theNumberOfFibersPerThread;
+      }
+    }
+    if (configured_ldm_workers == 0)
+    {
+      /**
+       * If there are no LDM Threads we will use 1 LDM worker per
+       * receive thread.
+       */
+      ldm_workers = globalData.ndbMtReceiveThreads;
+      ldm_threads = configured_ldm_workers;
+    }
+
+    globalData.ndbMtLqhWorkers = ldm_workers;
+    globalData.ndbMtLqhThreads = ldm_threads;
+    globalData.ndbMtLqhThreadFibers = ldm_workers;
     /**
      * Each block thread will have one Query worker, thus no more
      * any need for recover threads.
      *
-     * For Phase 1 fiber prototype we deliberately keep ndbMtQueryWorkers
-     * tied to the LDM thread count (not fiber count). Creating extra
-     * DBQLQH/DBQACC instances per fiber would route signals to fiber-1
-     * slots whose underlying DBLQH/DBACC/DBTUP data lives on fiber 0,
-     * breaking signal routing. Fiber-1 slots stay block-instance-less;
-     * the THRMAN check that fired with the previous formula is handled
-     * in send_measure_to_rep_thrman by silently returning instead of
-     * ndbrequire(false).
+     * Keep ndbMtQueryWorkers tied to the logical LDM worker count, not the
+     * physical OS LDM thread count. Fiber slots still occupy thr_data entries
+     * in the LDM range, so TC/recv/main query-worker numbering starts after
+     * ndbMtLqhThreadFibers.
      */
-    globalData.ndbMtQueryWorkers = ldm_threads +
+    globalData.ndbMtQueryWorkers = ldm_workers +
                                    globalData.ndbMtTcThreads +
                                    globalData.ndbMtMainThreads +
                                    globalData.ndbMtReceiveThreads;

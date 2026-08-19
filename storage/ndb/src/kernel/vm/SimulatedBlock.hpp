@@ -2061,6 +2061,7 @@ public:
     Uint32 num_query_instances = globalData.ndbMtQueryWorkers;
     Uint32 num_rr_groups = globalData.ndbRRGroups;
     Uint32 num_distr_threads = num_query_instances;
+    Uint32 num_ldm_slots = globalData.ndbMtLqhThreadFibers;
 
     m_num_lqhkeyreq_counts = globalData.theNumLqhKeyReqCounts;
     m_num_scan_fragreq_counts = globalData.theNumScanFragReqCounts;
@@ -2087,7 +2088,7 @@ public:
         m_rr_group[thr_no] =
           globalEmulatorData.theConfiguration->getRRGroups(
             thr_no,
-            globalData.ndbMtLqhThreads,
+            num_ldm_slots,
             globalData.ndbMtTcThreads,
             globalData.ndbMtReceiveThreads,
             globalData.ndbMtMainThreads);
@@ -2114,22 +2115,22 @@ public:
       Uint32 rr_group = m_rr_group[thr_no];
       ndbrequire(rr_group < num_rr_groups);
       threads_per_rr_group[rr_group]++;
-      if (thr_no < globalData.ndbMtLqhThreads)
+      if (thr_no < num_ldm_slots)
       {
         ldm_threads_per_rr_group[rr_group]++;
       }
       else if (thr_no <
-               (globalData.ndbMtLqhThreads + globalData.ndbMtTcThreads))
+               (num_ldm_slots + globalData.ndbMtTcThreads))
       {
         tc_threads_per_rr_group[rr_group]++;
       }
-      else if (thr_no < (globalData.ndbMtLqhThreads +
+      else if (thr_no < (num_ldm_slots +
                          globalData.ndbMtTcThreads +
                          globalData.ndbMtReceiveThreads))
       {
         recv_threads_per_rr_group[rr_group]++;
       }
-      else if (thr_no == (globalData.ndbMtLqhThreads +
+      else if (thr_no == (num_ldm_slots +
                           globalData.ndbMtTcThreads +
                           globalData.ndbMtReceiveThreads))
       {
@@ -2140,7 +2141,7 @@ public:
         rep_threads_per_rr_group[rr_group]++;
       }
     }
-    if (globalData.ndbMtLqhThreads >= num_rr_groups)
+    if (num_ldm_slots >= num_rr_groups)
     {
       const Uint32 min_ldm_covered_rr_group_size = 3;
       Uint32 num_rr_groups_without_ldm = 0;
@@ -2170,29 +2171,42 @@ public:
     }
     for (Uint32 thr_no = 0; thr_no < num_query_instances; thr_no++)
     {
-      if (thr_no < globalData.ndbMtLqhThreads)
+      if (thr_no < num_ldm_slots)
       {
-        g_eventLogger->info("LDM Thread %u is part of Round Robin Group %u",
-                            thr_no, m_rr_group[thr_no]);
+        if (globalData.theNumberOfFibersPerThread > 1 &&
+            globalData.ndbMtLqhThreads > 0)
+        {
+          const Uint32 ldm_thread_id = thr_no % globalData.ndbMtLqhThreads;
+          const Uint32 fiber_id = thr_no / globalData.ndbMtLqhThreads;
+          g_eventLogger->info(
+              "LDM Fiber %u (ldm_thread_id=%u, fiber_id=%u) "
+              "is part of Round Robin Group %u",
+              thr_no, ldm_thread_id, fiber_id, m_rr_group[thr_no]);
+        }
+        else
+        {
+          g_eventLogger->info("LDM Thread %u is part of Round Robin Group %u",
+                              thr_no, m_rr_group[thr_no]);
+        }
       }
       else if (thr_no <
-               (globalData.ndbMtLqhThreads + globalData.ndbMtTcThreads))
+               (num_ldm_slots + globalData.ndbMtTcThreads))
       {
         g_eventLogger->info("TC Thread %u is part of Round Robin Group %u",
-                            thr_no - globalData.ndbMtLqhThreads,
+                            thr_no - num_ldm_slots,
                             m_rr_group[thr_no]);
       }
-      else if (thr_no < (globalData.ndbMtLqhThreads +
+      else if (thr_no < (num_ldm_slots +
                          globalData.ndbMtTcThreads +
                          globalData.ndbMtReceiveThreads))
       {
         g_eventLogger->info("recv Thread %u is part of Round Robin Group %u",
                             thr_no -
-                            (globalData.ndbMtLqhThreads +
+                            (num_ldm_slots +
                              globalData.ndbMtTcThreads),
                             m_rr_group[thr_no]);
       }
-      else if (thr_no == (globalData.ndbMtLqhThreads +
+      else if (thr_no == (num_ldm_slots +
                           globalData.ndbMtTcThreads +
                           globalData.ndbMtReceiveThreads))
       {

@@ -414,6 +414,7 @@ void Thrman::execREAD_CONFIG_REQ(Signal *signal) {
    */
   m_num_send_threads = getNumSendThreads();
   m_num_threads = getNumThreads();
+  m_num_freeze_threads = mt_getNumFreezeThreads();
 
   c_measurementRecordPool.setSize(NUM_MEASUREMENT_RECORDS);
   if (instance() == m_main_thrman_instance) {
@@ -5075,7 +5076,7 @@ void Thrman::wait_freeze(bool ret) {
 }
 
 void Thrman::wait_all_stop(Signal *signal) {
-  if (check_freeze_waiters() == m_num_threads) {
+  if (check_freeze_waiters() == m_num_freeze_threads) {
     jam();
     FreezeActionReq *req = CAST_PTR(FreezeActionReq, signal->getDataPtrSend());
     BlockReference ref = m_freeze_req.senderRef;
@@ -5198,7 +5199,13 @@ void ThrmanProxy::execFREEZE_THREAD_REQ(Signal *signal) {
    */
   for (Uint32 i = 0; i < c_workers; i++) {
     jam();
-    Uint32 ref = numberToRef(number(), workerInstance(i), getOwnNodeId());
+    Uint32 instance_no = workerInstance(i);
+    Uint32 thr_no = instance_no - 1;
+    if (mt_isBlockThreadFiber(thr_no)) {
+      jam();
+      continue;
+    }
+    Uint32 ref = numberToRef(number(), instance_no, getOwnNodeId());
     sendSignal(ref, GSN_FREEZE_THREAD_REQ, signal, signal->getLength(), JBA);
   }
 }

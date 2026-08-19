@@ -235,7 +235,7 @@ void DbtcProxy::execTCSEIZEREQ(Signal *signal) {
      * As an example if we have 16 tc threads and we have TcThreadPerRecv
      * set to 4 with 8 recv threads. In 
      */
-    Uint32 first_tc_instance = globalData.ndbMtLqhThreads;
+    Uint32 first_tc_instance = globalData.ndbMtLqhThreadFibers;
     Uint32 first_recv_instance = first_tc_instance +
                                  globalData.ndbMtTcThreads;
     Uint32 recv_instance = first_recv_instance + instance;

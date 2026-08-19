@@ -76,6 +76,44 @@ fiber drain/`fiber_yield` path for `m_num_fibers > 1` instead of a raw
    implies either the node-wide start protocol is stuck waiting on an LDM
    fiber, or main itself is blocked (it shouldn't be). Disambiguate.
 
+## Instrumentation added this session (in tree, behind a macro)
+
+`mt.cpp` now has start-hang instrumentation gated by
+`#define RONDB732_FIBER_DEBUG 1` (defined just before `struct thr_data`,
+~line 1370). Set it to `0` to remove all of it at zero cost. Per-fiber
+`Uint64` counters on `thr_data` (`m_dbg_loops`, `m_dbg_exec_signals`,
+`m_dbg_fiber_yields`, `m_dbg_fulljb_enter`, `m_dbg_fulljb_wait`,
+`m_dbg_first_loop_done`, `m_dbg_last_report`), incremented at:
+`mt_fiber_main` loop top, `execute_signals` per-signal, `fiber_yield`,
+and `handle_full_job_buffers` (enter + before the congestion cond_wait).
+
+Three log signals to read in `ndb_<node>_out.log`:
+
+1. **`RONDB732 DBG first loop reached: ... fiber_id=N`** — emitted once per
+   fiber on its first main-loop iteration. **If fiber 1 never prints this,
+   it was never scheduled** (answers open hypothesis #2). 
+2. **`RONDB732 DBG thr_no=.. fiber=.. wd=.. loops=.. sigs=.. yields=..
+   fulljb[enter=.. wait=..] [(never-ran)]`** — fiber 0 dumps every sibling
+   ~once/second. A sibling with **frozen `loops`/`sigs`** across samples is
+   starved; the `wd=` (watchdog code) shows where it is parked
+   (`12`/`16`/`18`/`21`/`WD_FIBER_SUSPENDED=4294967295`).
+3. **`RONDB732 FULLJB-WAIT ... <== NON-BASE FIBER PARKS OS THREAD ...`** —
+   the **smoking gun**. Printed only when a `fiber_id != 0` fiber is about
+   to `cond_wait` on a sibling's `m_congestion_waiter` (first 50 times).
+   **If the out-log goes silent right after this line, suspect #1 is
+   confirmed** — the OS thread is parked on a waiter ordinary work won't
+   signal.
+
+Interpretation matrix:
+
+| Observation | Conclusion |
+|---|---|
+| No `FULLJB-WAIT` line, fiber 1 `loops` frozen, `wd=WD_FIBER_SUSPENDED` | fiber 1 starved — scheduling/dispatch bug, not congestion |
+| `FULLJB-WAIT` (fiber!=0) then silence | suspect #1 confirmed: fix `handle_full_job_buffers` for fibers |
+| Both fibers' counters keep advancing but start phase 2 still stalls | stall is upstream (block instance routed to a fiber that isn't draining a specific JBB); cross-check hypothesis #4 |
+
+Build (user) with the macro on, reproduce M=2, then read the out-log.
+
 ## Next steps to localize the stall (do this first)
 
 1. **Attach lldb to the hung `ndbmtd`; `thread backtrace all`.** Find where
