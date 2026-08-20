@@ -1060,27 +1060,45 @@ struct alignas(NDB_CL) thr_job_queue {
 };
 
 /**
- * Calculate remaining free slots in the job_buffer queue.
- * The SAFETY limit is subtracted from the 'free'.
+ * RONDB-732 Phase 1 — fiber scheduler instrumentation.
  *
- * Note that calc free consider a JB-page as non-free as soon as it
- * has been allocated to the JB-queue.
- *  -> A partial filled 'write-page', or even empty page, is non-free.
- *  -> A partial consumed 'read-page is non-free, until fully consumed
- *     and released back to the page pool
+ * Set to 1 to compile in low-overhead per-fiber progress counters and a
+ * ~1/second reporter (driven by fiber 0) that dumps every sibling fiber's
+ * loop/exec/yield/fulljb/dosend/sleep/spin counts and current watchdog
+ * code to the node out-log, plus the RONDB732_TEST_JB_SQUEEZE test hook
+ * below. See storage/ndb/claude_files/fibers/phase1_status.md.
  *
- * This also implies that max- 'fifo_free' is 'SIZE-SAFETY-1'.
- * (We do not care to handle the special initial case where
- *  there is just an empty_job_buffer/nullptr in the JB-queue)
+ * Set to 0 to remove all instrumentation (zero production cost).
  */
-static inline unsigned calc_fifo_free(Uint32 ri, Uint32 wi, Uint32 sz) {
-  // Note: The 'wi' 'write-in-progress' page is not 'free, thus 'wi+1'
-  const unsigned free = (ri > wi) ? ri - (wi + 1) : (sz - (wi + 1)) + ri;
-  if (likely(free >= thr_job_queue::SAFETY))
-    return free - thr_job_queue::SAFETY;
-  else
-    return 0;
-}
+#define RONDB732_FIBER_DEBUG 1
+
+#if RONDB732_FIBER_DEBUG
+/**
+ * RONDB-732 test hook: make LDM fibers pretend this many extra JB pages
+ * are in use, so the congestion/FULL machinery (quota reduction,
+ * congestion mask, handle_full_job_buffers and its fiber ladder) triggers
+ * under light MTR loads that could never fill a 32-page queue for real.
+ * Applied inside calc_fifo_free() (defined further down, after thr_data),
+ * the single point where JB 'free' is computed, so all fullness decisions
+ * stay mutually consistent — but ONLY for threads with m_num_fibers > 1:
+ * a global squeeze starves the recv thread's execution quota and with it
+ * QMGR's heartbeats, killing the node after ~120 s (observed 2026-08-20).
+ * Set via the environment variable RONDB732_TEST_JB_SQUEEZE (parsed by
+ * dbg_init_jb_squeeze(), called from rep_init()); 0 = no effect. Queue
+ * SIZE is 32 and FULL is at free <= RESERVED (10), so squeeze N makes
+ * FULL hit from ~(19-N) real in-flight pages; at the SIZE/2 cap (16)
+ * even idle queues run in congested-mode and FULL hits from ~3 pages.
+ *
+ * The squeeze is parsed into g_dbg_jb_squeeze_target and only ARMED
+ * (copied into the hot-path g_dbg_jb_squeeze) once the node reaches
+ * SL_STARTED, checked from fiber_dbg_report(): a from-boot squeeze of 16
+ * stalls the start protocol into node failure (observed 2026-08-20 —
+ * though with the fiber congestion ladder demonstrably working
+ * throughout: enter=4k/wait=35k/yready=588, no scheduler hang).
+ */
+static unsigned g_dbg_jb_squeeze = 0;         // active value (hot path)
+static unsigned g_dbg_jb_squeeze_target = 0;  // armed at SL_STARTED
+#endif
 
 /**
  * Identify type of thread.
@@ -1352,23 +1370,6 @@ struct thr_first_signal {
 
 struct thr_send_thread_instance;
 
-/**
- * RONDB-732 Phase 1 — fiber start-hang instrumentation.
- *
- * Set to 1 to compile in low-overhead per-fiber progress counters and a
- * ~1/second reporter (driven by fiber 0) that dumps every sibling fiber's
- * loop/exec/yield counts and current watchdog code to the node out-log.
- * Purpose: localise the M>=2 start stall (start phase 2 -> heartbeat
- * timeout) without a live debugger — a starved sibling shows frozen
- * counters, and a non-base fiber that parks the OS thread inside
- * handle_full_job_buffers (the prime suspect, see
- * storage/ndb/claude_files/fibers/phase1_status.md) prints a loud marker
- * right before it cond_waits on m_congestion_waiter.
- *
- * Set to 0 to remove all instrumentation (zero production cost).
- */
-#define RONDB732_FIBER_DEBUG 1
-
 struct alignas(NDB_CL) thr_data {
   thr_data()
       : m_signal_id_counter(0),
@@ -1390,6 +1391,25 @@ struct alignas(NDB_CL) thr_data {
     for (uint i = 0; i < NUM_JOB_BUFFERS_PER_THREAD; i++) {
       assert((((UintPtr)&m_jbb[i]) % NDB_CL) == 0);
     }
+#if RONDB732_FIBER_DEBUG
+    /**
+     * Zero the debug counters here too: threads that never run
+     * mt_fiber_main (recv threads) still reach do_send() and would
+     * otherwise increment indeterminate values.
+     */
+    m_dbg_loops = 0;
+    m_dbg_exec_signals = 0;
+    m_dbg_fiber_yields = 0;
+    m_dbg_fulljb_enter = 0;
+    m_dbg_fulljb_wait = 0;
+    m_dbg_fulljb_yield_sibling = 0;
+    m_dbg_fulljb_yield_ready = 0;
+    m_dbg_do_send_calls = 0;
+    m_dbg_do_send_nanos = 0;
+    m_dbg_sleep_waits = 0;
+    m_dbg_spin_enters = 0;
+    m_dbg_first_loop_done = false;
+#endif
   }
 
   /**
@@ -1501,6 +1521,12 @@ struct alignas(NDB_CL) thr_data {
   Uint64 m_dbg_fiber_yields;   // cooperative fiber_yield() calls this fiber made
   Uint64 m_dbg_fulljb_enter;   // handle_full_job_buffers() entries
   Uint64 m_dbg_fulljb_wait;    // times it cond_waited on a m_congestion_waiter
+  Uint64 m_dbg_fulljb_yield_sibling; // congested target was a sibling fiber: ran it
+  Uint64 m_dbg_fulljb_yield_ready;   // remote congestion: overlapped by running a sibling
+  Uint64 m_dbg_do_send_calls;  // do_send() invocations by this fiber
+  Uint64 m_dbg_do_send_nanos;  // wall time inside do_send() (includes assist)
+  Uint64 m_dbg_sleep_waits;    // real cond_waits on own m_waiter that slept
+  Uint64 m_dbg_spin_enters;    // entries into the fiber-mode spin loop (check_yield)
   bool   m_dbg_first_loop_done; // has this fiber executed its first loop yet
   NDB_TICKS m_dbg_last_report; // fiber-0 throttle for the periodic dump
 #endif
@@ -3596,6 +3622,9 @@ check_yield(thr_data *selfptr,
   {
     Uint32 ndb_spins = 0;
     Uint32 spin_checks = 0;
+#if RONDB732_FIBER_DEBUG
+    selfptr->m_dbg_spin_enters++;
+#endif
     do
     {
       /**
@@ -5067,6 +5096,50 @@ void trp_callback::unlock_send_transporter(TrpId trp_id) {
 }
 
 /**
+ * Calculate remaining free slots in the job_buffer queue.
+ * The SAFETY limit is subtracted from the 'free'.
+ *
+ * Note that calc free consider a JB-page as non-free as soon as it
+ * has been allocated to the JB-queue.
+ *  -> A partial filled 'write-page', or even empty page, is non-free.
+ *  -> A partial consumed 'read-page is non-free, until fully consumed
+ *     and released back to the page pool
+ *
+ * This also implies that max- 'fifo_free' is 'SIZE-SAFETY-1'.
+ * (We do not care to handle the special initial case where
+ *  there is just an empty_job_buffer/nullptr in the JB-queue)
+ *
+ * Defined here (not with the other queue helpers above) because the
+ * RONDB732 JB-squeeze test hook needs the complete thr_data type to
+ * check m_num_fibers via the thread-local self pointer.
+ */
+static inline unsigned calc_fifo_free(Uint32 ri, Uint32 wi, Uint32 sz) {
+  // Note: The 'wi' 'write-in-progress' page is not 'free, thus 'wi+1'
+  const unsigned free = (ri > wi) ? ri - (wi + 1) : (sz - (wi + 1)) + ri;
+#if RONDB732_FIBER_DEBUG
+  if (unlikely(g_dbg_jb_squeeze != 0)) {
+    /**
+     * Fiber-only squeeze (see g_dbg_jb_squeeze): only LDM fibers see the
+     * reduced 'free', so only they throttle and enter the congestion
+     * ladder under test; recv/tc/main threads keep full quotas (QMGR
+     * heartbeats must not starve). The waiting fiber re-evaluates its
+     * wait predicate on its own OS thread with the same TLS, so producer
+     * view and wait predicate stay consistent.
+     */
+    const thr_data *self = NDB_THREAD_TLS_THREAD;
+    if (self != nullptr && self->m_num_fibers > 1) {
+      const unsigned floor_used = thr_job_queue::SAFETY + g_dbg_jb_squeeze;
+      return (free >= floor_used) ? (free - floor_used) : 0;
+    }
+  }
+#endif
+  if (likely(free >= thr_job_queue::SAFETY))
+    return free - thr_job_queue::SAFETY;
+  else
+    return 0;
+}
+
+/**
  * Provide a producer side estimate for number of free JB-pages
  * in a specific 'out-'thr_job_queue.
  *
@@ -6065,8 +6138,8 @@ static inline void send_wakeup_thread_ord(struct thr_data *selfptr,
  * the data node, the longer delay we will impose since larger data nodes
  * tend to require a bit more batching to become efficient.
  */
-static bool do_send(struct thr_data *selfptr, bool must_send,
-                    bool assist_send) {
+static bool do_send_impl(struct thr_data *selfptr, bool must_send,
+                         bool assist_send) {
   Uint32 count = selfptr->m_pending_send_count;
   TrpId *trps = selfptr->m_pending_send_trps;
 
@@ -6323,6 +6396,26 @@ static bool do_send(struct thr_data *selfptr, bool must_send,
   return (made_progress)                            // Had some progress?
              ? (selfptr->m_pending_send_count > 0)  // More do_send is required
              : false;  // All busy, or didn't find any work (-> -0)
+}
+
+/**
+ * do_send wrapper. With RONDB732_FIBER_DEBUG it counts invocations and the
+ * wall time spent inside do_send_impl per thr_data, to localize scheduler
+ * stalls (see congestion_plan.md / phase1_status.md). Zero cost when the
+ * macro is 0.
+ */
+static bool do_send(struct thr_data *selfptr, bool must_send,
+                    bool assist_send) {
+#if RONDB732_FIBER_DEBUG
+  selfptr->m_dbg_do_send_calls++;
+  const NDB_TICKS dbg_start = NdbTick_getCurrentTicks();
+  const bool ret = do_send_impl(selfptr, must_send, assist_send);
+  selfptr->m_dbg_do_send_nanos +=
+      NdbTick_Elapsed(dbg_start, NdbTick_getCurrentTicks()).nanoSec();
+  return ret;
+#else
+  return do_send_impl(selfptr, must_send, assist_send);
+#endif
 }
 
 #ifdef ERROR_INSERT
@@ -7087,6 +7180,19 @@ fiber_yield_if_pending_work(thr_data *selfptr) {
 }
 
 /**
+ * If 'other' is a fiber slot on the same OS thread as selfptr, return its
+ * fiber id, else -1. m_my_fibers[]/m_num_fibers are populated on every
+ * fiber slot (base and non-base), so this works from any fiber.
+ */
+static inline int
+fiber_fid_of(const thr_data *selfptr, const thr_data *other) {
+  for (Uint32 fid = 0; fid < selfptr->m_num_fibers; fid++) {
+    if (selfptr->m_my_fibers[fid] == other) return (int)fid;
+  }
+  return -1;
+}
+
+/**
  * Cooperatively yield from the current fiber to the next sibling fiber
  * on the same OS thread, in round-robin order. Updates the per-OS-thread
  * TLS to point at the destination fiber's jam/self pointers before the
@@ -7118,6 +7224,14 @@ static void
 fiber_dbg_report(thr_data *selfptr, const NDB_TICKS now)
 {
   if (selfptr->m_fiber_id != 0 || selfptr->m_num_fibers <= 1) return;
+  if (unlikely(g_dbg_jb_squeeze_target != 0) &&
+      g_dbg_jb_squeeze == 0 &&
+      globalData.theStartLevel == NodeState::SL_STARTED) {
+    /* Deferred arming of the JB-squeeze test hook, see g_dbg_jb_squeeze. */
+    g_dbg_jb_squeeze = g_dbg_jb_squeeze_target;
+    g_eventLogger->info("RONDB732 TEST: jb squeeze active, %u pages",
+                        g_dbg_jb_squeeze);
+  }
   if (NdbTick_Elapsed(selfptr->m_dbg_last_report, now).milliSec() < 1000) {
     return;
   }
@@ -7126,13 +7240,20 @@ fiber_dbg_report(thr_data *selfptr, const NDB_TICKS now)
     const thr_data *f = selfptr->m_my_fibers[i];
     g_eventLogger->info(
         "RONDB732 DBG thr_no=%u fiber=%u wd=%u loops=%llu sigs=%llu "
-        "yields=%llu fulljb[enter=%llu wait=%llu]%s",
+        "yields=%llu fulljb[enter=%llu wait=%llu ysib=%llu yready=%llu] "
+        "dosend[n=%llu ms=%llu] sleeps=%llu spins=%llu%s",
         f->m_thr_no, f->m_fiber_id, f->m_watchdog_counter,
         (unsigned long long)f->m_dbg_loops,
         (unsigned long long)f->m_dbg_exec_signals,
         (unsigned long long)f->m_dbg_fiber_yields,
         (unsigned long long)f->m_dbg_fulljb_enter,
         (unsigned long long)f->m_dbg_fulljb_wait,
+        (unsigned long long)f->m_dbg_fulljb_yield_sibling,
+        (unsigned long long)f->m_dbg_fulljb_yield_ready,
+        (unsigned long long)f->m_dbg_do_send_calls,
+        (unsigned long long)(f->m_dbg_do_send_nanos / 1000000),
+        (unsigned long long)f->m_dbg_sleep_waits,
+        (unsigned long long)f->m_dbg_spin_enters,
         f->m_dbg_first_loop_done ? "" : " (never-ran)");
   }
 }
@@ -8492,6 +8613,8 @@ handle_full_job_buffers(struct thr_data* selfptr,
 {
   unsigned sleeploop = 0;
   const unsigned self_jbb = selfptr->m_thr_no % NUM_JOB_BUFFERS_PER_THREAD;
+  const bool fiber_mode = selfptr->m_num_fibers > 1;
+  const NDB_TICKS enter_ticks = NdbTick_getCurrentTicks();
   selfptr->m_watchdog_counter = 16;
 #if RONDB732_FIBER_DEBUG
   selfptr->m_dbg_fulljb_enter++;
@@ -8499,7 +8622,16 @@ handle_full_job_buffers(struct thr_data* selfptr,
 
   while (selfptr->m_max_signals_per_jb == 0)  // or return
   {
-    if (unlikely(sleeploop >= 10))
+    /**
+     * Escape hatch when blocked ~10 ms. In fiber mode the loop may make
+     * fast fiber switches instead of 1 ms waits, so sleeploop alone can
+     * no longer measure blocked time — bound by elapsed time as well.
+     * Non-fiber threads keep the original wait-count-only semantics.
+     */
+    if (unlikely(sleeploop >= 10) ||
+        (fiber_mode &&
+         unlikely(NdbTick_Elapsed(enter_ticks,
+                                  NdbTick_getCurrentTicks()).milliSec() >= 10)))
     {
       /**
        * we've slept for 10ms...run a bit anyway
@@ -8538,6 +8670,48 @@ handle_full_job_buffers(struct thr_data* selfptr,
     do_send(selfptr, true, true);
     selfptr->m_outstanding_send_wakeups = 0;
     send_sum = 0;
+    if (fiber_mode)
+    {
+      const int cong_fid = fiber_fid_of(selfptr, congested);
+      if (cong_fid >= 0)
+      {
+        /**
+         * The consumer of the FULL queue is a sibling fiber on this OS
+         * thread — the fiber analogue of the 'congested == selfptr'
+         * self-wait case above. A cond_wait here would park the only CPU
+         * the consumer can run on, so only the 1 ms wait timeout would
+         * make progress. Running the sibling drains the queue directly
+         * (and its execute_signals() wakes any remote waiters on its
+         * m_congestion_waiter as buffers are released).
+         */
+#if RONDB732_FIBER_DEBUG
+        selfptr->m_dbg_fulljb_yield_sibling++;
+#endif
+        fiber_yield_to(selfptr, (Uint32)cong_fid);
+        recheck_congested_job_buffers(selfptr);
+        continue;
+      }
+      if (fiber_yield_if_ready(selfptr) ||
+          fiber_yield_if_pending_work(selfptr))
+      {
+        /**
+         * Congested on a remote OS thread, but a sibling fiber can run:
+         * overlap the congestion wait with sibling execution instead of
+         * parking the OS thread on a waiter that ordinary-work wakeups
+         * (m_waiter via m_waiter_ptr) do not signal.
+         */
+#if RONDB732_FIBER_DEBUG
+        selfptr->m_dbg_fulljb_yield_ready++;
+#endif
+        recheck_congested_job_buffers(selfptr);
+        continue;
+      }
+      /**
+       * No sibling fiber can run. Parking the OS thread on the bounded
+       * 1 ms congestion wait below is now the same decision the base
+       * fiber would make; any fiber may take it.
+       */
+    }
     thr_job_queue *congested_queue = &congested->m_jbb[self_jbb];
     static constexpr Uint32 nano_wait_1ms = 1000*1000;    /* -> 1 ms */
     /**
@@ -8550,18 +8724,18 @@ handle_full_job_buffers(struct thr_data* selfptr,
 #if RONDB732_FIBER_DEBUG
     selfptr->m_dbg_fulljb_wait++;
     /**
-     * Prime-suspect marker (see phase1_status.md): a *non-base* fiber is
-     * about to pthread_cond_wait on a sibling thread's m_congestion_waiter,
-     * which parks the *entire* OS thread on a waiter that ordinary work
-     * routed to this OS thread does NOT signal (producers wake m_waiter via
-     * m_waiter_ptr, not m_congestion_waiter). If the node goes silent right
-     * after this line, the start stall is confirmed here. Throttled to the
-     * first 50 occurrences per fiber to avoid flooding the out-log.
+     * A fiber only reaches this cond_wait when the congested target is on
+     * another OS thread AND no sibling fiber can run (see the fiber ladder
+     * above; congestion_plan.md §1.4) — parking the OS thread for the
+     * bounded 1 ms wait is then the correct choice for any fiber id. The
+     * sibling-congested and runnable-sibling cases never get here; they
+     * are counted in m_dbg_fulljb_yield_sibling / _yield_ready instead.
+     * Throttled to the first 50 occurrences per fiber.
      */
-    if (selfptr->m_fiber_id != 0 && selfptr->m_dbg_fulljb_wait <= 50) {
+    if (selfptr->m_num_fibers > 1 && selfptr->m_dbg_fulljb_wait <= 50) {
       g_eventLogger->info(
-          "RONDB732 FULLJB-WAIT  thr_no=%u fiber_id=%u  <== NON-BASE FIBER "
-          "PARKS OS THREAD on m_congestion_waiter of congested thr_no=%u "
+          "RONDB732 FULLJB-WAIT thr_no=%u fiber_id=%u waits (<=1ms) on "
+          "m_congestion_waiter of remote thr_no=%u; no runnable sibling "
           "(sleeploop=%u, n=%llu)",
           selfptr->m_thr_no, selfptr->m_fiber_id, congested->m_thr_no,
           sleeploop, (unsigned long long)selfptr->m_dbg_fulljb_wait);
@@ -8706,6 +8880,12 @@ mt_fiber_main(void *fiber_arg)
   selfptr->m_dbg_fiber_yields = 0;
   selfptr->m_dbg_fulljb_enter = 0;
   selfptr->m_dbg_fulljb_wait = 0;
+  selfptr->m_dbg_fulljb_yield_sibling = 0;
+  selfptr->m_dbg_fulljb_yield_ready = 0;
+  selfptr->m_dbg_do_send_calls = 0;
+  selfptr->m_dbg_do_send_nanos = 0;
+  selfptr->m_dbg_sleep_waits = 0;
+  selfptr->m_dbg_spin_enters = 0;
   selfptr->m_dbg_first_loop_done = false;
   selfptr->m_dbg_last_report = now;
 #endif
@@ -8883,6 +9063,9 @@ mt_fiber_main(void *fiber_arg)
                                used_maxwait_in_ns,
                                check_all_fiber_queues_empty,
                                selfptr);
+#if RONDB732_FIBER_DEBUG
+                if (waited) selfptr->m_dbg_sleep_waits++;
+#endif
               } else {
                 /**
                  * check_all_fiber_queues_empty() can still observe work after
@@ -8897,6 +9080,9 @@ mt_fiber_main(void *fiber_arg)
                            used_maxwait_in_ns,
                            check_queues_empty,
                            selfptr);
+#if RONDB732_FIBER_DEBUG
+            if (waited) selfptr->m_dbg_sleep_waits++;
+#endif
           }
           if (waited)
           {
@@ -9335,6 +9521,41 @@ mt_setMaxSendDelay(Uint32 max_send_delay)
 {
   g_max_send_delay = max_send_delay;
 }
+
+#if RONDB732_FIBER_DEBUG
+/**
+ * Parse the RONDB732_TEST_JB_SQUEEZE env var (see g_dbg_jb_squeeze at
+ * calc_fifo_free). Called once from rep_init(). Kept entirely inside
+ * mt.cpp: unit-test binaries link libndbkernel (Configuration.cpp) but
+ * not mt.cpp, so no mt_ symbol may be needed for this debug hook.
+ */
+static void
+dbg_init_jb_squeeze()
+{
+  const char *env = getenv("RONDB732_TEST_JB_SQUEEZE");
+  if (env == nullptr) return;
+  char *end = nullptr;
+  unsigned long v = strtoul(env, &end, 10);
+  if (end == env) return;
+  /**
+   * Cap at 18: FULL is at effective-free <= RESERVED (10), i.e. at
+   * raw-free <= 12 + squeeze, and an empty queue reads raw-free 31
+   * (SIZE-1). Squeeze 18 => FULL from ONE real in-flight page (the
+   * most sensitive useful setting); squeeze >= 19 is degenerate: even
+   * empty queues read FULL, so has_full_in_queues() short-circuits
+   * handle_full_job_buffers() before the fiber ladder and everything
+   * runs on the reserved-quota trickle — defeating the test's purpose.
+   */
+  constexpr unsigned long max_squeeze = 18;
+  if (v > max_squeeze) v = max_squeeze;
+  g_dbg_jb_squeeze_target = (unsigned)v;
+  if (v > 0) {
+    g_eventLogger->info(
+        "RONDB732 TEST: jb squeeze armed, %u pages "
+        "(activates when node is started)", (unsigned)v);
+  }
+}
+#endif
 
 Uint32
 mt_getMaxSendDelay()
@@ -10435,6 +10656,9 @@ void
 rep_init(struct thr_repository* rep, unsigned int cnt, Ndbd_mem_manager *mm)
 {
   mt_setMinSendDelay(globalData.theMaxSendDelay);
+#if RONDB732_FIBER_DEBUG
+  dbg_init_jb_squeeze();
+#endif
 
   rep->m_mm = mm;
 
