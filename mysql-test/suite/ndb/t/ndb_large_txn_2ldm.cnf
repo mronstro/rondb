@@ -1,0 +1,13 @@
+!include suite/ndb/my.cnf
+
+[cluster_config.1]
+# RONDB-732 control config: identical to ndb_fibers_large_txn.cnf but with
+# NO fiber env override, so ldm={count=2} gives 2 real LDM OS threads.
+# Used to discriminate fiber-specific throughput problems from properties
+# of this cluster size/load (see congestion_plan.md).
+ThreadConfig=main={count=1},tc={count=1},ldm={count=2},io={count=1},rep={count=1},recv={count=1},send={count=1}
+# Scale-up for large transactions, copied from large_txn.cnf:
+DataMemory = 256M
+NoOfReplicas = 1
+MaxNoOfConcurrentOperations = 512K
+NoOfFragmentLogFiles = 16

@@ -1,0 +1,17 @@
+!include suite/ndb/my.cnf
+
+[cluster_config.1]
+# RONDB-732: run each data node with a single physical LDM OS thread
+# carrying 2 cooperative fibers. With explicit ThreadConfig the configured
+# ldm count is the *logical* LDM worker count; it is packed onto
+# ldm / RONDB_FIBERS_PER_THREAD OS threads (Configuration.cpp), so
+# ldm={count=2} + RONDB_FIBERS_PER_THREAD=2 => 1 OS LDM thread, M=2.
+ThreadConfig=main={count=1},tc={count=1},ldm={count=2},io={count=1},rep={count=1},recv={count=1},send={count=1}
+
+[ENV]
+# MTR exports [ENV] into its own environment before spawning the cluster
+# processes, so the ndbmtd processes inherit this. It is the only way to
+# enable fibers today (env override in Configuration.cpp, no config.ini
+# parameter yet). MTR restores the old value when the next test loads a
+# different config, so it does not leak into other tests.
+RONDB_FIBERS_PER_THREAD= 2

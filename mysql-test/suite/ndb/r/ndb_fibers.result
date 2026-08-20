@@ -1,0 +1,30 @@
+# Verify the fiber env override actually reached both data nodes
+include/assert_grep.inc [fiber override active in data node 1 log]
+include/assert_grep.inc [fiber override active in data node 2 log]
+# Basic DML spread across both LDM fiber workers
+CREATE TABLE t1 (pk INT PRIMARY KEY, val INT, KEY ix1 (val)) ENGINE=NDB;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+200
+# Primary key read (DBACC/DBTUP path)
+SELECT * FROM t1 WHERE pk = 42;
+pk	val
+42	420
+# Ordered index read and range scan (DBTUX path)
+SELECT * FROM t1 WHERE val = 1230;
+pk	val
+123	1230
+SELECT COUNT(*) FROM t1 WHERE val >= 1500;
+COUNT(*)
+50
+# Update through the primary key range
+UPDATE t1 SET val = val + 1 WHERE pk < 100;
+SELECT SUM(val) FROM t1;
+SUM(val)
+199100
+# Delete and verify
+DELETE FROM t1 WHERE pk >= 150;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+150
+DROP TABLE t1;

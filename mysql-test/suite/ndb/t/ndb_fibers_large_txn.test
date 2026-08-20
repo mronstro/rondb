@@ -1,0 +1,98 @@
+###############################################################################
+# RONDB-732 Step 1 (congestion_plan.md): job-buffer congestion under fibers.
+#
+# The companion .cnf packs 2 logical LDM workers onto 1 OS LDM thread per
+# data node (M=2). The load below is the large-transaction section of
+# ndb.large_txn, inlined here because that test is have_nodebug-gated (it
+# would skip on debug builds) and its unique-lock section is prohibitively
+# slow under debug. Huge commit/rollback signal chains drive job buffers
+# FULL so the LDM fibers enter handle_full_job_buffers().
+#
+# Before the fiber congestion fix: expect RONDB732 FULLJB-WAIT markers and
+# possibly "sleeploop 10!!" spam in var/mysql_cluster.1/ndbd.N/ndbd.log
+# (observation matrix in congestion_plan.md); the test may run very slowly.
+# After the fix: must pass, with fulljb[ysib=../yready=..] counters
+# advancing in the RONDB732 DBG report lines proving the new fiber ladder
+# branches were exercised.
+#
+# SIZE LIMIT: transactions are 50k ops, NOT the 500k of ndb.large_txn.
+# Dbtc::checkGcpFinished() ndbabort()s the node if a GCP epoch waits more
+# than a HARDCODED 60 s for its transactions to complete, and on debug
+# builds a 500k-op commit/abort phase exceeds that (observed 2026-08-20:
+# TC GCP assert during the 2nd 500k txn — this is why upstream large_txn
+# is have_nodebug-gated). Do not raise the count without checking that.
+###############################################################################
+--source include/have_ndb.inc
+
+--echo # Verify the fiber env override actually reached both data nodes
+--let $assert_text= fiber override active in data node 1 log
+--let $assert_file= $MYSQLTEST_VARDIR/mysql_cluster.1/ndbd.1/ndbd.log
+--let $assert_select= NDBMT: RONDB_FIBERS_PER_THREAD=2
+--let $assert_count_condition= >= 1
+--source include/assert_grep.inc
+
+--let $assert_text= fiber override active in data node 2 log
+--let $assert_file= $MYSQLTEST_VARDIR/mysql_cluster.1/ndbd.2/ndbd.log
+--let $assert_select= NDBMT: RONDB_FIBERS_PER_THREAD=2
+--let $assert_count_condition= >= 1
+--source include/assert_grep.inc
+
+create table t1 (a int primary key) engine=ndb;
+create table t2 (a int primary key) engine=ndb;
+
+delimiter %;
+
+# Insert batches of 32 rows, just to speed up test
+create procedure do_insert(count int)
+begin
+  set @x = 0;
+  repeat
+    insert into t1 values
+      (@x+0),  (@x+1),  (@x+2),  (@x+3),
+      (@x+4),  (@x+5),  (@x+6),  (@x+7),
+      (@x+8),  (@x+9),  (@x+10), (@x+11),
+      (@x+12), (@x+13), (@x+14), (@x+15),
+      (@x+16), (@x+17), (@x+18), (@x+19),
+      (@x+20), (@x+21), (@x+22), (@x+23),
+      (@x+24), (@x+25), (@x+26), (@x+27),
+      (@x+28), (@x+29), (@x+30), (@x+31);
+  set @x = @x + 32;
+  until @x >= count
+  end repeat;
+end %
+
+delimiter ;%
+
+# Generate large transactions, abort or commit them:
+begin;
+call do_insert(50000);
+rollback;
+select count(*) from t1;
+
+begin;
+call do_insert(50000);
+commit;
+select count(*) from t1;
+
+begin;
+insert into t2 select * from t1;
+rollback;
+select count(*) from t2;
+
+begin;
+insert into t2 select * from t1;
+commit;
+select count(*) from t2;
+
+begin;
+delete from t2;
+commit;
+
+begin;
+delete from t1;
+commit;
+select count(*) from t1;
+select count(*) from t2;
+
+drop procedure do_insert;
+drop table t1,t2;

@@ -1,0 +1,61 @@
+###############################################################################
+# RONDB-732: cooperative LDM fibers — cluster start + basic DML smoke test.
+#
+# The companion ndb_fibers.cnf packs 2 logical LDM workers onto a single
+# physical LDM OS thread per data node (ThreadConfig ldm={count=2} plus
+# RONDB_FIBERS_PER_THREAD=2 delivered through the [ENV] section), i.e. the
+# M=2 fiber configuration from storage/ndb/claude_files/fibers/plan.md.
+#
+# KNOWN STATE (Phase 1 debugging): with M>=2 the data nodes hang in start
+# phase 2 and eventually die from heartbeat failure, so this test currently
+# FAILS AT CLUSTER STARTUP — MTR restarts the cluster with this .cnf and
+# times out before the statements below ever run. That startup failure IS
+# the reproduction; the data node logs to read afterwards are
+#   var/mysql_cluster.1/ndbd.1/ndbd.log  (RONDB732 DBG / FULLJB-WAIT lines)
+# per the guide in storage/ndb/claude_files/fibers/phase1_status.md.
+#
+# Once the start hang is fixed this doubles as the fiber regression test:
+# cluster starts with fibers on, both fiber workers serve fragments, and
+# basic DML (PK read, index read, range scan, update, delete) works.
+###############################################################################
+--source include/have_ndb.inc
+
+--echo # Verify the fiber env override actually reached both data nodes
+--let $assert_text= fiber override active in data node 1 log
+--let $assert_file= $MYSQLTEST_VARDIR/mysql_cluster.1/ndbd.1/ndbd.log
+--let $assert_select= NDBMT: RONDB_FIBERS_PER_THREAD=2
+--let $assert_count_condition= >= 1
+--source include/assert_grep.inc
+
+--let $assert_text= fiber override active in data node 2 log
+--let $assert_file= $MYSQLTEST_VARDIR/mysql_cluster.1/ndbd.2/ndbd.log
+--let $assert_select= NDBMT: RONDB_FIBERS_PER_THREAD=2
+--let $assert_count_condition= >= 1
+--source include/assert_grep.inc
+
+--echo # Basic DML spread across both LDM fiber workers
+CREATE TABLE t1 (pk INT PRIMARY KEY, val INT, KEY ix1 (val)) ENGINE=NDB;
+
+--disable_query_log
+--let $i= 0
+while ($i < 200)
+{
+  eval INSERT INTO t1 VALUES ($i, $i * 10);
+  --inc $i
+}
+--enable_query_log
+
+SELECT COUNT(*) FROM t1;
+--echo # Primary key read (DBACC/DBTUP path)
+SELECT * FROM t1 WHERE pk = 42;
+--echo # Ordered index read and range scan (DBTUX path)
+SELECT * FROM t1 WHERE val = 1230;
+SELECT COUNT(*) FROM t1 WHERE val >= 1500;
+--echo # Update through the primary key range
+UPDATE t1 SET val = val + 1 WHERE pk < 100;
+SELECT SUM(val) FROM t1;
+--echo # Delete and verify
+DELETE FROM t1 WHERE pk >= 150;
+SELECT COUNT(*) FROM t1;
+
+DROP TABLE t1;

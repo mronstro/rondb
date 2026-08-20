@@ -1,0 +1,26 @@
+!include suite/ndb/my.cnf
+
+[cluster_config.1]
+# RONDB-732 congestion-ladder verification: recv-heavy shape (see
+# ndb_fibers_congestion.cnf) + the RONDB732_TEST_JB_SQUEEZE hook, which
+# makes calc_fifo_free() pretend 18 extra JB pages are in use — but ONLY
+# for LDM fiber threads, and armed only once the node reaches SL_STARTED.
+# Both restrictions were learned the hard way (2026-08-20): from boot the
+# squeeze stalls the start protocol into node failure, and applied
+# globally it starves the recv thread's execution quota and QMGR's
+# heartbeats with it (node death after ~120 s). At 18 (the cap) fibers
+# read FULL from ONE real in-flight page. Squeezes 12 and 16 proved too
+# weak: with consumers unsqueezed the real queues drain instantly, so the
+# 3+ in-flight pages those settings required never accumulated. 19+ is
+# degenerate (even empty queues read FULL and the has_full_in_queues
+# relief valve bypasses the fiber ladder).
+ThreadConfig=main={count=0},rep={count=0},ldm={count=2},recv={count=1}
+DataMemory = 256M
+SharedGlobalMemory=300M
+NoOfReplicas = 1
+MaxNoOfConcurrentOperations = 512K
+NoOfFragmentLogFiles = 16
+
+[ENV]
+RONDB_FIBERS_PER_THREAD= 2
+RONDB732_TEST_JB_SQUEEZE= 18

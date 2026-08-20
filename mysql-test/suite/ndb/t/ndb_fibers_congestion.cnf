@@ -1,0 +1,19 @@
+!include suite/ndb/my.cnf
+
+[cluster_config.1]
+# RONDB-732 congestion driver: the large_txn_non_mt thread shape (which was
+# designed to provoke job-buffer-full: everything except LDM runs on the
+# recv thread) with the LDM split into 2 fibers on 1 OS thread. One
+# overloaded recv+tc producer against one LDM OS thread carrying 2 fiber
+# workers maximizes the chance that handle_full_job_buffers() runs from a
+# fiber, exercising the RONDB-732 congestion ladder (ysib/yready counters).
+ThreadConfig=main={count=0},rep={count=0},ldm={count=2},recv={count=1}
+# Scale-up for large transactions, copied from large_txn_non_mt.cnf:
+DataMemory = 256M
+SharedGlobalMemory=300M
+NoOfReplicas = 1
+MaxNoOfConcurrentOperations = 512K
+NoOfFragmentLogFiles = 16
+
+[ENV]
+RONDB_FIBERS_PER_THREAD= 2
