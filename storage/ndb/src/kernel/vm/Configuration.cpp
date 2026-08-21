@@ -1928,17 +1928,27 @@ Configuration::setupConfiguration()
         /**
          * Explicit ThreadConfig names the desired logical LDM worker count.
          * Fibers pack those workers onto fewer physical LDM OS threads.
+         *
+         * If the configured LDM count is not divisible by the fiber count,
+         * IGNORE the env override and run with fibers off instead of
+         * failing the start: the override is a test/rollout switch, and a
+         * whole-suite sweep (RONDB_FIBERS_PER_THREAD=2 ./mtr ...) must not
+         * turn every odd-LDM-count test into a startup failure.
          */
         if ((configured_ldm_workers %
              globalData.theNumberOfFibersPerThread) != 0)
         {
-          ERROR_SET(fatal, NDBD_EXIT_INVALID_CONFIG,
-                    "Invalid configuration fetched. ",
-                    "LDM thread count must be divisible by "
-                    "RONDB_FIBERS_PER_THREAD");
+          g_eventLogger->warning(
+              "NDBMT: RONDB_FIBERS_PER_THREAD=%u ignored: LDM thread "
+              "count %u is not divisible by it, running with fibers off",
+              globalData.theNumberOfFibersPerThread, configured_ldm_workers);
+          globalData.theNumberOfFibersPerThread = 1;
         }
-        ldm_threads =
-          configured_ldm_workers / globalData.theNumberOfFibersPerThread;
+        else
+        {
+          ldm_threads =
+            configured_ldm_workers / globalData.theNumberOfFibersPerThread;
+        }
       }
     }
     if (configured_ldm_workers == 0)
@@ -1954,6 +1964,19 @@ Configuration::setupConfiguration()
     globalData.ndbMtLqhWorkers = ldm_workers;
     globalData.ndbMtLqhThreads = ldm_threads;
     globalData.ndbMtLqhThreadFibers = ldm_workers;
+    if (globalData.theNumberOfFibersPerThread > 1 && ldm_threads != 0)
+    {
+      /**
+       * The definitive "fibers are on" marker: parse-time env logging above
+       * no longer implies fibers are active (the override is ignored with a
+       * warning when the LDM count is not divisible). MTR fiber tests
+       * assert on this line.
+       */
+      g_eventLogger->info(
+          "NDBMT: LDM fibers active: %u logical workers on %u OS threads "
+          "(%u fibers/thread)",
+          ldm_workers, ldm_threads, globalData.theNumberOfFibersPerThread);
+    }
     /**
      * Each block thread will have one Query worker, thus no more
      * any need for recover threads.

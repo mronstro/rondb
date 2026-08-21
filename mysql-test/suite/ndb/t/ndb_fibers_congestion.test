@@ -19,16 +19,16 @@
 ###############################################################################
 --source include/have_ndb.inc
 
---echo # Verify the fiber env override actually reached both data nodes
---let $assert_text= fiber override active in data node 1 log
+--echo # Verify LDM fibers are actually active on both data nodes
+--let $assert_text= LDM fibers active in data node 1 log
 --let $assert_file= $MYSQLTEST_VARDIR/mysql_cluster.1/ndbd.1/ndbd.log
---let $assert_select= NDBMT: RONDB_FIBERS_PER_THREAD=2
+--let $assert_select= NDBMT: LDM fibers active: 2 logical workers on 1 OS threads
 --let $assert_count_condition= >= 1
 --source include/assert_grep.inc
 
---let $assert_text= fiber override active in data node 2 log
+--let $assert_text= LDM fibers active in data node 2 log
 --let $assert_file= $MYSQLTEST_VARDIR/mysql_cluster.1/ndbd.2/ndbd.log
---let $assert_select= NDBMT: RONDB_FIBERS_PER_THREAD=2
+--let $assert_select= NDBMT: LDM fibers active: 2 logical workers on 1 OS threads
 --let $assert_count_condition= >= 1
 --source include/assert_grep.inc
 

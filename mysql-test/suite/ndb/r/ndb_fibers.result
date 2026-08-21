@@ -1,6 +1,6 @@
-# Verify the fiber env override actually reached both data nodes
-include/assert_grep.inc [fiber override active in data node 1 log]
-include/assert_grep.inc [fiber override active in data node 2 log]
+# Verify LDM fibers are actually active on both data nodes
+include/assert_grep.inc [LDM fibers active in data node 1 log]
+include/assert_grep.inc [LDM fibers active in data node 2 log]
 # Basic DML spread across both LDM fiber workers
 CREATE TABLE t1 (pk INT PRIMARY KEY, val INT, KEY ix1 (val)) ENGINE=NDB;
 SELECT COUNT(*) FROM t1;
