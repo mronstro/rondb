@@ -153,6 +153,148 @@ Control test added: `ndb.ndb_large_txn_2ldm` — identical config/load with
 **fibers off** (2 real LDM OS threads). If it also collapses post-rollback,
 the issue is not fiber-specific.
 
+## Step 2 findings (wider stability sweep, 2026-08-20, IN PROGRESS)
+
+**Finding #1 — `ndb.ndb_TCtakeover_stall` timeout: COPY_FRAGREQ scan
+stalls on a non-base fiber during node restart.** Full-suite run with
+`RONDB_FIBERS_PER_THREAD=2` (default suite config ⇒ 4 logical LDM workers
+on 2 OS threads). Evidence chain (logs preserved in
+`var/log/ndb.ndb_TCtakeover_stall/`):
+
+- The test's own TC-takeover logic PASSED ("Test succeeded, no GCP
+  stall"); the 900 s timeout came from `ndb_waiter` waiting for the killed
+  node to rejoin. Node 2 stalled in **start phase 5** for ~14 minutes; the
+  final watchdog kills on both nodes are mtr-teardown artifacts.
+- Node 2 (joiner): all four "LDM(N): Starting to copy fragments" at
+  11:18:47; local LCP started on instances 1, 2, 4 — **never on
+  instance 3** (= thr_no 2, a NON-BASE fiber). All empty fragments
+  (INS 0 rows) copied fine; the stall is on the data-carrying tab(11).
+- Node 1 (copy source) dumps every 10 s: `COPY_FRAGREQ Scan has stalled
+  for 117310 ms, last seen on line 17496` — `(3)Dblqh::ScanRecord[9]:
+  state=9 (WAIT_LQHKEY_COPY), type=2 (COPY), complOps=75, concurrOps=0,
+  scanNodeId=2`. Line 17496 = `exec_next_scan_conf` (row fetched from
+  ACC/TUP); the scan then waits forever for a copy-row LQHKEYCONF.
+- Both endpoints of the stalled exchange are LDM instance 3 = a
+  **non-base fiber on each node**. All four fibers on both nodes remain
+  scheduler-healthy throughout (loops/sigs advancing, fulljb all zero) —
+  so this is a **lost/stuck signal in the copy protocol**, not a
+  scheduler starvation.
+- Hypothesis space (unconfirmed): (a) a fiber's flushed-but-unsent
+  transporter data stranded when the OS thread sleeps (per-fiber
+  pending_send guards LOOK sound on code reading — mid-execution
+  suspension is covered by m_fiber_processing_signals, and each fiber
+  self-guards pending_send before its sleep path — but send-thread
+  wakeup accounting (m_outstanding_send_wakeups) was not audited);
+  (b) the loss is on node 2's applying side (also a fiber);
+  (c) an execution-order bug in the copy state machine under fiber
+  scheduling. Needs a live repro.
+
+**Deep-dive (2026-08-20, after 2nd deterministic repro).** The stall's
+terminal state in both runs: `copyCountWords` wedged at/over the limit
+(`cmaxWordsAtNodeRec` = DEF 6000; runs wedged at 6000 and 8000 — overshoot
+is normal check-then-add) with `concurrOps=0`, so
+`is_ok_to_send_next_record()` stays false forever and nothing re-drives
+the scan. The arithmetic is exact in BOTH runs: residual = complOps × 80
+words (75×80=6000, 100×80=8000), and 80 = `8 + MAGIC_CONSTANT(56), +25%`
+— the fixed cost of a **copy DELETE-by-ROWID** op (DblqhMain ~26457).
+So: N delete-by-rowid ops each debited 80 words and NONE were credited,
+while their (or other ops') completions advanced complOps. The joiner-side
+handler for our case (row absent — these rowids are the source's
+rolled-back inserts) is `handle_nr_copy` **Case 7** → `update_gci_ignore:`
+which calls **`upgrade_to_exclusive_frag_access()`** before completing.
+That resolves to `handle_acquire_exclusive_frag_access()` (DblqhMain
+~8634) which spins ~50 µs then parks the WHOLE OS THREAD in a
+**timeout-less `NdbCondition_Wait(frag_write_cond)`** waiting for
+concurrent readers (query threads / scans) to release the fragment —
+under fibers, if the holder is a suspended sibling fiber, that is a
+permanent OS-thread deadlock (same hazard class as the congestion
+cond_wait fixed in mt.cpp). Caveat: the joiner's fiber counters kept
+advancing in the repro logs, so the wedge may instead be an op parked
+waiting for a grant, or the deletes may not have reached the joiner at
+all — undetermined which link breaks.
+
+**Instrumentation added (DblqhMain.cpp, throttled to first 40 events
+each, needs rebuild)**: `COPY-SEND-DEL` (source delete send: rowid, words,
+running count), `COPY-CONF` (source credit: words received),
+`COPY-CONF-SEND` (joiner conf to remote DBLQH: echoed words, packed?),
+`NR-DEL-CASE7` (joiner receipt of delete-by-rowid, row absent),
+`COPY-STALL flowctl` (added to the 10 s stall dump: countWords, cmax,
+active copies, halted flag, scan state), `FRAG-EXCL-WAIT` (entry to the
+timeout-less cond wait: tab/frag, reader/scan counts).
+
+**Instrumented run #3 (2026-08-20): PASSED — and the pass is itself
+evidence.** The hot fragment landed on **instance 1 (a BASE fiber)** this
+run and the whole chain worked (SEND-DEL → CASE7 → CONF-SEND(packed=1) →
+CONF credits, all words=80, zero FRAG-EXCL-WAIT). Both failures had it on
+**instance 3 (a NON-base fiber)** — fragment placement varies per run, so
+the test is a coin flip over which instance hosts the busy fragment, and
+pass/fail correlates exactly with base vs non-base so far. Bonus insight:
+the delete burst runs far past the 6000 gate (countWords peaked 28240) —
+the gate only throttles further fetching; batches send in bulk, credits
+then drain the counter. In the failures credits stopped MID-STREAM (75
+resp. 100 arrived, then silence): a **tail loss** — which the first-40
+throttled logs can never show. Tracing upgraded accordingly: per-instance
+running totals (g_dbg_copy_del_sent/credit/conf_sent/nr_del7) surfaced in
+the COPY-STALL dump (`del_sent_total`/`credit_total`) and as every-256th
+breadcrumb logs on CONF / CONF-SEND / CASE7.
+
+**Repeat run #1 (2026-08-20, instrumented binary): 6/6 PASSED — wedge did
+not reproduce.** A live-caught "stall" mid-run was a false positive: the
+test INTENTIONALLY stalls the copy scan on the held row lock
+(scanState=1/WAIT_NEXT_SCAN_COPY with an ACC lock op queued,
+check_lcp_stop polling — that IS the test's setup); it cleared at
+rollback and the rep passed. The real wedge signature is
+**scanState=9 (WAIT_LQHKEY_COPY) at the flow-control limit**, or any
+copy stall persisting well past the rollback (>100 s). Watcher retuned
+accordingly (`scratchpad/watch_stall.sh` v2). Possible reasons for
+non-repro: fragment-placement luck, or the first-40 trace logs during
+the delete burst perturbing the race (heisenbug risk — if many clean
+repeats accumulate, quiet the first-40 logs and keep only counters +
+breadcrumbs + stall dump).
+
+Also verified statically meanwhile: LQH instance N maps to thr N-1 (the
+fiber slot itself) in mt_add_thr_map — routing, m_instance_list and
+m_send_packer all registered on the fiber; SendPacked::pack() runs every
+registered block unconditionally each loop, so the fiber's packed
+containers DO get flushed every fiber loop. (Note: the fiber
+instance-list propagation at mt.cpp ~7966 OVERWRITES the sibling's own
+m_instance_list with fiber 0's — its comment claiming "send_packer
+registration stays on fiber 0" is wrong, registration is on the fiber;
+list consumers are THRConfig lookups (nosend, send-assist assignment),
+worth a later audit but not obviously the copy bug.)
+
+**Repeat run #2 (--repeat=20): 20/20 PASSED.** 26 consecutive passes on
+the instrumented binary vs 2 failures in ~3 runs before it — the
+first-40 g_eventLogger calls (mutex + I/O) inside the delete burst were
+evidently perturbing the race. **Tracing quieted (2026-08-20)**: all
+first-40 logs removed; silent per-instance counters + every-256th
+breadcrumbs + stall-dump totals + FRAG-EXCL-WAIT remain. Requires
+rebuild.
+
+**Repeat run #3 (quiet tracing, --repeat=20, 2026-08-21): 20/20 PASSED.**
+46 consecutive passes since instrumentation vs 2 failures in ~3 runs
+before it. Both original failures had a parallel mtr from another tree
+loading the machine; all passes since were on a quiet box — machine
+contention is the remaining race-enabler hypothesis.
+
+**STATUS: PARKED AS MONITORED (2026-08-21).** The wedge is real (two
+full log captures, exact flow-control arithmetic) but not currently
+reproducible. Canaries stay in permanently while RONDB732_FIBER_DEBUG
+is on: silent copy-protocol counters, every-256th breadcrumbs, the
+COPY-STALL flowctl dump (fires within ~20 s of any wedge and contains
+the full diagnosis), and FRAG-EXCL-WAIT. Any future occurrence — e.g.
+during Step 2 sweeps, which themselves load the machine — self-
+documents: compare source `del_sent_total` vs `credit_total` and the
+joiner's CASE7 / CONF-SEND breadcrumbs (CASE7 ≪ del_sent =
+source→joiner loss; CONF-SEND ≪ CASE7 = joiner parked, check
+FRAG-EXCL-WAIT; CONF-SEND ≈ del_sent with credit short = packed return
+path). Watcher: `scratchpad/watch_stall.sh` (session-local, recreate
+from this description if lost). Open theory candidates, in order:
+machine-load-dependent race in the fiber sleep/wakeup tail; packed
+container tail flush; the timeout-less frag-access NdbCondition_Wait
+(fiber-hostile by construction and worth fixing on principle
+regardless).
+
 ## Next steps
 
 > Detailed roadmap and the full Step 1 plan are in **`congestion_plan.md`**;
@@ -231,10 +373,20 @@ the issue is not fiber-specific.
    `fulljb[enter/wait/ysib/yready]` in ndbd.log. Verified = pass +
    `enter>0` + `ysib`/`yready` advancing + no LDM `sleeploop 10!!` storm.
 2. **Wider stability**: run bigger slices of the ndb suite with fibers on:
-   `RONDB_FIBERS_PER_THREAD=2 ./mtr --suite=ndb ...`. Caveat: tests whose
-   ThreadConfig LDM count is odd (e.g. `large_txn_non_mt`, ldm=1) fail
-   config validation by design. Include node-restart/system-restart tests —
-   the start hang lived in start phases; recovery paths are untested.
+   `RONDB_FIBERS_PER_THREAD=2 ./mtr --suite=ndb ...`. Include
+   node-restart/system-restart tests — recovery paths are the least
+   tested (see Finding #1). Sweep behavior (2026-08-20, needs rebuild):
+   a non-divisible LDM count now **ignores the env override with a
+   warning** ("running with fibers off") instead of a fatal config error,
+   so odd-LDM tests (`large_txn_non_mt`, `ndb_add_partition`,
+   `ndb_blob_big`, `ndb_fk_addnode`, `ndb_full_data_memory_restart`,
+   `ndb_load`, `ndb_one_fragment`) run normally fibers-off. Configuration
+   logs a definitive "NDBMT: LDM fibers active: N logical workers on M OS
+   threads" line when fibers engage; the fiber MTR tests now assert THAT
+   line (parse-time env logging no longer implies fibers are on).
+   Remaining known sweep noise: AutomaticThreadConfig/NumCPUs tests
+   multiply the worker count (intended semantics) and may diff
+   thread-count-dependent baselines.
 3. **Phase 1 measurement** (plan §7): single-LDM benchmark M=1 vs M=2 with
    only the boundary yield (no intra-signal yields) — quantify pure switch
    overhead. Set `RONDB732_FIBER_DEBUG` to `0` (mt.cpp ~1370) before

@@ -6811,6 +6811,19 @@ void Dblqh::sendCompletedTc(Signal *signal, BlockReference atcBlockref,
   memcpy(&container->packedWords[pos], &Tdata[0], len << 2);
 }
 
+/**
+ * RONDB-732 Step 2 Finding #1 debug: per-instance running totals for the
+ * node-recovery copy protocol (delete-by-rowid sends, credits received,
+ * confs sent to a remote DBLQH). Each LQH instance touches only its own
+ * slot, so no synchronization is needed. Surfaced in the COPY-STALL dump
+ * and as periodic log breadcrumbs — the observed stall is a TAIL loss of
+ * conf credits, which head-throttled logs cannot show.
+ */
+static Uint32 g_dbg_copy_del_sent[MAX_NDBMT_LQH_WORKERS + 1];
+static Uint32 g_dbg_copy_credit[MAX_NDBMT_LQH_WORKERS + 1];
+static Uint32 g_dbg_copy_conf_sent[MAX_NDBMT_LQH_WORKERS + 1];
+static Uint32 g_dbg_nr_del7[MAX_NDBMT_LQH_WORKERS + 1];
+
 void Dblqh::sendLqhkeyconfTc(Signal *signal, BlockReference atcBlockref,
                              const TcConnectionrecPtr tcConnectptr) {
   LqhKeyConf *lqhKeyConf;
@@ -6892,6 +6905,22 @@ void Dblqh::sendLqhkeyconfTc(Signal *signal, BlockReference atcBlockref,
   lqhKeyConf->transId1 = transid1;
   lqhKeyConf->transId2 = transid2;
   lqhKeyConf->numFiredTriggers = numFiredTriggers;
+  /**
+   * RONDB-732 Step 2 Finding #1 debug: a conf to a remote DBLQH is a
+   * node-recovery copy conf (the copy source is the "API"); trace the
+   * echoed word credit (transId1) and whether it goes packed. Throttled.
+   */
+  if (block == getDBLQH() && Thostptr.i != getOwnNodeId()) {
+    g_dbg_copy_conf_sent[instance()]++;
+    const Uint32 total = g_dbg_copy_conf_sent[instance()];
+    if ((total & 255) == 0) {
+      g_eventLogger->info(
+          "RONDB732 COPY-CONF-SEND (%u) to node %u inst %u words=%u "
+          "packed=%u n=%u",
+          instance(), Thostptr.i, instanceKey, transid1, (Uint32)send_packed,
+          total);
+    }
+  }
 
   DEB_ABORT_TRANS(("(%u)LQHKEYCONF tcAccPtrI: %u, transid(H'%.8x,H'%.8x),"
                    " tcRef(%u,%x)",
@@ -8724,6 +8753,26 @@ void Dblqh::handle_acquire_exclusive_frag_access(Fragrecord *fragPtrP,
     fragPtrP->m_spin_exclusive_waiters = 0;
     m_exclusive_frag_access_cond_waits++;
     DEB_FRAGMENT_LOCK(fragPtrP);
+    /**
+     * RONDB-732 Step 2 Finding #1 debug: this NdbCondition_Wait has NO
+     * timeout and parks the whole OS thread. Under LDM fibers, if the
+     * reader holding the fragment is a sibling fiber (suspended on this
+     * very OS thread), this deadlocks permanently — the same hazard class
+     * as the job-buffer congestion cond_wait fixed in mt.cpp. Log entry
+     * (throttled) so a repro shows whether the copy stall parks here.
+     */
+    {
+      static Uint32 dbg_excl_waits = 0;
+      if (dbg_excl_waits < 40) {
+        dbg_excl_waits++;
+        g_eventLogger->info(
+            "RONDB732 FRAG-EXCL-WAIT (%u) tab(%u,%u) readers=%u scans=%u "
+            "n=%u",
+            instance(), fragPtrP->tabRef, fragPtrP->fragId,
+            fragPtrP->m_concurrent_read_key_count,
+            fragPtrP->m_concurrent_scan_count, dbg_excl_waits);
+      }
+    }
     NdbCondition_Wait(&fragPtrP->frag_write_cond, &fragPtrP->frag_mutex);
     DEB_FRAGMENT_LOCK(fragPtrP);
     start_spin_time = now;
@@ -10797,6 +10846,19 @@ void Dblqh::handle_nr_copy(Signal *signal, Ptr<TcConnectionrec> regTcPtr) {
          * We are performing a DELETE by ROWID and there was no row at this
          * row id. We set the correct GCI in this row id.
          */
+        /* RONDB-732 Step 2 Finding #1 debug: joiner-side receipt trace. */
+        {
+          g_dbg_nr_del7[instance()]++;
+          const Uint32 total = g_dbg_nr_del7[instance()];
+          if ((total & 255) == 0) {
+            g_eventLogger->info(
+                "RONDB732 NR-DEL-CASE7 (%u) row(%u,%u) transid0(words)=%u "
+                "n=%u",
+                instance(), regTcPtr.p->m_row_id.m_page_no,
+                regTcPtr.p->m_row_id.m_page_idx, regTcPtr.p->transid[0],
+                total);
+          }
+        }
         if (TRACENR_FLAG) TRACENR(" UPDATE_GCI" << endl);
         if (refToMain(regTcPtr.p->tcBlockref) == getRESTORE()) {
           jam();
@@ -26474,6 +26536,25 @@ void Dblqh::nextScanConfCopyLab(Signal *signal,
      * Also see TR 587.
      *----------------------------------------------------------------*/
     tcConP->transid[0] = TnoOfWords; // Data overload, see note!
+    /**
+     * RONDB-732 Step 2 Finding #1 debug: trace the copy DELETE-by-ROWID
+     * sends — the observed stall wedges copyCountWords at the limit with
+     * exactly these 80-word ops uncredited. First 40 logged; running
+     * per-instance total kept for the stall dump (the wedge is a TAIL
+     * loss, invisible to head-throttled logs).
+     */
+    {
+      g_dbg_copy_del_sent[instance()]++;
+      /* Heisenbug care: no per-op logging in the burst; breadcrumbs only. */
+      if ((g_dbg_copy_del_sent[instance()] & 255) == 0) {
+        g_eventLogger->info(
+            "RONDB732 COPY-SEND-DEL (%u) row(%u,%u) words=%u "
+            "countWords(before)=%u n=%u",
+            instance(), scanptr.p->m_row_id.m_page_no,
+            scanptr.p->m_row_id.m_page_idx, TnoOfWords,
+            tcConP->copyCountWords, g_dbg_copy_del_sent[instance()]);
+      }
+    }
     packLqhkeyreqLab(signal, tcConnectptr);
     tcConP->copyCountWords += TnoOfWords;
 #ifdef STATS_PARALLEL_COPY_FRAGMENT
@@ -26735,6 +26816,19 @@ void Dblqh::copyCompletedLab(Signal *signal,
 
   ndbrequire(tcConnectptr.p->transid[1] == lqhKeyConf->transId2);
   Uint32 words = lqhKeyConf->transId1;
+  /**
+   * RONDB-732 Step 2 Finding #1 debug: trace copy conf credits — first 40
+   * plus every 256th as a breadcrumb (the wedge is a tail loss).
+   */
+  {
+    g_dbg_copy_credit[instance()]++;
+    const Uint32 total = g_dbg_copy_credit[instance()];
+    if ((total & 255) == 0) {
+      g_eventLogger->info(
+          "RONDB732 COPY-CONF (%u) words=%u countWords(before)=%u n=%u",
+          instance(), words, tcConnectptr.p->copyCountWords, total);
+    }
+  }
 #ifdef STATS_PARALLEL_COPY_FRAGMENT
   c_words_copy_fragreq += words;
   c_rows_copy_fragreq++;
@@ -43221,6 +43315,20 @@ void Dblqh::handle_check_system_scans(Signal *signal) {
           signal->theData[0] = DumpStateOrd::LqhDumpOneCopyTcRec;
           signal->theData[1] = loc_tcConnectptr.i;
           EXECUTE_DIRECT(getDBLQH(), GSN_DUMP_STATE_ORD, signal, 2);
+          /* RONDB-732 Step 2 Finding #1 debug: copy flow-control state. */
+          g_eventLogger->info(
+              "RONDB732 COPY-STALL flowctl (%u): copyCountWords=%u "
+              "cmaxWordsAtNodeRec=%u c_active_copyFragReq=%u "
+              "live_node_halted=%u scanState=%u complStatus=%u errCnt=%u "
+              "del_sent_total=%u credit_total=%u",
+              instance(), loc_tcConnectptr.p->copyCountWords,
+              cmaxWordsAtNodeRec, c_active_copyFragReq,
+              (Uint32)c_copy_frag_live_node_halted,
+              (Uint32)loc_scanptr.p->scanState,
+              (Uint32)loc_scanptr.p->scanCompletedStatus,
+              loc_scanptr.p->scanErrorCounter,
+              g_dbg_copy_del_sent[instance()],
+              g_dbg_copy_credit[instance()]);
         }
         signal->theData[0] = DumpStateOrd::LqhDumpOneScanRec;
         signal->theData[1] = loc_scanptr.i;
