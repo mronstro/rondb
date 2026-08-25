@@ -1913,42 +1913,51 @@ Configuration::setupConfiguration()
     Uint32 ldm_threads = configured_ldm_workers;
     if (ldm_threads != 0 && globalData.theNumberOfFibersPerThread > 1)
     {
-      if (auto_thread_config != 0)
+      /**
+       * Fibers PACK the configured logical LDM worker count onto fewer
+       * physical OS threads — identically for explicit ThreadConfig and
+       * for AutomaticThreadConfig/NumCPUs. The configured count (named by
+       * ThreadConfig, or chosen by automatic config from NumCPUs) is the
+       * LOGICAL LDM worker count; with M fibers per thread those workers
+       * run on count/M OS threads. E.g. NumCPUs=16 auto-chooses 8 LDM
+       * workers; with 2 fibers/thread these run as 8 LDM slots on 4 OS
+       * threads.
+       *
+       * (An earlier version MULTIPLIED workers on the automatic path,
+       * putting configured*M auto-sized LDM slots on the machine — that
+       * oversubscribes; ndb_big_signals_atc (NumCPUs=16 => 16 LDM slots)
+       * died in startphase 1 with STTOR pool-init outrunning the
+       * watchdog. See claude_files/fibers/phase1_status.md.)
+       *
+       * NOTE (future work): with AutomaticThreadConfig and NumCPUs = 0
+       * the LDM count is derived from the actual host CPUs, so it can be
+       * large. No MTR test uses that combination, and for now it gets
+       * the same pack treatment as every other path; when fibers go on
+       * real hardware this case will likely want special treatment
+       * (e.g. keep all auto-detected cores as LDM OS threads and derive
+       * the logical worker count as cores*M, or hyperthread-aware
+       * placement) — decide when Phase 2 benchmarking reaches real
+       * server hardware.
+       *
+       * If the configured count is not divisible by the fiber count,
+       * IGNORE the env override and run with fibers off instead of
+       * failing the start: the override is a test/rollout switch, and a
+       * whole-suite sweep (RONDB_FIBERS_PER_THREAD=2 ./mtr ...) must not
+       * turn every odd-LDM-count test into a startup failure.
+       */
+      if ((configured_ldm_workers %
+           globalData.theNumberOfFibersPerThread) != 0)
       {
-        /**
-         * AutomaticThreadConfig/NumCPUs chooses the number of physical LDM
-         * threads from the available CPUs. Fibers add cooperative LDM slots
-         * on top of those physical threads.
-         */
-        ldm_workers =
-          configured_ldm_workers * globalData.theNumberOfFibersPerThread;
+        g_eventLogger->warning(
+            "NDBMT: RONDB_FIBERS_PER_THREAD=%u ignored: LDM thread "
+            "count %u is not divisible by it, running with fibers off",
+            globalData.theNumberOfFibersPerThread, configured_ldm_workers);
+        globalData.theNumberOfFibersPerThread = 1;
       }
       else
       {
-        /**
-         * Explicit ThreadConfig names the desired logical LDM worker count.
-         * Fibers pack those workers onto fewer physical LDM OS threads.
-         *
-         * If the configured LDM count is not divisible by the fiber count,
-         * IGNORE the env override and run with fibers off instead of
-         * failing the start: the override is a test/rollout switch, and a
-         * whole-suite sweep (RONDB_FIBERS_PER_THREAD=2 ./mtr ...) must not
-         * turn every odd-LDM-count test into a startup failure.
-         */
-        if ((configured_ldm_workers %
-             globalData.theNumberOfFibersPerThread) != 0)
-        {
-          g_eventLogger->warning(
-              "NDBMT: RONDB_FIBERS_PER_THREAD=%u ignored: LDM thread "
-              "count %u is not divisible by it, running with fibers off",
-              globalData.theNumberOfFibersPerThread, configured_ldm_workers);
-          globalData.theNumberOfFibersPerThread = 1;
-        }
-        else
-        {
-          ldm_threads =
-            configured_ldm_workers / globalData.theNumberOfFibersPerThread;
-        }
+        ldm_threads =
+          configured_ldm_workers / globalData.theNumberOfFibersPerThread;
       }
     }
     if (configured_ldm_workers == 0)
@@ -1959,6 +1968,26 @@ Configuration::setupConfiguration()
        */
       ldm_workers = globalData.ndbMtReceiveThreads;
       ldm_threads = configured_ldm_workers;
+      if (globalData.theNumberOfFibersPerThread > 1)
+      {
+        /**
+         * RONDB-732: fibers only apply to dedicated LDM threads. In the
+         * no-LDM-thread shapes (LDM work on the receive threads, e.g.
+         * AutomaticThreadConfig with very few CPUs) the fiber env
+         * override must be ignored: left set, ndbMtLqhThreadFibers
+         * (= recv worker count) exceeds ndbMtLqhThreads (0), so the
+         * fiber-slot range check claims thr 0 is a fiber slot and the
+         * fiber spawn arithmetic (base = thr_no % ndbMtLqhThreads)
+         * misfires — observed as ndb_basic_mix_numcpus (NumCPUs=2/4 =>
+         * 0 dedicated LDM threads) hanging at start with never-started
+         * threads ("stuck in: Unknown place 0").
+         */
+        g_eventLogger->warning(
+            "NDBMT: RONDB_FIBERS_PER_THREAD=%u ignored: no dedicated "
+            "LDM threads in this configuration, running with fibers off",
+            globalData.theNumberOfFibersPerThread);
+        globalData.theNumberOfFibersPerThread = 1;
+      }
     }
 
     globalData.ndbMtLqhWorkers = ldm_workers;
