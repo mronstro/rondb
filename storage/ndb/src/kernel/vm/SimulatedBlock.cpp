@@ -5154,7 +5154,20 @@ void SimulatedBlock::sendSYNC_THREAD_REQ(Signal *signal,
        ptr.p->m_cnt < MAX_INFLIGHT && fan_out < MAX_FAN_OUT &&
        instance != BlockThreadBitmask::NotFound;
        fan_out++, instance = ptr.p->m_threads.find_next(instance + 1)) {
-    Uint32 ref = numberToRef(THRMAN, instance, 0);
+    /**
+     * RONDB-732 (pre-existing upstream off-by-one): m_threads holds
+     * thr_no bits (mt_get_threads_for_blocks_no_proxy sets raw thr_no),
+     * but THRMAN instance N runs on thread N-1 and instance 0 is the
+     * ThrmanProxy — whose base-class execSYNC_THREAD_REQ just echoes
+     * CONF from the main thread without syncing anything. Addressing
+     * instance = thr_no therefore never synced thread 0 (proxy echo)
+     * nor the highest thread in the mask, and synced everything else
+     * shifted by one. Correct mapping is thr_no + 1 (cf. trpman.cpp
+     * doing exactly that). Matters especially for the LQH fragment-
+     * array switch synchronization, where a missed thread (e.g. a
+     * fiber slot) races the switch.
+     */
+    Uint32 ref = numberToRef(THRMAN, instance + 1, 0);
     sendSignal(ref, GSN_SYNC_THREAD_REQ, signal, 4, req_prio);
     ptr.p->m_cnt++;
   }

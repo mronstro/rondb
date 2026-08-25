@@ -2165,7 +2165,16 @@ Thrman::update_query_distribution(Signal *signal)
   Int32 max_load = 0;
   check_weights(&m_curr_weights[0]);
 
-  Int32 num_ldm_threads = (Int32)globalData.ndbMtLqhThreads;
+  /**
+   * RONDB-732: the query-distribution index space is LOGICAL LDM
+   * instances (getNumQueryInstances() spans them), so the LDM segment
+   * bound must be the logical instance count. Using the physical
+   * ndbMtLqhThreads here classified the fiber slots (indexes
+   * ldm_threads..ldm_workers-1) as TC threads in the distribution
+   * weights that route committed reads — the sibling
+   * initial_query_distribution() already uses getNumLDMInstances().
+   */
+  Int32 num_ldm_threads = (Int32)getNumLDMInstances();
   Int32 num_tc_threads = (Int32)globalData.ndbMtTcThreads;
   Int32 num_recv_threads = (Int32)globalData.ndbMtReceiveThreads;
   Int32 num_main_threads = (Int32)globalData.ndbMtMainThreads;
