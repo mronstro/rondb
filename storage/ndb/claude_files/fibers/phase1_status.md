@@ -384,6 +384,15 @@ eventually BOTH nodes negotiate an INITIAL start (child 7) = data wipe
 machine slowness. VERIFY by running ndb_restart2 fibers-off under the
 same load — if it fails identically, drop it from the fiber list (it
 would then be an upstream test-robustness issue on slow machines).
+FIBERS-OFF DATA POINT (2026-08-25, accidental baseline sweep — shell
+env forgotten): ndb_restart2, ndb_TCtakeover_stall and
+ndb_scan_protocol_timeout all PASSED fibers-off under comparable
+machine load; the only fibers-off failures were the 0-LDM ThreadFibers
+invariant bug (fixed same day). One pass is not proof, but it shifts
+Finding #2 back toward fiber involvement and reconfirms Bug A / Bug B /
+Finding #3 as fiber-linked. Bonus confirmation: the ndb_fibers* tests
+self-arm via their cnf [ENV] sections, so they exercised fibers (and
+passed) even inside the fibers-off sweep.
 
 **Original preliminary record:**
 The test crashes the SR mid-sysfile-write via error insert 1028 (fires
@@ -521,6 +530,28 @@ than TCtakeover for the family).
    casualty: `ndb_big_signals_atc` (16 auto-sized LDM slots on a laptop)
    died in startphase 1 with DBTC STTOR pool-init outrunning the
    watchdog. That test should behave like fibers-off after rebuild.
+   **ROOT CAUSE DEEPENED (2026-08-25)**: `ndb_basic_mix_numcpus` and
+   `ndb_query_thread_mrr` reproduced the start-hang **with fibers OFF**
+   (no env in those processes) — the real bug is 9f96fac's invariant
+   break, independent of the fiber flag: `ndbMtLqhThreadFibers` was set
+   to `ldm_workers`, which in 0-dedicated-LDM shapes equals the RECV
+   thread count, and every consumer that 9f96fac switched from
+   `ndbMtLqhThreads` to `ThreadFibers` (mt_add_thr_map's
+   num_lqh_threads == 0 special layouts, DbtcProxy first TC instance,
+   SimulatedBlock round-robin, thrman naming, malloc sizing) then
+   treated recv threads as LDM slots → block instances mapped onto
+   nonexistent LDM threads → nodes hang forever after "Send START_ORD"
+   ("Unknown place 0"). FIXED: `ndbMtLqhThreadFibers = ldm_threads ×
+   fibers` — 0 in 0-LDM shapes (restoring the exact pre-branch value at
+   every consumer), unchanged (= ldm_workers) in dedicated shapes. The
+   earlier fibers-off guard stays as belt-and-suspenders.
+   SECOND consumer of the same invariant found by the retest (2026-08-25,
+   crash at mt.cpp add_thr_map `require(thr_no < glob_num_threads)`):
+   `ndbMtQueryWorkers = ldm_workers + tc + main + recv` double-counted
+   the recv threads in 0-LDM shapes (one query worker too many for the
+   thread array). Fixed to use ndbMtLqhThreadFibers as the LDM term —
+   reduces to upstream's `ldm_threads + ...` when fibers are off and to
+   the 9f96fac logical count in dedicated fiber shapes.
    Related REAL bug found via `ndb_basic_mix_numcpus` (NumCPUs=2/4 ⇒
    auto config chooses **0 dedicated LDM threads**, LDM work on recv
    threads): the fiber env override stayed armed, making

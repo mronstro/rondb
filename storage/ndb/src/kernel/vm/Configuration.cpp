@@ -1992,7 +1992,22 @@ Configuration::setupConfiguration()
 
     globalData.ndbMtLqhWorkers = ldm_workers;
     globalData.ndbMtLqhThreads = ldm_threads;
-    globalData.ndbMtLqhThreadFibers = ldm_workers;
+    /**
+     * RONDB-732: ndbMtLqhThreadFibers is the number of thr_no slots
+     * occupied by the DEDICATED LDM section (ldm_threads * M). It must
+     * be 0 when there are no dedicated LDM threads: it was previously
+     * set to ldm_workers, which in the no-LDM-thread shapes equals the
+     * receive-thread count — mt_add_thr_map reads it as
+     * num_lqh_threads, so its `== 0` special-case branches (the
+     * receive-thread-only layouts) never fired and block instances were
+     * mapped onto nonexistent LDM slots. Both nodes then hung forever
+     * after "Send START_ORD" with threads stuck at "Unknown place 0" —
+     * ndb_basic_mix_numcpus / ndb_query_thread_mrr (NumCPUs=2/4),
+     * fibers ON or OFF alike. In dedicated-LDM shapes
+     * ldm_threads * M == ldm_workers, so this is unchanged there.
+     */
+    globalData.ndbMtLqhThreadFibers =
+        ldm_threads * globalData.theNumberOfFibersPerThread;
     if (globalData.theNumberOfFibersPerThread > 1 && ldm_threads != 0)
     {
       /**
@@ -2010,12 +2025,18 @@ Configuration::setupConfiguration()
      * Each block thread will have one Query worker, thus no more
      * any need for recover threads.
      *
-     * Keep ndbMtQueryWorkers tied to the logical LDM worker count, not the
-     * physical OS LDM thread count. Fiber slots still occupy thr_data entries
-     * in the LDM range, so TC/recv/main query-worker numbering starts after
-     * ndbMtLqhThreadFibers.
+     * The LDM term must be the number of thr_data slots the DEDICATED
+     * LDM section occupies — i.e. ndbMtLqhThreadFibers (= ldm_threads *
+     * fibers): the logical worker count in dedicated-LDM shapes (fiber
+     * slots occupy thr_data entries, so TC/recv/main query-worker
+     * numbering starts after them), and ZERO in the no-LDM-thread
+     * shapes, where the LDM workers live ON the receive threads and
+     * using ldm_workers (= recv count) double-counted them — one query
+     * worker too many, whose add_thr_map then hit
+     * require(thr_no < glob_num_threads) (upstream used ldm_threads
+     * here, which this reduces to when fibers are off).
      */
-    globalData.ndbMtQueryWorkers = ldm_workers +
+    globalData.ndbMtQueryWorkers = globalData.ndbMtLqhThreadFibers +
                                    globalData.ndbMtTcThreads +
                                    globalData.ndbMtMainThreads +
                                    globalData.ndbMtReceiveThreads;
