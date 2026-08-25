@@ -1094,6 +1094,7 @@ static Uint32 g_dbg_copy_del_sent[MAX_NDBMT_LQH_WORKERS + 1];
 static Uint32 g_dbg_copy_credit[MAX_NDBMT_LQH_WORKERS + 1];
 static Uint32 g_dbg_copy_conf_sent[MAX_NDBMT_LQH_WORKERS + 1];
 static Uint32 g_dbg_nr_del7[MAX_NDBMT_LQH_WORKERS + 1];
+static Uint32 g_dbg_nr_copy_ops[MAX_NDBMT_LQH_WORKERS + 1];
 
 void Dblqh::execCONTINUEB(Signal *signal) {
   jamEntry();
@@ -10755,6 +10756,25 @@ void Dblqh::handle_nr_copy(Signal *signal, Ptr<TcConnectionrec> regTcPtr) {
   Uint64 fragPtr = fragptr.p->tupFragptr;
   Uint32 op = regTcPtr.p->operation;
 
+  /**
+   * RONDB-732 Step 2 debug: case-agnostic joiner-side copy-op entry
+   * trace. The receipt stream stops deterministically around op ~3108
+   * (ndb_TCtakeover_stall); log every op in that window (plus every
+   * 512th) with type and rowid so the last logged entry identifies the
+   * wedging operation regardless of which handle_nr_copy case it takes.
+   */
+  {
+    g_dbg_nr_copy_ops[instance()]++;
+    const Uint32 total = g_dbg_nr_copy_ops[instance()];
+    if ((total & 511) == 0 || (total >= 3090 && total <= 3140)) {
+      g_eventLogger->info(
+          "RONDB732 NR-COPY-OP (%u) n=%u op=%u row(%u,%u) rowidFlag=%u",
+          instance(), total, op, regTcPtr.p->m_row_id.m_page_no,
+          regTcPtr.p->m_row_id.m_page_idx,
+          (Uint32)LqhKeyReq::getRowidFlag(regTcPtr.p->reqinfo));
+    }
+  }
+
   const bool nrCopyFlag = LqhKeyReq::getNrCopyFlag(regTcPtr.p->reqinfo);
 
   if (!LqhKeyReq::getRowidFlag(regTcPtr.p->reqinfo)) {
@@ -10876,11 +10896,18 @@ void Dblqh::handle_nr_copy(Signal *signal, Ptr<TcConnectionrec> regTcPtr) {
          * We are performing a DELETE by ROWID and there was no row at this
          * row id. We set the correct GCI in this row id.
          */
-        /* RONDB-732 Step 2 Finding #1 debug: joiner-side receipt trace. */
+        /**
+         * RONDB-732 Step 2 Finding #1 debug: joiner-side receipt trace.
+         * The joiner's receipt stream stops DETERMINISTICALLY at
+         * case7 = 3105 in every ndb_TCtakeover_stall capture, so log
+         * each op individually around that boundary (3090..3130) in
+         * addition to the every-256th breadcrumbs — the last logged row
+         * identifies the wedging operation/rowid.
+         */
         {
           g_dbg_nr_del7[instance()]++;
           const Uint32 total = g_dbg_nr_del7[instance()];
-          if ((total & 255) == 0) {
+          if ((total & 255) == 0 || (total >= 3090 && total <= 3130)) {
             g_eventLogger->info(
                 "RONDB732 NR-DEL-CASE7 (%u) row(%u,%u) transid0(words)=%u "
                 "n=%u",
@@ -16598,6 +16625,17 @@ void Dblqh::execLQH_TRANSREQ(Signal *signal) {
   tcNodeFailPtr.p->maxInstanceId = 0;
   tcNodeFailPtr.p->tcRecNow = 0;
   tcNodeFailPtr.p->tcFailStatus = TcNodeFailRecord::TC_STATE_TRUE;
+  /**
+   * RONDB-732 Step 2 debug: prove per-instance takeover-scan receipt.
+   * A copy scan toward a failed node leaked (WAIT_LQHKEY_COPY for 14
+   * minutes) on a FIBER instance — either this signal never reached the
+   * instance, or the scan's COPY branch never matched. Takeover is rare;
+   * unthrottled.
+   */
+  g_eventLogger->info(
+      "RONDB732 LQH-TRANSREQ (%u) failedNode=%u takeOverInstance=%u",
+      instance(), tcNodeFailPtr.p->oldNodeId,
+      tcNodeFailPtr.p->takeOverInstanceId);
   signal->theData[0] = ZLQH_TRANS_NEXT;
   signal->theData[1] = tcNodeFailPtr.i;
   sendSignal(cownref, GSN_CONTINUEB, signal, 2, JBB);
@@ -16781,7 +16819,12 @@ void Dblqh::lqhTransNextLab(Signal *signal, TcNodeFailRecordPtr tcNodeFailPtr) {
                  * WE HAVE TO CLOSE THE COPY PROCESS.
                  * -----------------------------------------------------------
                  */
-                if (0) g_eventLogger->info("close copy");
+                /* RONDB-732 Step 2 debug: prove the copy-close ran. */
+                g_eventLogger->info(
+                    "RONDB732 TAKEOVER-COPY-CLOSE (%u) failedNode=%u "
+                    "scanState=%u",
+                    instance(), tcNodeFailPtr.p->oldNodeId,
+                    (Uint32)scanptr.p->scanState);
                 tcConnectptr.p->tcNodeFailrec = tcNodeFailPtr.i;
                 tcConnectptr.p->abortState = TcConnectionrec::NEW_FROM_TC;
                 ndbassert(!m_is_query_block);

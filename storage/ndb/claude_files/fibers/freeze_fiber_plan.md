@@ -48,6 +48,89 @@
 >   fiber-traffic-timing exposing it.
 > - TRP-SEND-FAIL burst from the fiber thr → prepareSend refuses (trp
 >   state observed as down) and callers drop silently — a third variant.
+>
+> **ROUND-2 VERDICT (2026-08-25 capture, fully-canaried binary): BOTH
+> prior mechanisms REFUTED — and the model reframed.** Ledger identical
+> (source del_sent=3188 credit=3108; joiner case7=3105 conf_sent=3108;
+> return path lossless). SB-DISCARD-* = 0 on both nodes (nothing was
+> shredded from any send buffer); TRP-CHOICE shows the fiber slots (thr
+> 0-3) actively flipping onto the multi trps 17-20 at the switch — no
+> stale routing. FREEZE-FLUSH = 0 (nothing thread-local at freeze).
+> New facts: THREE multi-trp activation cycles in 75 s (initial start,
+> node-2 rejoin, and a SECOND rejoin = join #2 failed and retried);
+> in-flight TCP data dies traceless at each trp teardown (it already
+> left the send buffers — no local shredder can see it). And the
+> decisive observation: the source's wedged copy scan SURVIVED the
+> target's re-restart for 14 minutes — node-failure handling should
+> have aborted it.
+>
+> **REFRAME**: transient in-flight signal loss around restarts is
+> semi-normal and recoverable BY DESIGN — node-failure/cleanup handling
+> is the recovery. The fiber bug class is that CLEANUP FANOUTS MISS
+> FIBER INSTANCES, converting transient losses into permanent wedges.
+> One mechanism would then explain Bug A's permanence (copy-scan
+> node-failure cleanup missed on the fiber instance), Bug B (TC-takeover
+> abort never releasing the fiber instance's row lock) and Finding #3
+> (scan-timeout cleanup). Prime suspect: an instance fanout bound using
+> physical LDM threads (2) where logical instances (4) exist. Next dig:
+> the takeover/cleanup fanout paths — DblqhProxy::execLQH_TRANSREQ's
+> worker loop, DBTC's takeOverInstanceId iteration bound, DBLQH
+> node-failure copy-scan cleanup (closeCopyLab / execNODE_FAILREP), and
+> DBTC scan-close fanout — audit every instance-count source against
+> ndbMtLqhWorkers (logical).
+>
+> **CASCADE RECONSTRUCTION (capture #4, 2026-08-25) — three stacked
+> anomalies:**
+> 1. PRIMARY (fiber-suspect, JOINER side): during rejoin #2 the joiner
+>    stopped consuming instance-3 copy traffic while alive (~23 s:
+>    receipts frozen at case7=3105 from 15:23:57, node up until
+>    15:24:20) — echoes capture #1 where the joiner's "(3)Starting local
+>    LCP" never appeared. Something wedges the joiner's fiber instance
+>    during its own phase 5.
+> 2. SECONDARY (by design): restart supervision crash-ordered the
+>    stalled joiner (NDB_TAMPER error 9999 into CMVMI at 15:24:16, death
+>    15:24:20; the test kills node 2 only ONCE, at 15:23:42 — the 9999
+>    is internal). The in-flight tail (del_sent 3106-3188) died with the
+>    node — normal, recoverable loss.
+> 3. TERTIARY (fiber bug, SOURCE side): failure #2's cleanup never
+>    closed instance 3's copy scan — wedged WAIT_LQHKEY_COPY for 14 min.
+>    Audited so far: closeCopyRequestLab has exactly ONE caller — the
+>    LQH_TRANSREQ takeover scan (DblqhMain ~16776: gates are
+>    transactionState not IDLE/TC_NOT_CONNECTED, tcScanRec set,
+>    scanNodeId == failed node). DblqhProxy fans LQH_TRANSREQ via
+>    LocalProxy c_workers = mt_get_instance_count = ndbMtLqhWorkers
+>    (logical, 4) — fanout bound SOUND. DBTC round bounds
+>    (maxInstanceId) discovered from real op records — SOUND. So the
+>    miss is either LQH_TRANSREQ not reaching/executing on the fiber
+>    instance after failure #2, or a gate mismatch on the copy record —
+>    NEXT: canary in Dblqh::execLQH_TRANSREQ (per-instance receipt log)
+>    + in the COPY-branch close, to see which on the next repro.
+>
+> **CAPTURE #5 (2026-08-25 18:37, pre-canary binary): DIGIT-IDENTICAL to
+> #4** — source del_sent=3180 credit=3108 scanState=9; joiner
+> case7=3105 conf_sent=3108; 9999 crash-order on node 2 again. The
+> joiner's receipt stream stops at EXACTLY case7=3105 in every capture:
+> **the primary anomaly is DETERMINISTIC, wedging on a specific
+> operation (~overall op 3108/3109), not a timing race.** New canaries
+> for the next repro: NR-DEL-CASE7 logs every op in the 3090..3130
+> window; NR-COPY-OP (new, case-agnostic at handle_nr_copy entry) logs
+> every op in 3090..3140 with type+rowid — the last logged entry names
+> the wedging op regardless of which copy case it takes.
+>
+> **FANOUT AUDIT COMPLETE (background sweep + manual)**: all
+> cleanup/failure fanouts verified SOUND (logical counts everywhere:
+> LocalProxy c_workers, remote m_lqh_workers via QMGR CmNodeInfo,
+> getInstanceNo family, SUMA GCP, DIH copy paths) — the tertiary leak
+> is NOT an iteration-bound bug. Two adjacent real bugs found and
+> FIXED: (1) Thrman::update_query_distribution used physical
+> ndbMtLqhThreads to segment the logical query-distribution index space
+> — fiber slots were weighted as TC threads in the committed-read
+> routing weights (possible contributor to the joiner-deaf primary);
+> now getNumLDMInstances(). (2) sendSYNC_THREAD_REQ off-by-one
+> (pre-existing upstream): thr_no bits addressed as THRMAN instances —
+> thread 0 never synced (proxy echo), highest thread never synced, rest
+> shifted; now instance+1. Guards the LQH fragment-array switch sync.
+> Noted, not fixed: benign Backup fragWorkers bit-0/count desync.
 
 Next focused task (chosen 2026-08-21). Goal: make the thread-freeze
 protocol correct when LDM fibers are enabled, so the temporary
