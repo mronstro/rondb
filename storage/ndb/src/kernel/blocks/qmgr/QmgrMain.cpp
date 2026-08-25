@@ -547,6 +547,15 @@ void Qmgr::execREAD_CONFIG_REQ(Signal *signal) {
     jam();
     m_num_multi_trps = 1;
   }
+  /**
+   * RONDB-732: multi-transporters are allowed together with LDM fibers.
+   * The multi-trp switch freezes all block threads for quiescence; fiber
+   * slots are exempted from the freeze fan-out, so their thread-local
+   * send buffers are flushed on their behalf by the main THRMAN instance
+   * once all threads are parked (mt_flush_fiber_send_buffers(), called
+   * from Thrman::wait_all_stop()) — otherwise a suspended fiber's send
+   * tail would be lost when the switch write-shuts the old transporter.
+   */
   m_num_multi_trps = MIN(m_num_multi_trps, MAX_NODE_GROUP_TRANSPORTERS);
   g_eventLogger->info("NodeGroupTransporters set to: %u", m_num_multi_trps);
   ReadConfigConf * conf = (ReadConfigConf*)signal->getDataPtrSend();

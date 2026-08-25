@@ -147,6 +147,8 @@ void mt_getSendPerformanceTimers(Uint32 send_instance,
 Uint32 mt_getNumSendThreads();
 Uint32 mt_getNumThreads();
 Uint32 mt_getNumFreezeThreads();
+/* RONDB-732: flush fiber slots' send buffers under freeze quiescence. */
+void mt_flush_fiber_send_buffers();
 bool mt_isBlockThreadFiber(Uint32 thr_no);
 void mt_flush_send_buffers(Uint32 self);
 void mt_set_watchdog_counter(Uint32 self);

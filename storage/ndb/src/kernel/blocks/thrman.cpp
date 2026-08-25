@@ -5078,6 +5078,16 @@ void Thrman::wait_freeze(bool ret) {
 void Thrman::wait_all_stop(Signal *signal) {
   if (check_freeze_waiters() == m_num_freeze_threads) {
     jam();
+    /**
+     * RONDB-732: all freeze-eligible threads are now parked, so every LDM
+     * fiber slot is provably suspended until unfreeze. Flush the fiber
+     * slots' thread-local transporter send buffers NOW, before the
+     * frozen-state action: the multi-trp switch write-shuts the old
+     * transporter's socket, so anything a fiber would flush after
+     * unfreeze onto it is lost (observed as the ndb_TCtakeover_stall
+     * copy-fragment tail loss). No-op without fibers.
+     */
+    mt_flush_fiber_send_buffers();
     FreezeActionReq *req = CAST_PTR(FreezeActionReq, signal->getDataPtrSend());
     BlockReference ref = m_freeze_req.senderRef;
     req->nodeId = m_freeze_req.nodeId;

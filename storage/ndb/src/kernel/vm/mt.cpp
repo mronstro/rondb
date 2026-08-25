@@ -1409,6 +1409,7 @@ struct alignas(NDB_CL) thr_data {
     m_dbg_sleep_waits = 0;
     m_dbg_spin_enters = 0;
     m_dbg_first_loop_done = false;
+    std::memset(m_dbg_last_trp_to_node, 0, sizeof(m_dbg_last_trp_to_node));
 #endif
   }
 
@@ -1527,6 +1528,12 @@ struct alignas(NDB_CL) thr_data {
   Uint64 m_dbg_do_send_nanos;  // wall time inside do_send() (includes assist)
   Uint64 m_dbg_sleep_waits;    // real cond_waits on own m_waiter that slept
   Uint64 m_dbg_spin_enters;    // entries into the fiber-mode spin loop (check_yield)
+  /**
+   * trp-choice change tracker. Sized by the compile-time absolute node-id
+   * cap: MAX_NDB_NODES is a runtime value in RonDB (dynamic node counts)
+   * and cannot size a struct field.
+   */
+  Uint8 m_dbg_last_trp_to_node[MAX_NODES_ID + 1];
   bool   m_dbg_first_loop_done; // has this fiber executed its first loop yet
   NDB_TICKS m_dbg_last_report; // fiber-0 throttle for the periodic dump
 #endif
@@ -5814,6 +5821,24 @@ void trp_callback::enable_send_buffer(TrpId trp_id) {
     link_thread_send_buffers(sb, trp_id);
 
     if (sb->m_buffer.m_first_page != NULL) {
+#if RONDB732_FIBER_DEBUG
+      /**
+       * RONDB-732: signals buffered while this trp's send buffer was
+       * disabled are discarded here. Suspected shredder for the
+       * ndb_TCtakeover_stall copy-tail loss (~100 sends vanishing around
+       * a multi-trp switch). Log what dies, throttled.
+       */
+      {
+        static Uint32 dbg_enable_discards = 0;
+        if (dbg_enable_discards < 100) {
+          dbg_enable_discards++;
+          g_eventLogger->info(
+              "RONDB732 SB-DISCARD-ENABLE trp=%u bytes=%llu n=%u",
+              trp_id, (unsigned long long)sb->m_buffered_size,
+              dbg_enable_discards);
+        }
+      }
+#endif
       thread_local_pool<thr_send_page> pool(&g_thr_repository->m_sb_pool, 0);
       release_list(&pool, sb->m_buffer.m_first_page, sb->m_buffer.m_last_page);
       pool.release_all(g_thr_repository->m_mm, RG_TRANSPORTER_BUFFERS,
@@ -5845,6 +5870,19 @@ void trp_callback::disable_send_buffer(TrpId trp_id) {
    * or any leftovers discarded by ::enable_send_buffer()
    */
   if (sb->m_sending.m_first_page != NULL) {
+#if RONDB732_FIBER_DEBUG
+    /* RONDB-732: see SB-DISCARD-ENABLE above — the disconnect-side twin. */
+    {
+      static Uint32 dbg_disable_discards = 0;
+      if (dbg_disable_discards < 100) {
+        dbg_disable_discards++;
+        g_eventLogger->info(
+            "RONDB732 SB-DISCARD-DISABLE trp=%u bytes=%llu n=%u",
+            trp_id, (unsigned long long)sb->m_sending_size,
+            dbg_disable_discards);
+      }
+    }
+#endif
     thread_local_pool<thr_send_page> pool(&g_thr_repository->m_sb_pool, 0);
     release_list(&pool, sb->m_sending.m_first_page, sb->m_sending.m_last_page);
     pool.release_all(
@@ -9749,6 +9787,56 @@ Uint32 mt_getNumFreezeThreads() {
 }
 
 /**
+ * RONDB-732: called by the main THRMAN instance in the FREEZE_THREAD_REQ
+ * protocol, once every freeze-eligible block thread is parked in
+ * wait_freeze() and before FREEZE_ACTION_REQ triggers the requested
+ * change (today: the multi-transporter switch, which sends a LAST signal
+ * on the old transporter and then shuts its socket down for writes).
+ *
+ * Fiber slots are skipped by the freeze fan-out — freezing one would
+ * park the shared OS thread before its base fiber could freeze and
+ * deadlock the waiter count — so, unlike every frozen thread, they never
+ * ran flush_send_buffers() on their own thr_data. Any thread-local send
+ * pages a suspended fiber holds are committed to a specific transporter;
+ * flushed after unfreeze they would hit the old transporter's
+ * closed-for-writes socket and be lost (observed as the copy-fragment
+ * tail loss in ndb_TCtakeover_stall, see
+ * claude_files/fibers/phase1_status.md Finding #1 / Bug A).
+ *
+ * Flushing here, into the global per-transporter queues, is sufficient:
+ * everything queued before the switch's last-signal sequence is
+ * transmitted by the socket drain before write-shutdown. It is also
+ * safe: all fiber slots' OS threads are parked in wait_freeze, so no
+ * concurrent producer exists for their thread-local buffers or their
+ * slots of the global send queues (the same single-producer rule the
+ * owning thread relies on).
+ */
+void mt_flush_fiber_send_buffers() {
+  if (globalData.theNumberOfFibersPerThread <= 1) {
+    return;
+  }
+  struct thr_repository *rep = g_thr_repository;
+  for (Uint32 thr_no = globalData.ndbMtLqhThreads;
+       thr_no < globalData.ndbMtLqhThreadFibers; thr_no++) {
+    struct thr_data *thrptr = &rep->m_thread[thr_no];
+    Uint32 flushed_trps = 0;
+    for (Uint32 trp_id = 1; trp_id < MAX_NTRANSPORTERS; trp_id++) {
+      if (thrptr->m_send_buffers[trp_id].m_first_page != nullptr) {
+        flush_send_buffer(thrptr, trp_id);
+        flushed_trps++;
+      }
+    }
+    if (flushed_trps > 0) {
+      g_eventLogger->info(
+          "RONDB732 FREEZE-FLUSH: fiber thr_no=%u had unflushed send "
+          "buffers for %u transporter(s) at freeze; flushed before the "
+          "frozen-state action",
+          thr_no, flushed_trps);
+    }
+  }
+}
+
+/**
  * Copy out signals one-by-one from the 'm_local_buffer' into the thread-shared
  * 'm_current_write_buffer'. If the write_buffer becomes full, the available
  * 'm_next_buffer' will be used. The copied signals will be 'published'
@@ -10268,6 +10356,45 @@ void sendprioa(Uint32 self, const SignalHeader *s, const uint32 *data,
  *
  * (The signal is only queued here, and actually sent later in do_send()).
  */
+#if RONDB732_FIBER_DEBUG
+/**
+ * RONDB-732: per-thread trp-choice tracker. Logs (throttled) whenever a
+ * thread's chosen transporter for a given node CHANGES, and any non-OK
+ * prepareSend to a data node. Purpose: show whether fiber slots observe
+ * the multi-trp routing flip at the same point as base threads — the
+ * suspected mechanism for the post-switch copy-tail loss is a fiber
+ * routing onto a trp whose send buffer is disabled (whose data the
+ * enable/disable shredders then discard, see SB-DISCARD-* above).
+ */
+static void dbg_note_trp_choice(thr_data *selfptr, NodeId nodeId,
+                                Uint32 trp_id, Uint32 ss) {
+  if (globalData.theNumberOfFibersPerThread <= 1) return;
+  if (nodeId > MAX_NODES_ID) return;    // hard array bound
+  if (nodeId >= MAX_NDB_NODES) return;  // data nodes only (runtime limit)
+  static Uint32 dbg_trp_logs = 0;
+  if (ss != SEND_OK) {
+    if (dbg_trp_logs < 200) {
+      dbg_trp_logs++;
+      g_eventLogger->info(
+          "RONDB732 TRP-SEND-FAIL thr=%u node=%u trp=%u status=%u n=%u",
+          selfptr->m_thr_no, nodeId, trp_id, ss, dbg_trp_logs);
+    }
+    return;
+  }
+  Uint8 *last = &selfptr->m_dbg_last_trp_to_node[nodeId];
+  if (*last != (Uint8)trp_id) {
+    Uint8 prev = *last;
+    *last = (Uint8)trp_id;
+    if (dbg_trp_logs < 200) {
+      dbg_trp_logs++;
+      g_eventLogger->info(
+          "RONDB732 TRP-CHOICE thr=%u node=%u trp %u -> %u n=%u",
+          selfptr->m_thr_no, nodeId, prev, trp_id, dbg_trp_logs);
+    }
+  }
+}
+#endif
+
 SendStatus mt_send_remote(Uint32 self, const SignalHeader *sh, Uint8 prio,
                           const Uint32 *data, NodeId nodeId,
                           const LinearSectionPtr ptr[3]) {
@@ -10285,6 +10412,9 @@ SendStatus mt_send_remote(Uint32 self, const SignalHeader *sh, Uint8 prio,
                                              nodeId,
                                              trp_id,
                                              ptr);
+#if RONDB732_FIBER_DEBUG
+  dbg_note_trp_choice(selfptr, nodeId, trp_id, (Uint32)ss);
+#endif
   if (likely(ss == SEND_OK))
   {
     if (globalData.thePrintFlag)
@@ -10321,6 +10451,9 @@ SendStatus mt_send_remote(Uint32 self, const SignalHeader *sh, Uint8 prio,
   TrpId trp_id = 0;
   ss = globalTransporterRegistry.prepareSend(&handle, sh, prio, data, nodeId,
                                              trp_id, *thePool, ptr);
+#if RONDB732_FIBER_DEBUG
+  dbg_note_trp_choice(selfptr, nodeId, trp_id, (Uint32)ss);
+#endif
   if (likely(ss == SEND_OK)) {
     register_pending_send(selfptr, trp_id);
   }
