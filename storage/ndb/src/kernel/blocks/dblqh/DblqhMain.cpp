@@ -1082,6 +1082,19 @@ void Dblqh::queued_log_write(Signal *signal, LogPartRecord *logPartPtrP) {
 /* This signal is also used for signal loops, for example   */
 /* the timeout handling for writing logs every second.      */
 /* ******************************************************>> */
+/**
+ * RONDB-732 Step 2 Finding #1 debug: per-instance running totals for the
+ * node-recovery copy protocol (delete-by-rowid sends, credits received,
+ * confs sent to a remote DBLQH). Each LQH instance touches only its own
+ * slot, so no synchronization is needed. Surfaced in the COPY-STALL dump
+ * and as periodic log breadcrumbs — the observed stall is a TAIL loss of
+ * conf credits, which head-throttled logs cannot show.
+ */
+static Uint32 g_dbg_copy_del_sent[MAX_NDBMT_LQH_WORKERS + 1];
+static Uint32 g_dbg_copy_credit[MAX_NDBMT_LQH_WORKERS + 1];
+static Uint32 g_dbg_copy_conf_sent[MAX_NDBMT_LQH_WORKERS + 1];
+static Uint32 g_dbg_nr_del7[MAX_NDBMT_LQH_WORKERS + 1];
+
 void Dblqh::execCONTINUEB(Signal *signal) {
   jamEntry();
   Uint32 tcase = signal->theData[0];
@@ -1287,6 +1300,36 @@ void Dblqh::execCONTINUEB(Signal *signal) {
     }
     case ZCHECK_SYSTEM_SCANS: {
       handle_check_system_scans(signal);
+      /**
+       * RONDB-732 Step 2 Finding #1 debug: log this instance's copy-
+       * protocol totals once per tick while they change, so the FINAL
+       * totals survive in the log after a wedge (the joiner's exact
+       * receipt/conf counts are the discriminator between request-path
+       * and conf-path tail loss, and the process dies with the node).
+       * First tick after the last change logs the final values; then
+       * silence. Near-zero cost when idle.
+       */
+      {
+        static Uint32 last_case7[MAX_NDBMT_LQH_WORKERS + 1];
+        static Uint32 last_conf_sent[MAX_NDBMT_LQH_WORKERS + 1];
+        static Uint32 last_del_sent[MAX_NDBMT_LQH_WORKERS + 1];
+        static Uint32 last_credit[MAX_NDBMT_LQH_WORKERS + 1];
+        const Uint32 inst = instance();
+        if (g_dbg_nr_del7[inst] != last_case7[inst] ||
+            g_dbg_copy_conf_sent[inst] != last_conf_sent[inst] ||
+            g_dbg_copy_del_sent[inst] != last_del_sent[inst] ||
+            g_dbg_copy_credit[inst] != last_credit[inst]) {
+          last_case7[inst] = g_dbg_nr_del7[inst];
+          last_conf_sent[inst] = g_dbg_copy_conf_sent[inst];
+          last_del_sent[inst] = g_dbg_copy_del_sent[inst];
+          last_credit[inst] = g_dbg_copy_credit[inst];
+          g_eventLogger->info(
+              "RONDB732 COPY-TOTALS (%u) del_sent=%u credit=%u case7=%u "
+              "conf_sent=%u",
+              inst, g_dbg_copy_del_sent[inst], g_dbg_copy_credit[inst],
+              g_dbg_nr_del7[inst], g_dbg_copy_conf_sent[inst]);
+        }
+      }
       signal->theData[0] = ZCHECK_SYSTEM_SCANS;
       sendSignalWithDelay(cownref, GSN_CONTINUEB, signal,
                           DELAY_CHECK_SYSTEM_SCANS, 1);
@@ -6810,19 +6853,6 @@ void Dblqh::sendCompletedTc(Signal *signal, BlockReference atcBlockref,
   Thostptr.p->tc_pack_mask.set(instanceKey);
   memcpy(&container->packedWords[pos], &Tdata[0], len << 2);
 }
-
-/**
- * RONDB-732 Step 2 Finding #1 debug: per-instance running totals for the
- * node-recovery copy protocol (delete-by-rowid sends, credits received,
- * confs sent to a remote DBLQH). Each LQH instance touches only its own
- * slot, so no synchronization is needed. Surfaced in the COPY-STALL dump
- * and as periodic log breadcrumbs — the observed stall is a TAIL loss of
- * conf credits, which head-throttled logs cannot show.
- */
-static Uint32 g_dbg_copy_del_sent[MAX_NDBMT_LQH_WORKERS + 1];
-static Uint32 g_dbg_copy_credit[MAX_NDBMT_LQH_WORKERS + 1];
-static Uint32 g_dbg_copy_conf_sent[MAX_NDBMT_LQH_WORKERS + 1];
-static Uint32 g_dbg_nr_del7[MAX_NDBMT_LQH_WORKERS + 1];
 
 void Dblqh::sendLqhkeyconfTc(Signal *signal, BlockReference atcBlockref,
                              const TcConnectionrecPtr tcConnectptr) {

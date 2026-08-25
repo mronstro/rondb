@@ -277,7 +277,82 @@ before it. Both original failures had a parallel mtr from another tree
 loading the machine; all passes since were on a quiet box — machine
 contention is the remaining race-enabler hypothesis.
 
-**STATUS: PARKED AS MONITORED (2026-08-21).** The wedge is real (two
+**REPRODUCED WITH CANARIES (2026-08-21, full-suite run = machine under
+load — confirming load as the race enabler).** Same signature: instance
+3 (non-base fiber), scanState=9, copyCountWords=7280 >= cmax 6762. The
+canaries delivered the ledger: source `del_sent_total=3196` vs
+`credit_total=3108` (~88 responses missing); breadcrumbs in perfect
+lockstep through op 3072 (identical row (0,7820) on both nodes);
+`FRAG-EXCL-WAIT=0` (joiner never parked in the RAL wait — that suspect
+is eliminated for this bug). Remaining ambiguity: the 256-granularity
+breadcrumbs cannot split the two tail-loss candidates — ~88 REQUESTS
+stuck in the source fiber's send path (joiner totals would be 3108) vs
+~88 CONFS lost on the packed return path (joiner totals would be 3196)
+— and the joiner's exact totals died with its process. Fix applied:
+**COPY-TOTALS canary** — the ZCHECK_SYSTEM_SCANS tick (~10 s, both
+nodes) logs each instance's del_sent/credit/case7/conf_sent totals
+whenever they changed, so the first tick after the tail loss preserves
+the exact final values in the log. Next repro answers the question
+outright: joiner case7 = 3108-like ⇒ source send-tail loss; = 3196-like
+⇒ conf return-path loss. Needs rebuild; reproduce via suite runs /
+loaded machine (single-test repeats on a quiet box don't trigger it).
+
+**ROOT CAUSE IDENTIFIED (2026-08-21, repro #4 with COPY-TOTALS canary,
+caught live in a suite run, worker var/2): SOURCE-SIDE SEND-TAIL LOSS AT
+THE MULTI-TRANSPORTER SWITCH.** The ledger settled the fork: source
+inst 3 `del_sent=3180 credit=3108`; joiner inst 3 `case7=3105
+conf_sent=3108`; source credited exactly 3108 — **the return path is
+lossless; ~75 REQUESTS never reached the wire**. And the same node log
+shows the multi-transporter machinery mid-restart: `m_num_multi_trps=4`
+(= fiber-inflated ndbMtLqhWorkers, QmgrMain ~517), GET_NUM_MULTI_TRP
+REF/retry, and "Ignored connection attempt ... multi transporter
+instance 1/2/3 is not in range" (connect-vs-create race). Mechanism:
+the SWITCH_MULTI_TRP protocol achieves quiescence by freezing all block
+threads, but commit 9f96fac exempted fiber slots from
+FREEZE_THREAD_REQ (they share the OS thread with their base) — so a
+non-base fiber streaming the copy burst at the switch instant has
+send-buffer state the switch's per-frozen-thread handling never sees;
+its tail strands on the old transporter assignment, permanently.
+Explains every observation: node-restart-only (switch runs then),
+mid-burst cutoff at an arbitrary op, always a NON-base instance, load/
+timing dependence (burst must overlap the switch), and the idle-at-
+switch reverse direction surviving. FRAG-EXCL-WAIT=0 in all captures —
+the RAL cond-wait is exonerated for this bug.
+
+**Workaround in tree (2026-08-21, QmgrMain.cpp, needs rebuild)**:
+`m_num_multi_trps` forced to 1 when `theNumberOfFibersPerThread > 1`
+(logged "forcing NodeGroupTransporters=1 under LDM fibers"). This
+skips the switch entirely. It is ALSO the confirming experiment: if
+suite runs under load no longer wedge ndb_TCtakeover_stall, the theory
+is proven. TODO (real fix, before fibers meet production): make the
+multi-trp switch fiber-safe — either include fiber slots' send state in
+the freeze/switch handling, or freeze at OS-thread granularity with
+per-fiber send-buffer flush before the switch. Also revisit whether
+m_num_multi_trps should be sized by logical workers (4) or physical
+LDM threads (2) under fibers.
+
+**WORKAROUND VERIFIED / SECOND BUG SPLIT OUT (2026-08-21, suite run
+WITH the workaround)**: the failing run's log shows "NodeGroupTransporters
+set to: 1" — and the state=9 flow-control wedge is GONE (ledger clean:
+del_sent=3105, credit=3108). Bug A (multi-trp switch send-tail loss) is
+thereby CONFIRMED and masked. `ndb_TCtakeover_stall` still fails on a
+DIFFERENT shape — **Bug B**: scanState=1, copyCountWords=0, the copy scan
+waiting forever on a row lock the TC-takeover abort should have released
+(same shape seen 2026-08-20 pre-workaround, so Bug B is not multi-trp
+related). NEXT FOCUSED TASK (user decision): make FREEZE_THREAD_REQ
+fiber-safe and lift the workaround — full plan in
+**`freeze_fiber_plan.md`** (protocol walkthrough, the three gaps, the
+flush-on-behalf design + cooperative-drain fallback, audit list,
+verification gates incl. the Bug-B entanglement).
+**Option C IMPLEMENTED 2026-08-21** (see the plan's header note):
+`mt_flush_fiber_send_buffers()` called from `Thrman::wait_all_stop()`
+at the all-parked point; QMGR workaround removed; FREEZE-FLUSH canary
+proves engagement. Needs rebuild + suite-under-load verification —
+expect: no state=9 wedges, FREEZE-FLUSH lines with nonzero counts in
+restart tests, balanced COPY-TOTALS; Bug B (stuck row lock) may still
+fail ndb_TCtakeover_stall independently.
+
+**Prior status: PARKED AS MONITORED (2026-08-21).** The wedge is real (two
 full log captures, exact flow-control arithmetic) but not currently
 reproducible. Canaries stay in permanently while RONDB732_FIBER_DEBUG
 is on: silent copy-protocol counters, every-256th breadcrumbs, the
@@ -294,6 +369,58 @@ machine-load-dependent race in the fiber sleep/wakeup tail; packed
 container tail flush; the timeout-less frag-access NdbCondition_Wait
 (fiber-hostile by construction and worth fixing on principle
 regardless).
+
+**Finding #2 — DISSECTED (2026-08-21, 2nd repro): most likely a
+TEST-DESIGN LOAD RACE, not a fiber bug.** Per-child map of the angel log
+shows: error insert 1028 does not crash the node — it ORDERS another
+system restart at each sysfile write, so while armed the cluster loops
+(SR completes → ~9 s uptime → ordered restart; children 2/3/6 completed
+SRs at GCI 40/45/82, children 4/5 never finished theirs). The test's
+`ndb_waiter` must catch the short started-window to let `all error 0`
+disarm — under machine load it keeps missing, sysfile writes keep
+getting zapped (every start shows "Local sysfile ... gci: 0"), and
+eventually BOTH nodes negotiate an INITIAL start (child 7) = data wipe
+= the observed "Unknown table t1". Fibers' only role: contributing to
+machine slowness. VERIFY by running ndb_restart2 fibers-off under the
+same load — if it fails identically, drop it from the fiber list (it
+would then be an upstream test-robustness issue on slow machines).
+
+**Original preliminary record:**
+The test crashes the SR mid-sysfile-write via error insert 1028 (fires
+once; the insert dies with the process) and expects the next SR to
+recover. In the failing attempt the cluster instead went through ~20
+restart cycles over ~9 minutes (20× "Start phase 1 completed" in
+ndbd.1's log, redo-apply at 10:50 → final start 10:59) and eventually
+came up as an **initial start** — data wiped, so the test's DROP TABLE
+found no table. mtr's retry (fresh cluster) passed → timing-dependent.
+No multi-trp signature in the log (0 hits) and no clean shutdown
+markers, so this is likely a DIFFERENT fiber SR bug than Finding #1 —
+possibly ~19 independent SR failures (crash or hang per cycle) until
+angel/DIH escalated to initial. NOT yet investigated: what killed each
+cycle (the accumulated ndbd.log needs per-cycle dissection). Revisit
+after the suite finishes and after the multi-trp workaround rebuild —
+re-sweep first; whatever still fails then is the true Finding-#2 class.
+
+Sweep-noise instance (2026-08-21): `ndb_alter_table_column_online`
+attempt-1 "cluster start failed" = both ndbmtd unable to reach mgmd
+(localhost:13000) for 60 s under machine load; never fetched config,
+never booted; retry-passed twice. Infrastructure flake, not fibers.
+
+**Finding #3 (2026-08-21, suite run, PRELIMINARY): `ndb.ndb_scan_protocol_timeout`
+— PK lookup times out (4012) after an induced scan timeout.** The test
+arms error insert 5112 to make an ordered scan time out, closes it, then
+verifies all ApiConnectRecords are reusable via a PK-lookup sweep — one
+of those lookups hung. Node logs clean (no watchdog/stall lines): a
+protocol-level wedge (stuck TC/LQH record after scan-timeout cleanup).
+**Family hypothesis**: Bug B (TC-takeover abort never releases a row
+lock on a fiber instance) and this finding look like the same class —
+ERROR/CLEANUP-path signal handling involving LDM fiber instances
+misbehaving while normal-path traffic is fine. Candidate common cause:
+a cleanup fanout (abort, scan close, timeout handling) that iterates or
+addresses LQH instances using physical-thread-derived counts somewhere.
+Investigate after the config-guard rebuild: if it persists, drill this
+test (it is error-insert-deterministic, likely a better repro vehicle
+than TCtakeover for the family).
 
 ## Next steps
 
@@ -384,9 +511,31 @@ regardless).
    logs a definitive "NDBMT: LDM fibers active: N logical workers on M OS
    threads" line when fibers engage; the fiber MTR tests now assert THAT
    line (parse-time env logging no longer implies fibers are on).
-   Remaining known sweep noise: AutomaticThreadConfig/NumCPUs tests
-   multiply the worker count (intended semantics) and may diff
-   thread-count-dependent baselines.
+   AutomaticThreadConfig noise RESOLVED BY DESIGN CHANGE (2026-08-21,
+   user decision): the auto path now PACKS exactly like explicit
+   ThreadConfig — the auto-chosen LDM count is the LOGICAL worker count,
+   run on count/M OS threads (NumCPUs=16 → 8 workers on 4 OS threads at
+   M=2). Both paths unified in Configuration.cpp with the same
+   divisibility fallback. Previously the auto path MULTIPLIED
+   (configured×M slots), which oversubscribed the machine — confirmed
+   casualty: `ndb_big_signals_atc` (16 auto-sized LDM slots on a laptop)
+   died in startphase 1 with DBTC STTOR pool-init outrunning the
+   watchdog. That test should behave like fibers-off after rebuild.
+   Related REAL bug found via `ndb_basic_mix_numcpus` (NumCPUs=2/4 ⇒
+   auto config chooses **0 dedicated LDM threads**, LDM work on recv
+   threads): the fiber env override stayed armed, making
+   ndbMtLqhThreadFibers (= recv worker count) exceed ndbMtLqhThreads
+   (0) — the fiber-slot range check then classified thr 0 as a fiber
+   slot and spawn arithmetic (thr_no % ndbMtLqhThreads) misfired; nodes
+   hung at start with never-started threads ("Unknown place 0").
+   FIXED (2026-08-21): no-dedicated-LDM shapes force fibers off with a
+   warning, same graceful pattern as the divisibility fallback.
+   Open design note (user, 2026-08-21): AutomaticThreadConfig with
+   **NumCPUs = 0** (true host auto-detect, can yield many LDMs; no MTR
+   test uses it) currently gets the same pack treatment but will likely
+   want SPECIAL treatment later — e.g. keeping all auto-detected cores
+   as LDM OS threads and deriving logical workers as cores×M — decide
+   when fiber benchmarking reaches real server hardware (Phase 2+).
 3. **Phase 1 measurement** (plan §7): single-LDM benchmark M=1 vs M=2 with
    only the boundary yield (no intra-signal yields) — quantify pure switch
    overhead. Set `RONDB732_FIBER_DEBUG` to `0` (mt.cpp ~1370) before
