@@ -131,6 +131,38 @@
 > thread 0 never synced (proxy echo), highest thread never synced, rest
 > shifted; now instance+1. Guards the LQH fragment-array switch sync.
 > Noted, not fixed: benign Backup fragWorkers bit-0/count desync.
+>
+> **CAPTURE #6 (2026-08-25 19:17, canaried binary): TERTIARY SOLVED,
+> PRIMARY NARROWED.**
+> - Tertiary ROOT CAUSE (latent upstream, now FIXED): the node-failure
+>   copy close (closeCopyRequestLab) caught the scan in a locally-active
+>   state, marked scanCompletedStatus, and cleared copyCountWords. The
+>   response path did not check the marker before handling fetched rows,
+>   so the scan sent 8 more deletes to the DEAD node (del_sent
+>   3188→3196), re-inflating copyCountWords, and ended parked forever
+>   behind closeCopyLab's copyCountWords>0 wait. Canaries proved
+>   LQH_TRANSREQ reached ALL instances and TAKEOVER-COPY-CLOSE ran on
+>   instance 3 (scanState=1 at close). FIX: check
+>   scanCompletedStatus at nextScanConfCopyLab entry before handling any
+>   fetched row; when set, zero copyCountWords, discard the record, and
+>   close immediately. Upstream-reportable.
+> - PRIMARY NARROWED: NR-COPY-OP named the wedging op — after 3107
+>   in-order deletes, op n=3108 = INSERT (op=2) at row(0,0) with
+>   rowidFlag=1 = the FIRST REAL-ROW copy of the data-bearing fragment
+>   (test.t1). It enters handle_nr_copy and never confs. The joiner is
+>   otherwise fully healthy afterwards (other fragments complete,
+>   TRP-CHOICE flows, FRAG-EXCL-WAIT=0) — ONE fragment's copy wedges
+>   mid-op on the fiber instance; phase 5 waits on it; supervision
+>   9999-kills the node. The thrman query-distribution fix was IN this
+>   binary and did NOT cure it. Next dig: instrument the INSERT-copy
+>   path stages (handle_nr_copy case taken; ACC/TUP entry vs completion)
+>   for the window ops to find where op 3108 parks — suspects: DBACC
+>   lock/insert on the restored row, nr_copy_delete_row internals,
+>   disk-data path, or a lost intra-op signal on the fiber.
+> - With the tertiary fix, the cascade should now degrade gracefully
+>   (source cleans up on the 9999 kill; joiner retries) — but the
+>   deterministic primary may turn the test into a join-retry loop
+>   until it passes/fails by timeout; observe next run.
 
 Next focused task (chosen 2026-08-21). Goal: make the thread-freeze
 protocol correct when LDM fibers are enabled, so the temporary
