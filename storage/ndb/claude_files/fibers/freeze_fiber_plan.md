@@ -1,5 +1,48 @@
 # RONDB-732 — Plan: fiber-safe FREEZE_THREAD_REQ (lift the multi-trp workaround)
 
+> **RESOLVED (2026-08-27, post-13:42 rebuild with the complete
+> RONDB-1112 pair): FULL SUITE GREEN — the wedge is gone.** With the
+> two-layer fix in (execCOPY_FRAGREQ refuses dead targets before the
+> scan-record re-init; fetch guard checks flag OR node status), the
+> suite run produced ZERO preserved failures, and surviving worker logs
+> show the copy stream flowing straight through the old deterministic
+> death zone (ops 3090..3140 and on to 5632+) with no stall dumps, no
+> takeover closes, no FRAG-WK-WAIT, no 9999 kills. REVISED CAUSALITY:
+> the "primary" joiner wedge was most likely DOWNSTREAM of the leak —
+> the test's first intended kill left the source with a wedged copy
+> scan (the flag-wipe race), and that poisoned state broke every
+> subsequent rejoin at the fragment boundary (the deterministic
+> 3105/3108 stop = the poisoned fragment transition). Fixing the leak
+> under all orderings dissolved the whole cascade. Soak advisory: given
+> earlier 46-pass heisenbug streaks, keep the canaries in and watch
+> several more loaded suite runs before declaring extinction; the
+> FRAG-WK-WAIT / read-cond fiber-hostile waits remain flagged for a
+> principled fix regardless.
+
+> **CAPTURES #7-8 (2026-08-27) + THE FLAG-WIPE RACE.** The reworked
+> RONDB-1112 fix (f44804c51d6) WAS active in the 08-27 binary and the
+> wedge still reproduced: the takeover close's scanCompletedStatus is
+> WIPED by a COPY_FRAGREQ racing the node failure (copy-scan init
+> resets the flag), after which 75 deletes stream to the corpse and the
+> scan parks in the eternal WAIT_LQHKEY_COPY. Two-layer completion
+> (uncommitted): execCOPY_FRAGREQ refuses a dead target with
+> COPY_FRAGREF before touching the scan record, and the fetch guard
+> additionally checks get_node_status(scanNodeId). Backportable
+> follow-up on RONDB-1112.
+>
+> **PRIMARY dig instrumentation (uncommitted)**: the deterministic
+> joiner wedge (op ~3108, INSERT row(0,0) of the data fragment) enters
+> handle_nr_copy and vanishes; all paths funnel through `run:` →
+> exec_acckeyreq (DBACC). New canaries: NR-COPY-RUN logs window ops
+> reaching `run:`; FRAG-WK-WAIT logs the previously-uninstrumented
+> timeout-less write-key fragment-access cond wait (the copy-apply
+> path's RAL wait — fiber-hostile like FRAG-EXCL-WAIT; the two READ
+> cond waits at ~8497/8570 remain uninstrumented). Next capture:
+> RUN + no WK-WAIT ⇒ ACC lock queue; RUN + WK-WAIT ⇒ RAL deadlock via
+> suspended sibling; no RUN ⇒ wedge inside an earlier handle_nr_copy
+> case. NOTE: the test CANNOT pass until the primary is fixed — every
+> rejoin dies at the same op regardless of source-side cleanup.
+
 > **IMPLEMENTED (Option C, 2026-08-21) — verification pending.** Audit
 > §4.1-4 all passed: `flush_send_buffer(thr, trp)` uses only the passed
 > thr_data (no TLS/pool ops; single-producer queue slots are race-free

@@ -8667,6 +8667,23 @@ void Dblqh::handle_acquire_write_key_frag_access(Fragrecord *fragPtrP,
     fragPtrP->m_spin_write_key_waiters = 0;
     m_write_key_frag_access_cond_waits++;
     DEB_FRAGMENT_LOCK(fragPtrP);
+    /**
+     * RONDB-732 debug: like FRAG-EXCL-WAIT — this timeout-less
+     * NdbCondition_Wait parks the whole OS thread; under LDM fibers, if
+     * the access holder is a suspended sibling fiber this deadlocks.
+     * Flagged for a principled fiber-safe rework. Throttled.
+     */
+    {
+      static Uint32 dbg_wk_waits = 0;
+      if (dbg_wk_waits < 40) {
+        dbg_wk_waits++;
+        g_eventLogger->info(
+            "RONDB732 FRAG-WK-WAIT (%u) tab(%u,%u) scans=%u excl=%u n=%u",
+            instance(), fragPtrP->tabRef, fragPtrP->fragId,
+            fragPtrP->m_concurrent_scan_count,
+            (Uint32)fragPtrP->m_exclusive_locked, dbg_wk_waits);
+      }
+    }
     NdbCondition_Wait(&fragPtrP->frag_write_cond, &fragPtrP->frag_mutex);
     DEB_FRAGMENT_LOCK(fragPtrP);
     start_spin_time = now;
@@ -11053,6 +11070,14 @@ void Dblqh::handle_nr_copy(Signal *signal, Ptr<TcConnectionrec> regTcPtr) {
 
 run:
   jam();
+  /* RONDB-732 debug: window ops reaching normal execution (see NR-COPY-OP). */
+  {
+    const Uint32 total = g_dbg_nr_copy_ops[instance()];
+    if (unlikely(total >= 3090 && total <= 3140)) {
+      g_eventLogger->info("RONDB732 NR-COPY-RUN (%u) n=%u op=%u",
+                          instance(), total, regTcPtr.p->operation);
+    }
+  }
   exec_acckeyreq(signal, regTcPtr);
   return;
 

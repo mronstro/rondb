@@ -410,6 +410,13 @@ cycle (the accumulated ndbd.log needs per-cycle dissection). Revisit
 after the suite finishes and after the multi-trp workaround rebuild —
 re-sweep first; whatever still fails then is the true Finding-#2 class.
 
+Sweep-noise instance (2026-08-27): `ndb_security_enforce` failed MTR's
+post-test state check ("node 2 missing") — node 2 was healthy and
+mid-way through the test's own final node restart when the check
+sampled (full SR had completed minutes earlier; no wedge signatures,
+fibers running). Slow-restart-under-load timing flake, not the copy
+wedge.
+
 Sweep-noise instance (2026-08-21): `ndb_alter_table_column_online`
 attempt-1 "cluster start failed" = both ndbmtd unable to reach mgmd
 (localhost:13000) for 60 s under machine load; never fetched config,
