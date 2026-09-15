@@ -376,6 +376,12 @@ struct JoinAggregationState {
   std::atomic<State> m_state;
   Uint32 m_error_code;           // Error code if m_state == ERROR
 
+  // Pending callbacks must not resume work after an abort or failure.
+  bool isAborting() const {
+    const State state = m_state.load();
+    return state == ERROR || state == ABORTING || state == NODE_FAIL_ABORT;
+  }
+
   //------------------------------------------------------------------
   // Key-based access — pool index assigned at seize time
   //------------------------------------------------------------------

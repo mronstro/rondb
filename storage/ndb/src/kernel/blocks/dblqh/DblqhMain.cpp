@@ -19441,6 +19441,10 @@ void Dblqh::continueJoinAggMerge(Signal* signal, Uint32 aggStateKey,
 
   JoinAggregationState *state = getJoinAggState(aggStateKey);
   ndbrequire(state != nullptr);
+  if (state->isAborting()) {
+    jam();
+    return;
+  }
   sendJoinAggCompleteHeartbeat(signal, state);
 
   /*
@@ -22126,6 +22130,13 @@ void Dblqh::abortCteRedistribution(Signal *signal,
                                     JoinAggregationState *state,
                                     Uint32 errorCode) {
   jam();
+  ndbassert(state->m_owner_instance == instance());
+  if (state->isAborting()) {
+    // A late REF must not send another completion reply.
+    return;
+  }
+  state->m_error_code = errorCode;
+  state->m_cte_waiting_conf = false;
   state->m_state.store(JoinAggregationState::ERROR);
   JoinAggCompleteRef *ref =
     (JoinAggCompleteRef *)signal->getDataPtrSend();
@@ -22216,6 +22227,11 @@ void Dblqh::continueJoinAggRedistribute(Signal *signal, Uint32 aggStateKey) {
 
   /* Phase L (E.1): redistribution runs on the owner LDM only. */
   ndbassert(state->m_owner_instance == instance());
+  if (state->isAborting()) {
+    // A queued continuation or late CONF is expected after an abort.
+    jam();
+    return;
+  }
 
   /* Phase L (B): idempotency guards.
    *
@@ -22584,9 +22600,8 @@ void Dblqh::execJOIN_AGG_REDISTRIBUTE_REQ(Signal *signal) {
                signal, JoinAggRedistributeConf::SignalLength, JBB);
   }
 
-  /* If in ERROR state, send REF */
-  if (curState == JoinAggregationState::ERROR ||
-      curState == JoinAggregationState::NODE_FAIL_ABORT) {
+  /* Failed or aborting states must not accept more groups. */
+  if (state->isAborting()) {
     jam();
     JoinAggRedistributeRef *ref =
       (JoinAggRedistributeRef *)signal->getDataPtrSend();
@@ -22797,6 +22812,10 @@ void Dblqh::processRedistQueue(Signal *signal,
 void Dblqh::continueRedistQueueDrain(Signal *signal, Uint32 aggStateKey) {
   JoinAggregationState *state = getJoinAggState(aggStateKey);
   ndbrequire(state != nullptr);
+  if (state->isAborting()) {
+    jam();
+    return;
+  }
 
   if (state->m_redist_queue_head != nullptr) {
     jam();
@@ -22859,6 +22878,10 @@ void Dblqh::execJOIN_AGG_FINAL_REP(Signal *signal) {
   /* Phase L (E.1): senders address FINAL_REP to the destination's
    * owner LDM via numberToRef(DBLQH, dstOwner, dstNode). */
   ndbassert(state->m_owner_instance == instance());
+  if (state->isAborting()) {
+    jam();
+    return;
+  }
 
   state->m_cte_nodes_finalized.set(senderNodeId);
   DEB_JOIN_AGG(("(%u) DBLQH FINAL_REP recv: "
@@ -22890,7 +22913,7 @@ void Dblqh::execJOIN_AGG_FINAL_REP(Signal *signal) {
  * missing state means the CTE was aborted/released mid-chain — drop. */
 void Dblqh::continueCteAvgFinalize(Signal *signal, Uint32 aggStateKey) {
   JoinAggregationState *state = getJoinAggState(aggStateKey);
-  if (state == nullptr) {
+  if (state == nullptr || state->isAborting()) {
     jam();
     return;
   }
@@ -22921,7 +22944,7 @@ void Dblqh::continueCteAvgFinalize(Signal *signal, Uint32 aggStateKey) {
  * and performs the CTE_READY transition. */
 void Dblqh::continueCteLimitFinalize(Signal *signal, Uint32 aggStateKey) {
   JoinAggregationState *state = getJoinAggState(aggStateKey);
-  if (state == nullptr) {
+  if (state == nullptr || state->isAborting()) {
     jam();
     return;
   }
@@ -22957,6 +22980,11 @@ void Dblqh::checkCteReady(Signal *signal, JoinAggregationState *state) {
    * execJOIN_AGG_FINAL_REP — are already pinned to the owner LDM, so
    * this assertion just confirms the chain hasn't been broken. */
   ndbassert(state->m_owner_instance == instance());
+  if (state->isAborting()) {
+    // Successful finalization must never revive a failed CTE.
+    jam();
+    return;
+  }
   if (state->m_state.load() == JoinAggregationState::CTE_READY) {
     jam();
     DEB_CTE(("(%u) checkCteReady: already CTE_READY — skip duplicate CONF",

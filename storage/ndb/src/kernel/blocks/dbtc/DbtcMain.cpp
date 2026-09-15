@@ -19038,6 +19038,15 @@ void Dbtc::scanError(Signal *signal, ScanRecordPtr scanptr, Uint32 errorCode) {
   ndbrequire(scanP->scanState == ScanRecord::RUNNING ||
              scanP->scanState == ScanRecord::WAIT_CTE_COMPLETE);
 
+  /* A failed CTE can cause a later worker error such as STATE_NOT_READY.
+   * Report the original aggregation failure, even if its phase flag
+   * was cleared while draining completion replies.
+   */
+  if (scanP->m_joinAgg && scanP->m_aggErrorCode != 0) {
+    jam();
+    errorCode = scanP->m_aggErrorCode;
+  }
+
   /**
    * Read the API-fail state before closing: the close can run all the way
    * to handleApiFailState(), which releases the ApiConnectRecord - reading
@@ -19727,8 +19736,8 @@ void Dbtc::close_scan_req(Signal *signal, ScanRecordPtr scanPtr,
   if (aggWaitState) {
     if (likely(cteAggResponsesOutstanding(scanPtr))) {
       jam();
-      if (!scanPtr.p->m_aggPhaseFailed) {
-        scanPtr.p->m_aggPhaseFailed = true;
+      scanPtr.p->m_aggPhaseFailed = true;
+      if (scanPtr.p->m_aggErrorCode == 0) {
         scanPtr.p->m_aggErrorCode = ZSCAN_LQH_ERROR;
       }
       return;
@@ -31586,9 +31595,9 @@ void Dbtc::execJOIN_AGG_COMPLETE_REF(Signal *signal) {
     scanptr.p->m_joinAggNodes->m_aggNodesPending.clear(senderNodeId);
     scanptr.p->m_aggNodesOutstanding--;
   }
-  if (!scanptr.p->m_aggPhaseFailed) {
+  scanptr.p->m_aggPhaseFailed = true;
+  if (scanptr.p->m_aggErrorCode == 0) {
     jam();
-    scanptr.p->m_aggPhaseFailed = true;
     scanptr.p->m_aggErrorCode = ref->errorCode;
   }
 

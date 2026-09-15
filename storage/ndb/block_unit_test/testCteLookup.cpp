@@ -1152,6 +1152,172 @@ done:
 }
 
 /* ------------------------------------------------------------------ */
+/* Test 7: Late replies after a CTE redistribution failure              */
+/* ------------------------------------------------------------------ */
+
+static int
+testFailedCteLateReplies(Ndb *ndb, SignalSender &ss, const TableMeta &meta,
+                         int mysqlPort)
+{
+  printf("Test 7: Late replies after CTE failure...\n");
+  std::set<Uint32> nodes(meta.fragNodes.begin(), meta.fragNodes.end());
+  if (nodes.size() < 2) {
+    printf("  SKIP: requires at least two data nodes\n");
+    return 0;
+  }
+
+  auto aggProg = buildAggProgram_SumGroupBy(meta.attrIdA, meta.attrIdB);
+  std::map<Uint32, Uint32> aggKeys;
+  std::map<Uint32, Uint32> owners;
+  for (Uint32 node : nodes) {
+    Uint32 key = 0, owner = 0;
+    if (sendSetupReq(ss, node, aggProg, meta, key, owner) != 0) {
+      releaseAll(ss, aggKeys);
+      return -1;
+    }
+    aggKeys[node] = key;
+    owners[node] = owner;
+  }
+
+  const Uint32 node = *nodes.begin();
+  const Uint32 key = aggKeys[node];
+  const Uint16 block = numberToBlock(DBLQH, owners[node]);
+  const Uint32 ownerRef = numberToRef(DBLQH, owners[node], node);
+  auto attrInfo = buildCteLookupAttrInfo(1, 1, ss.getOwnRef(),
+                                       FAKE_SENDER_DATA, ss.getOwnRef());
+  Uint32 keyBuf[3], keyWords, keyBytes;
+  buildBigintKey(keyBuf, keyWords, keyBytes, meta.attrIdA, 1);
+
+  /* A lookup on the same owner is an ordered barrier: any extra
+   * COMPLETE_REF/CONF from the preceding injected reply fails this check.
+   * STATE_NOT_READY also distinguishes ERROR from a revived, empty CTE,
+   * which would return GROUP_NOT_FOUND.  No timing-based sleeps needed. */
+  auto expectNotReady = [&](Uint32 correlationId) -> int {
+    if (sendCteLookupReq(ss, node, owners[node], key, correlationId,
+                         keyBuf, keyWords, keyBytes, attrInfo) != 0)
+      return -1;
+    SimpleSignal *resp = waitForSignal(ss, WAIT_TIMEOUT_MS, "failed CTE lookup");
+    if (resp == nullptr) return -1;
+    if (getGsn(resp) != GSN_CTE_LOOKUP_REF) {
+      fprintf(stderr, "FAIL 7: expected CTE_LOOKUP_REF, got GSN=%d\n",
+              getGsn(resp));
+      return -1;
+    }
+    const CteLookupRef *ref =
+      reinterpret_cast<const CteLookupRef *>(resp->getDataPtr());
+    if (ref->errorCode != CteLookupRef::STATE_NOT_READY ||
+        ref->senderData != correlationId || ref->senderRef != ownerRef) {
+      fprintf(stderr, "FAIL 7: lookup error=%u senderData=%u senderRef=%x\n",
+              ref->errorCode, ref->senderData, ref->senderRef);
+      return -1;
+    }
+    return 0;
+  };
+
+  auto sendFailure = [&](Uint32 errorCode) -> int {
+    SimpleSignal sig;
+    JoinAggRedistributeRef *ref =
+      reinterpret_cast<JoinAggRedistributeRef *>(sig.getDataPtrSend());
+    auto peer = aggKeys.rbegin();
+    ref->aggStateKey = peer->second;
+    ref->senderNodeId = peer->first;
+    ref->errorCode = errorCode;
+    ref->senderAggStateKey = key;
+    sig.set(ss, 0, block, GSN_JOIN_AGG_REDISTRIBUTE_REF,
+            JoinAggRedistributeRef::SignalLength);
+    if (ss.sendSignal(node, &sig) == SEND_OK) return 0;
+    fprintf(stderr, "FAIL 7: send REDISTRIBUTE_REF failed\n");
+    return -1;
+  };
+
+  int result = [&]() -> int {
+    /* Empty grouped states avoid row redistribution.  Complete only one
+     * node so it waits at the FINAL_REP barrier until we release its peers. */
+    if (sendCompleteReq(ss, node, key, owners[node], aggKeys, owners) != 0 ||
+        expectNotReady(700) != 0)
+      return -1;
+
+    const Uint32 originalError = CteLookupRef::AGG_FEED_SELF_REFERENCE;
+    if (sendFailure(originalError) != 0) return -1;
+    SimpleSignal *resp = waitForSignal(ss, WAIT_TIMEOUT_MS, "COMPLETE_REF");
+    if (resp == nullptr) return -1;
+    if (getGsn(resp) != GSN_JOIN_AGG_COMPLETE_REF) {
+      fprintf(stderr, "FAIL 7: expected COMPLETE_REF, got GSN=%d\n",
+              getGsn(resp));
+      return -1;
+    }
+    const JoinAggCompleteRef *ref =
+      reinterpret_cast<const JoinAggCompleteRef *>(resp->getDataPtr());
+    if (ref->errorCode != originalError || ref->senderRef != ownerRef ||
+        ref->senderData != FAKE_SENDER_DATA ||
+        ref->requestId != FAKE_REQUEST_ID) {
+      fprintf(stderr, "FAIL 7: incorrect completion error or correlation\n");
+      return -1;
+    }
+
+    /* A second failure must not emit another completion reply. */
+    if (sendFailure(CteLookupRef::STATE_NOT_READY) != 0 ||
+        expectNotReady(701) != 0)
+      return -1;
+
+    /* A late flow-control CONF must not restart redistribution. */
+    SimpleSignal sig;
+    JoinAggRedistributeConf *conf =
+      reinterpret_cast<JoinAggRedistributeConf *>(sig.getDataPtrSend());
+    auto peer = aggKeys.rbegin();
+    conf->aggStateKey = peer->second;
+    conf->senderNodeId = peer->first;
+    conf->senderAggStateKey = key;
+    sig.set(ss, 0, block, GSN_JOIN_AGG_REDISTRIBUTE_CONF,
+            JoinAggRedistributeConf::SignalLength);
+    if (ss.sendSignal(node, &sig) != SEND_OK) {
+      fprintf(stderr, "FAIL 7: send REDISTRIBUTE_CONF failed\n");
+      return -1;
+    }
+    if (expectNotReady(702) != 0) return -1;
+
+    /* Finish peers, delivering real FINAL_REPs after the failure. */
+    for (Uint32 peerNode : nodes) {
+      if (peerNode == node) continue;
+      if (sendCompleteReq(ss, peerNode, aggKeys[peerNode], owners[peerNode],
+                           aggKeys, owners) != 0)
+        return -1;
+    }
+    for (Uint32 i = 1; i < nodes.size(); i++) {
+      if (waitForCompleteConf(ss) != 0) return -1;
+    }
+
+    /* Replay FINAL_REPs from this sender so the lookup barrier also
+     * guarantees their delivery, regardless of inter-node scheduling. */
+    for (Uint32 peerNode : nodes) {
+      if (peerNode == node) continue;
+      SimpleSignal finalSig;
+      JoinAggFinalRep *rep =
+        reinterpret_cast<JoinAggFinalRep *>(finalSig.getDataPtrSend());
+      rep->aggStateKey = key;
+      rep->senderNodeId = peerNode;
+      finalSig.set(ss, 0, block, GSN_JOIN_AGG_FINAL_REP,
+                   JoinAggFinalRep::SignalLength);
+      if (ss.sendSignal(node, &finalSig) != SEND_OK) {
+        fprintf(stderr, "FAIL 7: send FINAL_REP failed\n");
+        return -1;
+      }
+    }
+    return expectNotReady(703);
+  }();
+
+  for (auto &entry : aggKeys) {
+    if (sendReleaseReq(ss, entry.first, entry.second) != 0) result = -1;
+  }
+  if (result != 0) return -1;
+
+  /* A fresh setup, scan, completion and lookup must work after cleanup. */
+  if (testBasicLookup(ndb, ss, meta, mysqlPort) != 0) return -1;
+  printf("  PASS\n");
+  return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* main                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -1225,6 +1391,7 @@ int main(int argc, char **argv)
       if (testCteModeSilentComplete(&ndb, ss, meta, mysqlPort) != 0) result = 1;
       if (testFlushAIRouting(&ndb, ss, meta, mysqlPort) != 0) result = 1;
       if (testErrorCases(&ndb, ss, meta, mysqlPort) != 0) result = 1;
+      if (testFailedCteLateReplies(&ndb, ss, meta, mysqlPort) != 0) result = 1;
 
       ss.unlock();
     }
