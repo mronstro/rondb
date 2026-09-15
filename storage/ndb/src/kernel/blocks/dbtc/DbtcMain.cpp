@@ -31603,7 +31603,8 @@ void Dbtc::execJOIN_AGG_COMPLETE_REF(Signal *signal) {
   rec.p->m_aggNodesPending.clear(senderNodeId);
   ndbrequire(rec.p->m_outstanding > 0);
   rec.p->m_outstanding--;
-  if (rec.p->m_errorCode == 0) rec.p->m_errorCode = ref->errorCode;
+  const bool firstError = rec.p->m_errorCode == 0;
+  if (firstError) rec.p->m_errorCode = ref->errorCode;
 
   /* Phase L commit 5: same as the CONF path — m_cteCompleteOutstanding
    * is retired; main-aggregation legacy counters keep their mirror
@@ -31626,6 +31627,10 @@ void Dbtc::execJOIN_AGG_COMPLETE_REF(Signal *signal) {
                 instance(), rec.i, (Uint32)rec.p->m_kind,
                 senderNodeId, rec.p->m_outstanding, ref->errorCode));
 
+  if (firstError && rec.p->m_kind == AggCompleteRecord::KIND_CTE) {
+    jam();
+    cancelCteAggregation(signal, scanptr, rec);
+  }
   if (rec.p->m_outstanding != 0) return;
 
   if (rec.p->m_kind == AggCompleteRecord::KIND_CTE) {
@@ -31636,6 +31641,42 @@ void Dbtc::execJOIN_AGG_COMPLETE_REF(Signal *signal) {
     rec.p->m_state = AggCompleteRecord::REC_FAILED;
     scanptr.p->m_aggPhaseFailed = false;
     sendJoinAggReleaseReqs(signal, scanptr);
+  }
+}
+
+/* A failed node may never send FINAL_REP. Stop the remaining peers
+ * instead of waiting for their redistribution barriers indefinitely.
+ * Keep the pending bits: each peer still owes its original completion
+ * reply, which may already be in flight. RELEASE remains a later phase. */
+void Dbtc::cancelCteAggregation(Signal *signal, ScanRecordPtr scanptr,
+                                 AggCompleteRecordPtr rec) {
+  ndbrequire(rec.p->m_kind == AggCompleteRecord::KIND_CTE);
+  ndbrequire(scanptr.p->m_aggErrorCode != 0);
+  ndbrequire(rec.p->m_cteIndex < scanptr.p->m_numCtes);
+  auto *cteNodes = scanptr.p->m_cteAggNodeState[rec.p->m_cteIndex];
+  ndbrequire(cteNodes != nullptr);
+  ApiConnectRecordPtr apiPtr;
+  apiPtr.i = scanptr.p->scanApiRec;
+  c_apiConnectRecordPool.getPtr(apiPtr);
+
+  const NdbNodeBitmask pending = rec.p->m_aggNodesPending;
+  for (Uint32 node = pending.find_first();
+       node != NdbNodeBitmask::NotFound;
+       node = pending.find_next(node + 1)) {
+    if (!getNodeInfo(node).m_connected) continue;  // Node failure drains it.
+    const Uint32 owner = cteNodes->m_aggOwnerInstances[node];
+    ndbrequire(owner > 0);
+    JoinAggCancelReq *req =
+        (JoinAggCancelReq *)signal->getDataPtrSend();
+    req->senderRef = reference();
+    req->senderData = scanptr.i;
+    req->requestId = makeAggCompleteRequestId(rec.i);
+    req->transid[0] = apiPtr.p->transid[0];
+    req->transid[1] = apiPtr.p->transid[1];
+    req->aggStateKey = rec.p->m_aggStateKeys[node];
+    req->errorCode = scanptr.p->m_aggErrorCode;
+    sendSignal(numberToRef(DBLQH, owner, node), GSN_JOIN_AGG_CANCEL_REQ,
+               signal, JoinAggCancelReq::SignalLength, JBB);
   }
 }
 

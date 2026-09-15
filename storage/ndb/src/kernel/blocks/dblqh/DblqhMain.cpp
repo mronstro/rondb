@@ -19281,6 +19281,35 @@ void Dblqh::execJOIN_AGG_COMPLETE_REQ(Signal *signal) {
                        senderRef, senderData, requestId);
 }
 
+/* COMPLETE and CANCEL are ordered from the same coordinator to the
+ * owner LDM. A completion reply may already be in flight when CANCEL arrives. */
+void Dblqh::execJOIN_AGG_CANCEL_REQ(Signal *signal) {
+  jamEntry();
+  const JoinAggCancelReq *req =
+      (const JoinAggCancelReq *)signal->getDataPtr();
+  JoinAggregationState *state = getJoinAggState(req->aggStateKey);
+  if (state == nullptr || state->m_owner_instance != instance() ||
+      !state->m_cte_mode || req->errorCode == 0 ||
+      signal->getSendersBlockRef() != req->senderRef ||
+      state->m_cte_complete_senderRef != req->senderRef ||
+      state->m_cte_complete_senderData != req->senderData ||
+      state->m_cte_complete_requestId != req->requestId ||
+      state->m_cte_complete_transid[0] != req->transid[0] ||
+      state->m_cte_complete_transid[1] != req->transid[1]) {
+    jam();
+    return;
+  }
+
+  const JoinAggregationState::State current = state->m_state.load();
+  if (current != JoinAggregationState::FINALIZING &&
+      current != JoinAggregationState::SENDING_RESULTS &&
+      current != JoinAggregationState::CTE_REDISTRIBUTING) {
+    jam();
+    return;  // Only pending completion work may send a new reply.
+  }
+  abortCteRedistribution(signal, state, req->errorCode);
+}
+
 /**
  * Check if the DBTC node that owns this aggregation has died.
  * If so, no RELEASE_REQ will ever arrive — send a fire-and-forget

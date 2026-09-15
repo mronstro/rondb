@@ -2468,6 +2468,8 @@ class Dbtc : public SimulatedBlock {
   void releaseAggCompleteRecords(ScanRecordPtr scanptr);
   void completeCteAggregation(Signal *signal, ScanRecordPtr scanptr,
                               AggCompleteRecordPtr rec);
+  void cancelCteAggregation(Signal *signal, ScanRecordPtr scanptr,
+                            AggCompleteRecordPtr rec);
   /* DAG scheduler (cte_dag_scheduler_plan.md): per-CTE readiness. */
   void cteMarkReady(Signal *signal, ScanRecordPtr scanptr, Uint32 cteId);
   void broadcastCteReady(Signal *signal, ScanRecordPtr scanptr,
