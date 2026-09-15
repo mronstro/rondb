@@ -22564,6 +22564,25 @@ void Dblqh::execJOIN_AGG_REDISTRIBUTE_REQ(Signal *signal) {
 
   SectionHandle handle(this, signal);
 
+  /* Reject late groups before decoding or acknowledging them. A CONF
+   * would resume a peer that must abort, and a secondary error would
+   * hide the failure that originally stopped this CTE. */
+  if (state->isAborting()) {
+    jam();
+    releaseSections(handle);
+    JoinAggRedistributeRef *ref =
+      (JoinAggRedistributeRef *)signal->getDataPtrSend();
+    ref->aggStateKey = aggStateKey;
+    ref->senderNodeId = getOwnNodeId();
+    ref->errorCode = state->m_error_code != 0
+                         ? state->m_error_code
+                         : ZJOIN_AGG_STATE_NOT_FOUND;
+    ref->senderAggStateKey = senderAggStateKey;
+    sendSignal(signal->getSendersBlockRef(), GSN_JOIN_AGG_REDISTRIBUTE_REF,
+               signal, JoinAggRedistributeRef::SignalLength, JBB);
+    return;
+  }
+
   SegmentedSectionPtr keySection, valueSection;
   ndbrequire(handle.getSection(keySection,
                                JoinAggRedistributeReq::KeySectionNum));
@@ -22601,20 +22620,6 @@ void Dblqh::execJOIN_AGG_REDISTRIBUTE_REQ(Signal *signal) {
     conf->senderAggStateKey = senderAggStateKey;  // D25
     sendSignal(signal->getSendersBlockRef(), GSN_JOIN_AGG_REDISTRIBUTE_CONF,
                signal, JoinAggRedistributeConf::SignalLength, JBB);
-  }
-
-  /* Failed or aborting states must not accept more groups. */
-  if (state->isAborting()) {
-    jam();
-    JoinAggRedistributeRef *ref =
-      (JoinAggRedistributeRef *)signal->getDataPtrSend();
-    ref->aggStateKey = aggStateKey;
-    ref->senderNodeId = getOwnNodeId();
-    ref->errorCode = ZJOIN_AGG_STATE_NOT_FOUND;
-    ref->senderAggStateKey = senderAggStateKey;  // D25
-    sendSignal(signal->getSendersBlockRef(), GSN_JOIN_AGG_REDISTRIBUTE_REF,
-               signal, JoinAggRedistributeRef::SignalLength, JBB);
-    return;
   }
 
   /* If still finalizing, queue for later using page-based allocator */
