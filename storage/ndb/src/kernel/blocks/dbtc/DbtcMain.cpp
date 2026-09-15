@@ -31477,20 +31477,12 @@ void Dbtc::execJOIN_AGG_COMPLETE_CONF(Signal *signal) {
 
   if (rec.p->m_outstanding != 0) return;
 
-  rec.p->m_state = AggCompleteRecord::REC_COMPLETE;
   if (rec.p->m_kind == AggCompleteRecord::KIND_CTE) {
     jam();
-    if (scanptr.p->m_aggPhaseFailed) {
-      jam();
-      scanptr.p->m_aggPhaseFailed = false;
-      // TODO: propagate CTE error to API
-    }
-    /* DAG scheduler: this CTE is now redistributed cluster-wide —
-     * mark it READY, broadcast to workers so dependents can start,
-     * and start the main query once every CTE is READY. */
-    cteMarkReady(signal, scanptr, rec.p->m_cteIndex);
+    completeCteAggregation(signal, scanptr, rec);
   } else {
     jam();
+    rec.p->m_state = AggCompleteRecord::REC_COMPLETE;
     if (scanptr.p->m_aggPhaseFailed) {
       jam();
       scanptr.p->m_aggPhaseFailed = false;
@@ -31580,6 +31572,34 @@ void Dbtc::execJOIN_AGG_COMPLETE_REF(Signal *signal) {
     return;
   }
 
+#ifdef ERROR_INSERT
+  /* Pair with DBLQH 5124: every node returns REF for CTE 0.
+   * 8130 keeps the first REF and converts later replies to CONF.
+   * 8131 converts every reply except the last to CONF.
+   * No delays: the pending count determines the order deterministically.
+   * Use error 1860 to prove the ordering hook was actually exercised. */
+  if (rec.p->m_kind == AggCompleteRecord::KIND_CTE &&
+      rec.p->m_cteIndex == 0 &&
+      (ERROR_INSERTED(8130) || ERROR_INSERTED(8131))) {
+    const bool makeConf = ERROR_INSERTED(8130)
+                             ? rec.p->m_errorCode != 0
+                             : rec.p->m_outstanding > 1;
+    if (makeConf) {
+      const JoinAggCompleteRef saved = *ref;
+      JoinAggCompleteConf *conf =
+          (JoinAggCompleteConf *)signal->getDataPtrSend();
+      conf->senderRef = saved.senderRef;
+      conf->senderData = saved.senderData;
+      conf->requestId = saved.requestId;
+      conf->numResultRows = 0;
+      conf->resultBytes = 0;
+      execJOIN_AGG_COMPLETE_CONF(signal);
+      return;
+    }
+    ((JoinAggCompleteRef *)signal->getDataPtrSend())->errorCode = 1860;
+  }
+#endif
+
   rec.p->m_aggNodesPending.clear(senderNodeId);
   ndbrequire(rec.p->m_outstanding > 0);
   rec.p->m_outstanding--;
@@ -31608,27 +31628,47 @@ void Dbtc::execJOIN_AGG_COMPLETE_REF(Signal *signal) {
 
   if (rec.p->m_outstanding != 0) return;
 
-  rec.p->m_state = AggCompleteRecord::REC_FAILED;
   if (rec.p->m_kind == AggCompleteRecord::KIND_CTE) {
     jam();
-    /* DAG scheduler: a CTE's redistribute failed.  Mirror the old
-     * behavior — skip any remaining CTE work (no dependents are
-     * started) and start the main query so it reports the error
-     * (probes against never-redistributed CTEs fail with
-     * STATE_NOT_READY). */
-    scanptr.p->m_aggPhaseFailed = false;
-    if (cteStageActive(scanptr.p)) {
-      jam();
-      const Uint32 n = scanptr.p->m_numCtes;
-      scanptr.p->m_cteReadyMask =
-          (n >= 64) ? ~Uint64(0) : ((Uint64(1) << n) - 1);
-      scanptr.p->m_ctesReadyCount = n;
-      sendCteStartMainReqs(signal, scanptr);
-    }
+    completeCteAggregation(signal, scanptr, rec);
   } else {
     jam();
+    rec.p->m_state = AggCompleteRecord::REC_FAILED;
     scanptr.p->m_aggPhaseFailed = false;
     sendJoinAggReleaseReqs(signal, scanptr);
+  }
+}
+
+/* Decide CTE completion only after every reply has arrived.  A final
+ * CONF must take the same failure path as a final REF when an earlier
+ * reply failed.  Use the persistent error code, since the phase flag
+ * can have been cleared while another CTE's replies were drained. */
+void Dbtc::completeCteAggregation(Signal *signal, ScanRecordPtr scanptr,
+                                   AggCompleteRecordPtr rec) {
+  ndbrequire(rec.p->m_kind == AggCompleteRecord::KIND_CTE);
+  ndbrequire(rec.p->m_outstanding == 0);
+
+  if (scanptr.p->m_aggErrorCode == 0) {
+    jam();
+    rec.p->m_state = AggCompleteRecord::REC_COMPLETE;
+    cteMarkReady(signal, scanptr, rec.p->m_cteIndex);
+    return;
+  }
+
+  jam();
+  rec.p->m_state = AggCompleteRecord::REC_FAILED;
+  scanptr.p->m_aggPhaseFailed = false;
+  /* Retain the existing failure shutdown path: skip remaining CTE work
+   * and start the main query so its failed CTE access closes the scan.
+   * scanError() reports m_aggErrorCode rather than STATE_NOT_READY.
+   * Do not call cteMarkReady(), which would start dependent CTEs. */
+  if (cteStageActive(scanptr.p)) {
+    jam();
+    const Uint32 n = scanptr.p->m_numCtes;
+    scanptr.p->m_cteReadyMask =
+        (n >= 64) ? ~Uint64(0) : ((Uint64(1) << n) - 1);
+    scanptr.p->m_ctesReadyCount = n;
+    sendCteStartMainReqs(signal, scanptr);
   }
 }
 
@@ -32160,6 +32200,12 @@ void Dbtc::cteMarkReady(Signal *signal, ScanRecordPtr scanptr,
  */
 void Dbtc::broadcastCteReady(Signal *signal, ScanRecordPtr scanptr,
                              Uint32 cteId) {
+#ifdef ERROR_INSERT
+  /* The reply-order tests fail CTE 0. Advertising it as READY would
+   * incorrectly start its dependent CTE, even if that later fails too. */
+  ndbrequire(cteId != 0 ||
+             !(ERROR_INSERTED(8130) || ERROR_INSERTED(8131)));
+#endif
   ApiConnectRecordPtr apiPtr;
   apiPtr.i = scanptr.p->scanApiRec;
   c_apiConnectRecordPool.getPtr(apiPtr);
