@@ -1,0 +1,1185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>RONDB-1150 Durable Commits</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,500..800&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&display=swap">
+<style>
+/* Layout: one reading column (about 68ch) with figures that widen to 1100px; REDO records are drawn as typed word cells, one colour per record type */
+:root {
+  --paper: #f3f5f7;
+  --panel: #ffffff;
+  --ink: #16202a;
+  --muted: #55636f;
+  --rule: #d2dae1;
+  --band: #e8edf1;
+  --accent: #b0530e;
+  --accent-tint: #f7e4d4;
+  --link: #1d5a86;
+  --on-solid: #ffffff;
+  --prep: #788896;
+  --commit: #2462a8;
+  --complete: #217a4f;
+  --abort: #b6372b;
+  --gci: #6a4ea0;
+  --lock: #a9bccb;
+  --font-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  --measure: 70ch;
+  --wide: 1100px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0e1418; --panel: #151e24; --ink: #e1e7ec; --muted: #98a6b1;
+    --rule: #2a3741; --band: #19242b; --accent: #ee9a4b; --accent-tint: #3a2a1b;
+    --link: #82b8e2; --on-solid: #0e1418; --prep: #8a9aa7; --commit: #62a0e0;
+    --complete: #4fb37f; --abort: #e46c5f; --gci: #a98ddc; --lock: #3b5266;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0e1418; --panel: #151e24; --ink: #e1e7ec; --muted: #98a6b1;
+  --rule: #2a3741; --band: #19242b; --accent: #ee9a4b; --accent-tint: #3a2a1b;
+  --link: #82b8e2; --on-solid: #0e1418; --prep: #8a9aa7; --commit: #62a0e0;
+  --complete: #4fb37f; --abort: #e46c5f; --gci: #a98ddc; --lock: #3b5266;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 17px;
+  line-height: 1.6;
+}
+.page {
+  max-width: var(--wide);
+  margin: 0 auto;
+  padding-block: 48px 72px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.col { max-width: var(--measure); margin-inline: auto; }
+.col > * + * { margin-top: 0.9em; }
+
+h1, h2, h3 {
+  font-family: var(--font-display);
+  font-stretch: 87.5%;
+  line-height: 1.15;
+  text-wrap: balance;
+  margin: 0;
+}
+h1 { font-size: clamp(30px, 5vw, 44px); font-weight: 750; letter-spacing: -0.01em; }
+h2 { font-size: 27px; font-weight: 700; }
+h3 { font-size: 19px; font-weight: 650; }
+.col > h2 { margin-top: 2.4em; }
+.col > h3 { margin-top: 1.8em; }
+h2 .num { color: var(--muted); font-weight: 500; margin-right: 0.35em; font-variant-numeric: tabular-nums; }
+p { margin: 0; }
+a { color: var(--link); text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible, .stepper:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+code, .mono { font-family: var(--font-mono); font-size: 0.86em; }
+code { background: var(--band); padding: 0.05em 0.3em; border-radius: 3px; overflow-wrap: anywhere; }
+ul, ol { margin: 0; padding-left: 1.3em; }
+li + li { margin-top: 0.35em; }
+strong { font-weight: 600; }
+
+.eyebrow {
+  font-family: var(--font-display);
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.lede { font-size: 19.5px; line-height: 1.55; margin-top: 18px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+.chip {
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--rule);
+  background: var(--panel);
+}
+.chip.ok { border-color: var(--complete); color: var(--complete); }
+.chip.open { border-color: var(--accent); color: var(--accent); }
+
+nav.toc {
+  margin-top: 32px;
+  padding-block: 16px;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--font-display);
+  font-size: 14.5px;
+}
+nav.toc ol {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 6px 20px;
+}
+nav.toc li + li { margin-top: 0; }
+nav.toc a { text-decoration: none; color: var(--ink); }
+nav.toc a:hover { color: var(--link); }
+nav.toc .n { color: var(--muted); display: inline-block; width: 1.6em; font-variant-numeric: tabular-nums; }
+
+.conclusions { counter-reset: c; list-style: none; padding: 0; }
+.conclusions li { counter-increment: c; display: grid; grid-template-columns: 2.1em minmax(0, 1fr); gap: 4px; }
+.conclusions li + li { margin-top: 0.7em; }
+.conclusions li::before {
+  content: counter(c);
+  font-family: var(--font-display);
+  font-weight: 700;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.rule-box {
+  border: 1.5px solid var(--ink);
+  border-radius: 4px;
+  padding: 14px 18px;
+  background: var(--panel);
+}
+.rule-box .eyebrow { margin-bottom: 4px; }
+
+figure { margin: 2em auto 0; max-width: var(--wide); }
+figure.mid { max-width: 900px; }
+.fig-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+figure svg { display: block; width: 100%; height: auto; color: var(--ink); font-family: var(--font-display); }
+figcaption {
+  max-width: var(--measure);
+  margin: 12px auto 0;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+figcaption b { color: var(--ink); font-weight: 600; }
+
+/* shared SVG vocabulary */
+.s-band { fill: var(--band); }
+.s-band-warn { fill: var(--abort); opacity: 0.14; }
+.s-lane { stroke: var(--rule); stroke-width: 1.5; }
+.s-msg { stroke: currentColor; stroke-width: 1.3; fill: none; }
+.s-msg.ok { stroke: var(--complete); stroke-width: 1.6; }
+.s-dash { stroke-dasharray: 5 4; }
+.s-mutline { stroke: var(--muted); }
+.s-box { fill: var(--panel); stroke: currentColor; stroke-width: 1; }
+.s-box.new { fill: var(--accent-tint); stroke: var(--accent); }
+.s-box.ok { stroke: var(--complete); stroke-width: 1.6; }
+.s-box.gone { fill: none; stroke: var(--muted); stroke-dasharray: 5 4; }
+.s-t { fill: currentColor; font-size: 12px; }
+.s-sig { font-family: var(--font-mono); font-size: 11px; fill: currentColor; }
+.s-sm { font-size: 11px; }
+.s-b { font-weight: 700; font-size: 13.5px; }
+.s-mut { fill: var(--muted); }
+.s-acc { fill: var(--accent); }
+.s-ok { fill: var(--complete); }
+.s-bad { fill: var(--abort); }
+.s-cap { font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em; fill: var(--muted); }
+.tm { text-anchor: middle; }
+.te { text-anchor: end; }
+.s-lock { stroke: var(--lock); stroke-width: 9; }
+.s-lock.new { stroke: var(--accent); opacity: 0.6; }
+.ah { fill: currentColor; }
+.ah-mut { fill: var(--muted); }
+.ah-ok { fill: var(--complete); }
+.ah-commit { fill: var(--commit); }
+.ah-abort { fill: var(--abort); }
+.s-x { stroke: var(--abort); stroke-width: 2.5; stroke-linecap: round; }
+
+/* record-format cells */
+.rf .cellr { stroke-width: 1.3; }
+.rf .r-P { fill: color-mix(in srgb, var(--prep) 14%, var(--panel)); stroke: var(--prep); }
+.rf .r-C { fill: color-mix(in srgb, var(--commit) 12%, var(--panel)); stroke: var(--commit); }
+.rf .r-A { fill: color-mix(in srgb, var(--abort) 12%, var(--panel)); stroke: var(--abort); }
+.rf .r-new { fill: var(--accent-tint); stroke: var(--accent); stroke-width: 1.6; }
+.rf .r-var { stroke-dasharray: 5 4; }
+.rf .f { font-family: var(--font-mono); font-size: 10.5px; fill: currentColor; text-anchor: middle; }
+.rf .brk { stroke: var(--muted); stroke-width: 1; fill: none; }
+.rf .brk.new { stroke: var(--accent); }
+
+/* log-part stepper */
+.stepper { border: 1px solid var(--rule); border-radius: 6px; background: var(--panel); padding: 14px 14px 16px; }
+.stepper-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+  font-family: var(--font-display); font-size: 14px;
+}
+.stepper-bar .stage { font-weight: 650; margin-right: auto; min-width: 0; }
+.stepper-bar .count { color: var(--muted); font-variant-numeric: tabular-nums; }
+button {
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: 4px;
+  border: 1px solid var(--ink);
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+}
+button.primary { background: var(--ink); color: var(--paper); }
+button:disabled { opacity: 0.4; cursor: default; }
+.lg-scroll { overflow-x: auto; margin-top: 10px; }
+.lg-scroll svg { min-width: 820px; }
+.lg .tint { opacity: 0.16; transition: opacity 0.2s; }
+.lg .box { fill: none; stroke-width: 1.5; }
+.lg .k-P .tint { fill: var(--prep); }    .lg .k-P .box { stroke: var(--prep); }
+.lg .k-C .tint { fill: var(--commit); }  .lg .k-C .box { stroke: var(--commit); }
+.lg .k-X .tint { fill: var(--complete); } .lg .k-X .box { stroke: var(--complete); }
+.lg .k-A .tint { fill: var(--abort); }   .lg .k-A .box { stroke: var(--abort); }
+.lg .k-G .tint { fill: var(--gci); }     .lg .k-G .box { stroke: var(--gci); }
+.lg text.k { font-weight: 700; font-size: 14px; fill: var(--ink); text-anchor: middle; }
+.lg text.k.small { font-size: 11px; }
+.lg text.sub { font-family: var(--font-mono); font-size: 10px; fill: var(--muted); text-anchor: middle; }
+.lg .done .tint { opacity: 1; }
+.lg .done text.k, .lg .done text.sub { fill: var(--on-solid); }
+.lg .hatch { display: none; }
+.lg .invalid .hatch { display: inline; }
+.lg .invalid .box { stroke: var(--abort); stroke-width: 2; }
+.lg .hatch-line { stroke: var(--abort); stroke-width: 2; }
+.lg .pend .box { stroke: var(--abort); stroke-dasharray: 4 3; stroke-width: 2.2; }
+.lg .doubt .box { stroke: var(--accent); stroke-dasharray: 4 3; stroke-width: 2.4; }
+.lg .unused { opacity: 0.38; }
+.lg .p1 { opacity: 0.5; }
+.lg .cur .box { stroke: var(--ink); stroke-width: 3; stroke-dasharray: none; }
+.lg .arc { fill: none; stroke: var(--commit); stroke-width: 1.2; opacity: 0.45; }
+.lg .arc.done { opacity: 1; stroke-width: 1.9; }
+.lg .arc.dead { stroke: var(--abort); stroke-dasharray: 3 3; opacity: 0.9; }
+.lg .cursor { fill: var(--ink); transition: transform 0.2s; }
+.lg .idx { font-family: var(--font-mono); font-size: 10px; fill: var(--muted); text-anchor: middle; }
+.lg .brk { stroke: var(--muted); stroke-width: 1; fill: none; }
+.lg .brk-t { font-size: 11.5px; fill: var(--muted); text-anchor: middle; }
+.lg .crash { stroke: var(--abort); stroke-width: 1.5; stroke-dasharray: 4 3; }
+.lg .crash-t { fill: var(--abort); font-size: 11.5px; font-weight: 600; text-anchor: middle; }
+.lg .note { font-size: 11px; fill: var(--muted); text-anchor: middle; }
+.panels {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+.panel { border-top: 2px solid var(--rule); padding-top: 8px; min-width: 0; }
+.panel h4 {
+  margin: 0 0 6px;
+  font-family: var(--font-display);
+  font-size: 12px; font-weight: 650; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted);
+}
+.panel .msg { font-size: 15.5px; line-height: 1.5; }
+.panel ul { list-style: none; padding: 0; font-family: var(--font-mono); font-size: 13px; }
+.panel li + li { margin-top: 3px; }
+.panel .empty { color: var(--muted); font-family: var(--font-body); font-style: italic; font-size: 14.5px; }
+.legend {
+  display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 12px;
+  font-family: var(--font-display); font-size: 13px; color: var(--muted);
+}
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 14px; height: 14px; border-radius: 2px; border: 1.5px solid; display: inline-block; }
+.sw.P { border-color: var(--prep); background: color-mix(in srgb, var(--prep) 16%, transparent); }
+.sw.C { border-color: var(--commit); background: color-mix(in srgb, var(--commit) 16%, transparent); }
+.sw.X { border-color: var(--complete); background: color-mix(in srgb, var(--complete) 16%, transparent); }
+.sw.A { border-color: var(--abort); background: color-mix(in srgb, var(--abort) 16%, transparent); }
+.sw.G { border-color: var(--gci); background: color-mix(in srgb, var(--gci) 16%, transparent); }
+.sw.done { border-color: var(--commit); background: var(--commit); }
+.sw.inv { border-color: var(--abort); background: repeating-linear-gradient(45deg, var(--abort) 0 2px, transparent 2px 5px); }
+.sw.doubt { border-color: var(--accent); border-style: dashed; }
+
+/* tables */
+.table-wrap { overflow-x: auto; margin-top: 1.2em; }
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-family: var(--font-display);
+  font-size: 14.5px;
+  line-height: 1.45;
+}
+th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--rule); }
+th { font-size: 12px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); border-bottom: 1.5px solid var(--ink); }
+td.id { font-weight: 750; white-space: nowrap; }
+td code { font-size: 0.85em; }
+.pill {
+  display: inline-block; font-size: 12px; font-weight: 650; padding: 1px 8px; border-radius: 999px;
+  border: 1px solid; white-space: nowrap;
+}
+.pill.ok { color: var(--complete); border-color: var(--complete); }
+.pill.open { color: var(--accent); border-color: var(--accent); }
+
+.chain { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; margin-top: 1.2em; font-family: var(--font-display); }
+.chain .step {
+  flex: 1 1 180px; min-width: 0;
+  border: 1px solid var(--rule); border-radius: 4px; background: var(--panel); padding: 10px 12px;
+  font-size: 14px; line-height: 1.4;
+}
+.chain .step b { display: block; font-size: 13px; color: var(--accent); letter-spacing: 0.04em; }
+.chain .step.indep { border-style: dashed; }
+
+footer { margin-top: 4em; padding-top: 16px; border-top: 1px solid var(--rule); font-family: var(--font-display); font-size: 14px; color: var(--muted); }
+footer ul { list-style: none; padding: 0; margin-top: 8px; }
+footer code { background: none; padding: 0; }
+
+@media (max-width: 720px) {
+  body { font-size: 16.5px; }
+  .panels { grid-template-columns: minmax(0, 1fr); }
+  .col > h2 { margin-top: 2em; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lg .tint, .lg .cursor { transition: none; }
+}
+</style>
+</head>
+<body>
+<main class="page">
+
+<header class="col">
+  <p class="eyebrow">RONDB-1150 · Plan, revision 6 · 27 October 2026</p>
+  <h1>Durable commits across a cluster restart</h1>
+  <p class="lede">Today a cluster restart brings the database back to the last GCI saved by the global checkpoint, so commits acknowledged in the last GCP interval can be lost. This plan makes every acknowledged commit survive a crash of all data nodes, power loss included, by putting the REDO log on persistent memory and logging one more record per operation.</p>
+  <div class="chips">
+    <span class="chip ok">Research done</span>
+    <span class="chip ok">All decisions settled</span>
+    <span class="chip">No code changed</span>
+  </div>
+</header>
+
+<nav class="toc col" aria-label="Contents">
+  <ol>
+    <li><a href="#conclusion"><span class="n">1</span>The conclusion</a></li>
+    <li><a href="#config"><span class="n">2</span>Configuration</a></li>
+    <li><a href="#protocol"><span class="n">3</span>Commit protocol</a></li>
+    <li><a href="#records"><span class="n">4</span>REDO records</a></li>
+    <li><a href="#restart"><span class="n">5</span>Cluster restart</a></li>
+    <li><a href="#order"><span class="n">6</span>Why log order is enough</a></li>
+    <li><a href="#failures"><span class="n">7</span>Node failures</a></li>
+    <li><a href="#decisions"><span class="n">8</span>Decisions</a></li>
+    <li><a href="#work"><span class="n">9</span>Risks and work plan</a></li>
+  </ol>
+</nav>
+
+<!-- 1 -->
+<section class="col" id="conclusion">
+  <h2><span class="num">1</span>The conclusion</h2>
+  <p>The review settled on these eight points. The rest of the page explains them.</p>
+  <ol class="conclusions">
+    <li><span>A config variable turns on <strong>disk durable commits</strong>. It is activated online at a chosen GCI and can only be turned off by a cluster restart.</span></li>
+    <li><span>A config variable makes the REDO log use <strong>memory-mapped files</strong>. Durable commits need it, on persistent memory; otherwise the node refuses to start.</span></li>
+    <li><span>A new <strong>COMPLETE record</strong> carrying the transaction id is written to the REDO log. The <strong>COMMIT record also gets the transaction id</strong>.</span></li>
+    <li><span>Both the COMMIT and the COMPLETE record are <strong>persisted</strong> when written.</span></li>
+    <li><span><strong>Row locks are held until the COMPLETE record is persistent.</strong></span></li>
+    <li><span><strong>Node restarts are not affected.</strong></span></li>
+    <li><span>A cluster restart first runs the <strong>normal recovery</strong> to the GCI that the global checkpoint made durable.</span></li>
+    <li><span>A <strong>second phase</strong> then recovers the last GCI, which mixes committed and aborted transactions. A hash table keyed by transaction id queues the COMMIT records; a COMPLETE record executes them. Transactions left without a COMPLETE are resolved by asking the other REDO log parts.</span></li>
+  </ol>
+  <p><strong>What it costs.</strong> On persistent memory a REDO write is persistent in well under a microsecond, so there is no fsync and no group commit. The cost is message latency: the primary holds its row locks one round longer, and tables without READ_BACKUP get their ack one round later.</p>
+</section>
+
+<!-- 2 -->
+<section class="col" id="config">
+  <h2><span class="num">2</span>Configuration and activation</h2>
+  <ul>
+    <li><strong>Memory-mapped REDO.</strong> Each REDO log part becomes a memory-mapped file in a new format with checksums and a reliable end of log. A node switches to it with an initial node restart, so a cluster switches by rolling initial node restarts.</li>
+    <li><strong>Persistent memory.</strong> The whole REDO log lives in PMEM: files on an ext4 or xfs file system mounted with <code>-o dax</code>, mapped with <code>MAP_SYNC</code>. Both ADR (flush each cache line, then fence) and eADR (fence only) are supported. With durable commits configured, a node whose REDO is not on a DAX mapping refuses to start.</li>
+    <li><strong>Online activation.</strong> When every node runs memory-mapped REDO, the DIH master picks an activation GCI <i>g</i>, sends it with the GCP protocol and writes it to the sysfile. Every transaction with GCI ≥ <i>g</i> uses the durable protocol.</li>
+    <li><strong>Turning it off</strong> takes a cluster restart. That restart still recovers the durable tail, because the mode recorded in the sysfile governs the tail.</li>
+    <li><strong>Testing without PMEM hardware.</strong> The Linux <code>memmap=</code> kernel parameter creates a RAM-backed <code>/dev/pmem</code> device that passes the DAX check. Data survives a process crash but not a reboot, which is enough for MTR and autotest.</li>
+  </ul>
+</section>
+
+<figure class="mid" aria-labelledby="cap-act">
+  <div class="fig-scroll">
+  <svg viewBox="0 0 780 150" role="img" aria-label="Transactions with GCI below g use today's protocol, those from g use the durable protocol. The guarantee is armed once GCI g minus 1 has been saved by GCP.">
+    <text class="s-t s-sm s-mut tm" x="200" y="30">today's commit protocol</text>
+    <text class="s-t s-sm s-acc tm" x="580" y="30">durable commit protocol</text>
+    <rect class="s-box" x="20" y="42" width="170" height="40" rx="3"/>
+    <rect class="s-box" x="210" y="42" width="170" height="40" rx="3"/>
+    <rect class="s-box new" x="400" y="42" width="170" height="40" rx="3"/>
+    <rect class="s-box new" x="590" y="42" width="170" height="40" rx="3"/>
+    <text class="s-t s-b tm" x="105" y="67">GCI g−2</text>
+    <text class="s-t s-b tm" x="295" y="67">GCI g−1</text>
+    <text class="s-t s-b tm" x="485" y="67">GCI g</text>
+    <text class="s-t s-b tm" x="675" y="67">GCI g+1</text>
+    <line class="s-msg s-dash" x1="395" y1="20" x2="395" y2="100" style="stroke: var(--accent)"/>
+    <text class="s-t s-sm s-acc tm" x="395" y="118">activation GCI g</text>
+    <text class="s-t s-sm s-mut tm" x="295" y="102">saved by GCP: guarantee armed</text>
+    <text class="s-t s-sm s-mut tm" x="395" y="138">restart runs phase 2 only if R_gcp ≥ g−1, and only for GCI ≥ g</text>
+  </svg>
+  </div>
+  <figcaption id="cap-act"><b>Activation boundary.</b> A durable transaction in GCI <i>g</i> may depend on a non-durable one in GCI <i>g</i>−1. Only once <i>g</i>−1 is saved by the global checkpoint is the durable tail closed under dependencies, so that is when activation is reported complete.</figcaption>
+</figure>
+
+<!-- 3 -->
+<section class="col" id="protocol">
+  <h2><span class="num">3</span>The commit protocol</h2>
+  <p>The message rounds stay as they are. What changes is what each replica writes, and when it lets go of the row. The figure shows the linear commit of one operation with a primary P and a backup B.</p>
+</section>
+
+<figure class="mid" aria-labelledby="cap-proto">
+  <div class="fig-scroll">
+  <svg viewBox="0 0 780 578" style="min-width: 640px" role="img" aria-label="Sequence diagram. COMMIT goes from TC to backup B, then to primary P; each writes and persists a COMMIT record. COMPLETE follows the same path; each replica persists a COMPLETE record, then makes the change visible and releases its lock. The primary's lock is now held until its COMPLETE instead of its COMMIT. The API ack goes after COMPLETED.">
+    <defs>
+      <marker id="f1-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="ah"/></marker>
+      <marker id="f1-ahm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="ah-mut"/></marker>
+    </defs>
+    <rect class="s-band" x="0" y="58" width="780" height="100"/>
+    <rect class="s-band" x="0" y="168" width="780" height="184"/>
+    <rect class="s-band" x="0" y="362" width="780" height="204"/>
+    <text class="s-cap te" x="772" y="74">PREPARE PHASE</text>
+    <text class="s-cap te" x="772" y="184">COMMIT PHASE</text>
+    <text class="s-cap te" x="772" y="378">COMPLETE PHASE</text>
+
+    <line class="s-lock" x1="470" y1="86" x2="470" y2="300"/>
+    <line class="s-lock new" x1="470" y1="300" x2="470" y2="524"/>
+    <line class="s-lock" x1="680" y1="110" x2="680" y2="448"/>
+
+    <line class="s-lane" x1="64" y1="52" x2="64" y2="566"/>
+    <line class="s-lane" x1="220" y1="52" x2="220" y2="566"/>
+    <line class="s-lane" x1="470" y1="52" x2="470" y2="566"/>
+    <line class="s-lane" x1="680" y1="52" x2="680" y2="566"/>
+    <text class="s-t s-b tm" x="64" y="24">API</text>
+    <text class="s-t s-b tm" x="220" y="24">TC</text>
+    <text class="s-t s-b tm" x="470" y="24">Primary P</text>
+    <text class="s-t s-b tm" x="680" y="24">Backup B</text>
+    <text class="s-t s-sm s-mut tm" x="220" y="40">DBTC</text>
+    <text class="s-t s-sm s-mut tm" x="470" y="40">DBLQH, its log part</text>
+    <text class="s-t s-sm s-mut tm" x="680" y="40">DBLQH, its log part</text>
+
+    <!-- prepare -->
+    <line class="s-msg" x1="224" y1="86" x2="464" y2="86" marker-end="url(#f1-ah)"/>
+    <text class="s-sig tm" x="344" y="80">LQHKEYREQ</text>
+    <line class="s-msg" x1="474" y1="110" x2="674" y2="110" marker-end="url(#f1-ah)"/>
+    <text class="s-sig tm" x="575" y="104">LQHKEYREQ</text>
+    <line class="s-msg" x1="676" y1="134" x2="226" y2="134" marker-end="url(#f1-ah)"/>
+    <text class="s-sig tm" x="340" y="128">LQHKEYCONF</text>
+    <text class="s-t s-sm s-mut" x="230" y="152">commit point, GCI assigned</text>
+
+    <!-- commit -->
+    <line class="s-msg" x1="224" y1="196" x2="674" y2="196" marker-end="url(#f1-ah)"/>
+    <text class="s-sig tm" x="340" y="190">COMMIT</text>
+    <rect class="s-box" x="600" y="206" width="160" height="34" rx="3"/>
+    <text class="s-t s-sm tm" x="680" y="220">write COMMIT record</text>
+    <text class="s-t s-sm s-acc tm" x="680" y="234">persist barrier (C)</text>
+    <line class="s-msg" x1="676" y1="256" x2="474" y2="256" marker-end="url(#f1-ah)"/>
+    <text class="s-sig tm" x="575" y="250">COMMIT</text>
+    <rect class="s-box" x="390" y="266" width="160" height="34" rx="3"/>
+    <text class="s-t s-sm tm" x="470" y="280">write COMMIT record</text>
+    <text class="s-t s-sm s-acc tm" x="470" y="294">persist barrier (C)</text>
+    <line class="s-msg s-dash s-mutline" x1="432" y1="310" x2="508" y2="310"/>
+    <text class="s-t s-sm s-mut te" x="424" y="314">today P commits and unlocks here</text>
+    <line class="s-msg" x1="466" y1="336" x2="226" y2="336" marker-end="url(#f1-ah)"/>
+    <text class="s-sig tm" x="345" y="330">COMMITTED</text>
+    <line class="s-msg s-dash s-mutline" x1="216" y1="346" x2="70" y2="346" marker-end="url(#f1-ahm)"/>
+    <text class="s-t s-sm s-mut tm" x="142" y="340">ack today *</text>
+
+    <!-- complete -->
+    <line class="s-msg" x1="224" y1="390" x2="674" y2="390" marker-end="url(#f1-ah)"/>
+    <text class="s-sig tm" x="340" y="384">COMPLETE</text>
+    <rect class="s-box new" x="600" y="400" width="160" height="48" rx="3"/>
+    <text class="s-t s-sm tm" x="680" y="415">write COMPLETE record</text>
+    <text class="s-t s-sm s-acc tm" x="680" y="429">persist barrier (K)</text>
+    <text class="s-t s-sm tm" x="680" y="443">visible, unlock (L)</text>
+    <line class="s-msg" x1="676" y1="466" x2="474" y2="466" marker-end="url(#f1-ah)"/>
+    <text class="s-sig tm" x="575" y="460">COMPLETE</text>
+    <rect class="s-box new" x="390" y="476" width="160" height="48" rx="3"/>
+    <text class="s-t s-sm tm" x="470" y="491">write COMPLETE record</text>
+    <text class="s-t s-sm s-acc tm" x="470" y="505">persist barrier (K)</text>
+    <text class="s-t s-sm tm" x="470" y="519">visible, unlock (L)</text>
+    <line class="s-msg" x1="466" y1="542" x2="226" y2="542" marker-end="url(#f1-ah)"/>
+    <text class="s-sig tm" x="345" y="536">COMPLETED</text>
+    <line class="s-msg" x1="216" y1="560" x2="70" y2="560" marker-end="url(#f1-ah)"/>
+    <text class="s-t s-sm tm" x="142" y="554" style="font-weight:600">ack (A)</text>
+  </svg>
+  </div>
+  <figcaption id="cap-proto"><b>Linear commit of one operation.</b> The thick bars on the replica lanes are the row lock. The amber part of the primary's bar is the extra hold: today the primary commits and unlocks at COMMIT; in durable mode it does so at COMPLETE, like the backup. Amber boxes are new REDO writes. * Today tables without READ_BACKUP are acked after COMMITTED; in durable mode every table is acked after the last COMPLETED.</figcaption>
+</figure>
+
+<section class="col">
+  <h3>Invariants</h3>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Id</th><th>Rule</th><th>Where in the code</th></tr></thead>
+    <tbody>
+      <tr><td class="id">C</td><td>A replica persists its COMMIT record before it sends COMMITTED or forwards COMMIT. One barrier also covers the earlier PREPARE, which is in the same log part.</td><td>After <code>writeCommitLog</code>, <code>DblqhMain.cpp:15343</code>, <code>912</code></td></tr>
+      <tr><td class="id">K</td><td>A replica persists a COMPLETE record before the change becomes visible, and before it forwards COMPLETE or sends COMPLETED. One record per operation.</td><td>New <code>writeCompleteLog</code> in <code>execCOMPLETE</code> and <code>execCOMPLETEREQ</code>, <code>15004-15017</code>, <code>15120-15140</code></td></tr>
+      <tr><td class="id">L</td><td>No replica makes a change visible or releases its lock before its COMPLETE record is persistent. The primary's local commit moves from COMMIT to COMPLETE.</td><td><code>commitReqLab</code> <code>15267</code> to <code>execCOMPLETE</code> <code>15010-15013</code>; <code>tupcommit_conf</code> <code>15552-15615</code></td></tr>
+      <tr><td class="id">A</td><td>The API ack goes after the last COMPLETED, also after a TC takeover.</td><td><code>TF_LATE_COMMIT</code> always on, <code>DbtcMain.cpp:5616-5627</code>, <code>9302-9307</code>; takeover ack to <code>check_finished_complete_handling</code></td></tr>
+      <tr><td class="id">F</td><td>If a participating node fails before any COMPLETE is sent, the transaction aborts. A replica that already wrote its COMMIT writes an ABORT record with the transaction id before it releases the lock.</td><td>TC node-failure handling and takeover; a new abort path from the committed state in DBLQH</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="margin-top:1.2em">TC sends COMPLETE only after every COMMITTED. So a COMPLETE record anywhere means every live replica of every operation has a persistent COMMIT record pointing back to its PREPARE. A change that was visible or acknowledged has a COMPLETE record. If no COMPLETE record exists, nobody saw the transaction and aborting it is safe.</p>
+  <div class="rule-box">
+    <p class="eyebrow">Survival rule</p>
+    <p>A transaction survives the cluster restart if a COMPLETE record for it is found in some starting REDO log part. In a partial restart, a count fallback also applies (§7).</p>
+  </div>
+
+  <h3>Lock hold on the primary</h3>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Commit path</th><th>Today</th><th>Durable mode</th></tr></thead>
+    <tbody>
+      <tr><td>Linear</td><td class="mono">t_p + R·t_c</td><td class="mono">t_p + 2R·t_c</td></tr>
+      <tr><td>Parallel COMMITREQ / COMPLETEREQ</td><td class="mono">t_p + t_c</td><td class="mono">t_p + 2·t_c</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="margin-top:1em">Here t_p is the prepare chain, t_c one hop and R the number of replicas. No sync time is added on PMEM. A hot row's throughput limit, about one over the hold time, drops accordingly. Detached triggers, SUMA, the binlog and backup logging see the change one round later on the primary.</p>
+</section>
+
+<!-- 4 -->
+<section class="col" id="records">
+  <h2><span class="num">4</span>REDO records</h2>
+  <p>A PREPARE record holds the after-image of the row but no transaction id, table or GCI. Recovery can only reach it through the backward reference in a COMMIT record, and a PREPARE can be gigabytes back in the log. So recovery is driven by COMMIT records, as today, and a PREPARE without a COMMIT is never applied and never searched for.</p>
+</section>
+
+<figure aria-labelledby="cap-rf">
+  <div class="fig-scroll">
+  <svg class="rf" viewBox="0 0 870 336" style="min-width: 760px" role="img" aria-label="Word layouts of the REDO records. PREPARE is unchanged. COMMIT grows from 9 to 13 words by adding transid, gci_lo and opCount. COMPLETE is a new 3-word record with type and transid. ABORT is unchanged at 3 words.">
+    <!-- PREPARE -->
+    <text class="s-t s-b" x="0" y="44">PREPARE</text>
+    <text class="s-t s-sm s-mut" x="0" y="59">unchanged</text>
+    <g>
+      <rect class="cellr r-P" x="124" y="30" width="56" height="30"/><text class="f" x="152" y="49">type</text>
+      <rect class="cellr r-P" x="180" y="30" width="56" height="30"/><text class="f" x="208" y="49">len</text>
+      <rect class="cellr r-P" x="236" y="30" width="56" height="30"/><text class="f" x="264" y="49">hash</text>
+      <rect class="cellr r-P" x="292" y="30" width="56" height="30"/><text class="f" x="320" y="49">op</text>
+      <rect class="cellr r-P" x="348" y="30" width="56" height="30"/><text class="f" x="376" y="49">aiLen</text>
+      <rect class="cellr r-P" x="404" y="30" width="56" height="30"/><text class="f" x="432" y="49">keyLen</text>
+      <rect class="cellr r-P" x="460" y="30" width="56" height="30"/><text class="f" x="488" y="49">page</text>
+      <rect class="cellr r-P" x="516" y="30" width="56" height="30"/><text class="f" x="544" y="49">idx</text>
+      <rect class="cellr r-P r-var" x="572" y="30" width="224" height="30"/><text class="f" x="684" y="49">key + ATTRINFO (after-image)</text>
+    </g>
+
+    <!-- COMMIT today -->
+    <text class="s-t s-sm s-mut tm" x="460" y="83">where the PREPARE is (back-reference)</text>
+    <path class="brk" d="M348,96 V89 H572 V96"/>
+    <text class="s-t s-b" x="0" y="114">COMMIT</text>
+    <text class="s-t s-sm s-mut" x="0" y="129">today, 9 words</text>
+    <g>
+      <rect class="cellr r-C" x="124" y="100" width="56" height="30"/><text class="f" x="152" y="119">type</text>
+      <rect class="cellr r-C" x="180" y="100" width="56" height="30"/><text class="f" x="208" y="119">table</text>
+      <rect class="cellr r-C" x="236" y="100" width="56" height="30"/><text class="f" x="264" y="119">schVer</text>
+      <rect class="cellr r-C" x="292" y="100" width="56" height="30"/><text class="f" x="320" y="119">frag</text>
+      <rect class="cellr r-C" x="348" y="100" width="56" height="30"/><text class="f" x="376" y="119">file</text>
+      <rect class="cellr r-C" x="404" y="100" width="56" height="30"/><text class="f" x="432" y="119">page</text>
+      <rect class="cellr r-C" x="460" y="100" width="56" height="30"/><text class="f" x="488" y="119">index</text>
+      <rect class="cellr r-C" x="516" y="100" width="56" height="30"/><text class="f" x="544" y="119">stop</text>
+      <rect class="cellr r-C" x="572" y="100" width="56" height="30"/><text class="f" x="600" y="119">gci_hi</text>
+    </g>
+
+    <!-- COMMIT new -->
+    <text class="s-t s-sm s-acc tm" x="740" y="151">added</text>
+    <path class="brk new" d="M628,162 V155 H852 V162"/>
+    <text class="s-t s-b" x="0" y="180">COMMIT</text>
+    <text class="s-t s-sm s-mut" x="0" y="195">new, 13 words</text>
+    <g>
+      <rect class="cellr r-C" x="124" y="166" width="56" height="30"/><text class="f" x="152" y="185">type</text>
+      <rect class="cellr r-C" x="180" y="166" width="56" height="30"/><text class="f" x="208" y="185">table</text>
+      <rect class="cellr r-C" x="236" y="166" width="56" height="30"/><text class="f" x="264" y="185">schVer</text>
+      <rect class="cellr r-C" x="292" y="166" width="56" height="30"/><text class="f" x="320" y="185">frag</text>
+      <rect class="cellr r-C" x="348" y="166" width="56" height="30"/><text class="f" x="376" y="185">file</text>
+      <rect class="cellr r-C" x="404" y="166" width="56" height="30"/><text class="f" x="432" y="185">page</text>
+      <rect class="cellr r-C" x="460" y="166" width="56" height="30"/><text class="f" x="488" y="185">index</text>
+      <rect class="cellr r-C" x="516" y="166" width="56" height="30"/><text class="f" x="544" y="185">stop</text>
+      <rect class="cellr r-C" x="572" y="166" width="56" height="30"/><text class="f" x="600" y="185">gci_hi</text>
+      <rect class="cellr r-new" x="628" y="166" width="56" height="30"/><text class="f" x="656" y="185">transid1</text>
+      <rect class="cellr r-new" x="684" y="166" width="56" height="30"/><text class="f" x="712" y="185">transid2</text>
+      <rect class="cellr r-new" x="740" y="166" width="56" height="30"/><text class="f" x="768" y="185">gci_lo</text>
+      <rect class="cellr r-new" x="796" y="166" width="56" height="30"/><text class="f" x="824" y="185">opCount</text>
+    </g>
+
+    <!-- COMPLETE -->
+    <text class="s-t s-b" x="0" y="246">COMPLETE</text>
+    <text class="s-t s-sm s-acc" x="0" y="261">new, 3 words</text>
+    <g>
+      <rect class="cellr r-new" x="124" y="232" width="56" height="30"/><text class="f" x="152" y="251">type</text>
+      <rect class="cellr r-new" x="180" y="232" width="56" height="30"/><text class="f" x="208" y="251">transid1</text>
+      <rect class="cellr r-new" x="236" y="232" width="56" height="30"/><text class="f" x="264" y="251">transid2</text>
+    </g>
+    <text class="s-t s-sm s-mut" x="306" y="251">written at COMPLETE, one per operation, before the change becomes visible</text>
+
+    <!-- ABORT -->
+    <text class="s-t s-b" x="0" y="304">ABORT</text>
+    <text class="s-t s-sm s-mut" x="0" y="319">today, 3 words</text>
+    <g>
+      <rect class="cellr r-A" x="124" y="290" width="56" height="30"/><text class="f" x="152" y="309">type</text>
+      <rect class="cellr r-A" x="180" y="290" width="56" height="30"/><text class="f" x="208" y="309">transid1</text>
+      <rect class="cellr r-A" x="236" y="290" width="56" height="30"/><text class="f" x="264" y="309">transid2</text>
+    </g>
+    <text class="s-t s-sm s-mut" x="306" y="309">now also written after a COMMIT when rule F aborts the transaction</text>
+  </svg>
+  </div>
+  <figcaption id="cap-rf"><b>Record layouts, one cell per 32-bit word.</b> The COMMIT record gains the transaction id, which the restart uses as the hash key; <code>gci_lo</code>, so replay restores the exact GCI64 of the row (today it sets 0); and <code>opCount</code>, the number of logged write operations of the transaction, for the partial-restart fallback. Every page of the new format also carries a CRC32C checksum and a lap number. The per-operation space reservation for commit and abort records must also cover the COMPLETE record.</figcaption>
+</figure>
+
+<!-- 5 -->
+<section class="col" id="restart">
+  <h2><span class="num">5</span>Cluster restart</h2>
+  <h3>Phase 1: normal recovery to R_gcp</h3>
+  <p>LCP restore, disk-data UNDO, and replay of the COMMIT records with GCI ≤ R_gcp run as today. Three things are no longer done for the durable tail: rewriting COMMIT records above R_gcp as invalid, moving the log head to the <code>COMPLETED_GCI</code> record of R_gcp, and the phase-4 invalidation. Nothing in the log is touched before phase 2 has decided.</p>
+  <h3>Phase 2: the tail</h3>
+  <p>The tail is normally the last GCI. It also holds the GCI before it if the crash came while that GCI's GCP save was still running. Each REDO log part of each starting node runs three steps. Step through the first one below on an example log part.</p>
+</section>
+
+<figure aria-labelledby="cap-lg">
+  <div class="stepper" id="f3" tabindex="0" aria-label="Phase 2 on one log part. Use the Next and Back buttons, or the arrow keys.">
+    <div class="stepper-bar">
+      <span class="stage" id="f3-stage">Before phase 2</span>
+      <span class="count" id="f3-count">0 / 20</span>
+      <button type="button" id="f3-reset">Restart</button>
+      <button type="button" id="f3-prev">Back</button>
+      <button type="button" id="f3-next" class="primary">Next</button>
+    </div>
+    <div class="lg-scroll">
+      <svg class="lg" id="f3-svg" viewBox="0 0 1000 232" role="img" aria-label="One REDO log part drawn as a row of records, oldest on the left. Arcs lead from each COMMIT record back to its PREPARE."></svg>
+    </div>
+    <div class="panels">
+      <div class="panel"><h4>What happens</h4><p class="msg" id="f3-msg" aria-live="polite"></p></div>
+      <div class="panel"><h4>Hash table of this log part</h4><div id="f3-table"></div></div>
+      <div class="panel"><h4>Result so far</h4><div id="f3-result"></div></div>
+    </div>
+    <div class="legend" aria-hidden="true">
+      <span><i class="sw P"></i>PREPARE</span>
+      <span><i class="sw C"></i>COMMIT</span>
+      <span><i class="sw X"></i>COMPLETE</span>
+      <span><i class="sw A"></i>ABORT</span>
+      <span><i class="sw G"></i>COMPLETED_GCI</span>
+      <span><i class="sw done"></i>executed</span>
+      <span><i class="sw doubt"></i>in doubt</span>
+      <span><i class="sw inv"></i>invalidated</span>
+    </div>
+  </div>
+  <figcaption id="cap-lg"><b>Phase 2 on one log part.</b> Records are labelled by transaction and row, so <span class="mono">T7·a</span> is transaction T7's operation on row a. The arcs are the backward references from each COMMIT to its PREPARE. A transaction's COMMITs are executed in log order when its first COMPLETE is found, and the transaction leaves the table, so the table only ever holds transactions between their COMMIT and their COMPLETE.</figcaption>
+</figure>
+
+<section class="col">
+  <h3>Step A: first scan</h3>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Record</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td>COMMIT</td><td>Append a reference to the FIFO queue of its transaction id.</td></tr>
+      <tr><td>COMPLETE, entry found</td><td>Execute the queued COMMITs in log order through their backward references, then remove the entry.</td></tr>
+      <tr><td>COMPLETE, no entry</td><td>Ignore. Another operation's COMPLETE already executed the transaction, or its GCI is ≤ R_gcp.</td></tr>
+      <tr><td>ABORT</td><td>Remove the entry. Its COMMITs are invalidated in step C.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="margin-top:1em">No COMMIT of a transaction can follow its COMPLETE in the same log part, because COMPLETE is only sent after every COMMITTED. What is left in the table at the end is the log part's in-doubt set.</p>
+  <h3>Step B: exchange between log parts</h3>
+  <p>There is no coordinator. Every log part sends its in-doubt set to every other part, as transaction id and the number of COMMIT records it holds. The COMMIT records stay local. Each part then scans its tail a second time for COMPLETE and ABORT records of the transactions it was sent, and answers the parts that asked.</p>
+</section>
+
+<figure class="mid" aria-labelledby="cap-ex">
+  <div class="fig-scroll">
+  <svg viewBox="0 0 780 410" style="min-width: 640px" role="img" aria-label="Three log parts on three nodes. Each sends its in-doubt set to all. Each rescans its tail; log part 3 finds the COMPLETE of T8 and tells log part 1. All send done. Each then computes the same verdicts: T8 commits, T10 aborts.">
+    <defs>
+      <marker id="f4-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="ah-ok"/></marker>
+    </defs>
+    <rect class="s-band" x="0" y="58" width="780" height="70"/>
+    <rect class="s-band" x="0" y="138" width="780" height="66"/>
+    <rect class="s-band" x="0" y="240" width="780" height="50"/>
+    <rect class="s-band" x="0" y="300" width="780" height="104"/>
+    <line class="s-lane" x1="130" y1="48" x2="130" y2="404"/>
+    <line class="s-lane" x1="390" y1="48" x2="390" y2="404"/>
+    <line class="s-lane" x1="650" y1="48" x2="650" y2="404"/>
+    <text class="s-t s-b tm" x="130" y="22">Log part 1</text>
+    <text class="s-t s-b tm" x="390" y="22">Log part 2</text>
+    <text class="s-t s-b tm" x="650" y="22">Log part 3</text>
+    <text class="s-t s-sm s-mut tm" x="130" y="38">node 1</text>
+    <text class="s-t s-sm s-mut tm" x="390" y="38">node 2</text>
+    <text class="s-t s-sm s-mut tm" x="650" y="38">node 3</text>
+
+    <text class="s-cap tm" x="390" y="74">B1 · EVERY PART SENDS ITS IN-DOUBT SET TO EVERY PART</text>
+    <rect class="s-box" x="30" y="84" width="200" height="32" rx="3"/>
+    <text class="s-sig tm" x="130" y="104">T8: 1   T10: 1</text>
+    <rect class="s-box" x="290" y="84" width="200" height="32" rx="3"/>
+    <text class="s-sig tm" x="390" y="104">T10: 1</text>
+    <rect class="s-box" x="550" y="84" width="200" height="32" rx="3"/>
+    <text class="s-t s-sm s-mut tm" x="650" y="104">nothing in doubt</text>
+
+    <text class="s-cap tm" x="390" y="154">B2 · RESCAN THE TAIL FOR COMPLETE AND ABORT RECORDS</text>
+    <rect class="s-box" x="30" y="164" width="200" height="30" rx="3"/>
+    <text class="s-t s-sm tm" x="130" y="183">no match</text>
+    <rect class="s-box" x="290" y="164" width="200" height="30" rx="3"/>
+    <text class="s-t s-sm tm" x="390" y="183">no match</text>
+    <rect class="s-box ok" x="550" y="164" width="200" height="30" rx="3"/>
+    <text class="s-t s-sm tm" x="650" y="183">finds the COMPLETE of T8</text>
+
+    <line class="s-msg ok" x1="646" y1="224" x2="134" y2="224" marker-end="url(#f4-ah)"/>
+    <text class="s-sig tm s-ok" x="520" y="218">"T8 complete"</text>
+
+    <text class="s-cap tm" x="390" y="256">B3 · EVERY PART SENDS DONE TO EVERY PART</text>
+    <text class="s-t s-sm s-mut tm" x="390" y="278">signal order puts a part's "T complete" messages before its "done"</text>
+
+    <text class="s-cap tm" x="390" y="316">C · EVERY PART COMPUTES THE SAME VERDICTS</text>
+    <rect class="s-box" x="30" y="326" width="200" height="66" rx="3"/>
+    <text class="s-t s-sm tm" x="130" y="344">T8: commit, run its queue</text>
+    <text class="s-t s-sm tm" x="130" y="362">T10: no COMPLETE, counts</text>
+    <text class="s-t s-sm tm" x="130" y="380">short: abort, invalidate</text>
+    <rect class="s-box" x="290" y="326" width="200" height="66" rx="3"/>
+    <text class="s-t s-sm tm" x="390" y="353">T10: no COMPLETE, counts</text>
+    <text class="s-t s-sm tm" x="390" y="371">short: abort, invalidate</text>
+    <rect class="s-box" x="550" y="326" width="200" height="66" rx="3"/>
+    <text class="s-t s-sm s-mut tm" x="650" y="362">nothing to decide</text>
+  </svg>
+  </div>
+  <figcaption id="cap-ex"><b>Step B and step C across three log parts.</b> Every part computes each verdict from the same exchanged data, so all parts agree without a coordinator. The work is two linear scans of the tail, the second reading only COMPLETE and ABORT records; the messages grow with the number of in-doubt transactions times the number of log parts.</figcaption>
+</figure>
+
+<section class="col">
+  <h3>Step C: verdicts</h3>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Condition, once "done" has come from every part</th><th>Verdict</th></tr></thead>
+    <tbody>
+      <tr><td>"T complete" received</td><td>Commit: execute the queued COMMITs in log order.</td></tr>
+      <tr><td>Otherwise the counts pass the node-group rule (§7) and no "T aborted" was received</td><td>Commit, the same way.</td></tr>
+      <tr><td>Otherwise</td><td>Abort: rewrite the transaction's COMMIT records in place as <code>ZINVALID_COMMIT_TYPE</code>.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="margin-top:1em">The hash table is then freed. A restart that crashes partway through is repeatable: nothing in the log changes before every part is done, and after that only the COMMITs of aborted transactions are rewritten, which a rerun aborts again.</p>
+  <h3>Phase 3: raise the restorable GCI</h3>
+  <ul>
+    <li>Set the restorable GCI to the highest GCI applied in phase 2, durably, before the restart LCP and the first new GCP. The sysfile, DIH, DBLQH, Backup, NDBCNTR and the DIH replica intervals must all see it.</li>
+    <li>Keep the LCP-restore bound at R_gcp.</li>
+    <li>Put the new log head after the old tail and write an SR-head record, so a repeated restart finds the same state. New GCIs start above the new restorable GCI.</li>
+  </ul>
+</section>
+
+<!-- 6 -->
+<section class="col" id="order">
+  <h2><span class="num">6</span>Why log order is enough</h2>
+  <p>Each log part executes the surviving transactions in its own log order, with no ordering across fragments or transactions, and every row still ends as a serial execution of the survivors would leave it. The cost is linear.</p>
+  <ul>
+    <li><strong>After-images.</strong> REDO records hold the values written. Interpreted updates are logged as their resulting ATTRINFO. Applying a record depends only on its own row.</li>
+    <li><strong>Locks are held to the COMPLETE record.</strong> On each replica a writer keeps its row lock until its COMPLETE record for that operation is persistent, or until its ABORT record. The next writer of the row logs its PREPARE, COMMIT and COMPLETE only after that.</li>
+    <li><strong>GCI order.</strong> If T2 read or overwrote T1's write, GCI(T2) ≥ GCI(T1), so phase 1 followed by phase 2 keeps each row's order.</li>
+    <li><strong>FIFO within a transaction.</strong> Several operations of one transaction on the same row keep their order.</li>
+  </ul>
+  <p>Take T1 before T2 on row r. T1's COMPLETE for r comes before T2's COMMIT for r. T1 is executed at its first COMPLETE in this log part, T2 at its own COMPLETE or in step C, so T1 runs first. If T1 has no COMPLETE in this log part, it still held the lock on r at the crash, and nothing follows it on r. In the example above, T11 writes row a at record 13, after T7's COMPLETE of row a at record 8.</p>
+  <p><strong>Dependencies are kept.</strong> If T2 read T1's write, the write was visible, so T1 has a COMPLETE record and survives. Routing the tail through TCs instead would throw away the order the log already holds and would re-fire triggers and take locks.</p>
+</section>
+
+<!-- 7 -->
+<section class="col" id="failures">
+  <h2><span class="num">7</span>Node failures</h2>
+  <h3>A node failure in the tail GCI (D3)</h3>
+  <p>Rule F covers transactions in flight when a node fails. Transactions that start after the failure run on the surviving replica alone. If the cluster then crashes before that GCI is saved by GCP, every sysfile still shows the failed node as restorable, and its replicas would miss those transactions. So the failure must be persisted before anything can be committed without the failed node.</p>
+</section>
+
+<figure class="mid" aria-labelledby="cap-d3">
+  <div class="fig-scroll">
+  <svg viewBox="0 0 780 432" style="min-width: 640px" role="img" aria-label="Node X fails. The president Z sends PREP_FAILREQ. Each surviving node appends X failed to its node-failure file and persists it, then replies PREP_FAILCONF. Only then does COMMIT_FAILREQ and NODE_FAILREP let transactions leave X out. After a power loss, the restart learns from the file that X is stale.">
+    <defs>
+      <marker id="f5-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="ah"/></marker>
+    </defs>
+    <line class="s-lane" x1="110" y1="48" x2="110" y2="96"/>
+    <line class="s-lane" x1="390" y1="48" x2="390" y2="336"/>
+    <line class="s-lane" x1="650" y1="48" x2="650" y2="336"/>
+    <text class="s-t s-b tm" x="110" y="22">Node X</text>
+    <text class="s-t s-b tm" x="390" y="22">Node Y</text>
+    <text class="s-t s-b tm" x="650" y="22">Node Z</text>
+    <text class="s-t s-sm s-mut tm" x="110" y="38">node group 0</text>
+    <text class="s-t s-sm s-mut tm" x="390" y="38">node group 0, X's peer</text>
+    <text class="s-t s-sm s-mut tm" x="650" y="38">node group 1, president</text>
+
+    <line class="s-x" x1="102" y1="98" x2="118" y2="114"/>
+    <line class="s-x" x1="118" y1="98" x2="102" y2="114"/>
+    <text class="s-t s-sm s-bad" x="128" y="111">fails during GCI g</text>
+
+    <line class="s-msg" x1="646" y1="136" x2="394" y2="136" marker-end="url(#f5-ah)"/>
+    <text class="s-sig tm" x="520" y="130">PREP_FAILREQ</text>
+    <rect class="s-box new" x="280" y="148" width="220" height="50" rx="3"/>
+    <text class="s-t s-sm tm" x="390" y="165">append "X failed, GCI g"</text>
+    <text class="s-t s-sm tm" x="390" y="179">to the node-failure file</text>
+    <text class="s-t s-sm s-acc tm" x="390" y="193">persist barrier</text>
+    <rect class="s-box new" x="540" y="148" width="220" height="50" rx="3"/>
+    <text class="s-t s-sm tm" x="650" y="165">append "X failed, GCI g"</text>
+    <text class="s-t s-sm tm" x="650" y="179">to the node-failure file</text>
+    <text class="s-t s-sm s-acc tm" x="650" y="193">persist barrier</text>
+
+    <line class="s-msg" x1="394" y1="218" x2="646" y2="218" marker-end="url(#f5-ah)"/>
+    <text class="s-sig tm" x="520" y="212">PREP_FAILCONF</text>
+    <line class="s-msg" x1="646" y1="246" x2="394" y2="246" marker-end="url(#f5-ah)"/>
+    <text class="s-sig tm" x="520" y="240">COMMIT_FAILREQ</text>
+    <rect class="s-box" x="280" y="256" width="220" height="30" rx="3"/>
+    <text class="s-t s-sm tm" x="390" y="275">NODE_FAILREP: TC, DIH drop X</text>
+    <rect class="s-box" x="540" y="256" width="220" height="30" rx="3"/>
+    <text class="s-t s-sm tm" x="650" y="275">NODE_FAILREP: TC, DIH drop X</text>
+    <rect class="s-box" x="250" y="298" width="280" height="30" rx="3"/>
+    <text class="s-t s-sm tm" x="390" y="317">T commits on Y alone and is acknowledged</text>
+
+    <rect class="s-band-warn" x="0" y="344" width="780" height="28"/>
+    <text class="s-t s-sm s-bad tm" x="390" y="362" style="font-weight:600">power loss before GCI g is saved by GCP</text>
+
+    <rect class="s-box" x="20" y="382" width="740" height="42" rx="3"/>
+    <text class="s-t s-sm tm" x="390" y="399">At restart a starting node reports "X failed in GCI g", and g &gt; R_gcp.</text>
+    <text class="s-t s-sm tm" x="390" y="415">X is stale: it stays out of the cluster restart and joins afterwards by a node restart.</text>
+  </svg>
+  </div>
+  <figcaption id="cap-d3"><b>Recording the failure.</b> QMGR appends the record before it sends PREP_FAILCONF (<code>QmgrMain.cpp:7636</code>). The president sends COMMIT_FAILREQ, and NODE_FAILREP goes out, only after every PREP_FAILCONF has arrived, so every survivor has the record before any TC or DIH can leave X out. The node-failure file is a small ring on the PMEM file system, separate from the REDO log parts: the fact is per node, DIH needs it before phase 2 starts, and it costs one PMEM write per node failure.</figcaption>
+</figure>
+
+<section class="col">
+  <h3>Stale nodes</h3>
+  <p>A starting node X is <strong>stale</strong> if some starting node recorded X's failure in a GCI above R_gcp: X failed after the last GCP save, the cluster ran on without it, and no sysfile shows it. A stale node takes no part in the cluster restart, neither phase 1 nor phase 2. It is restarted by a node restart once the other nodes have recovered, the same way NDBCNTR already treats a node that cannot be restored from its own REDO log (<code>m_withLogNotRestorable</code>, <code>NdbcntrMain.cpp:2730-2743</code>). The node-failure records therefore travel with each node's start request, before the master fixes the node sets. <strong>Recovery needs at least one non-stale node in each node group.</strong></p>
+  <h3>The proof of commit is on a missing node (D5)</h3>
+  <p>With linear complete, the backup writes its COMPLETE and makes the row visible before the primary gets COMPLETE. If the backup's node does not come back, no starting log part may have a COMPLETE for the transaction, although someone may have seen it. The fallback uses the counts from step B.</p>
+  <ul>
+    <li>Every node of a node group holds a replica of the same fragments and writes one COMMIT record per operation on them. A node's count is therefore the number of the transaction's operations in its node group that it has COMMIT records for.</li>
+    <li><strong>Node-group rule:</strong> within each node group every node taking part in the restart reports the same count, and the counts of the node groups add up to <code>opCount</code>. Then every operation has a COMMIT on every replica in the restart, and the transaction commits.</li>
+    <li>This always holds once any COMPLETE was written. A transaction with every COMMIT and no COMPLETE may correctly go either way, since nobody saw it. A "T aborted" from step B vetoes the rule, so it never revives a transaction aborted by rule F.</li>
+  </ul>
+  <h3>A node group with only stale nodes starting (D4)</h3>
+</section>
+
+<figure class="mid" aria-labelledby="cap-d4">
+  <div class="fig-scroll">
+  <svg viewBox="0 0 780 250" style="min-width: 600px" role="img" aria-label="Node group 0 has X, which failed before T, and Y, which has T on row a but never comes back. Node group 1 has Z and W, which both have T on row b. Running phase 2 would apply row b but not row a.">
+    <rect class="s-box" x="20" y="34" width="350" height="140" rx="5"/>
+    <rect class="s-box" x="410" y="34" width="350" height="140" rx="5"/>
+    <text class="s-t s-b" x="36" y="56">Node group 0</text>
+    <text class="s-t s-b" x="426" y="56">Node group 1</text>
+
+    <rect class="s-box gone" x="36" y="70" width="150" height="88" rx="4"/>
+    <text class="s-t s-b tm" x="111" y="94">X</text>
+    <text class="s-t s-sm s-mut tm" x="111" y="114">failed before T</text>
+    <text class="s-t s-sm s-mut tm" x="111" y="130">stale: lacks T</text>
+
+    <rect class="s-box gone" x="204" y="70" width="150" height="88" rx="4"/>
+    <text class="s-t s-b tm" x="279" y="94">Y</text>
+    <text class="s-t s-sm tm" x="279" y="114">has T on row a</text>
+    <text class="s-t s-sm s-bad tm" x="279" y="130">never comes back</text>
+
+    <rect class="s-box ok" x="426" y="70" width="150" height="88" rx="4"/>
+    <text class="s-t s-b tm" x="501" y="94">Z</text>
+    <text class="s-t s-sm tm" x="501" y="114">has T on row b</text>
+    <text class="s-t s-sm s-mut tm" x="501" y="130">COMMIT + COMPLETE</text>
+
+    <rect class="s-box ok" x="594" y="70" width="150" height="88" rx="4"/>
+    <text class="s-t s-b tm" x="669" y="94">W</text>
+    <text class="s-t s-sm tm" x="669" y="114">has T on row b</text>
+    <text class="s-t s-sm s-mut tm" x="669" y="130">COMMIT + COMPLETE</text>
+
+    <text class="s-t s-bad tm" x="390" y="206" style="font-weight:600">Phase 2 would apply T to row b but not to row a: T would be half applied.</text>
+    <text class="s-t s-sm s-mut tm" x="390" y="230">Z and W know from their node-failure files that X is stale: node group 0 has no node that can recover.</text>
+  </svg>
+  </div>
+  <figcaption id="cap-d4"><b>At least one non-stale node per node group.</b> X failed, then T committed on Y, Z and W and was acknowledged, then the cluster crashed and Y's machine is gone. Node group 0 has no non-stale node, so the cluster restart does not start until Y is back. With a single node group nothing can reveal that X is stale, since its only witness is gone: X recovers alone, Y's commits are lost, and nothing is half applied.</figcaption>
+</figure>
+
+<!-- 8 -->
+<section class="col" id="decisions">
+  <h2><span class="num">8</span>Decisions</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>#</th><th>Question</th><th>Status</th><th>Outcome</th></tr></thead>
+    <tbody>
+      <tr><td class="id">D0</td><td>Recovery model and scope</td><td><span class="pill ok">Settled</span></td><td>Per transaction, cluster-wide, persistent COMMIT and COMPLETE records.</td></tr>
+      <tr><td class="id">D1</td><td>Where the REDO lives</td><td><span class="pill ok">Settled</span></td><td>The whole REDO in PMEM; fsdax with <code>MAP_SYNC</code>; ADR and eADR both supported.</td></tr>
+      <tr><td class="id">D2</td><td>Who decides in-doubt transactions</td><td><span class="pill ok">Settled</span></td><td>No coordinator: log parts exchange in-doubt sets and each computes the same verdicts.</td></tr>
+      <tr><td class="id">D3</td><td>A node failure in the tail GCI</td><td><span class="pill ok">Settled</span></td><td>The failure must be recorded. Proposed place: a node-failure file on PMEM, written by QMGR before PREP_FAILCONF.</td></tr>
+      <tr><td class="id">D4</td><td>A node group with only stale nodes starting</td><td><span class="pill ok">Settled</span></td><td>Recovery needs at least one non-stale node in each node group. Stale nodes stay out of the restart and join by node restart afterwards.</td></tr>
+      <tr><td class="id">D5</td><td>COMPLETE only on a missing node</td><td><span class="pill ok">Settled</span></td><td><code>opCount</code> fallback, decided from per-node counts per node group.</td></tr>
+      <tr><td class="id">D6</td><td>When the API is acked</td><td><span class="pill ok">Settled</span></td><td>After the last COMPLETED.</td></tr>
+      <tr><td class="id">D7</td><td>How many COMPLETE records</td><td><span class="pill ok">Settled</span></td><td>One per operation. One per transaction and log part would work but is complex to implement.</td></tr>
+      <tr><td class="id">D8</td><td>Hardware without PMEM</td><td><span class="pill ok">Settled</span></td><td>Refuse to start. Tests use emulated PMEM.</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- 9 -->
+<section class="col" id="work">
+  <h2><span class="num">9</span>Risks and work plan</h2>
+  <h3>Risks</h3>
+  <ul>
+    <li><strong>Persist barriers.</strong> Several LDMs can share a log part, so a barrier must cover the part's whole unpersisted range. A missing barrier is a silent bug; a debug check and power-loss emulation that keeps only what was written up to the last barrier guard against it.</li>
+    <li><strong>Moving the primary's local commit</strong> touches the hottest commit code: the queued-log path, <code>tupcommit_conf</code>, the parallel and takeover paths.</li>
+    <li><strong>Longer lock hold</strong> on the primary. Measure hot-row throughput and deadlock-timeout aborts.</li>
+    <li><strong>Rule F</strong> needs an abort path from the committed state in DBLQH, and the takeover TC must know whether any COMPLETE was sent.</li>
+    <li><strong><code>opCount</code></strong> must be right for trigger-generated operations, IgnoreError aborts and takeover.</li>
+    <li><strong>Transaction id reuse.</strong> The API's counter starts at 0 again when the API process restarts. A failed API node id is therefore not taken into use again until the GCI in which it failed has been saved by GCP, enforced in QMGR's API_REGREQ handling.</li>
+    <li><strong>Activation boundary.</strong> Phase 2 applies only to GCI ≥ <i>g</i>, and only when R_gcp ≥ <i>g</i>−1.</li>
+  </ul>
+
+  <h3>Design documents</h3>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Id</th><th>Subtask</th><th>Covers</th></tr></thead>
+    <tbody>
+      <tr><td class="id">P0</td><td>Research <span class="pill ok">Done</span></td><td>Five research notes on the commit protocol, REDO log, system restart, micro-GCPs and the literature.</td></tr>
+      <tr><td class="id">P1</td><td>Decision record <span class="pill ok">Done</span></td><td>This plan; all decisions settled.</td></tr>
+      <tr><td class="id">P2</td><td>Memory-mapped REDO and PMEM layer</td><td>The new format, DAX mapping and start-up check, barriers per log part, space reservations, <code>redoLogReader</code>.</td></tr>
+      <tr><td class="id">P3</td><td>Commit path</td><td>Invariants C, K, L, A and F on every path; moving the primary's local commit; <code>writeCompleteLog</code>; <code>opCount</code>; the late ack; API node-id hold-back; the node-failure file write.</td></tr>
+      <tr><td class="id">P4</td><td>Cluster restart</td><td>Phases 1 to 3, steps A to C and their signals, the count fallback, stale nodes and the D4 check, the ordering proof with code references.</td></tr>
+      <tr><td class="id">P5</td><td>Configuration and activation</td><td>The two config variables, activation at GCI <i>g</i> through the GCP protocol, the sysfile field, turning it off by cluster restart, ndbinfo.</td></tr>
+      <tr><td class="id">P6</td><td>Verification and benchmarks</td><td>A TLA+ model of the protocol and phase 2; power-loss emulation with an acknowledged-commit ledger; ERROR_INSERT crash points; MTR and autotest on emulated PMEM; latency, hot-row and restart-time benchmarks.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>Execution phases</h3>
+</section>
+
+<div class="col">
+  <div class="chain">
+    <div class="step indep"><b>X1 · independent</b>Takeover ack after COMPLETE; also fixes read-your-writes after takeover today.</div>
+    <div class="step"><b>X2</b>Memory-mapped REDO config, new record writer, PMEM persistence layer.</div>
+    <div class="step"><b>X3</b>Test harness: ledger, crash of all nodes, power-loss emulation.</div>
+    <div class="step"><b>X4</b>Commit path: barriers, primary commit at COMPLETE, late ack, rule F, <span class="mono">opCount</span>.</div>
+    <div class="step"><b>X5</b>Restart phases 1 to 3. From here the ledger must show zero losses.</div>
+    <div class="step"><b>X6</b>Node-failure file, stale nodes, count fallback, D4 check.</div>
+    <div class="step"><b>X7</b>Online activation at a GCI, turning it off, ndbinfo.</div>
+    <div class="step"><b>X8</b>Performance, rondb-docs, <span class="mono">redoLogReader</span>.</div>
+  </div>
+</div>
+
+<footer class="col">
+  Source documents in <code>storage/ndb/claude_files/durable_commits/</code>:
+  <ul>
+    <li><code>durable_commits_plan.md</code>, the plan this page summarises (revision 6)</li>
+    <li><code>research_commit_protocol.md</code>, <code>research_redo_log.md</code>, <code>research_system_restart.md</code>, <code>research_micro_gcp.md</code>, <code>research_literature.md</code></li>
+  </ul>
+</footer>
+
+</main>
+
+<script>
+(function () {
+  var NS = 'http://www.w3.org/2000/svg';
+  var svg = document.getElementById('f3-svg');
+  if (!svg) return;
+
+  // One log part, oldest record first. The first four are covered by phase 1.
+  var cells = [
+    { k: 'P', tx: 'T5', row: 'a', p1: true },
+    { k: 'C', tx: 'T5', row: 'a', ref: 0, p1: true },
+    { k: 'X', tx: 'T5', row: 'a', p1: true },
+    { k: 'G', p1: true },
+    { k: 'P', tx: 'T7', row: 'a' },
+    { k: 'P', tx: 'T7', row: 'c' },
+    { k: 'P', tx: 'T8', row: 'b' },
+    { k: 'P', tx: 'T9', row: 'd' },
+    { k: 'C', tx: 'T7', row: 'a', ref: 4 },
+    { k: 'C', tx: 'T7', row: 'c', ref: 5 },
+    { k: 'C', tx: 'T8', row: 'b', ref: 6 },
+    { k: 'X', tx: 'T7', row: 'a' },
+    { k: 'P', tx: 'T10', row: 'e' },
+    { k: 'X', tx: 'T7', row: 'c' },
+    { k: 'C', tx: 'T9', row: 'd', ref: 7 },
+    { k: 'A', tx: 'T9' },
+    { k: 'P', tx: 'T11', row: 'a' },
+    { k: 'C', tx: 'T11', row: 'a', ref: 16 },
+    { k: 'X', tx: 'T11', row: 'a' },
+    { k: 'C', tx: 'T10', row: 'e', ref: 12 },
+    { k: 'P', tx: 'T12', row: 'f' }
+  ];
+  var FIRST = 4, LAST = cells.length - 1, TAIL = LAST - FIRST + 1, STEPS = TAIL + 3;
+  var W = 40, H = 48, GAP = 5, X0 = 24, Y0 = 118;
+  var NAMES = { P: 'PREPARE', C: 'COMMIT', X: 'COMPLETE', A: 'ABORT' };
+  function num(i) { return i - FIRST + 1; }
+
+  function mk(tag, attrs, parent, text) {
+    var e = document.createElementNS(NS, tag);
+    for (var a in attrs) e.setAttribute(a, attrs[a]);
+    if (text != null) e.textContent = text;
+    parent.appendChild(e);
+    return e;
+  }
+
+  var defs = mk('defs', {}, svg);
+  var pat = mk('pattern', { id: 'f3-hatch', width: 6, height: 6, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' }, defs);
+  mk('line', { x1: 0, y1: 0, x2: 0, y2: 6, 'class': 'hatch-line' }, pat);
+  var m1 = mk('marker', { id: 'f3-ah', viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 6, markerHeight: 6, orient: 'auto' }, defs);
+  mk('path', { d: 'M0,0 L10,5 L0,10 z', 'class': 'ah-commit' }, m1);
+  var m2 = mk('marker', { id: 'f3-ahd', viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 6, markerHeight: 6, orient: 'auto' }, defs);
+  mk('path', { d: 'M0,0 L10,5 L0,10 z', 'class': 'ah-abort' }, m2);
+
+  cells.forEach(function (c, i) { c.x = X0 + i * (W + GAP); c.cx = c.x + W / 2; });
+
+  var arcG = mk('g', {}, svg);
+  var cellG = mk('g', {}, svg);
+
+  cells.forEach(function (c, i) {
+    if (c.ref == null) return;
+    var p = cells[c.ref];
+    var apex = 14 + 10 * (i - c.ref);
+    c.arc = mk('path', {
+      d: 'M' + c.cx + ',' + Y0 + ' Q' + (c.cx + p.cx) / 2 + ',' + (Y0 - 2 * apex) + ' ' + p.cx + ',' + Y0,
+      'class': 'arc', 'marker-end': 'url(#f3-ah)'
+    }, arcG);
+  });
+  mk('text', { x: (cells[7].cx + cells[14].cx) / 2, y: 22, 'class': 'note' }, svg, 'back-reference from COMMIT to PREPARE');
+
+  cells.forEach(function (c, i) {
+    var g = mk('g', { 'class': 'cell k-' + c.k }, cellG);
+    mk('rect', { 'class': 'tint', x: c.x, y: Y0, width: W, height: H, rx: 3 }, g);
+    mk('rect', { 'class': 'hatch', x: c.x, y: Y0, width: W, height: H, rx: 3, fill: 'url(#f3-hatch)' }, g);
+    mk('rect', { 'class': 'box', x: c.x, y: Y0, width: W, height: H, rx: 3 }, g);
+    if (c.k === 'G') {
+      mk('text', { 'class': 'k small', x: c.cx, y: Y0 + 20 }, g, 'GCI');
+      mk('text', { 'class': 'sub', x: c.cx, y: Y0 + 37 }, g, 'R');
+    } else {
+      mk('text', { 'class': 'k', x: c.cx, y: Y0 + 21 }, g, c.k);
+      mk('text', { 'class': 'sub', x: c.cx, y: Y0 + 37 }, g, c.tx + (c.row ? '·' + c.row : ''));
+    }
+    if (i >= FIRST) mk('text', { 'class': 'idx', x: c.cx, y: Y0 + H + 15 }, svg, String(num(i)));
+    c.g = g;
+  });
+
+  var cursor = mk('polygon', { 'class': 'cursor', points: '0,0 -6,10 6,10' }, svg);
+  cursor.setAttribute('transform', 'translate(-100,' + (Y0 + H + 21) + ')');
+
+  var by = Y0 + H + 42;
+  mk('path', { 'class': 'brk', d: 'M' + cells[0].x + ',' + (by - 6) + ' V' + by + ' H' + (cells[3].x + W) + ' V' + (by - 6) }, svg);
+  mk('text', { 'class': 'brk-t', x: (cells[0].x + cells[3].x + W) / 2, y: by + 16 }, svg, 'phase 1 · GCI ≤ R_gcp');
+  mk('path', { 'class': 'brk', d: 'M' + cells[FIRST].x + ',' + (by - 6) + ' V' + by + ' H' + (cells[LAST].x + W) + ' V' + (by - 6) }, svg);
+  mk('text', { 'class': 'brk-t', x: (cells[FIRST].x + cells[LAST].x + W) / 2, y: by + 16 }, svg, 'phase 2 · the tail · GCI > R_gcp');
+  var cx = cells[LAST].x + W + 9;
+  mk('line', { 'class': 'crash', x1: cx, y1: Y0 - 12, x2: cx, y2: Y0 + H + 4 }, svg);
+  mk('text', { 'class': 'crash-t', x: cx, y: Y0 - 18 }, svg, 'crash');
+
+  function compute(s) {
+    var st = { table: [], done: {}, invalid: {}, pend: {}, doubt: {}, unused: {}, cursor: null, msg: '', stage: '', executed: [], aborted: [], remote: false };
+    var table = {}, order = [];
+    function q(tx) { if (!table[tx]) { table[tx] = []; order.push(tx); } return table[tx]; }
+    function drop(tx) { delete table[tx]; order = order.filter(function (t) { return t !== tx; }); }
+    function exec(tx, where) {
+      var list = table[tx];
+      list.forEach(function (ci) { st.done[ci] = 1; st.done[cells[ci].ref] = 1; });
+      st.executed.push(tx + ': COMMIT ' + list.map(num).join(', ') + ' ' + where);
+      drop(tx);
+      return list;
+    }
+    var n = Math.min(s, TAIL);
+    for (var k = 1; k <= n; k++) {
+      var ci = FIRST + k - 1, c = cells[ci];
+      st.cursor = ci;
+      var where = 'Record ' + k + ': ' + NAMES[c.k] + ' of ' + c.tx + (c.row ? ' on row ' + c.row : '') + '. ';
+      if (c.k === 'P') {
+        st.msg = where + 'Nothing to do now. A PREPARE is only reached later, through the backward reference of its COMMIT.';
+      } else if (c.k === 'C') {
+        q(c.tx).push(ci);
+        st.msg = where + 'Append it to ' + c.tx + "'s queue.";
+      } else if (c.k === 'X') {
+        if (table[c.tx]) {
+          var list = exec(c.tx, 'at record ' + k);
+          st.msg = where + 'Execute ' + c.tx + "'s queued COMMIT" + (list.length > 1 ? 's ' : ' ') + list.map(num).join(' and ') + ' in log order, each through its back-reference, and remove ' + c.tx + ' from the table.';
+        } else {
+          st.msg = where + c.tx + ' is no longer in the table: an earlier COMPLETE already executed it. Ignore.';
+        }
+      } else if (c.k === 'A') {
+        var l = table[c.tx] || [];
+        l.forEach(function (x) { st.pend[x] = 1; });
+        st.aborted.push(c.tx + ': COMMIT ' + l.map(num).join(', ') + ' (ABORT record)');
+        drop(c.tx);
+        st.msg = where + 'A node failed before any COMPLETE was sent, so rule F aborted ' + c.tx + '. Remove it from the table; its COMMIT ' + l.map(num).join(', ') + ' is invalidated in step C.';
+      }
+    }
+    if (s === 0) {
+      st.stage = 'Before phase 2';
+      st.msg = 'Phase 1 has already replayed the records with GCI ≤ R_gcp, up to the GCI R marker. Phase 2 now scans the tail of this log part from left to right. Press Next.';
+    } else if (s <= TAIL) {
+      st.stage = 'Step A · first scan';
+    }
+    if (s >= TAIL + 1) {
+      st.cursor = null;
+      st.unused[LAST] = 1;
+      order.forEach(function (tx) { table[tx].forEach(function (ci) { st.doubt[ci] = 1; }); });
+    }
+    if (s === TAIL + 1) {
+      st.stage = 'Step A done';
+      st.msg = 'End of the scan. T8 and T10 are still in the table: each has a COMMIT here but no COMPLETE or ABORT. They are this log part\'s in-doubt set. The PREPARE of T12 has no COMMIT, so it is never applied.';
+    }
+    if (s >= TAIL + 2) { st.remote = true; }
+    if (s === TAIL + 2) {
+      st.stage = 'Step B · exchange';
+      st.msg = 'This part sends "T8: 1, T10: 1" to every other log part. In its second scan, another log part finds a COMPLETE for T8 and sends "T8 complete". Nobody has a COMPLETE for T10, and its counts fall short of opCount.';
+    }
+    if (s === TAIL + 3) {
+      st.stage = 'Step C · verdicts';
+      exec('T8', 'in step C');
+      Object.keys(st.pend).forEach(function (ci) { st.invalid[ci] = 1; });
+      st.pend = {};
+      (table['T10'] || []).forEach(function (ci) { st.invalid[ci] = 1; });
+      st.aborted.push('T10: COMMIT ' + table['T10'].map(num).join(', ') + ' (no COMPLETE)');
+      drop('T10');
+      st.doubt = {};
+      st.msg = 'T8 commits: its queued COMMIT 7 is executed. T10 aborts. The COMMIT records of T9 and T10 (11 and 16) are rewritten in place as invalid, and the hash table is freed.';
+      st.freed = true;
+    }
+    st.table = order.map(function (tx) { return tx + ' → COMMIT ' + table[tx].map(num).join(', ') + (st.remote && tx === 'T8' ? '  (complete elsewhere)' : ''); });
+    return st;
+  }
+
+  var step = 0;
+  var elStage = document.getElementById('f3-stage');
+  var elCount = document.getElementById('f3-count');
+  var elMsg = document.getElementById('f3-msg');
+  var elTable = document.getElementById('f3-table');
+  var elResult = document.getElementById('f3-result');
+  var bPrev = document.getElementById('f3-prev');
+  var bNext = document.getElementById('f3-next');
+  var bReset = document.getElementById('f3-reset');
+
+  function list(items, empty) {
+    if (!items.length) return '<p class="empty">' + empty + '</p>';
+    return '<ul>' + items.map(function (t) { return '<li>' + t + '</li>'; }).join('') + '</ul>';
+  }
+
+  function render() {
+    var st = compute(step);
+    cells.forEach(function (c, i) {
+      var cl = c.g.classList;
+      cl.toggle('p1', !!c.p1);
+      cl.toggle('cur', st.cursor === i);
+      cl.toggle('done', !!st.done[i]);
+      cl.toggle('invalid', !!st.invalid[i]);
+      cl.toggle('pend', !!st.pend[i]);
+      cl.toggle('doubt', !!st.doubt[i]);
+      cl.toggle('unused', !!st.unused[i]);
+      if (c.arc) {
+        var dead = !!(st.invalid[i] || st.pend[i]);
+        c.arc.classList.toggle('done', !!st.done[i] || !!c.p1);
+        c.arc.classList.toggle('dead', dead);
+        c.arc.setAttribute('marker-end', dead ? 'url(#f3-ahd)' : 'url(#f3-ah)');
+      }
+    });
+    var x = st.cursor == null ? -100 : cells[st.cursor].cx;
+    cursor.setAttribute('transform', 'translate(' + x + ',' + (Y0 + H + 21) + ')');
+    elStage.textContent = st.stage + (step >= 1 && step <= TAIL ? ' · record ' + step + ' of ' + TAIL : '');
+    elCount.textContent = step + ' / ' + STEPS;
+    elMsg.textContent = st.msg;
+    elTable.innerHTML = st.freed ? '<p class="empty">Freed.</p>' : list(st.table, 'Empty.');
+    var res = '';
+    res += '<p class="empty" style="font-style:normal;margin-bottom:2px">Executed</p>' + list(st.executed, 'none yet');
+    res += '<p class="empty" style="font-style:normal;margin:8px 0 2px">' + (step === STEPS ? 'Invalidated' : 'To invalidate') + '</p>' + list(st.aborted, 'none yet');
+    elResult.innerHTML = res;
+    bPrev.disabled = step === 0;
+    bReset.disabled = step === 0;
+    bNext.disabled = step === STEPS;
+  }
+
+  bNext.addEventListener('click', function () { if (step < STEPS) { step++; render(); } });
+  bPrev.addEventListener('click', function () { if (step > 0) { step--; render(); } });
+  bReset.addEventListener('click', function () { step = 0; render(); });
+  document.getElementById('f3').addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight' && step < STEPS) { step++; render(); e.preventDefault(); }
+    if (e.key === 'ArrowLeft' && step > 0) { step--; render(); e.preventDefault(); }
+  });
+  render();
+})();
+</script>
+</body>
+</html>
