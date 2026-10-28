@@ -15,8 +15,8 @@ Paths are relative to `storage/ndb/` unless they start with the repo root.
 
 | ID | Package | Size |
 |---|---|---|
-| S1.1 | CPU feature detection in `NdbHW`; fix `is_avx2_supported()` (implemented, to be tested) | S, 1–1.5 d |
-| S1.2 | `ndb_xxh3`: XXH3 with AVX2 chosen at run time (implemented, to be tested) | M, 2–3 d |
+| S1.1 | CPU feature detection in `NdbHW`; fix `is_avx2_supported()` (done) | S, 1–1.5 d |
+| S1.2 | `ndb_xxh3`: XXH3 with AVX2 chosen at run time (done) | M, 2–3 d |
 | S1.3 | `ndb_pmem` core: map, prefault, copy, store, flush, drain; stubs | M, 3–4 d |
 | S1.4 | Platform queries: domain, bad blocks, dirty shutdown, NUMA | M, 3 d |
 | S1.5 | Power-loss emulation (`ndb_pmem_emul_*`) | M, 3 d |
@@ -129,7 +129,7 @@ Total about 36–42 person-days.
 ### S1.1 CPU feature detection
 
 - **Goal.** Real detection for S1.2 and S1.3. Fix `is_avx2_supported()` (fact 1).
-  **Implemented** in step 1 phase 1, to be tested (`step1_phases.md`).
+  **Done** in step 1 phase 1 (`step1_phases.md`).
 - **Change.** `include/portlib/NdbHW.hpp`: `struct ndb_cpu_features` and
   `const ndb_cpu_features *Ndb_GetCpuFeatures()`. `src/common/portlib/NdbHW.cpp`: detect once
   (function-local static), independent of `NdbHW_Init()` (fact 2); `is_avx2_supported()`
@@ -160,8 +160,8 @@ Total about 36–42 person-days.
 ### S1.2 `ndb_xxh3`
 
 - **Goal.** XXH3 with the AVX2 code chosen at run time on x86-64, for the checksum of E4 in
-  ndbmtd, `ndb_redo_log_reader` and the tests, and for the hash of keys. **Implemented** in
-  step 1 phase 1, to be tested (`step1_phases.md`).
+  ndbmtd, `ndb_redo_log_reader` and the tests, and for the hash of keys. **Done** in step 1
+  phase 1 (`step1_phases.md`).
 - **Where.** `include/util/ndb_xxh3.h`, `src/common/util/ndb_xxh3.cpp`, in `ndbgeneral`
   (`src/common/util/CMakeLists.txt:36-79`) [V]. `ndb_redo_log_reader` links `ndbgeneral`
   (`src/kernel/blocks/dblqh/CMakeLists.txt:24-35`) [V].
