@@ -12,7 +12,7 @@ unchanged.
 
 | Phase | Pull request | Content | Packages | Gate (what the pusher runs) | Needs | State |
 |---|---|---|---|---|---|---|
-| 1 | 2 | CPU feature detection and XXH3, with AVX2 chosen at run time | S1.1, S1.2 | `NdbHW-t`, `ndb_xxh3-t`, `rondb_hash-t` on Linux x86_64, Linux ARM64 and macOS ARM64; file-mode regression | — | **Reworked**: the CRC32C version passed all tests (2026-10-28); the XXH3 version is to be tested |
+| 1 | 2 | CPU feature detection and XXH3, with AVX2 chosen at run time | S1.1, S1.2 | `NdbHW-t`, `ndb_xxh3-t`, `rondb_hash-t` on Linux x86_64, Linux ARM64 and macOS ARM64; file-mode regression | — | **Done**: the XXH3 version passed all tests (reported 2026-10-29); the first, CRC32C version had passed on 2026-10-28 |
 | 2 | 3 | PMEM helper and platform queries | S1.3, S1.4 | `ndb_pmem-t` on a plain file on the three platforms and on `memmap=` | 1 | Not started |
 | 3 | 4 | Configuration: parameters, path parser, checks, test settings | S2.1–S2.3, S2.7 | Config unit tests, management-server refusals | — | Not started |
 | 4 | 5 | NDBFS mapping and placement; PMEM mode with today's format (**M0.2**) | S3.1–S3.4, S2.4, S2.5 | MTR ndb suite and a testSystemRestart subset in `nodax` and on `memmap=` | 2, 3 | Not started |
@@ -217,5 +217,50 @@ The same machine, built with `-mavx2` (XXH3 with AVX2, 2026-10-28):
   92 KB, against 22 GB/s with SSE2.
 - **CRC-32C runs at the same speed in both builds** (2612 and 2615 ns at
   92 KB), as it should, since it uses no AVX2.
+
+The CRC32C timing test was removed with decision 5, so Linux ARM64 is
+timed with `ndb_xxh3-t` only.
+
+**`ndb_xxh3-t`**, the XXH3 version, prints ns per hash for each
+implementation and for the checksum of a REDO record (`record`). macOS
+ARM64, Apple M5 Pro, optimised build (2026-10-29):
+
+| bytes | scalar | neon | record |
+|---|---|---|---|
+| 20 | 7.8 | 6.2 | 7.7 |
+| 28 | 5.0 | 4.9 | 9.1 |
+| 60 | 5.1 | 5.1 | 8.7 |
+| 124 | 5.5 | 5.7 | 9.4 |
+| 300 | 20.2 | 11.0 | 14.8 |
+| 1000 | 57.8 | 20.1 | 22.8 |
+| 32768 | 1807.0 | 640.5 | 672.0 |
+| 92520 | 5342.9 | 1836.0 | 1817.9 |
+
+- `record` matches `xxh3+mix` of the comparison within about 1 ns, and
+  within 6 % at 32 KB, so going through the chosen function costs nothing
+  measurable.
+- Above 240 bytes NEON is 2.9 times faster than scalar. Up to 240 bytes
+  both run the same scalar code; the 20-byte row is the first timed loop.
+
+Linux x86_64, Intel Core i9-13900K, normal build without `-mavx2`,
+`avx2` chosen at run time (2026-10-29):
+
+| bytes | scalar | sse2 | avx2 | record |
+|---|---|---|---|---|
+| 20 | 8.1 | 7.8 | 7.8 | 12.5 |
+| 28 | 7.8 | 7.8 | 7.8 | 12.4 |
+| 60 | 8.1 | 8.1 | 8.1 | 12.4 |
+| 124 | 8.7 | 8.7 | 8.7 | 12.4 |
+| 300 | 30.9 | 18.0 | 14.7 | 19.0 |
+| 1000 | 100.6 | 49.4 | 27.6 | 28.9 |
+| 32768 | 3208.6 | 1542.8 | 769.9 | 761.0 |
+| 92520 | 9057.3 | 4286.3 | 2175.6 | 2160.6 |
+
+- `record` matches `xxh3+mix` of the `-mavx2` build. The run-time choice
+  gives full AVX2 speed in a build that does not require AVX2.
+- Per operation (PREPARE, COMMIT, COMPLETE) that is 37 ns with a 124-byte
+  PREPARE and 54 ns with a 1000-byte one.
+- Above 240 bytes AVX2 is 1.8 to 2 times faster than SSE2, and about
+  4 times faster than scalar.
 
 Linux ARM64: to come.
