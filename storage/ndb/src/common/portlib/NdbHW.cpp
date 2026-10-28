@@ -509,6 +509,127 @@ Uint32 is_avx2_supported()
   return avx2_supported;
 }
 
+/**
+ * CPU feature detection. It runs once, at the first call of
+ * Ndb_GetCpuFeatures(), and does not depend on NdbHW_Init(), which
+ * is not called in the MySQL Server.
+ */
+#if defined(__x86_64__) && defined(__GNUC__) && !defined(_WIN32)
+#define NDB_CPU_FEATURES_X86_64
+#include <cpuid.h>
+#elif defined(__aarch64__) && defined(__linux__)
+#define NDB_CPU_FEATURES_ARM64_LINUX
+#include <sys/auxv.h>
+/* Values from the kernel's arch/arm64/include/uapi/asm/hwcap.h */
+#ifndef AT_HWCAP2
+#define AT_HWCAP2 26
+#endif
+#ifndef HWCAP_PMULL
+#define HWCAP_PMULL (1 << 4)
+#endif
+#ifndef HWCAP_CRC32
+#define HWCAP_CRC32 (1 << 7)
+#endif
+#ifndef HWCAP_DCPOP
+#define HWCAP_DCPOP (1 << 16)
+#endif
+#ifndef HWCAP2_DCPODP
+#define HWCAP2_DCPODP (1 << 0)
+#endif
+#elif defined(__aarch64__) && defined(__APPLE__)
+#define NDB_CPU_FEATURES_ARM64_APPLE
+#include <sys/sysctl.h>
+#include <sys/types.h>
+#endif
+
+#if defined(NDB_CPU_FEATURES_X86_64)
+/* XCR0, the OS-enabled register state, needed before using AVX */
+static Uint64 ndb_xgetbv0()
+{
+  Uint32 eax;
+  Uint32 edx;
+  __asm__ volatile("xgetbv" : "=a"(eax), "=d"(edx) : "c"(0));
+  return (Uint64(edx) << 32) | eax;
+}
+
+static void detect_cpu_features(struct ndb_cpu_features *f)
+{
+  unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+  if (__get_cpuid(1, &eax, &ebx, &ecx, &edx) == 0)
+  {
+    return;
+  }
+  f->sse42 = (ecx & (1U << 20)) != 0;
+  f->pclmul = (ecx & (1U << 1)) != 0;
+  f->clflush = (edx & (1U << 19)) != 0;
+  const bool osxsave = (ecx & (1U << 27)) != 0;
+  const bool avx_cpu = (ecx & (1U << 28)) != 0;
+  const Uint64 xcr0 = osxsave ? ndb_xgetbv0() : 0;
+  /* XMM and YMM state, plus opmask and ZMM state for AVX-512 */
+  const bool os_ymm = (xcr0 & 0x6) == 0x6;
+  const bool os_zmm = (xcr0 & 0xE6) == 0xE6;
+  f->avx = avx_cpu && os_ymm;
+  if (__get_cpuid_max(0, nullptr) < 7)
+  {
+    return;
+  }
+  __cpuid_count(7, 0, eax, ebx, ecx, edx);
+  f->avx2 = f->avx && (ebx & (1U << 5)) != 0;
+  f->avx512f = f->avx && os_zmm && (ebx & (1U << 16)) != 0;
+  f->clflushopt = (ebx & (1U << 23)) != 0;
+  f->clwb = (ebx & (1U << 24)) != 0;
+  f->movdir64b = (ecx & (1U << 28)) != 0;
+}
+#elif defined(NDB_CPU_FEATURES_ARM64_LINUX)
+static void detect_cpu_features(struct ndb_cpu_features *f)
+{
+  const unsigned long hwcap = getauxval(AT_HWCAP);
+  const unsigned long hwcap2 = getauxval(AT_HWCAP2);
+  f->arm_crc32 = (hwcap & HWCAP_CRC32) != 0;
+  f->arm_pmull = (hwcap & HWCAP_PMULL) != 0;
+  f->arm_dcpop = (hwcap & HWCAP_DCPOP) != 0;
+  f->arm_dcpodp = (hwcap2 & HWCAP2_DCPODP) != 0;
+}
+#elif defined(NDB_CPU_FEATURES_ARM64_APPLE)
+static bool apple_cpu_flag(const char *name, bool if_unknown)
+{
+  int value = 0;
+  size_t size = sizeof(value);
+  if (sysctlbyname(name, &value, &size, nullptr, 0) != 0)
+  {
+    return if_unknown;
+  }
+  return value != 0;
+}
+
+static void detect_cpu_features(struct ndb_cpu_features *f)
+{
+  /**
+   * Every Apple ARM CPU has CRC32 and PMULL, as InnoDB assumes, so they
+   * are taken as present if this macOS does not report them.
+   */
+  f->arm_crc32 = apple_cpu_flag("hw.optional.armv8_crc32", true);
+  f->arm_pmull = apple_cpu_flag("hw.optional.arm.FEAT_PMULL", true);
+  f->arm_dcpop = apple_cpu_flag("hw.optional.arm.FEAT_DPB", false);
+  f->arm_dcpodp = apple_cpu_flag("hw.optional.arm.FEAT_DPB2", false);
+}
+#else
+static void detect_cpu_features(struct ndb_cpu_features *)
+{
+}
+#endif
+
+const struct ndb_cpu_features *Ndb_GetCpuFeatures()
+{
+  static const struct ndb_cpu_features features = []() {
+    struct ndb_cpu_features f;
+    memset(&f, 0, sizeof(f));
+    detect_cpu_features(&f);
+    return f;
+  }();
+  return &features;
+}
+
 int NdbHW_Init()
 {
   /**
@@ -4459,8 +4580,38 @@ void printdata(const struct ndb_hwinfo *data, Uint32 cpu) {
          elapsed ? (100 * cpu_sys) / elapsed : 0, sum_sys);
 }
 
+static void
+test_cpu_features()
+{
+  printf("Start CPU feature test\n");
+  const struct ndb_cpu_features *f = Ndb_GetCpuFeatures();
+  OK(f != nullptr);
+  OK(f == Ndb_GetCpuFeatures());
+  printf("x86-64: sse42 %d pclmul %d avx %d avx2 %d avx512f %d clflush %d"
+         " clflushopt %d clwb %d movdir64b %d\n",
+         f->sse42, f->pclmul, f->avx, f->avx2, f->avx512f, f->clflush,
+         f->clflushopt, f->clwb, f->movdir64b);
+  printf("aarch64: crc32 %d pmull %d dcpop %d dcpodp %d\n",
+         f->arm_crc32, f->arm_pmull, f->arm_dcpop, f->arm_dcpodp);
+  /* AVX2 and AVX-512 need the AVX register state */
+  OK(!f->avx2 || f->avx);
+  OK(!f->avx512f || f->avx);
+  /* DC CVADP is an extension of DC CVAP */
+  OK(!f->arm_dcpodp || f->arm_dcpop);
+#if defined(__x86_64__)
+  OK(!f->arm_crc32 && !f->arm_pmull && !f->arm_dcpop && !f->arm_dcpodp);
+#elif defined(__aarch64__)
+  OK(!f->sse42 && !f->pclmul && !f->avx && !f->avx2 && !f->avx512f &&
+     !f->clflush && !f->clflushopt && !f->clwb && !f->movdir64b);
+#if defined(NDB_CPU_FEATURES_ARM64_APPLE)
+  OK(f->arm_crc32 && f->arm_pmull);
+#endif
+#endif
+}
+
 TAPTEST(NdbCPU) {
   printf("Start NdbHW test\n");
+  test_cpu_features();
   test_create_cpumap();
   test_cgroup_parser();
   int res = NdbHW_Init();
