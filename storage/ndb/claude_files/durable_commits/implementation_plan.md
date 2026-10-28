@@ -10,6 +10,7 @@ is explained in §5.1).
 | Document | Content |
 |---|---|
 | `implementation_plan.md` | This file: order, milestones, pull requests, conventions, reconciled points, open questions |
+| `step1_phases.md` | Step 1 progress: the phases, their gates and state |
 | `impl_step1_platform.md` | Step 1, S1–S3: portlib (CPU features, CRC32C, PMEM helper, device queries, power-loss emulation), configuration and start-up checks, NDBFS mapping |
 | `impl_step1_lqh_write.md` | Step 1, S4–S5: DBLQH record writers, the persist primitive, bypassing the file write path, GCP save, mbyte and file switch, benchmark switch |
 | `impl_step1_recovery_test.md` | Step 1, S6–S7: restart reading and end of log, control area, zeroing, node restart, `redoLogReader`, power-loss testing, the test plan for step 1 |

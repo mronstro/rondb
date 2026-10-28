@@ -120,6 +120,28 @@ struct ndb_hwinfo {
   struct ndb_cpudata *cpu_data;
 };
 
+/**
+ * CPU features used by the CRC32C and the persistent memory code.
+ * A feature is only set if both the CPU and the OS support it.
+ */
+struct ndb_cpu_features {
+  /* x86-64 */
+  bool sse42;
+  bool pclmul;
+  bool avx;
+  bool avx2;
+  bool avx512f;
+  bool clflush;
+  bool clflushopt;
+  bool clwb;
+  bool movdir64b;
+  /* aarch64 */
+  bool arm_crc32;
+  bool arm_pmull;
+  bool arm_dcpop;  /* DC CVAP, clean to the point of persistence */
+  bool arm_dcpodp; /* DC CVADP, clean to the point of deep persistence */
+};
+
 extern "C"
 {
 
@@ -187,5 +209,11 @@ extern "C"
    */
   void Ndb_GetCoreCPUIds(Uint32 cpu_id, Uint32 *cpu_ids, Uint32 &num_cpus);
   Uint32 is_avx2_supported();
+
+  /**
+   * Get the CPU features of this machine. They are detected at the
+   * first call, which is thread safe and does not need ndb_init().
+   */
+  const struct ndb_cpu_features *Ndb_GetCpuFeatures();
 }
 #endif
