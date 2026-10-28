@@ -33,7 +33,7 @@ Conventions:
   - Phase 1 is the exception: it reads page headers straight from the
     mapping.
 - **The reader side of the shared format code.** The write plan's
-  `PmemRedoFormat.hpp` holds the constants and the CRC. S6.2 adds:
+  `PmemRedoFormat.hpp` holds the constants and the checksum. S6.2 adds:
   - the full V1–V5 checks in `PmemRedoFormat.hpp`;
   - `PmemRedoScan.{hpp,cpp}`: the end-of-log scan, position arithmetic,
     and the control-area and slot codecs.
@@ -63,7 +63,7 @@ Names follow `impl_step1_platform.md` (P) and `impl_step1_lqh_write.md`
 | `ndb_pmem_dirty_shutdown(int fd, Uint64 *count)`, returning `ENOTSUP` if absent | P S2.5 | Recorded in the slot (S6.3) |
 | `ndb_pmem_emul_*` (P S1.5), plus the two additions listed in S7.3 | P S1.5 | S7.3 |
 | `__RedoLogPmemTestMode=emulated` (`memmap=`) or `nodax` (macOS ARM64, Linux without `memmap=`); `__RedoLogPmemPowerLossEmulation=1` | P S2.7 | MTR and autotest without real PMEM (§4) |
-| `PmemRedoFormat.hpp` (namespace `PmemRedo`): constants, `w0` packing, suffix S, CRC accumulator, header image with `DRAM_ONLY_MASK` | W §3.1, S4.1 | The reader must hash exactly what the writer hashed |
+| `PmemRedoFormat.hpp` (namespace `PmemRedo`): constants, `w0` packing, suffix S, checksum accumulator, header image with `DRAM_ONLY_MASK` | W §3.1, S4.1 | The reader must hash exactly what the writer hashed |
 | Initial images, written by `redoPmemInitFile()` with the S6.3 builders: the control area; a valid page-0 header and FD in **every** file; `COMPLETED_GCI(1)` + FILLER at words 32–47 of page 1 of file 0 | W S4.8, P S3.5 | Phase 1 checks every page 0 it reads. `initFourth` puts the head at word 48 (W §7.2) |
 | The page-0 copy stops at the unit holding the FILLER header, so it never stores words ≥ 8128 | W S5.3, D4 | The slots in file 0 survive every lap |
 | The file switch calls `redoWriteLastFileSlot(part, fileNo, lap)` after the new FD is persistent and before the first record of the file | W S5.3, §7.2 | W3; replaces the page-0 rewrite at `35197` and `35303` [V] |
@@ -152,8 +152,8 @@ struct PartView {                     // DBLQH: m_pmem_base of every file
   const Uint8 *const *fileBase;       // fileBase[fileNo]
   const Uint32 *page(Uint32 f, Uint32 p) const;
 };
-enum Reason { R_OK, R_HDR_MAGIC, R_HDR_CRC, R_HDR_IDENTITY, R_HDR_LAP,
-  R_TYPE_ZERO, R_TYPE_UNKNOWN, R_LEN, R_CROSSES_MBYTE, R_SPAN_HDR, R_CRC,
+enum Reason { R_OK, R_HDR_MAGIC, R_HDR_CHECKSUM, R_HDR_IDENTITY, R_HDR_LAP,
+  R_TYPE_ZERO, R_TYPE_UNKNOWN, R_LEN, R_CROSSES_MBYTE, R_SPAN_HDR, R_CHECKSUM,
   R_FD_POS, R_FILLER_ALIGN, R_AFTER_NEXT_MBYTE, R_NEXT_MBYTE_HDR };
 struct RecInfo { Uint32 type, flags, len; Pos end; };
 struct ScanResult { Pos end; Uint32 reason; Uint32 records;
@@ -167,17 +167,19 @@ Pos    ceilUnit(const Geom&, Pos);            // carries across page, mbyte, fil
 ```
 
 **Rules implemented** (V1–V5 of E11 and format §3.4, in this order; bounds
-always come before the CRC):
-1. V1. The page header has the magic. Its CRC over words 1–31, with
+always come before the checksum):
+1. V1. The page header has the magic. Its checksum over words 1–31, with
    `DRAM_ONLY_MASK` words read as 0 (W D1), is valid. Words 15, 16 and 24
    match (page, file, part). The lap equals the expected lap.
 2. V2. `p` is 8-byte aligned and `≥ 32` inside its page. The type is
    known; 0 is invalid. `len` is even and within the bounds of the type.
    The record ends inside the mbyte.
 3. V3. Every page the record crosses passes V1 with the same lap.
-4. V4. The CRC over `(w0 & ~RF_INVALIDATED) ‖ w2..w(n−1) ‖ S` matches
-   `w1`, with `S = [lap, 0, part<<16|file, page*8192+index]` (E4). For a
-   FILLER, `n = 2`.
+4. V4. The checksum of E4 matches `w1`: `H` = XXH3 of `w2..w(n−1)`, one
+   piece per page, chained through the seed; `w1` = the low 32 bits of the
+   seeded XXH3 of `(w0 & ~RF_INVALIDATED) ‖ S` with seed `H`, where
+   `S = [lap, 0, part<<16|file, page*8192+index]`. For a FILLER, `n = 2`
+   and `H` is the hash of no bytes, `0x2D06800538D394C2`.
 5. V5. FD only at word 32 of page 0. FILLER ends on a W boundary.
    Nothing follows NEXT_MBYTE in its mbyte.
 
@@ -199,14 +201,16 @@ always come before the CRC):
 **File mode unchanged:** the module is only called under `c_redo_pmem`.
 
 **Tests:** U2–U5 (§4).
-**Depends on:** P S1.2 (`ndb_crc32c`), W S4.1 (header).
+**Depends on:** P S1.2 (`ndb_xxh3`), W S4.1 (header).
 **Size:** L, 7 days including the unit tests and the synthetic-log
 generator (the generator uses W's writer functions).
 **Risks and review points:**
-- The writer and the reader must hash the same bytes: use W's accumulator.
+- The writer and the reader must hash the same bytes in the same pieces:
+  use W's accumulator, one `piece` per page.
 - The `fileBase[]` array avoids the O(N) `findLogfile` walk (`41219`) [V].
 - The false-pass rate is 2⁻³² per torn record.
-- The scan must never read outside the mbyte: check `len` before the CRC.
+- The scan must never read outside the mbyte: check `len` before the
+  checksum.
 
 ### S6.3 Control area, two-slot last-file pointer and start-up checks
 
@@ -219,9 +223,9 @@ in the dead body of the FILLER that follows the FD):
 
 | Line | Words | Content |
 |---|---|---|
-| Config | 8128–8143 | [0] magic `'RCTL'`, [1] format version, [2] NoOfFragmentLogParts, [3] logPartNo, [4] NoOfFragmentLogFiles, [5] FragmentLogFileSize in MB, [6] W, [7] node id, [8–14] 0, [15] CRC32C of [0–14]. Written once at initial start by W's `redoPmemInitFile()` with `PmemRedo::buildCtrlConfig` |
+| Config | 8128–8143 | [0] magic `'RCTL'`, [1] format version, [2] NoOfFragmentLogParts, [3] logPartNo, [4] NoOfFragmentLogFiles, [5] FragmentLogFileSize in MB, [6] W, [7] node id, [8–14] 0, [15] checksum of [0–14]: the low 32 bits of `ndb_xxh3_64` of those 60 bytes. Written once at initial start by W's `redoPmemInitFile()` with `PmemRedo::buildCtrlConfig` |
 | Reserved | 8144–8159 | 0. For X5/X6 (SR generation, stale marker) |
-| Slot 0, slot 1 | 8160–8175, 8176–8191 | [0] magic `'RSLT'`, [1–2] seq64, [3] lastFileNo, [4] lap, [5] logPartNo, [6–7] recorded dirty-shutdown count, [8] flags (bit 0 count valid, bit 1 unsafe shutdown seen at that start, bits 8–15 slot index), [9–14] 0, [15] CRC32C of [0–14] |
+| Slot 0, slot 1 | 8160–8175, 8176–8191 | [0] magic `'RSLT'`, [1–2] seq64, [3] lastFileNo, [4] lap, [5] logPartNo, [6–7] recorded dirty-shutdown count, [8] flags (bit 0 count valid, bit 1 unsafe shutdown seen at that start, bits 8–15 slot index), [9–14] 0, [15] checksum of [0–14], as for the config line |
 
 The FD ends at word 8068 or earlier. It starts at word 32, has 4 header
 words and at most `8192−32−128` array words (capacity rule `2833-2834`
@@ -320,11 +324,11 @@ exactly by scanning the last mbyte and zeroes `[E, end of mbyte(E))`.
       Invalid or lap < L marks the drop: `lastMbyte = mb − 1`, as at
       `36371-36373`. A valid lap-L header after the drop sets
       `corruptAfterDrop` and the node stops (recovery §3.4 step 3).
-    - The arrays get the header values when the header CRC passes, and 0
+    - The arrays get the header values when the header checksum passes, and 0
       otherwise; 0 is what a zeroed page gives today.
   - **C.** Step back through earlier files' page 0, as `36427-36455` and
     `readSrNextFileLab` `36471` do, but synchronously.
-    - Each page 0 must pass its header CRC and identity, with lap ≤ L.
+    - Each page 0 must pass its header checksum and identity, with lap ≤ L.
     - If lap ≥ 1, the FD must pass V4. A lap-0 page (never written) gives
       zeros.
     - Copy each page to DRAM and call `initGciInLogFileRec`.
@@ -395,7 +399,7 @@ the `else` branch.
 
 | Type | Action (today's code it replaces or shares) |
 |---|---|
-| PREPARE | `stepAhead(len − 1)`. Today `39089-39094` reads the length from `w1`, which is now the CRC |
+| PREPARE | `stepAhead(len − 1)`. Today `39089-39094` reads the length from `w1`, which is now the checksum |
 | COMMIT with `RF_INVALIDATED` | `stepAhead(len − 1)`; replaces type 9 (`39099-39103`) |
 | COMMIT | Shared case `39108-39195` with two branches: `readCommitLogPmem` instead of `readCommitLog`; and for `gci_hi > crestartNewestGci` the call `redoPmemInvalidateCommit(part, file, prevFilepage, savePageIndex)` instead of the DRAM type write and `ZPOS_DIRTY` (`39126-39132`). `prevFilepage` and `savePageIndex` locate `w0` (`39053`, `39017`) [V] |
 | ABORT | `stepAhead(len − 1)` (`39200-39205`) |
@@ -456,8 +460,10 @@ ROW_GCI64); 5169; M1.
   pre-dispatch.
 - The checks read the mapping while the parser reads the copy. Both see
   the same bytes, because nothing writes below E during phase 3 except
-  the flag, which the CRC excludes [I].
-- jam coverage; the cost of the CRC per record (about 10 GB/s, [I]).
+  the flag, which the checksum excludes [I].
+- jam coverage; the cost of the checksum per record (about 12 ns for a
+  COMMIT, 28 ns for a 1000-byte PREPARE on x86-64 with AVX2;
+  `step1_phases.md`, Timings).
 
 ### S6.6 Phase 4: head, zeroing `[ceilW(H), E)`, writer resume, slot
 
@@ -501,7 +507,7 @@ closed by a FILLER before writing resumes).
 
      The bytes below H are identical to PMEM, because the DRAM page was
      copied from it. The FILLER header is identical to the one GCP save
-     wrote there: same position, length and CRC. W zeroes the body. Then
+     wrote there: same position, length and checksum. W zeroes the body. Then
      call `redoInitWritePosition(part)`, which checks that the head is
      W-aligned and that the filled list is empty.
   4. `redoWriteLastFileSlot(part, currentLogfile.fileNo, logLap)`
@@ -568,7 +574,7 @@ in phase 4.
 
 ### S6.8 `redoLogReader` for the PMEM format
 
-**Goal.** Format §10: CRC checks, printing, end of the valid log, the
+**Goal.** Format §10: checksum checks, printing, end of the valid log, the
 control area. The old path stays unchanged.
 
 **Files:**
@@ -577,12 +583,12 @@ control area. The old path stays unchanged.
   `pmem_reader_main()`.
 - New `redoLogReader/pmem_reader.cpp`; it uses `PmemRedoFormat.hpp` and
   `PmemRedoScan`.
-- `dblqh/CMakeLists.txt` target `ndb_redo_log_reader`: add the two sources
-  and the `ndb_crc32c` library.
+- `dblqh/CMakeLists.txt` target `ndb_redo_log_reader`: add the two sources.
+  `ndb_xxh3` is in `ndbgeneral`, which the target links already.
 
 **Behaviour:**
-- Page headers: CRC ok or bad, lap, identity, W, node, part.
-- Records: CRC ok or bad. COMMIT unpacked (prepare reference, gci_hi,
+- Page headers: checksum ok or bad, lap, identity, W, node, part.
+- Records: checksum ok or bad. COMMIT unpacked (prepare reference, gci_hi,
   gci_lo, transid, opCount, `INVALIDATED` and `DURABLE` flags). COMPLETE.
   ABORT with `AF_AFTER_COMMIT`. COMPLETED_GCI, NEXT_MBYTE, FD (new
   offsets), SR_HEAD. FILLER only with `--dump`.
@@ -905,8 +911,8 @@ Commands assume a build directory `$B` and `cd mysql-test` for MTR.
 
 | # | Test | Lvl | What it proves | Command | HW |
 |---|---|---|---|---|---|
-| U1 | `ndb_crc32c-t` (S1) | U | CRC32C("123456789") = `0xE3069283`; 32×0x00 = `0x8A9136AA`; 32×0xFF = `0x62A8AB43`; HW = SW on random buffers and lengths 0–4096 | `cd $B && ctest -R ndb_crc32c --output-on-failure` | no |
-| U2 | `pmem_redo_format-t` (W S4.1) and the validator cases of `pmem_redo_scan-t` | U | Framing per type (bounds, odd and 0 length, type 0, unknown type, crossing an mbyte); CRC bound to lap, part, file and position (the same bytes at another position fail); `RF_INVALIDATED` excluded; header validity; PREPARE spanning 1–4 pages; torn spanned header; FD only at page 0 word 32; FILLER alignment; nothing after NEXT_MBYTE | `ctest -R pmem_redo --output-on-failure` | no |
+| U1 | `ndb_xxh3-t` (S1) | U | XXH3 of no bytes = `0x2D06800538D394C2`; every implementation (scalar, SSE2, AVX2, NEON) equals the header's XXH3 for all lengths 0–2100 and some long ones, at every alignment, with and without seed | `cd $B && ctest -R ndb_xxh3 --output-on-failure` | no |
+| U2 | `pmem_redo_format-t` (W S4.1) and the validator cases of `pmem_redo_scan-t` | U | Framing per type (bounds, odd and 0 length, type 0, unknown type, crossing an mbyte); checksum bound to lap, part, file and position (the same bytes at another position fail); `RF_INVALIDATED` excluded; header validity; PREPARE spanning 1–4 pages, its body hashed one piece per page; torn spanned header; FD only at page 0 word 32; FILLER alignment; nothing after NEXT_MBYTE | `ctest -R pmem_redo --output-on-failure` | no |
 | U3 | `pmem_redo_scan-t`, cases | U | Every row of recovery §3.3: torn last record; previous-lap record at E; unwritten or torn page header; torn mbyte header; FILLER at end; zeroed region; next file's FD torn with the slot lagging (E in the next file); orphans after a hole, then zero `[E, mbyte end)`, append, crash at an old record boundary, rescan: no orphan accepted | `ctest -R pmem_redo_scan` | no |
 | U4 | `pmem_redo_scan-t --random` | U | Random logs with persist points. Crash model A2 after a random barrier B (lines skipped, copied or torn at 8 bytes). Then E ≥ B and the prefix is intact. The restart procedure (zero, head H or E, FILLER, append), a second crash and a rescan accept no stale record. 10⁴ seeded iterations, `--seed` to replay | `$B/runtime_output_directory/pmem_redo_scan-t --random --loops=10000` | no |
 | U5 | `pmem_redo_slot-t` | U | Higher seq wins; all 256 subsets of a torn slot's 8-byte chunks leave the other slot chosen; neither valid gives an error; wrong part; config mismatch messages | `ctest -R pmem_redo_slot` | no |
@@ -999,7 +1005,7 @@ a dirty-shutdown count is [I].
 
 | Environment | Proves | Does not prove |
 |---|---|---|
-| Unit tests (U2–U5) | Format, CRC binding, the scan rule, slots and the restart procedure on synthetic logs, including torn, stale-lap and orphan records | That DBLQH calls them right |
+| Unit tests (U2–U5) | Format, checksum binding, the scan rule, slots and the restart procedure on synthetic logs, including torn, stale-lap and orphan records | That DBLQH calls them right |
 | Non-DAX test mode | Every DBLQH path; recovery after `kill -9` and after injected torn tails (M1); the ledger | The DAX and `MAP_SYNC` path; `persistence_domain` |
 | `memmap=` | The above, plus DAX, `MAP_SYNC`, prefault, fault cost and the empty-`persistence_domain` check | Power-fail durability; barrier placement (caches stay coherent); real latency |
 | M2 journal | No missing fence or flush in RonDB code under the model "8-byte atomic, any order between fences"; torn persists at every point | That `ndb_pmem` actually emits the fence; device and firmware behaviour; real ADR/eADR |
@@ -1145,12 +1151,13 @@ S7.2, S7.1 (after S5 and S6.6) ── S7.3 (after S1 journal) ─┴── S7.5
    §7.2 says "recovery owns the slot layout". This plan owns it (S6.3) and
    provides the builders; W's `redoPmemInitFile()` calls them.
 8. **A valid page 0 in every file.** Phase 1 checks every page 0 it reads
-   (FD CRC, as `pmem_redo_recovery.md` §9 asks). W S4.8 writes page 0 of
+   (FD checksum, as `pmem_redo_recovery.md` §9 asks). W S4.8 writes page 0 of
    every file at initial start. Recovery also treats lap 0 as "never
    written", for robustness.
-9. **Wording of V4 in `pmem_redo_recovery.md`.** Its V4 ("seeded with
-   magic, part number, LSN") and its "type rewritten to 9, CRC computed as
-   if COMMIT" are superseded by E4 and E9. Implement E4/E9 only.
+9. **Wording of V4 in `pmem_redo_recovery.md`.** Its V4 first said "seeded
+   with magic, part number, LSN"; it now follows E4. Its "type rewritten to
+   9, checksum computed as if COMMIT" is superseded by E9. Implement E4/E9
+   only.
 
 ---
 
@@ -1162,7 +1169,8 @@ S7.2, S7.1 (after S5 and S6.6) ── S7.3 (after S1 journal) ─┴── S7.5
    `gci_lo` and make `ExactGCI` hold after every SR? Recommendation: keep
    0; X5 decides.
 2. **V4 on every record in phase-3 scans** (recommended: simplest and
-   strongest; CRC at about 10 GB/s [I]) or only on records acted upon
+   strongest; XXH3 at about 12 ns per small record and 22 to 43 GB/s on the
+   largest on x86-64, `step1_phases.md` Timings) or only on records acted upon
    (E11 allows it)? Measure on a 16 GB tail.
 3. **Real time.** Phase 1 runs in slices of 8 pages and phase 4 zeroing in
    slices of 32 pages per signal. Is that acceptable for the watchdog and

@@ -1,9 +1,10 @@
 # RONDB-1150 — Durable commits across a cluster restart: master plan
 
-Status: **Revision 11, 2026-10-28. Decisions D0–D8 are settled (§11). The
+Status: **Revision 12, 2026-10-29. Decisions D0–D8 are settled (§11). The
 first implementation step, the REDO log on persistent memory, is designed in
 `pmem_redo_design.md` (planning subtask P2 done). The implementation plan
-for all phases is `implementation_plan.md`. No code has been changed.**
+for all phases is `implementation_plan.md`; progress on step 1 is in
+`step1_phases.md`.**
 Branch: `RONDB-1150-durable-commits` (base 26.10-main, commit 7128c75dca4).
 All paths are relative to `storage/ndb/`.
 
@@ -52,9 +53,10 @@ All paths are relative to `storage/ndb/`.
   in each node group (D4 settled).
 - **Revision 7** (review 6). The first implementation step is PMEM support
   for the REDO log. Four parallel notes and a consolidated design
-  (`pmem_redo_design.md`): W = 64 bytes; a position-bound CRC32C on every
-  record and page header; write-once page headers; a FILLER at every persist
-  point; records built in DRAM and copied out with non-temporal stores;
+  (`pmem_redo_design.md`): W = 64 bytes; a position-bound checksum (then
+  CRC32C; XXH3 since step 1 phase 1, E4) on every record and page header;
+  write-once page headers; a FILLER at every persist point; records built
+  in DRAM and copied out with non-temporal stores;
   atomic COMMIT invalidation; two-slot "last file" pointer; invalidation by
   zeroing. §2.1, §7, §9 and §10 updated.
 - **Revision 8** (review 7). "Immediately" defined: persist while handling
@@ -81,8 +83,14 @@ All paths are relative to `storage/ndb/`.
   keeps today's REDO placement. The read-buffer size for log execution
   (`ZMIN_READ_BUFFER_SIZE`) is fixed in both modes as a separate bug fix.
   The initial-start pages are written through the mapping, so the page-header
-  CRC covers every header word. A hidden persist delay lets DRAM runs
+  checksum covers every header word. A hidden persist delay lets DRAM runs
   approximate the latency of CXL persistent memory.
+- **Revision 12** (step 1, phase 1). The checksum of the REDO records, the
+  page headers and the slots is XXH3 instead of CRC32C, chosen on measured
+  timings: the body in one call, then a seeded hash of `w0` and `S`
+  (`pmem_redo_design.md` E4, `step1_phases.md` decision 5). XXH3 chooses
+  AVX2 at run time on x86-64. That also speeds up the hash of keys over
+  240 bytes, with the same results.
 
 ---
 
@@ -621,27 +629,28 @@ The memory-mapped REDO uses a new format (§2.1); the details are in
 `pmem_redo_design.md` E3–E13 and `pmem_redo_format.md`.
 
 **Framing.** Every record is 8-byte aligned with an even length. Word 0 holds
-type, flags and length; word 1 a CRC32C over the record and a 16-byte
-suffix that is never stored: lap, a reserved word, log part and file, and
-the position. So a record from an earlier lap at the same offset never
-validates. The page header is written once at page init with its own CRC
-and never updated; its GCI fields keep their meaning as snapshots at page
-start. There is no whole-page checksum and no fill index on PMEM.
+type, flags and length; word 1 a 32-bit XXH3 checksum (E4): the body is
+hashed, then mixed with word 0 and a 16-byte suffix that is never stored:
+lap, a reserved word, log part and file, and the position. So a record from
+an earlier lap at the same offset never validates. The page header is
+written once at page init with its own checksum and never updated; its GCI
+fields keep their meaning as snapshots at page start. There is no
+whole-page checksum and no fill index on PMEM.
 
 | Record | Words | Content | Purpose |
 |---|---|---|---|
-| PREPARE | 8 + key + attrinfo, even | As today; the length moves into word 0, the CRC takes its slot | Reached only through the COMMIT back-reference |
+| PREPARE | 8 + key + attrinfo, even | As today; the length moves into word 0, the checksum takes its slot | Reached only through the COMMIT back-reference |
 | COMMIT | 12 | tableId, schemaVersion, fragId, the PREPARE reference packed into 2 words, gci_hi, **gci_lo**, **transid**, **opCount**. Flags: durable, invalidated | Phase 2 queue; exact row GCI64 (replay sets `gci_lo = 0` today); partial-SR fallback |
 | **COMPLETE** (new) | 4 | transid. One per operation (D7) | Executes T's queued COMMITs |
 | ABORT | 4 | transid. Flag `AF_AFTER_COMMIT` when written after a COMMIT (F) | Removes T from the phase-2 queue; only flagged ABORTs veto the fallback |
 | COMPLETED_GCI | 4 | gci | As today |
-| NEXT_MBYTE | 2 | — | As today, now with a CRC |
+| NEXT_MBYTE | 2 | — | As today, now with a checksum |
 | **FILLER** (new) | 2 + n | — | Pads to the next 64-byte boundary at every persist point |
 | SR_HEAD | 6 | R_gcp, G', restart sequence | Repeatable SR; stop point for the next SR |
 
 - **Invalidating a COMMIT** sets a flag bit in word 0 with one aligned store;
-  the bit is outside the CRC, so the record stays valid. A type rewrite
-  would fail the CRC and cut the log there.
+  the bit is outside the checksum, so the record stays valid. A type rewrite
+  would fail the checksum and cut the log there.
 - **The "last file in use" pointer** in page 0 of file 0 becomes two
   checksummed slots, written alternately.
 - The node-failure records (§5.4) are not REDO records; they live in a
@@ -761,7 +770,7 @@ What each design document covers:
 | Phase | Content |
 |---|---|
 | X1 | Takeover-ack fix (TCKEY_FAILCONF after COMPLETE). Independent; it also fixes READ_BACKUP read-your-writes after takeover today |
-| X2 | **First step: the REDO log on PMEM**, in steps S1–S7 of `pmem_redo_design.md` §3: portlib CRC32C and PMEM helpers; config and start checks; NDBFS mapping; record writers; write path; recovery; power-loss testing. Ends with the REDO on PMEM at today's (GCP-based) durability |
+| X2 | **First step: the REDO log on PMEM**, in steps S1–S7 of `pmem_redo_design.md` §3: portlib XXH3 checksum and PMEM helpers; config and start checks; NDBFS mapping; record writers; write path; recovery; power-loss testing. Ends with the REDO on PMEM at today's (GCP-based) durability |
 | X3 | Test harness: ledger, crash of all nodes, power-loss emulation (losses beyond R_gcp expected until X5) |
 | X4 | Commit path: barriers, primary local commit at COMPLETE, forced late ack, rule F, opCount, API node-id hold-back |
 | X5 | SR phases 1–3. From here the ledger must show zero losses with all nodes starting |

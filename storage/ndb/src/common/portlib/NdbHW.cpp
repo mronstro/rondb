@@ -53,7 +53,11 @@ static int initres = 0;
 
 static Uint32 ncpu = 0;
 static Uint64 ticks_per_us = 0;
-static Uint32 avx2_supported = 0;
+/**
+ * Read once, when the program starts. A static initialiser in another
+ * file that runs earlier sees 0, which only means no AVX2.
+ */
+static const Uint32 avx2_supported = Ndb_GetCpuFeatures()->avx2 ? 1 : 0;
 
 static struct ndb_hwinfo *g_ndb_hwinfo = nullptr;
 

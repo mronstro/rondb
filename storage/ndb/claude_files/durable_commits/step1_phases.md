@@ -12,7 +12,7 @@ unchanged.
 
 | Phase | Pull request | Content | Packages | Gate (what the pusher runs) | Needs | State |
 |---|---|---|---|---|---|---|
-| 1 | 2 | CPU feature detection and CRC32C | S1.1, S1.2 | `NdbHW-t`, `ndb_crc32c-t` on Linux x86_64, Linux ARM64 and macOS ARM64; file-mode regression | — | **Done**: all tests passed (reported 2026-10-28) |
+| 1 | 2 | CPU feature detection and XXH3, with AVX2 chosen at run time | S1.1, S1.2 | `NdbHW-t`, `ndb_xxh3-t`, `rondb_hash-t` on Linux x86_64, Linux ARM64 and macOS ARM64; file-mode regression | — | **Reworked**: the CRC32C version passed all tests (2026-10-28); the XXH3 version is to be tested |
 | 2 | 3 | PMEM helper and platform queries | S1.3, S1.4 | `ndb_pmem-t` on a plain file on the three platforms and on `memmap=` | 1 | Not started |
 | 3 | 4 | Configuration: parameters, path parser, checks, test settings | S2.1–S2.3, S2.7 | Config unit tests, management-server refusals | — | Not started |
 | 4 | 5 | NDBFS mapping and placement; PMEM mode with today's format (**M0.2**) | S3.1–S3.4, S2.4, S2.5 | MTR ndb suite and a testSystemRestart subset in `nodax` and on `memmap=` | 2, 3 | Not started |
@@ -33,93 +33,104 @@ unchanged.
 
 ---
 
-## Phase 1: CPU feature detection and CRC32C
+## Phase 1: CPU feature detection and XXH3
 
 **Scope.** `implementation_plan.md` pull request 2; platform plan S1.1 and
-S1.2. Nothing in the data node calls the new code yet, so file mode is
-unchanged.
+S1.2. The hash of keys now chooses AVX2 at run time and gives the same
+hashes as before. Nothing else calls the new code yet, so file mode is
+otherwise unchanged.
 
 **Changes.**
 
 | File | Change |
 |---|---|
 | `include/portlib/NdbHW.hpp` | `struct ndb_cpu_features` and `Ndb_GetCpuFeatures()` |
-| `src/common/portlib/NdbHW.cpp` | Detection, once, on first call, independent of `NdbHW_Init()`: CPUID and XGETBV on x86-64, `getauxval` on Linux ARM64, `sysctlbyname` on macOS ARM64. `TAPTEST(NdbCPU)` prints and checks the features |
-| `include/util/ndb_crc32c.h` | `ndb_crc32c(crc, buf, len)` (chains like zlib), `ndb_crc32c_init()`, `ndb_crc32c_implementation()` |
-| `src/common/util/ndb_crc32c.cpp` | Port of InnoDB's CRC32C (`storage/innobase/ut/crc32.cc`): slicing-by-8 software and the hardware template with three interleaved streams combined by carry-less multiplication, seeded so it chains. Run-time choice by `Ndb_GetCpuFeatures()`. The unit test is in the same file |
-| `src/common/util/CMakeLists.txt` | `ndb_crc32c.cpp` in `ndbgeneral`; `ndb_crc32c-t` |
-| `src/common/util/ndb_init.cpp` | `ndb_crc32c_init()` in `ndb_init_internal()` |
+| `src/common/portlib/NdbHW.cpp` | Detection, once, on first call, independent of `NdbHW_Init()`: CPUID and XGETBV on x86-64, `getauxval` on Linux ARM64, `sysctlbyname` on macOS ARM64. `TAPTEST(NdbCPU)` prints and checks the features. `is_avx2_supported()` reports the detected AVX2, read once at start; it always returned 0 before |
+| `include/util/ndb_xxh3.h` | `ndb_xxh3_64(buf, len)`, `ndb_xxh3_64_seed(buf, len, seed)`, `ndb_xxh3_init()`, `ndb_xxh3_implementation()` |
+| `src/common/util/ndb_xxh3.cpp` | XXH3 from `ndb_xxhash.h`, and `rondb_xxhash_std()`. Inputs up to 240 bytes take the inline scalar code. Longer ones go through a function pointer chosen once: on x86-64 the AVX2 code, compiled with `target("avx2")` as xxhash's own `xxh_x86dispatch.c` does, when `Ndb_GetCpuFeatures()` reports AVX2, otherwise SSE2; elsewhere the code the build chose, NEON on aarch64. The unit test is in the same file |
+| `include/util/rondb_hash.hpp`, `src/common/util/rondb_hash.cpp` | `rondb_calc_hash` calls `rondb_xxhash_std`; its AVX2 branch, which never ran, and `rondb_xxhash_avx2` are gone |
+| `src/common/util/xxhash_avx2.cpp`, `xxhash_std.cpp` | Removed, replaced by `ndb_xxh3.cpp` |
+| `src/common/util/CMakeLists.txt` | `ndb_xxh3.cpp` in `ndbgeneral`; `ndb_xxh3-t` |
+| `src/common/util/ndb_init.cpp` | `ndb_xxh3_init()` in `ndb_init_internal()` |
+
+The first version of this phase had a CRC32C instead, a port of InnoDB's
+(`ndb_crc32c`, commit 77a146884ec). It was removed after decision 5; commit
+4102f7f1c7a has it with its timing test.
 
 **Decisions taken while implementing.**
 
-1. **InnoDB's CRC32C, not another one.** simdjson has no CRC32C. The
-   bundled Abseil has one (`extra/abseil/.../absl/crc`), but its hardware
-   path is chosen at compile time and needs `__SSE4_2__` and `__PCLMUL__`
-   (or `__ARM_FEATURE_CRC32`), which RonDB's build flags do not set, so it
-   would run in software there. It is also built only with bundled
-   protobuf, as shared libraries that no NDB program links, and it is
-   Apache-2.0 code, which cannot be copied into GPLv2 files. InnoDB's
-   code chooses the hardware path at run time and is already GPLv2.
-2. **`is_avx2_supported()` is left as it is** (always 0). The platform plan
-   fixes it in S1.1, but the fix would change nothing in any build:
-   - Its only caller, `rondb_calc_hash`, checks it only under
-     `#if defined(__AVX2__)`, so without `-mavx2` the AVX2 branch does not
-     exist.
-   - With `-mavx2`, `xxhash_std.cpp` is compiled with AVX2 as well,
-     because `ndb_xxhash.h` chooses the vector code from `__AVX2__`. The
-     `XXH_VECTOR_TYPE` define in `xxhash_avx2.cpp` is not read. The two
-     functions are then the same code.
+1. **CRC32C first, then XXH3.** The first version ported InnoDB's CRC32C,
+   because nothing better was in the tree:
+   - simdjson has no CRC32C.
+   - The bundled Abseil has one, but chooses its hardware path at compile
+     time, from flags RonDB's build does not set.
+   - Abseil is also built only with bundled protobuf, and it is Apache-2.0
+     code, which cannot be copied into GPLv2 files.
 
-   Every XXH3 variant (scalar, SSE2, AVX2, NEON) gives the same hash, so
-   the distribution of rows does not depend on this; AVX2 would only make
-   keys over 240 bytes faster. A run-time choice that works needs
-   `target("avx2")` functions, which belong in their own ticket, not in
-   PMEM. `ndb_cpu_features::avx2` is detected correctly.
-3. **Loads through `memcpy`** instead of InnoDB's pointer casts, so the
-   port has no strict-aliasing questions; compilers emit the same load.
-4. **Windows and big-endian** use the software CRC; x86 detection runs only
-   with GCC or Clang outside Windows. Neither is a supported platform
-   (Q-A5).
-5. **CRC-32C or XXH3: open**, to be decided on the Linux x86_64 and
-   Linux ARM64 timings.
-   - In today's format (E4) a record is checksummed in three pieces:
-     `w0` without the invalidation bit, the body from `w2`, and the
-     16 bytes of `S`, which are never stored. A spanning record has more
-     pieces, around each page header.
-   - That format suits CRC-32C, whose chaining costs about 2 ns per piece
-     (`crc32c/3`).
-   - A format built for XXH3 would hash the body in one call with a fixed
-     seed, then mix in `w0` and `S` (`xxh3+mix`). It stays bound to lap and
-     position, because a different `S` gives a different checksum.
-   - On macOS ARM64, one-shot XXH3 is 2 to 3 times faster than
-     `crc32c/3` from 60 to 1000 bytes, and faster at every size from
-     60 bytes.
-   - Linux x86_64 matters most. There XXH3 uses SSE2, unless built with
-     `-mavx2`, which pays only above 240 bytes.
-   - Nothing calls `ndb_crc32c` yet, so a switch changes only E3/E4, the
-     format document and the reader.
+   Timing it against XXH3, which the tree already has, decided for XXH3
+   (decision 5).
+2. **AVX2 is chosen at run time, not by `-mavx2`.**
+   - `-mavx2` for the whole build would make every program require AVX2.
+     Such a program dies with SIGILL on a CPU or VM CPU model without it.
+   - Before, AVX2 was never chosen at run time, in any build.
+     `rondb_calc_hash` took `rondb_xxhash_avx2` only under
+     `#if defined(__AVX2__)` and only if `is_avx2_supported()`, which
+     always returned 0.
+   - With `-mavx2`, `xxhash_std.cpp` was compiled with AVX2 too, because
+     `ndb_xxhash.h` chooses the vector code from `__AVX2__`. The
+     `XXH_VECTOR_TYPE` define in `xxhash_avx2.cpp` was not read.
+   - Every XXH3 implementation (scalar, SSE2, AVX2, NEON) gives the same
+     hash, so the distribution of rows does not change; `ndb_xxh3-t`
+     checks it.
+   - AVX2 makes inputs over 240 bytes about twice as fast. Shorter ones
+     run the same scalar code in every implementation.
+   - AVX-512 is left out for now; it could be added the same way.
+3. **Windows** uses the code the build chose, because the run-time choice
+   needs GCC or Clang. Neither Windows nor big-endian is a supported
+   platform (Q-A5).
+4. **The hash of keys keeps its entry point.** Callers still use
+   `rondb_xxhash_std()`, which moved from `xxhash_std.cpp` into
+   `ndb_xxh3.cpp` and gains the run-time choice.
+5. **XXH3 rather than CRC32C** (settled 2026-10-28). The definition is in
+   `pmem_redo_design.md` E4.
+   - In the CRC32C format a record is checksummed in three pieces: `w0`
+     without the invalidation bit, the body, and the 16 bytes of `S`,
+     which are never stored. CRC32C chains them at about 2 ns per piece.
+   - The XXH3 format hashes the body in one call. It then mixes in `w0`
+     and `S` with a seeded hash of 20 bytes. Both formats bind the checksum
+     to lap and position.
+   - Per operation (PREPARE + COMMIT + COMPLETE) on x86-64 with AVX2, XXH3
+     against CRC32C (Timings):
+     - with a PREPARE of 124 bytes: 37 ns against 41 ns;
+     - with a PREPARE of 1000 bytes: 53 ns against 98 ns. The PREPARE
+       alone is 28 ns against 75 ns.
+   - Without AVX2 those are 37 against 38 ns and 80 against 95 ns. On macOS
+     ARM64 they are 27 against 37 ns and 39 against 85 ns.
+   - CRC32C stays faster for the shortest records (FILLER, COMPLETE, ABORT)
+     by a few nanoseconds. Without AVX2 it is also faster from 32 KB.
+     PREPAREs are seldom tiny, so XXH3 wins where the bytes are.
 
 **Commands for the pusher** (from the build directory, configured with
 `-DWITH_UNIT_TESTS=1`), on Linux x86_64, Linux ARM64 and macOS ARM64:
 
 ```
-cmake --build . --target NdbHW-t ndb_crc32c-t rondb_hash-t
-ctest -R 'NdbHW-t|ndb_crc32c-t|rondb_hash-t' --output-on-failure
-./runtime_output_directory/ndb_crc32c-t      # prints the implementation and timings
+cmake --build . --target NdbHW-t ndb_xxh3-t rondb_hash-t
+ctest -R 'NdbHW-t|ndb_xxh3-t|rondb_hash-t' --output-on-failure
+./runtime_output_directory/ndb_xxh3-t      # prints the implementation and timings
 ```
 
-`ndb_crc32c-t` should report the hardware implementation on all three
-platforms (`sse4.2+pclmul` on x86_64, `armv8-crc+pmull` on ARM64); it
-warns, without failing, on a CPU or VM CPU model without CRC32
-instructions. It also prints the timing table of CRC-32C against XXH3 at
-the REDO record sizes (20 bytes to 92 KB). The timings mean something only
-from an optimised build (`-DWITH_DEBUG=0`); a debug build measures call
-overhead.
+`ndb_xxh3-t` should report `avx2` on an x86_64 CPU with AVX2 (`sse2`
+without it) and `neon` on ARM64. It checks that every implementation the
+CPU has gives the header's XXH3 for every length up to 2100 bytes and some
+long ones, at every alignment, with and without a seed. It also checks the
+hash of keys and the distribution hash. It prints ns per hash for each
+implementation and for the checksum of a REDO record (`record`). The
+timings mean something only from an optimised build (`-DWITH_DEBUG=0`).
 
-**Timings.** These come from `ndb_crc32c-t` in an optimised build, in ns
-per checksum. `crc32c/3` and `xxh3/3` checksum the same bytes in three
-pieces, 4 + body + 16, as a record is checksummed. `xxh3+mix` (added after
-the macOS run below) is a format built for XXH3: the body in one call,
+**Timings.** These come from `ndb_crc32c-t`, the timing test of the CRC32C
+version (commit 4102f7f1c7a), in an optimised build, in ns per checksum. `crc32c/3` and `xxh3/3` checksum the same bytes in three
+pieces, 4 + body + 16, as a record is checksummed. `xxh3+mix` is a format
+built for XXH3: the body in one call,
 then a seeded XXH3 over the 20 bytes of `w0` and `S` with the body's hash
 as seed. Each result feeds the next input, so the loop measures latency
 with the data in cache.
@@ -127,18 +138,84 @@ with the data in cache.
 macOS ARM64, Apple M5 Pro, `armv8-crc+pmull`, XXH3 with NEON
 (2026-10-28):
 
-| bytes | crc32c | crc32c/3 | xxh3 | xxh3/3 |
-|---|---|---|---|---|
-| 20 | 4.0 | 7.5 | 4.7 | 8.0 |
-| 28 | 4.6 | 8.8 | 4.7 | 8.3 |
-| 60 | 7.2 | 11.5 | 4.8 | 9.7 |
-| 124 | 12.4 | 16.8 | 5.3 | 10.1 |
-| 300 | 26.8 | 31.3 | 10.6 | 24.5 |
-| 1000 | 61.4 | 65.3 | 18.9 | 55.2 |
-| 32768 | 917.0 | 922.1 | 619.0 | 1584.5 |
-| 92520 | 2703.2 | 2719.4 | 1791.3 | 4488.5 |
+| bytes | record (E13) | crc32c | crc32c/3 | xxh3 | xxh3/3 | xxh3+mix |
+|---|---|---|---|---|---|---|
+| 20 | FILLER header, NEXT_MBYTE | 4.0 | 7.5 | 4.7 | 8.5 | 7.3 |
+| 28 | COMPLETE, ABORT, COMPLETED_GCI | 4.6 | 8.8 | 4.7 | 8.7 | 9.0 |
+| 60 | COMMIT | 7.2 | 11.4 | 4.9 | 10.1 | 8.8 |
+| 124 | PREPARE, 20 words of key and attrinfo | 12.4 | 16.8 | 5.4 | 10.7 | 9.2 |
+| 300 | PREPARE, 64 words | 27.2 | 31.0 | 10.8 | 25.4 | 14.4 |
+| 1000 | PREPARE, 239 words | 60.7 | 65.0 | 19.2 | 55.6 | 21.5 |
+| 32768 | PREPARE, 8181 words | 919.6 | 914.8 | 619.3 | 1577.4 | 633.2 |
+| 92520 | largest PREPARE, 4 pages | 2663.4 | 2699.2 | 1795.4 | 4524.0 | 1827.9 |
 
-At 92 KB this is 34 GB/s for CRC-32C, 52 GB/s for one-shot XXH3 and
-21 GB/s for streaming XXH3. Each extra CRC call costs about 2 ns.
+The bytes checksummed are 4 + 4·(words − 2) + 16. At 92 KB this is
+35 GB/s for CRC-32C, 51 GB/s for XXH3 one-shot and with the mix, and
+20 GB/s for streaming XXH3. Each extra CRC call costs about 2 ns, and the
+mix about 3 ns. Comparing today's format (`crc32c/3`) with a format
+built for XXH3 (`xxh3+mix`):
+- up to 28 bytes they are equal;
+- for a COMMIT, XXH3 is 1.3 times faster;
+- for a PREPARE of 124 to 1000 bytes, it is 1.8 to 3 times faster;
+- for the largest records, it is 1.45 times faster.
 
-Linux x86_64 and Linux ARM64: to come.
+For one operation, a PREPARE of 124 bytes plus a COMMIT and a COMPLETE,
+that is 37 ns against 27 ns. With a PREPARE of 1000 bytes it is 85 ns
+against 39 ns. A real spanning PREPARE has one more piece per page header
+it crosses, in both formats.
+
+Linux x86_64, Intel Core i9-13900K, `sse4.2+pclmul`, XXH3 with SSE2, the
+normal build (2026-10-28):
+
+| bytes | record (E13) | crc32c | crc32c/3 | xxh3 | xxh3/3 | xxh3+mix |
+|---|---|---|---|---|---|---|
+| 20 | FILLER header, NEXT_MBYTE | 6.9 | 5.7 | 7.9 | 16.6 | 12.3 |
+| 28 | COMPLETE, ABORT, COMPLETED_GCI | 7.8 | 7.4 | 7.9 | 16.8 | 12.5 |
+| 60 | COMMIT | 11.2 | 12.0 | 8.1 | 14.9 | 12.2 |
+| 124 | PREPARE, 20 words of key and attrinfo | 18.2 | 18.8 | 9.0 | 16.6 | 12.5 |
+| 300 | PREPARE, 64 words | 37.2 | 37.8 | 17.1 | 46.3 | 24.0 |
+| 1000 | PREPARE, 239 words | 74.9 | 75.1 | 46.1 | 73.5 | 55.2 |
+| 32768 | PREPARE, 8181 words | 919.4 | 906.9 | 1512.0 | 1475.6 | 1514.2 |
+| 92520 | largest PREPARE, 4 pages | 2615.2 | 2614.7 | 4272.3 | 4150.2 | 4255.2 |
+
+- At 92 KB CRC-32C runs at 35 GB/s and XXH3 with SSE2 at 22 GB/s.
+- Unlike on the M5, CRC-32C is the faster from 32 KB, by 1.6 times.
+- The short records are 1.7 to 2.2 times faster with CRC-32C, because the
+  mix costs about 4 ns here.
+- XXH3 wins only the PREPAREs of 124 to 1000 bytes, by 1.4 to 1.6 times.
+- `crc32c/3` is below `crc32c` at 20 and 28 bytes in this run and in an
+  earlier one, so that is not noise. The cause was not investigated.
+- The earlier run, from a build without `xxh3+mix`, was 13 to 21 % slower
+  for both checksums, which points to a different clock. The i9-13900K
+  has performance and efficiency cores, and a run can land on either.
+  Pinning the run to a performance core with `taskset` makes runs
+  comparable.
+- A desktop part at up to 5.8 GHz gives low absolute times. Server parts
+  at 2 to 4 GHz will be slower, but the ratios should hold, because both
+  checksums scale with the clock. Unlike this part, Xeons have AVX-512,
+  which XXH3 could use above 240 bytes behind the same kind of run-time
+  choice.
+
+The same machine, built with `-mavx2` (XXH3 with AVX2, 2026-10-28):
+
+| bytes | record (E13) | crc32c | crc32c/3 | xxh3 | xxh3/3 | xxh3+mix |
+|---|---|---|---|---|---|---|
+| 20 | FILLER header, NEXT_MBYTE | 6.9 | 7.6 | 7.8 | 15.2 | 11.9 |
+| 28 | COMPLETE, ABORT, COMPLETED_GCI | 7.8 | 10.6 | 7.8 | 15.2 | 12.3 |
+| 60 | COMMIT | 11.2 | 11.9 | 8.3 | 13.8 | 11.9 |
+| 124 | PREPARE, 20 words of key and attrinfo | 18.2 | 18.9 | 9.0 | 15.3 | 12.4 |
+| 300 | PREPARE, 64 words | 37.2 | 37.9 | 14.8 | 39.8 | 20.9 |
+| 1000 | PREPARE, 239 words | 74.9 | 75.1 | 26.9 | 53.0 | 28.4 |
+| 32768 | PREPARE, 8181 words | 904.8 | 905.5 | 784.1 | 772.0 | 766.8 |
+| 92520 | largest PREPARE, 4 pages | 2611.6 | 2611.5 | 2155.6 | 2165.4 | 2168.2 |
+
+- **Up to 240 bytes nothing changes.** XXH3 runs the same scalar code as
+  in the normal build: the `xxh3` and `xxh3+mix` columns agree with it
+  within 0.4 ns.
+- **The mix costs 3.5 to 4.5 ns here.**
+- **AVX2 makes XXH3 more than twice as fast above 240 bytes**: 43 GB/s at
+  92 KB, against 22 GB/s with SSE2.
+- **CRC-32C runs at the same speed in both builds** (2612 and 2615 ns at
+  92 KB), as it should, since it uses no AVX2.
+
+Linux ARM64: to come.

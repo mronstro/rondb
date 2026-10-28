@@ -557,13 +557,13 @@ footer code { background: none; padding: 0; }
 
 <figure aria-labelledby="cap-rf">
   <div class="fig-scroll">
-  <svg class="rf" viewBox="0 0 870 404" style="min-width: 760px" role="img" aria-label="Word layouts of the REDO records on persistent memory. Every record starts with a type and length word and a CRC32C word. PREPARE keeps its 8-word header. COMMIT grows from 9 to 12 words by adding the CRC, gci_lo, the transaction id and opCount, with the PREPARE reference packed into 2 words. COMPLETE and ABORT are 4 words. FILLER pads to the next 64-byte boundary.">
+  <svg class="rf" viewBox="0 0 870 404" style="min-width: 760px" role="img" aria-label="Word layouts of the REDO records on persistent memory. Every record starts with a type and length word and a checksum word. PREPARE keeps its 8-word header. COMMIT grows from 9 to 12 words by adding the checksum, gci_lo, the transaction id and opCount, with the PREPARE reference packed into 2 words. COMPLETE and ABORT are 4 words. FILLER pads to the next 64-byte boundary.">
     <!-- PREPARE -->
     <text class="s-t s-b" x="0" y="44">PREPARE</text>
     <text class="s-t s-sm s-mut" x="0" y="59">header unchanged</text>
     <g>
       <rect class="cellr r-P" x="124" y="30" width="56" height="30"/><text class="f" x="152" y="49">type/len</text>
-      <rect class="cellr r-new" x="180" y="30" width="56" height="30"/><text class="f" x="208" y="49">CRC</text>
+      <rect class="cellr r-new" x="180" y="30" width="56" height="30"/><text class="f" x="208" y="49">checksum</text>
       <rect class="cellr r-P" x="236" y="30" width="56" height="30"/><text class="f" x="264" y="49">hash</text>
       <rect class="cellr r-P" x="292" y="30" width="56" height="30"/><text class="f" x="320" y="49">op</text>
       <rect class="cellr r-P" x="348" y="30" width="56" height="30"/><text class="f" x="376" y="49">aiLen</text>
@@ -599,7 +599,7 @@ footer code { background: none; padding: 0; }
     <text class="s-t s-sm s-mut" x="0" y="195">PMEM, 12 words</text>
     <g>
       <rect class="cellr r-C" x="124" y="166" width="56" height="30"/><text class="f" x="152" y="185">type/len</text>
-      <rect class="cellr r-new" x="180" y="166" width="56" height="30"/><text class="f" x="208" y="185">CRC</text>
+      <rect class="cellr r-new" x="180" y="166" width="56" height="30"/><text class="f" x="208" y="185">checksum</text>
       <rect class="cellr r-C" x="236" y="166" width="56" height="30"/><text class="f" x="264" y="185">table</text>
       <rect class="cellr r-C" x="292" y="166" width="56" height="30"/><text class="f" x="320" y="185">schVer</text>
       <rect class="cellr r-C" x="348" y="166" width="56" height="30"/><text class="f" x="376" y="185">frag</text>
@@ -617,7 +617,7 @@ footer code { background: none; padding: 0; }
     <text class="s-t s-sm s-acc" x="0" y="261">new, 4 words</text>
     <g>
       <rect class="cellr r-new" x="124" y="232" width="56" height="30"/><text class="f" x="152" y="251">type/len</text>
-      <rect class="cellr r-new" x="180" y="232" width="56" height="30"/><text class="f" x="208" y="251">CRC</text>
+      <rect class="cellr r-new" x="180" y="232" width="56" height="30"/><text class="f" x="208" y="251">checksum</text>
       <rect class="cellr r-new" x="236" y="232" width="56" height="30"/><text class="f" x="264" y="251">transid1</text>
       <rect class="cellr r-new" x="292" y="232" width="56" height="30"/><text class="f" x="320" y="251">transid2</text>
     </g>
@@ -628,7 +628,7 @@ footer code { background: none; padding: 0; }
     <text class="s-t s-sm s-mut" x="0" y="319">4 words</text>
     <g>
       <rect class="cellr r-A" x="124" y="290" width="56" height="30"/><text class="f" x="152" y="309">type/len</text>
-      <rect class="cellr r-new" x="180" y="290" width="56" height="30"/><text class="f" x="208" y="309">CRC</text>
+      <rect class="cellr r-new" x="180" y="290" width="56" height="30"/><text class="f" x="208" y="309">checksum</text>
       <rect class="cellr r-A" x="236" y="290" width="56" height="30"/><text class="f" x="264" y="309">transid1</text>
       <rect class="cellr r-A" x="292" y="290" width="56" height="30"/><text class="f" x="320" y="309">transid2</text>
     </g>
@@ -639,13 +639,13 @@ footer code { background: none; padding: 0; }
     <text class="s-t s-sm s-acc" x="0" y="377">new, 2 + n words</text>
     <g>
       <rect class="cellr r-new" x="124" y="348" width="56" height="30"/><text class="f" x="152" y="367">type/len</text>
-      <rect class="cellr r-new" x="180" y="348" width="56" height="30"/><text class="f" x="208" y="367">CRC</text>
+      <rect class="cellr r-new" x="180" y="348" width="56" height="30"/><text class="f" x="208" y="367">checksum</text>
       <rect class="cellr r-new r-var" x="236" y="348" width="224" height="30"/><text class="f" x="348" y="367">unused, to the next 64 B</text>
     </g>
-    <text class="s-t s-sm s-mut" x="474" y="367">written at every persist point; its CRC covers only its header</text>
+    <text class="s-t s-sm s-mut" x="474" y="367">written at every persist point; its checksum covers only its header</text>
   </svg>
   </div>
-  <figcaption id="cap-rf"><b>Record layouts on persistent memory, one cell per 32-bit word.</b> Every record is 8-byte aligned and starts with a type/flags/length word and a CRC32C. The CRC covers word 0 (except the invalidated flag), the body, and a 16-byte suffix that is never stored: the lap, the log part and file, and the record's position. A record left from an earlier lap at the same offset therefore never validates. The COMMIT record gains the transaction id (the restart's hash key), <code>gci_lo</code> (replay restores the exact GCI64; today it sets 0) and <code>opCount</code> (the partial-restart fallback); packing the four 16-bit PREPARE-reference fields into two words pays for the CRC. Page headers are written once with their own CRC; there is no whole-page checksum.</figcaption>
+  <figcaption id="cap-rf"><b>Record layouts on persistent memory, one cell per 32-bit word.</b> Every record is 8-byte aligned and starts with a type/flags/length word and a 32-bit XXH3 checksum. The checksum covers word 0 (except the invalidated flag), the body, and a 16-byte suffix that is never stored: the lap, the log part and file, and the record's position. A record left from an earlier lap at the same offset therefore never validates. The COMMIT record gains the transaction id (the restart's hash key), <code>gci_lo</code> (replay restores the exact GCI64; today it sets 0) and <code>opCount</code> (the partial-restart fallback); packing the four 16-bit PREPARE-reference fields into two words pays for the checksum. Page headers are written once with their own checksum; there is no whole-page checksum.</figcaption>
 </figure>
 
 <figure class="mid" aria-labelledby="cap-units">
@@ -826,7 +826,7 @@ footer code { background: none; padding: 0; }
     <tbody>
       <tr><td>"T complete" received</td><td>Commit: execute the queued COMMITs in log order.</td></tr>
       <tr><td>Otherwise the counts pass the node-group rule (§7) and no "T aborted" was received</td><td>Commit, the same way.</td></tr>
-      <tr><td>Otherwise</td><td>Abort: mark the transaction's COMMIT records invalidated, one atomic flag store each. The flag sits outside the CRC, so the records stay valid and the log is not cut there.</td></tr>
+      <tr><td>Otherwise</td><td>Abort: mark the transaction's COMMIT records invalidated, one atomic flag store each. The flag sits outside the checksum, so the records stay valid and the log is not cut there.</td></tr>
     </tbody>
   </table>
   </div>
@@ -1024,7 +1024,7 @@ footer code { background: none; padding: 0; }
 <div class="col">
   <div class="chain">
     <div class="step indep"><b>X1 · independent</b>Takeover ack after COMPLETE; also fixes read-your-writes after takeover today.</div>
-    <div class="step"><b>X2 · first step</b>REDO log on PMEM, steps S1–S7: CRC32C and PMEM helpers, config, NDBFS mapping, record writers, write path, recovery, power-loss tests.</div>
+    <div class="step"><b>X2 · first step</b>REDO log on PMEM, steps S1–S7: XXH3 checksum and PMEM helpers, config, NDBFS mapping, record writers, write path, recovery, power-loss tests.</div>
     <div class="step"><b>X3</b>Test harness: ledger, crash of all nodes, power-loss emulation.</div>
     <div class="step"><b>X4</b>Commit path: barriers, primary commit at COMPLETE, late ack, rule F, <span class="mono">opCount</span>.</div>
     <div class="step"><b>X5</b>Restart phases 1 to 3. From here the ledger must show zero losses.</div>
@@ -1044,12 +1044,12 @@ footer code { background: none; padding: 0; }
     <tbody>
       <tr><td>Target hardware</td><td>CXL 2.0 persistent memory modules, about 200–2000 ns per persist. Linux reports them as needing flushes, so the barrier is non-temporal stores plus <code>sfence</code>.</td></tr>
       <tr><td>Write unit</td><td>64 bytes, fixed, recorded in every page header.</td></tr>
-      <tr><td>Checksum</td><td>CRC32C on every record and every page header, bound to the lap, log part, file and position. No whole-page checksum.</td></tr>
+      <tr><td>Checksum</td><td>XXH3 (32 bits stored) on every record and every page header, bound to the lap, log part, file and position. No whole-page checksum.</td></tr>
       <tr><td>Page header</td><td>Written once at page init, never updated. Its GCI fields are snapshots taken at page start, which is what the head and tail search needs.</td></tr>
       <tr><td>FILLER</td><td>At every persist point, to the next 64-byte boundary. A persisted unit is not written again in that lap.</td></tr>
       <tr><td>Write path</td><td>Records are built in DRAM pages. A persist copies the new bytes with non-temporal stores and fences; the copying thread fences before it releases the log-part mutex.</td></tr>
       <tr><td>When to persist</td><td>While the COMMIT or COMPLETE signal is handled, before the next COMMIT, COMMITTED, COMPLETE or COMPLETED is sent. Always, also when a later optimisation delays the sync.</td></tr>
-      <tr><td>COMMIT invalidation</td><td>One atomic store of a flag bit outside the CRC, so the record stays valid.</td></tr>
+      <tr><td>COMMIT invalidation</td><td>One atomic store of a flag bit outside the checksum, so the record stays valid.</td></tr>
       <tr><td>Last file in use</td><td>Two checksummed slots in page 0 of file 0, written alternately.</td></tr>
       <tr><td>End of log</td><td>The first invalid position, E. The log is always recoverable up to E; failed or torn last writes are cut off by the checksums.</td></tr>
       <tr><td>Leftovers</td><td>Zero from E to the end of its mbyte at every restart, and the abandoned range when the head moves back.</td></tr>
@@ -1100,7 +1100,7 @@ footer code { background: none; padding: 0; }
     <text class="s-t s-sm s-acc tm" x="580" y="184">zeroed in phase 1 of every restart, from E</text>
   </svg>
   </div>
-  <figcaption id="cap-eol"><b>End of log after a crash.</b> R1 reached persistent memory and lies before the torn unit, so it is part of the log; its barrier never finished, so no signal depending on it was sent. E, the first invalid position, is the end of the log. R2 also reached memory and has a valid CRC for the current lap, but it lies after the hole. The checksum rejects the previous lap's data but not R2. So every restart zeroes from E to the end of the mbyte: otherwise a later crash could end the log exactly where R2 starts and the scan would accept it. Nothing in the next mbyte can hold new data, because the NEXT_MBYTE record is fenced before any byte of the next mbyte is written.</figcaption>
+  <figcaption id="cap-eol"><b>End of log after a crash.</b> R1 reached persistent memory and lies before the torn unit, so it is part of the log; its barrier never finished, so no signal depending on it was sent. E, the first invalid position, is the end of the log. R2 also reached memory and has a valid checksum for the current lap, but it lies after the hole. The checksum rejects the previous lap's data but not R2. So every restart zeroes from E to the end of the mbyte: otherwise a later crash could end the log exactly where R2 starts and the scan would accept it. Nothing in the next mbyte can hold new data, because the NEXT_MBYTE record is fenced before any byte of the next mbyte is written.</figcaption>
 </figure>
 
 <section class="col">
@@ -1110,10 +1110,10 @@ footer code { background: none; padding: 0; }
 
 <div class="col">
   <div class="chain">
-    <div class="step"><b>S1</b>CRC32C and PMEM helpers: map, prefault, non-temporal copy, fences, power-loss emulation.</div>
+    <div class="step"><b>S1</b>XXH3 checksum and PMEM helpers: map, prefault, non-temporal copy, fences, power-loss emulation.</div>
     <div class="step"><b>S2 · parallel</b>Config: <span class="mono">RedoLogMode</span>, a path per NUMA node, start-up refusals, ndbinfo.</div>
     <div class="step"><b>S3</b>NDBFS maps the files with <span class="mono">MAP_SYNC</span>; full initialisation at initial start.</div>
-    <div class="step"><b>S4</b>Record writers: header and CRC, write-once page header, FILLER, new COMMIT and ABORT.</div>
+    <div class="step"><b>S4</b>Record writers: header and checksum, write-once page header, FILLER, new COMMIT and ABORT.</div>
     <div class="step"><b>S5</b>Write path: the persist primitive, copy-out, GCP save, mbyte and file switch.</div>
     <div class="step"><b>S6</b>Recovery: end of log, slots, zeroing, new record types, node restart, <span class="mono">redoLogReader</span>.</div>
     <div class="step"><b>S7</b>Power-loss tests: torn-copy error insert, emulation, acknowledged-write checker.</div>
