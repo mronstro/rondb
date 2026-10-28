@@ -1,9 +1,9 @@
 # RONDB-1150 — Durable commits across a cluster restart: master plan
 
-Status: **Revision 9, 2026-10-28. Decisions D0–D8 are settled (§11). The
+Status: **Revision 11, 2026-10-28. Decisions D0–D8 are settled (§11). The
 first implementation step, the REDO log on persistent memory, is designed in
-`pmem_redo_design.md` (planning subtask P2 done). No code has been
-changed.**
+`pmem_redo_design.md` (planning subtask P2 done). The implementation plan
+for all phases is `implementation_plan.md`. No code has been changed.**
 Branch: `RONDB-1150-durable-commits` (base 26.10-main, commit 7128c75dca4).
 All paths are relative to `storage/ndb/`.
 
@@ -16,6 +16,9 @@ All paths are relative to `storage/ndb/`.
 | `research_micro_gcp.md` | The GCP/micro-GCP protocol and the consistent-cut proof (used in §6), the durable-epoch alternative (not pursued) |
 | `research_literature.md` | 2PC variants, early lock release, epoch commit, how recovery cuts are computed in FoundationDB, Aurora, FaRM, CockroachDB and TiDB |
 | `pmem_redo_design.md` | **Step 1 design:** the REDO log on persistent memory. Consolidates the four notes below and settles their conflicts (decisions E1–E20, steps S1–S7, questions Q1–Q8 answered) |
+| `implementation_plan.md` | **Implementation plan:** order of the phases, milestones, step 1 split into pull requests, conventions, points settled between the detail plans, questions for the architect |
+| `impl_step1_platform.md`, `impl_step1_lqh_write.md`, `impl_step1_recovery_test.md` | Step 1 work packages: platform (S1–S3), DBLQH write side (S4–S5), recovery and tests (S6–S7) |
+| `impl_next_steps.md` | Work packages for X1 and X3–X8, new signals, design issues found |
 | `research_pmem_hardware.md` | Failure atomicity, devices available in 2026, flush instructions and their cost, Linux DAX interfaces, CRC32C |
 | `pmem_redo_format.md` | Record framing and checksum, write-once page header, every record layout, FILLER, space reservation and overhead |
 | `pmem_redo_recovery.md` | Today's head and tail search traced through the code, end-of-log rule, invalidation by zeroing, torn-safe last-file slots |
@@ -64,6 +67,22 @@ All paths are relative to `storage/ndb/`.
   system in the first version. No REDO log buffer in PMEM mode, so an
   operation that cannot be logged aborts, as today. Each log part on the
   persistent memory closest to its LDM. All step-1 questions answered.
+- **Revision 10** (review 9). Implementation plan for all phases
+  (`implementation_plan.md` and four detail plans). PMEM mode without DAX is
+  refused always, with hidden test modes for development. The step-B
+  exchange gets three new signals, aggregated per node in the DBLQH proxy;
+  the DONE signal carries each part's highest GCI so all parts agree on G'.
+  Open design issues for the later steps (dirty writes, read locks, the
+  takeover race) are listed in `implementation_plan.md` §3 and §5.
+- **Revision 11** (review 10). PMEM mode, and durable commits, must run on
+  normal DRAM through the test modes, release builds included, since no
+  PMEM hardware is available; the persist code is the production code in
+  every mode. `FileSystemPathRedoLog` is used only in PMEM mode; file mode
+  keeps today's REDO placement. The read-buffer size for log execution
+  (`ZMIN_READ_BUFFER_SIZE`) is fixed in both modes as a separate bug fix.
+  The initial-start pages are written through the mapping, so the page-header
+  CRC covers every header word. A hidden persist delay lets DRAM runs
+  approximate the latency of CXL persistent memory.
 
 ---
 
@@ -136,13 +155,21 @@ The full design is `pmem_redo_design.md`. In short:
 
 - A new config variable (`RedoLogMode = file | pmem`, names to be decided)
   puts the REDO log parts in memory-mapped files on PMEM, with its own path
-  (`FileSystemPathRedoLog`). Switching a node to it, or back, needs an
+  (`FileSystemPathRedoLog`, PMEM mode only: file mode keeps today's REDO
+  placement, review 10). Switching a node to it, or back, needs an
   initial node restart; a cluster switches by rolling initial node restarts.
 - **Mapping.** NDBFS opens and maps every REDO file once at start
   (`MAP_SHARED_VALIDATE | MAP_SYNC`) and prefaults it; the files are fully
   written at initial start. NDBFS leaves the write path. `MAP_SYNC` failing
-  means the file is not on DAX: with durable commits configured, the node
-  refuses to start (D8).
+  means the file is not on DAX, and the node refuses to start in PMEM mode,
+  with or without durable commits (D8; `implementation_plan.md` R8). Hidden
+  test modes (`emulated`, `nodax`) let PMEM mode run on emulated memory or
+  on any file, macOS included, without durability, for development and CI
+  (review 10). Until PMEM hardware is available everything runs this way,
+  release builds and durable commits included. A test mode changes only the
+  map flags and the start checks; the persist code is the production code.
+  On DRAM a commit survives a crash of every data-node process, since the
+  page cache holds the mapped file, but not an OS crash or a power loss.
 - **Geometry kept.** Files, 1 MB mbytes, 32 KB pages with a header on each
   page, the FD record in page 0, and today's head and tail search.
 - **Write unit W = 64 bytes**, fixed and recorded in the page header.
@@ -370,7 +397,13 @@ each row's order.
      received set.
 3. The part then sends "done" to every part. Signal order between two block
    instances is kept, so all of a part's "T complete" messages arrive
-   before its "done".
+   before its "done". The done message also carries the part's highest
+   executed GCI, so every part computes the same G'.
+
+**Signals** (`implementation_plan.md` §3): `SR_TAIL_INDOUBT_REP`,
+`SR_TAIL_HIT_REP` and `SR_TAIL_DONE_REP`, data-node only. They are
+aggregated per node in the DBLQH proxy, so the message count grows with
+the number of nodes, not with the square of the number of log parts.
 
 **Step C — verdicts, once "done" has arrived from every part.**
 
@@ -741,6 +774,10 @@ X1 (independent)
 X2 ── X3 ── X4 ── X5 ── X6 ── X7 ── X8
 ```
 
+Sizes, milestones, the pull requests of step 1 and the work packages of
+every phase are in `implementation_plan.md` (about 300 person-days in
+total, of which step 1 is about 120).
+
 ---
 
 ## 11. Decisions
@@ -755,4 +792,4 @@ X2 ── X3 ── X4 ── X5 ── X6 ── X7 ── X8
 | D5 | Partial SR with the COMPLETE record only on a missing node | **Settled:** opCount fallback, decided from per-node counts per node group (§5.5) |
 | D6 | Ack point | **Settled:** after the last COMPLETED |
 | D7 | COMPLETE records | **Settled:** one per operation (one per transaction and log part works but is complex to implement) |
-| D8 | Hardware without PMEM | **Settled:** durable commits require PMEM; otherwise the node refuses to start. Tests use emulated PMEM |
+| D8 | Hardware without PMEM | **Settled:** durable commits require PMEM; otherwise the node refuses to start. Tests use emulated PMEM. Review 10: until hardware is available, test modes run PMEM mode and durable commits on normal DRAM, release builds included, with the production persist code |

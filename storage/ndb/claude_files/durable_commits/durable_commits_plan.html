@@ -351,7 +351,7 @@ footer code { background: none; padding: 0; }
 <main class="page">
 
 <header class="col">
-  <p class="eyebrow">RONDB-1150 · Plan, revision 9 · 28 October 2026</p>
+  <p class="eyebrow">RONDB-1150 · Plan, revision 11 · 28 October 2026</p>
   <h1>Durable commits across a cluster restart</h1>
   <p class="lede">Today a cluster restart brings the database back to the last GCI saved by the global checkpoint, so commits acknowledged in the last GCP interval can be lost. This plan makes every acknowledged commit survive a crash of all data nodes, power loss included, by putting the REDO log on persistent memory and logging one more record per operation.</p>
   <div class="chips">
@@ -398,7 +398,7 @@ footer code { background: none; padding: 0; }
   <h2><span class="num">2</span>Configuration and activation</h2>
   <ul>
     <li><strong>Memory-mapped REDO.</strong> Each REDO log part becomes a memory-mapped file in a new format with a checksum on every record. A node switches to it with an initial node restart, so a cluster switches by rolling initial node restarts.</li>
-    <li><strong>Persistent memory.</strong> The whole REDO log lives in PMEM: files on an ext4 or xfs file system mounted with <code>-o dax</code>, mapped once at start with <code>MAP_SYNC</code> and prefaulted. If <code>MAP_SYNC</code> fails the file is not on DAX, and with durable commits configured the node refuses to start.</li>
+    <li><strong>Persistent memory.</strong> The whole REDO log lives in PMEM: files on an ext4 or xfs file system mounted with <code>-o dax</code>, mapped once at start with <code>MAP_SYNC</code> and prefaulted. If <code>MAP_SYNC</code> fails the file is not on DAX, and the node refuses to start in PMEM mode, with or without durable commits. Hidden test modes run PMEM mode on emulated memory, or on any file (macOS, CI), without durability. Until PMEM hardware is available everything runs this way on normal DRAM, release builds and durable commits included; a test mode changes only the map flags and the start checks, so the persist code is the production code.</li>
     <li><strong>Writing.</strong> Records are built in DRAM log pages as today. At each persist point the new bytes are padded with a FILLER to the next 64-byte boundary, copied to PMEM with non-temporal stores and fenced. The same code serves ADR, eADR and CXL memory. Without durable commits the log is persisted at GCP save, at mbyte and file switches and when a page fills, which keeps today's durability.</li>
     <li><strong>Placement.</strong> Each log part's files sit on the persistent memory closest to the LDM thread that owns the part.</li>
     <li><strong>Refused in the first version:</strong> an encrypted file system, and Diskless. When an operation cannot be logged it aborts, as today; PMEM mode has no REDO log buffer to queue it in.</li>
@@ -758,7 +758,7 @@ footer code { background: none; padding: 0; }
   </div>
   <p style="margin-top:1em">No COMMIT of a transaction can follow its COMPLETE in the same log part, because COMPLETE is only sent after every COMMITTED. What is left in the table at the end is the log part's in-doubt set.</p>
   <h3>Step B: exchange between log parts</h3>
-  <p>There is no coordinator. Every log part sends its in-doubt set to every other part, as transaction id and the number of COMMIT records it holds. The COMMIT records stay local. Each part then scans its tail a second time for COMPLETE and ABORT records of the transactions it was sent, and answers the parts that asked.</p>
+  <p>There is no coordinator. Every log part sends its in-doubt set to every other part, as transaction id and the number of COMMIT records it holds. The COMMIT records stay local. Each part then scans its tail a second time for COMPLETE and ABORT records of the transactions it was sent, and answers the parts that asked. Three new data-node-only signals carry this, <code>SR_TAIL_INDOUBT_REP</code>, <code>SR_TAIL_HIT_REP</code> and <code>SR_TAIL_DONE_REP</code>, aggregated per node in the DBLQH proxy. The done signal also carries the part's highest executed GCI, so every part computes the same new restorable GCI.</p>
 </section>
 
 <figure class="mid" aria-labelledby="cap-ex">
@@ -815,7 +815,7 @@ footer code { background: none; padding: 0; }
     <text class="s-t s-sm s-mut tm" x="650" y="362">nothing to decide</text>
   </svg>
   </div>
-  <figcaption id="cap-ex"><b>Step B and step C across three log parts.</b> Every part computes each verdict from the same exchanged data, so all parts agree without a coordinator. The work is two linear scans of the tail, the second reading only COMPLETE and ABORT records; the messages grow with the number of in-doubt transactions times the number of log parts.</figcaption>
+  <figcaption id="cap-ex"><b>Step B and step C across three log parts.</b> Every part computes each verdict from the same exchanged data, so all parts agree without a coordinator. The work is two linear scans of the tail, the second reading only COMPLETE and ABORT records. The messages are aggregated per node in the DBLQH proxy, so they grow with the number of in-doubt transactions and the number of nodes, not with the square of the number of log parts.</figcaption>
 </figure>
 
 <section class="col">
@@ -976,10 +976,16 @@ footer code { background: none; padding: 0; }
       <tr><td class="id">D5</td><td>COMPLETE only on a missing node</td><td><span class="pill ok">Settled</span></td><td><code>opCount</code> fallback, decided from per-node counts per node group.</td></tr>
       <tr><td class="id">D6</td><td>When the API is acked</td><td><span class="pill ok">Settled</span></td><td>After the last COMPLETED.</td></tr>
       <tr><td class="id">D7</td><td>How many COMPLETE records</td><td><span class="pill ok">Settled</span></td><td>One per operation. One per transaction and log part would work but is complex to implement.</td></tr>
-      <tr><td class="id">D8</td><td>Hardware without PMEM</td><td><span class="pill ok">Settled</span></td><td>Refuse to start. Tests use emulated PMEM.</td></tr>
+      <tr><td class="id">D8</td><td>Hardware without PMEM</td><td><span class="pill ok">Settled</span></td><td>Refuse to start. Tests use emulated PMEM. Until hardware is available, the test modes run PMEM mode and durable commits on normal DRAM.</td></tr>
     </tbody>
   </table>
   </div>
+  <p style="margin-top:1em"><strong>Open for the later steps</strong> (found while planning the implementation; proposals in <code>implementation_plan.md</code>):</p>
+  <ul>
+    <li><strong>Dirty writes.</strong> A dirty write logs PREPARE, COMMIT and COMPLETE together and takes its GCI from DBLQH, so its COMPLETE record would wrongly tell the restart that the whole transaction is complete. Either flag such records or turn dirty writes into normal writes in durable mode.</li>
+    <li><strong>Read locks.</strong> Released at COMMIT, or held to COMPLETE like write locks.</li>
+    <li><strong>Takeover race.</strong> A COMPLETE sent by the failed TC may be executed after the takeover TC has collected the operation states, so its "was any COMPLETE sent?" decision must be checked in the code and in the TLA+ model.</li>
+  </ul>
 </section>
 
 <!-- 9 -->
@@ -1049,10 +1055,12 @@ footer code { background: none; padding: 0; }
       <tr><td>Leftovers</td><td>Zero from E to the end of its mbyte at every restart, and the abandoned range when the head moves back.</td></tr>
       <tr><td>Restart scan</td><td>One scan runs both phases: COMMITs at or below R_gcp execute as today, the rest go to the hash table.</td></tr>
       <tr><td>Mapping</td><td>NDBFS maps every file once at start with <code>MAP_SYNC</code> and prefaults it. If <code>MAP_SYNC</code> fails, the file is not on DAX and the node refuses to start.</td></tr>
-      <tr><td>Placement</td><td>Each log part on the persistent memory closest to the LDM that owns it; one path per NUMA node.</td></tr>
+      <tr><td>Placement</td><td>Each log part on the persistent memory closest to the LDM that owns it; one path per NUMA node. The REDO path setting is used only in PMEM mode: file mode keeps today's REDO placement.</td></tr>
       <tr><td>REDO log full</td><td>No REDO log buffer, only a few staging pages. An operation that cannot be logged aborts, as today.</td></tr>
       <tr><td>Unsafe shutdown</td><td>If the device reports one, the node is stale: its REDO is still read up to E, but it stays out of the restart and joins by node restart.</td></tr>
-      <tr><td>Refused in the first version</td><td>Encrypted file system, Diskless.</td></tr>
+      <tr><td>Refused in the first version</td><td>Encrypted file system, Diskless, and PMEM mode on a file that is not on DAX.</td></tr>
+      <tr><td>Test modes</td><td>Hidden settings, allowed in release builds, run PMEM mode and durable commits on normal DRAM: on emulated persistent memory (<code>memmap=</code>), or on any file (macOS, CI) without durability. On DRAM a commit survives a crash of every data-node process, since the page cache holds the mapped file, but not an OS crash or a power loss; the power-loss emulation reverts or tears lines not yet fenced to test that case. Format, copy, flushes, fences and recovery are the same code as on real persistent memory.</td></tr>
+      <tr><td>Observability</td><td>A new ndbinfo table, <code>redo_log_pmem</code>, per log part: barriers, bytes copied, filler bytes, persist latency, placement, unsafe shutdowns.</td></tr>
     </tbody>
   </table>
   </div>
@@ -1119,7 +1127,8 @@ footer code { background: none; padding: 0; }
 <footer class="col">
   Source documents in <code>storage/ndb/claude_files/durable_commits/</code>:
   <ul>
-    <li><code>durable_commits_plan.md</code>, the plan this page summarises (revision 9)</li>
+    <li><code>durable_commits_plan.md</code>, the plan this page summarises (revision 11)</li>
+    <li><code>implementation_plan.md</code>, the implementation plan, with <code>impl_step1_platform.md</code>, <code>impl_step1_lqh_write.md</code>, <code>impl_step1_recovery_test.md</code>, <code>impl_next_steps.md</code></li>
     <li><code>pmem_redo_design.md</code>, the design of the first step, with <code>research_pmem_hardware.md</code>, <code>pmem_redo_format.md</code>, <code>pmem_redo_recovery.md</code>, <code>pmem_redo_write_path.md</code></li>
     <li><code>research_commit_protocol.md</code>, <code>research_redo_log.md</code>, <code>research_system_restart.md</code>, <code>research_micro_gcp.md</code>, <code>research_literature.md</code></li>
   </ul>
