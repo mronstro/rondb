@@ -6163,102 +6163,44 @@ private:
   size_t m_cap = 0;
 };
 
+// Generated identifiers are decoded names; quote them independently of SQL.
+void
+append_sql_identifier(ArenaSqlBuilder& sql, const char* name)
+{
+  ndbrequire(name != NULL);
+  sql << "`";
+  for (const char* p = name; *p != '\0'; p++)
+    sql << (*p == '`' ? std::string_view("``") : std::string_view(p, 1));
+  sql << "`";
+}
+
+// Only consume parser-recorded spans from an original inner statement.
+std::string_view
+original_subquery_span(const SelectStatement& stmt, const LexString& span)
+{
+  ndbrequire(stmt.sql_begin != NULL && stmt.sql_end != NULL);
+  ndbrequire(span.str != NULL && span.len > 0 &&
+             span.str >= stmt.sql_begin && span.str < stmt.sql_end &&
+             span.len <= size_t(stmt.sql_end - span.str));
+  return std::string_view(span.str, span.len);
+}
+
 /*
- * Append " WHERE <conjuncts>" to sql: the AND conjuncts of the WHERE
- * clause of inner_sql (an inner SELECT's original text) except the
- * correlation predicate, the one naming both outer_col_name and
- * inner_col_name around an '='.  Nothing is appended when no conjunct is
- * left or inner_sql has no WHERE.  Textual and fragile, but enough for
- * simple shapes like "l_orderkey = o_id AND l_quantity > 20"; the pieces
- * are std::string_view slices of inner_sql, so nothing is copied.
+ * Called before rewriting or simplifying the inner WHERE. The grammar
+ * records the WHERE root and both operands of every AND, covering every
+ * original node returned by flatten_and_conjuncts(). Preserve the exact
+ * source of the conjuncts retained by structural correlation detection.
  */
 void
 append_non_correlation_where(ArenaSqlBuilder& sql,
-                             std::string_view inner_sql,
-                             const char* outer_col_name,
-                             const char* inner_col_name)
+                             const SelectStatement& inner_stmt,
+                             ConditionalExpression* const* conditions,
+                             Uint32 count)
 {
-  // Find WHERE keyword (case-insensitive)
-  size_t where_pos = std::string_view::npos;
-  for (size_t p = 0; p + 5 <= inner_sql.size(); p++)
-  {
-    if ((inner_sql[p] == 'W' || inner_sql[p] == 'w') &&
-        (inner_sql[p+1] == 'H' || inner_sql[p+1] == 'h') &&
-        (inner_sql[p+2] == 'E' || inner_sql[p+2] == 'e') &&
-        (inner_sql[p+3] == 'R' || inner_sql[p+3] == 'r') &&
-        (inner_sql[p+4] == 'E' || inner_sql[p+4] == 'e') &&
-        (p + 5 == inner_sql.size() || inner_sql[p+5] == ' '))
-    {
-      where_pos = p;
-      break;
-    }
-  }
-  if (where_pos == std::string_view::npos)
-    return;
-
-  // Extract the WHERE clause text (everything after "WHERE ")
-  std::string_view where_text = inner_sql.substr(where_pos + 6);
-
-  // Strip GROUP BY / ORDER BY / LIMIT if present
-  for (const char* kw : {"GROUP BY", "ORDER BY", "LIMIT",
-                          "group by", "order by", "limit"})
-  {
-    size_t kw_pos = where_text.find(kw);
-    if (kw_pos != std::string_view::npos)
-      where_text = where_text.substr(0, kw_pos);
-  }
-
-  // Trim trailing whitespace
-  while (!where_text.empty() &&
-         (where_text.back() == ' ' || where_text.back() == '\n' ||
-          where_text.back() == '\r' || where_text.back() == '\t'))
-    where_text.remove_suffix(1);
-
-  // Now split by AND and remove the correlation predicate.
-  // The correlation predicate contains both the outer column name
-  // and the inner column name connected by '='.
-  bool first = true;
-  size_t pos = 0;
-  while (pos < where_text.size())
-  {
-    // Find next AND (case-insensitive)
-    size_t and_pos = std::string_view::npos;
-    for (size_t p = pos; p + 3 <= where_text.size(); p++)
-    {
-      if ((where_text[p] == 'A' || where_text[p] == 'a') &&
-          (where_text[p+1] == 'N' || where_text[p+1] == 'n') &&
-          (where_text[p+2] == 'D' || where_text[p+2] == 'd') &&
-          (p == 0 || where_text[p-1] == ' ') &&
-          (p + 3 >= where_text.size() || where_text[p+3] == ' '))
-      {
-        and_pos = p;
-        break;
-      }
-    }
-    std::string_view part;
-    if (and_pos == std::string_view::npos)
-    {
-      part = where_text.substr(pos);
-      pos = where_text.size();
-    }
-    else
-    {
-      part = where_text.substr(pos, and_pos - pos);
-      pos = and_pos + 3; // skip "AND"
-    }
-    // Trim
-    while (!part.empty() && part.front() == ' ') part.remove_prefix(1);
-    while (!part.empty() && part.back() == ' ') part.remove_suffix(1);
-    if (part.empty()) continue;
-
-    // Check if this part is the correlation predicate
-    if (part.find(outer_col_name) != std::string_view::npos &&
-        part.find(inner_col_name) != std::string_view::npos &&
-        part.find('=') != std::string_view::npos)
-      continue;
-    sql << (first ? " WHERE " : " AND ") << part;
-    first = false;
-  }
+  for (Uint32 i = 0; i < count; i++)
+    sql << (i == 0 ? " WHERE (" : " AND (")
+        << original_subquery_span(inner_stmt, conditions[i]->conjunct_sql)
+        << ")";
 }
 }  // namespace
 
@@ -6353,6 +6295,7 @@ RonSQLPreparer::decorrelate_exists()
     Uint32 outer_col_idx = UINT32_MAX;
     const char* inner_col_name = NULL;
     Uint32 num_correlation = 0;
+    ConditionalExpression* non_correlation[MAX_WHERE_CONJUNCTS];
     Uint32 num_non_corr = 0;
 
     for (Uint32 j = 0; j < num_inner; j++)
@@ -6407,26 +6350,14 @@ RonSQLPreparer::decorrelate_exists()
       // Non-correlation predicate
       require_prm(num_non_corr < MAX_WHERE_CONJUNCTS,
                   "Too many non-correlation predicates in EXISTS.");
-      num_non_corr++;
+      non_correlation[num_non_corr++] = ic;
     }
 
     require_prm(num_correlation == 1,
                 "EXISTS subquery must have exactly one correlation "
                 "predicate (inner.col = outer.col).");
 
-    // Build the inner SQL string for the IN subquery.
-    // Format: SELECT <inner_col> FROM <table> [WHERE ...] GROUP BY <inner_col>
-    //
-    // For the WHERE clause, we extract the original text of each
-    // non-correlation predicate from the source buffer. Since individual
-    // CE nodes don't carry position info, we extract text spans from the
-    // original inner query and remove the correlation predicate.
-    //
-    // Simplified approach: extract the whole inner WHERE text from
-    // sql_begin..sql_end and use it minus the correlation predicate.
-    // For robustness, we build the SQL using the inner table name and
-    // inner column name, then splice in non-correlation predicate text.
-
+    // Build a grouped inner query with exactly the retained conditions.
     const char* inner_table_name = inner_stmt->table.c_str();
     LexCString inner_alias = inner_stmt->root_table != NULL
         ? inner_stmt->root_table->alias
@@ -6436,38 +6367,19 @@ RonSQLPreparer::decorrelate_exists()
 
     // Build inner SQL string, in the arena
     ArenaSqlBuilder sql(m_amalloc);
-    sql << "SELECT MIN(" << inner_col_name << ")"
-        << " FROM " << inner_table_name;
+    sql << "SELECT MIN(";
+    append_sql_identifier(sql, inner_col_name);
+    sql << ") FROM ";
+    append_sql_identifier(sql, inner_table_name);
     if (has_alias)
-      sql << " AS " << inner_alias.c_str();
-
-    if (num_non_corr > 0)
     {
-      // We need to serialize non-correlation predicates back to SQL.
-      // Extract the original inner SQL text and remove the correlation part.
-      // Strategy: use the original SQL between sql_begin and sql_end,
-      // which is the complete inner SELECT. We need just the WHERE part
-      // without the correlation predicate.
-      //
-      // Alternative: serialize simple predicates (col op const).
-      // For now, extract the original WHERE clause text and strip the
-      // correlation predicate textually. This is fragile but works for
-      // simple cases like "l_orderkey = o_id AND l_quantity > 20".
-      //
-      // More robust: find WHERE keyword in inner SQL, then for each AND
-      // conjunct, check if it contains both the inner and outer column
-      // names of the correlation. Skip that one, keep the rest.
-
-      ndbrequire(inner_stmt->sql_begin != NULL &&
-                 inner_stmt->sql_end != NULL);
-      append_non_correlation_where(
-          sql,
-          std::string_view(inner_stmt->sql_begin,
-                           inner_stmt->sql_end - inner_stmt->sql_begin),
-          m_columns[outer_col_idx].c_str(), inner_col_name);
+      sql << " AS ";
+      append_sql_identifier(sql, inner_alias.c_str());
     }
-
-    sql << " GROUP BY " << inner_col_name;
+    append_non_correlation_where(sql, *inner_stmt,
+                                 non_correlation, num_non_corr);
+    sql << " GROUP BY ";
+    append_sql_identifier(sql, inner_col_name);
 
     size_t sql_len = sql.len();
     char* sql_buf = sql.str();
@@ -6817,6 +6729,7 @@ RonSQLPreparer::decorrelate_scalar()
     Uint32 outer_col_idx = UINT32_MAX;
     const char* inner_col_name = NULL;
     Uint32 num_correlation = 0;
+    ConditionalExpression* non_correlation[MAX_WHERE_CONJUNCTS];
     Uint32 num_non_corr = 0;
 
     for (Uint32 j = 0; j < num_inner; j++)
@@ -6866,7 +6779,7 @@ RonSQLPreparer::decorrelate_scalar()
 
       require_prm(num_non_corr < MAX_WHERE_CONJUNCTS,
                   "Too many non-correlation predicates.");
-      num_non_corr++;
+      non_correlation[num_non_corr++] = ic;
     }
 
     if (num_correlation != 1)
@@ -6878,55 +6791,9 @@ RonSQLPreparer::decorrelate_scalar()
       continue;
     }
 
-    // Extract aggregate expression from original inner SQL
-    ndbrequire(inner_stmt->sql_begin != NULL &&
-               inner_stmt->sql_end != NULL);
-    const std::string_view inner_sql(
-        inner_stmt->sql_begin, inner_stmt->sql_end - inner_stmt->sql_begin);
-
-    // Find the text between "SELECT " and " FROM"
-    size_t select_pos = std::string_view::npos;
-    for (size_t p = 0; p + 6 <= inner_sql.size(); p++)
-    {
-      if ((inner_sql[p] == 'S' || inner_sql[p] == 's') &&
-          (inner_sql[p+1] == 'E' || inner_sql[p+1] == 'e') &&
-          (inner_sql[p+2] == 'L' || inner_sql[p+2] == 'l') &&
-          (inner_sql[p+3] == 'E' || inner_sql[p+3] == 'e') &&
-          (inner_sql[p+4] == 'C' || inner_sql[p+4] == 'c') &&
-          (inner_sql[p+5] == 'T' || inner_sql[p+5] == 't') &&
-          (p + 6 == inner_sql.size() || inner_sql[p+6] == ' '))
-      {
-        select_pos = p;
-        break;
-      }
-    }
-    require_prm(select_pos != std::string_view::npos,
-                "Could not find SELECT in inner subquery.");
-
-    size_t from_pos = std::string_view::npos;
-    for (size_t p = select_pos + 7; p + 4 <= inner_sql.size(); p++)
-    {
-      if ((inner_sql[p] == 'F' || inner_sql[p] == 'f') &&
-          (inner_sql[p+1] == 'R' || inner_sql[p+1] == 'r') &&
-          (inner_sql[p+2] == 'O' || inner_sql[p+2] == 'o') &&
-          (inner_sql[p+3] == 'M' || inner_sql[p+3] == 'm') &&
-          (p == 0 || inner_sql[p-1] == ' ') &&
-          (p + 4 == inner_sql.size() || inner_sql[p+4] == ' '))
-      {
-        from_pos = p;
-        break;
-      }
-    }
-    require_prm(from_pos != std::string_view::npos,
-                "Could not find FROM in inner subquery.");
-
-    std::string_view agg_expr = inner_sql.substr(select_pos + 7,
-                                                  from_pos - select_pos - 7);
-    // Trim
-    while (!agg_expr.empty() && agg_expr.front() == ' ')
-      agg_expr.remove_prefix(1);
-    while (!agg_expr.empty() && agg_expr.back() == ' ')
-      agg_expr.remove_suffix(1);
+    // Preserve the parsed SELECT list, including any output alias.
+    const std::string_view select_list =
+        original_subquery_span(*inner_stmt, inner_stmt->select_list_sql);
 
     const char* inner_table_name = inner_stmt->table.c_str();
     LexCString inner_alias = inner_stmt->root_table != NULL
@@ -6937,19 +6804,19 @@ RonSQLPreparer::decorrelate_scalar()
 
     // Build rewritten inner SQL, in the arena
     ArenaSqlBuilder sql(m_amalloc);
-    sql << "SELECT " << inner_col_name << ", " << agg_expr
-        << " FROM " << inner_table_name;
+    sql << "SELECT ";
+    append_sql_identifier(sql, inner_col_name);
+    sql << ", " << select_list << " FROM ";
+    append_sql_identifier(sql, inner_table_name);
     if (has_alias)
-      sql << " AS " << inner_alias.c_str();
-
-    // Handle non-correlation WHERE predicates: the original WHERE text
-    // without the correlation predicate
-    if (num_non_corr > 0)
-      append_non_correlation_where(sql, inner_sql,
-                                   m_columns[outer_col_idx].c_str(),
-                                   inner_col_name);
-
-    sql << " GROUP BY " << inner_col_name;
+    {
+      sql << " AS ";
+      append_sql_identifier(sql, inner_alias.c_str());
+    }
+    append_non_correlation_where(sql, *inner_stmt,
+                                 non_correlation, num_non_corr);
+    sql << " GROUP BY ";
+    append_sql_identifier(sql, inner_col_name);
 
     size_t sql_len = sql.len();
     char* sql_buf = sql.str();
@@ -8209,7 +8076,10 @@ RonSQLPreparer::analyze_select_subqueries()
         if (ce->op == T_AND) {
           self(self, ce->args.left);
           self(self, ce->args.right);
-        } else if (num_conjuncts < 32) {
+        } else {
+          require_prm(num_conjuncts < 32,
+                      "Too many conditions in the WHERE clause of a"
+                      " SELECT-list subquery.");
           conjuncts[num_conjuncts++] = ce;
         }
       };
@@ -8305,13 +8175,17 @@ RonSQLPreparer::analyze_select_subqueries()
 
     // Extract the inner aggregate column's col_idx from the expression tree.
     // For simple SUM(col), the arg is a Load expression with idx = col_idx.
-    // For COUNT(*), the arg is a LoadImmediate(1) — no column reference needed.
+    // COUNT(*) is parsed as the integer constant 1. Any integer constant,
+    // including a folded expression, is non-NULL and can count rows directly.
+    // Other expressions must be evaluated to preserve their NULL semantics;
+    // this path only emits a column load or the immediate 1.
     AggregationAPICompiler_Expr *agg_arg = inner_out->aggregate.arg;
     bool is_count_star = (agg_fun == T_COUNT && agg_arg != NULL &&
-                          !agg_arg->isLoad());
-    require_prm(agg_arg != NULL && (agg_arg->isLoad() || is_count_star),
-                "SELECT-list subquery aggregate argument must be a simple "
-                "column reference (or COUNT(*)).");
+                          agg_arg->isLoadConstantInt());
+    require_unsupported(
+        agg_arg != NULL && (agg_arg->isLoad() || is_count_star),
+        "SELECT-list subquery aggregate argument must be a simple column "
+        "reference, COUNT(*), or COUNT of an integer constant.");
     Uint32 inner_agg_col_idx = is_count_star ? 0 : agg_arg->getLoadIdx();
 
     SelectSubqueryLeaf leaf;
@@ -9504,6 +9378,8 @@ RonSQLPreparer::substitute_subquery_results_ce(ConditionalExpression** ce_ptr,
       }
       else
       {
+        // Synthetic roots have no original conjunct span to copy.
+        result->conjunct_sql = LexString{NULL, 0};
         *ce = *result;
       }
       return;
@@ -9629,6 +9505,8 @@ RonSQLPreparer::substitute_subquery_results_ce(ConditionalExpression** ce_ptr,
             result = always_false;
           }
         }
+        // Synthetic roots have no original conjunct span to copy.
+        result->conjunct_sql = LexString{NULL, 0};
         *ce = *result;
         return;
       }
@@ -11537,13 +11415,6 @@ RonSQLPreparer::execute_join()
         SelectSubqueryLeaf &sl = m_select_subquery_leaves[si];
         if (sl.merged_leaf_idx != ml) continue;
 
-        Uint32 col_idx = sl.inner_agg_col_idx;
-        const QueryScope::ResolvedColumnRef& agg_ref =
-            m_main_scope.resolved_columns[col_idx];
-        require_prm(
-            agg_ref.kind == QueryScope::ResolvedColumnRef::Kind::StoredColumn,
-            "Subquery aggregate input is not a stored-table column.");
-        NdbAttrId attr_id = agg_ref.attr_id;
         Uint32 reg = 0;  // use register 0 for loads
         Uint32 agg_slot = leaf_local_slot++;
 
@@ -11551,8 +11422,6 @@ RonSQLPreparer::execute_join()
         // embedded normal interpreter.  A failed predicate skips this
         // subquery's aggregate update; comparison and branch semantics remain
         // owned by the normal interpreter.
-        //
-        // Without a cross-table filter, just: LoadColumn + Agg.
         if (sl.cross_table_filter != NULL) {
           ConditionalExpression *cf = sl.cross_table_filter;
           require_prm(cf->args.left != NULL && cf->args.right != NULL &&
@@ -11563,7 +11432,9 @@ RonSQLPreparer::execute_join()
                       cf->op == T_GT || cf->op == T_GE ||
                       cf->op == T_EQUALS || cf->op == T_NOT_EQUALS,
                       "Cross-table filter must use <, <=, >, >=, = or !=.");
-          Uint32 aggregate_update_raw_size = sl.is_count_star ? 4 : 2;
+          // COUNT(*): LoadUint64 (3), embedded program (4),
+          // SetRegNull (1), and Count (1).
+          Uint32 aggregate_update_raw_size = sl.is_count_star ? 9 : 2;
           generate_embedded_condition(
               agg, m_main_scope, cf, 0, /*cteVirtualTables=*/NULL,
               /*use_custom_outputs=*/true,
@@ -11575,7 +11446,24 @@ RonSQLPreparer::execute_join()
         if (sl.is_count_star) {
           require_prm(agg->LoadUint64(1, reg),
                       "Failed to load immediate for COUNT(*).");
+          // A missing LEFT JOIN match feeds a NULL-extended row to the
+          // aggregator. Those rows skip embedded programs and fall through.
+          // Real rows execute this program and skip SetRegNull, preserving 1.
+          require_prm(
+              agg->EmbeddedInterp(3) &&
+              agg->EmitEmbeddedWord(Interpreter::LoadConst16(2, 1)) &&
+              agg->EmitEmbeddedWord(Interpreter::WriteInterpreterOutput(2, 0)) &&
+              agg->EmitEmbeddedWord(Interpreter::ExitOK()) &&
+              agg->SetRegNull(reg),
+              "Failed to guard COUNT(*) against a missing subquery row.");
         } else {
+          Uint32 col_idx = sl.inner_agg_col_idx;
+          const QueryScope::ResolvedColumnRef& agg_ref =
+              m_main_scope.resolved_columns[col_idx];
+          require_prm(
+              agg_ref.kind == QueryScope::ResolvedColumnRef::Kind::StoredColumn,
+              "Subquery aggregate input is not a stored-table column.");
+          NdbAttrId attr_id = agg_ref.attr_id;
           require_prm(agg->LoadColumn(attr_id, reg),
                       "Failed to load column for subquery aggregate.");
         }

@@ -257,6 +257,10 @@ struct SelectStatement;  // forward declaration for subquery support
 
 struct ConditionalExpression
 {
+  // Original SQL for a WHERE root or an operand of AND, set by the grammar.
+  // Read only for original WHERE conjuncts, before inner-query rewrites.
+  // Other nodes, including synthetic nodes, need not have a valid span.
+  LexString conjunct_sql;
   TokenKind op;
   union
   {
@@ -405,6 +409,8 @@ struct SelectStatement
   bool is_single_row_cte = false;
   char* sql_begin = NULL;  // Start of inner query SQL (points into original buffer)
   char* sql_end = NULL;    // End of inner query SQL
+  // Original SELECT list, retained for subquery decorrelation.
+  LexString select_list_sql = {NULL, 0};
 
   // Aggregator program compiled while parsing this SELECT body. Populated
   // by the cte_def / subquery grammar actions via the value returned from

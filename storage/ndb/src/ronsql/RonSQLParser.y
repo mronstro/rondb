@@ -269,6 +269,8 @@ selectstatement:
     context->ast_root.frags_per_worker = $2;
     context->ast_root.cte_list = $3.head;
     context->ast_root.outputs = $5.head;
+    context->ast_root.select_list_sql =
+        LexString{(@5).begin, size_t((@5).end - (@5).begin)};
     context->ast_root.root_table = $6.root_table;
     if ($6.root_table != NULL) {
       context->ast_root.table = $6.root_table->name;
@@ -332,6 +334,8 @@ cte_def:
     $$->stmt->do_explain = false;
     $$->stmt->cte_list = NULL;
     $$->stmt->outputs = $6.head;
+    $$->stmt->select_list_sql =
+        LexString{(@6).begin, size_t((@6).end - (@6).begin)};
     $$->stmt->root_table = $8;
     $$->stmt->table = $8->name;
     $$->stmt->joins = $9.head;
@@ -682,7 +686,10 @@ join_condition:
 
 where_opt:
   %empty                                { $$ = NULL; }
-| T_WHERE cond_expr                     { $$ = $2; }
+| T_WHERE cond_expr                     {
+    $$ = $2;
+    $$->conjunct_sql = LexString{(@2).begin, size_t((@2).end - (@2).begin)};
+  }
 
 cond_expr:
   identifier_c                          { initptr($$); $$->op = T_IDENTIFIER; $$->col_idx = context->column_name_to_idx($1); }
@@ -694,7 +701,11 @@ cond_expr:
 | T_LEFT cond_expr T_RIGHT              { $$ = $2; }
 | cond_expr T_OR cond_expr              { init_cond($$, $1, T_OR, $3); }
 | cond_expr T_XOR cond_expr             { init_cond($$, $1, T_XOR, $3); }
-| cond_expr T_AND cond_expr             { init_cond($$, $1, T_AND, $3); }
+| cond_expr T_AND cond_expr             {
+    init_cond($$, $1, T_AND, $3);
+    $1->conjunct_sql = LexString{(@1).begin, size_t((@1).end - (@1).begin)};
+    $3->conjunct_sql = LexString{(@3).begin, size_t((@3).end - (@3).begin)};
+  }
 | T_NOT cond_expr                       { init_cond($$, $2, T_NOT, NULL); }
 | cond_expr T_EQUALS cond_expr          { init_cond($$, $1, T_EQUALS, $3); }
 | cond_expr T_GE cond_expr              { init_cond($$, $1, T_GE, $3); }
@@ -802,6 +813,8 @@ subquery:
     $$->agg = subq_agg;
     $$->do_explain = false;
     $$->outputs = $3.head;
+    $$->select_list_sql =
+        LexString{(@3).begin, size_t((@3).end - (@3).begin)};
     $$->root_table = $5;
     $$->table = $5->name;
     $$->joins = $6.head;
