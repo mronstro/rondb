@@ -519,3 +519,22 @@ First try one barrier per `execPACKED_SIGNAL`, then one per round at
 | Q6 | Which PMEM hardware is the target? | **Answered:** no specific product; CXL 2.0 persistent memory modules with 200–2000 ns latency first (§2) |
 | Q7 | REDO full in PMEM mode: abort the operation instead of queueing it? | **Answered:** do as today. With no REDO log buffer the operation aborts; a buffer would allow some queueing, but simply aborting is best (E15) |
 | Q8 | NUMA: should each log part's files sit on the PMEM of the socket that runs its LDM? | **Answered:** yes, use the closest memory (E20) |
+
+---
+
+## 6. Amendments from the implementation plan
+
+The implementation plan (`implementation_plan.md` §2.3) checked this
+design against the code. These points change or refine it; the numbers
+refer to its table.
+
+| Decision | Amendment |
+|---|---|
+| E5 | The header CRC covers all of words 1–31, with the DRAM-only words stored as 0; the initial-start pages are written through the mapping by `redoPmemInitFile()`, not through the LFO path (R2; Q-A4 answered, option B, explained in `implementation_plan.md` §5.1). The page identity and the header CRC are set at the first copy of the page, not in `initLogpage` (R3) |
+| E6 | Besides the atomic stores of E9 and E10, two more deliberate writes touch persisted units: the zeroing of E12 and the FILLER that closes the unit at H or E after a restart (R7) |
+| E10 | The control area is words 8128–8191 of page 0 of file 0, owned by recovery. The FILLER after the FD covers it, so a FILLER body is never stored and page 0 is never copied in full (R4). The slots also hold the dirty-shutdown count (R10) |
+| E13 | In step 1 the whole per-operation reservation is released at COMMIT; the two-step release starts with X4 (R5). `ZMIN_READ_BUFFER_SIZE` becomes 4 in both modes, as a separate bug fix (R13, Q-A6) |
+| E14 | Prefault with `MADV_POPULATE_WRITE` (R12). A node looks for its files under every REDO path, since placement can change between starts (R11). The initial head is word 48 (R6) |
+| E15 | The RedoBuffer in PMEM mode defaults to 2 MB per part, not about 8 pages (R1) |
+| E17 | PMEM mode without DAX is refused always, not only with durable commits; only a test mode allows it (R8, R9). The test modes run PMEM mode, and durable commits, on normal DRAM, release builds included, with the production persist code (Q-A1). Before X6, an unsafe shutdown is warned about, recorded and shown in ndbinfo (R10) |
+| E19 | `FileSystemPathRedoLog` is used only in PMEM mode; file mode keeps today's REDO placement (R18, Q-A2) |
