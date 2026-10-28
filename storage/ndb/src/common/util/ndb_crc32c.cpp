@@ -964,6 +964,10 @@ static void test_chaining(const std::vector<TestVariant> &variants) {
  *             4 bytes type word, the body, 16 bytes position suffix
  *   xxh3      XXH3_64bits over the whole buffer in one call
  *   xxh3/3    XXH3 streaming in the same three pieces
+ *   xxh3+mix  A record format built for XXH3: XXH3_64bits over the body
+ *             with the default secret, then a seeded XXH3 over the
+ *             20 bytes of type word and position suffix, seeded with
+ *             the body's hash; the low 32 bits are the checksum
  * Each result changes the first byte of the next input, so the calls
  * form a chain, as when records are written one after the other.
  */
@@ -977,15 +981,15 @@ static void test_timing() {
   printf("ndb_crc32c: %s, XXH_VECTOR %d (0 scalar, 1 SSE2, 2 AVX2, "
          "3 AVX512, 4 NEON)\n",
          ndb_crc32c_implementation(), (int)XXH_VECTOR);
-  printf("%8s %10s %10s %10s %10s   (ns per checksum)\n", "bytes", "crc32c",
-         "crc32c/3", "xxh3", "xxh3/3");
+  printf("%8s %10s %10s %10s %10s %10s   (ns per checksum)\n", "bytes",
+         "crc32c", "crc32c/3", "xxh3", "xxh3/3", "xxh3+mix");
   typedef std::chrono::steady_clock clock;
   Uint64 sink = 0;
   for (size_t len : sizes) {
     const size_t iterations = std::max<size_t>(2000, (64 << 20) / len);
     const size_t body = len - 20;
-    double ns[4];
-    for (int method = 0; method < 4; method++) {
+    double ns[5];
+    for (int method = 0; method < 5; method++) {
       Uint64 h = 0;
       const auto start = clock::now();
       for (size_t i = 0; i < iterations; i++) {
@@ -1002,6 +1006,17 @@ static void test_timing() {
           case 2:
             h = XXH3_64bits(buf, len);
             break;
+          case 4: {
+            /* The body takes part in the chain too, or the compiler
+               could hash it once, outside the loop */
+            buf[4] ^= (Uint8)h;
+            Uint8 tail[20];
+            memcpy(tail, buf, 4);
+            memcpy(tail + 4, buf + 4 + body, 16);
+            h = (Uint32)XXH3_64bits_withSeed(tail, sizeof(tail),
+                                             XXH3_64bits(buf + 4, body));
+            break;
+          }
           default: {
             XXH3_state_t state;
             XXH3_64bits_reset(&state);
@@ -1019,8 +1034,8 @@ static void test_timing() {
           std::chrono::duration<double, std::nano>(stop - start).count() /
           (double)iterations;
     }
-    printf("%8zu %10.1f %10.1f %10.1f %10.1f\n", len, ns[0], ns[1], ns[2],
-           ns[3]);
+    printf("%8zu %10.1f %10.1f %10.1f %10.1f %10.1f\n", len, ns[0], ns[1],
+           ns[2], ns[3], ns[4]);
   }
   printf("(sink %llu)\n", (unsigned long long)sink);
 }
