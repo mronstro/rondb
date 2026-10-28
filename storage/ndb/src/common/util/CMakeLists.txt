@@ -51,6 +51,7 @@ ADD_CONVENIENCE_LIBRARY(ndbgeneral
   NodeCertificate.cpp
   ndb_az31.cpp
   ndb_barrier.cpp
+  ndb_crc32c.cpp
   ndb_ndbxfrm1.cpp
   ndb_openssl3_compat.cpp
   ndb_openssl_evp.cpp
@@ -115,6 +116,7 @@ FOREACH(tests
     NdbPack
     mysql_utils_test
     ndb_barrier
+    ndb_crc32c
     ndb_openssl_evp
     ndbxfrm_file
     ndbxfrm_padding
