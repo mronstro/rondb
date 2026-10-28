@@ -686,12 +686,12 @@ filler waste drops by the same factor.
 ## 9. Cost per operation on the commit path
 
 Per write operation per replica, durable mode, W = 64, option 2. Figures are
-published or estimated, not measured here; all [I].
+published or estimated, not measured here; all [I], except the checksums.
 
 | Step | Today (file REDO) | PMEM, durable |
 |---|---|---|
 | Append PREPARE + COMMIT in DRAM | ~50-100 ns | same, plus COMPLETE ~10 ns |
-| Checksums (CRC32C with SSE4.2, ~8 GB/s single stream) | none (constant 37) | ~30-40 ns for ~264 B |
+| Checksums (XXH3, E4; measured, `step1_phases.md` Timings) | none (constant 37) | ~37 ns for PREPARE (124 B) + COMMIT + COMPLETE on x86-64 with AVX2; ~53 ns with a 1000-byte PREPARE |
 | Fillers | – | ~5 ns |
 | ntstore copy of ~320 B | – (pwrite in an NDBFS thread) | ~20-40 ns |
 | `sfence` after ntstores, ×2 (C and K) | – | Optane ~100-200 ns each, 200-400 ns total. DRAM-backed persistent memory (NVDIMM-N, CXL with backup) ~50-100 ns each |
@@ -776,7 +776,7 @@ Data-node start:
 | A-1 | format | The PMEM format keeps files of 1 MB mbytes; if it keeps 32 KB pages, a page header starts each page |
 | A-2 | format | A FILLER record can fill any gap of ≥ 2 words; the write path extends a 1-word gap by one unit |
 | H1 | hardware | §4.2. Not required with W padding; required for option B |
-| R-1 | format | Every record's checksum covers its own position and lap (for example CRC32C seeded with the 64-bit LSN). Stale PMEM from an earlier lap can hold a record with a valid plain checksum at exactly the offset where the log now ends |
+| R-1 | format | Every record's checksum covers its own position and lap (E4: bound to lap and position through S). Stale PMEM from an earlier lap can hold a record with a valid plain checksum at exactly the offset where the log now ends |
 | R-2 | recovery | The log of a part ends at the first record that fails validation. Never skip a bad record: the barrier is contiguous, so nothing after the first bad record was acknowledged |
 | R-3 | format | The checksum may sit in the header or in a trailer; the writer finishes it before any byte of the record is copied (§2.4) |
 | R-4 | format | A page header (and mbyte header) is final when the page starts: no fill index, no write-time fields, checksum computed at page start |

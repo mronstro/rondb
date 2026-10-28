@@ -38,17 +38,8 @@ rondb_calc_hash(Uint32 hash_val[4],
   Uint32 keylen_bytes = 4 * keylen_words;
   if (likely(use_new))
   {
-    Uint64 hash;
-#if defined (__AVX2__)
-    if (unlikely(is_avx2_supported()))
-    {
-      hash = rondb_xxhash_avx2(key, keylen_bytes);
-    }
-    else
-#endif
-    {
-      hash = rondb_xxhash_std(key, keylen_bytes);
-    }
+    /* AVX2 is chosen at run time inside, for keys over 240 bytes */
+    Uint64 hash = rondb_xxhash_std(key, keylen_bytes);
     hash_val[0] = hash & 0xFFFFFFFF;
     hash_val[1] = hash >> 32;
   }

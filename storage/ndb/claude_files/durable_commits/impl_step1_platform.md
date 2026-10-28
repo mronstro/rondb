@@ -15,8 +15,8 @@ Paths are relative to `storage/ndb/` unless they start with the repo root.
 
 | ID | Package | Size |
 |---|---|---|
-| S1.1 | CPU feature detection in `NdbHW`; fix `is_avx2_supported()` | S, 1–1.5 d |
-| S1.2 | `ndb_crc32c`: port of InnoDB's hardware CRC32C | M, 2–3 d |
+| S1.1 | CPU feature detection in `NdbHW`; fix `is_avx2_supported()` (implemented, to be tested) | S, 1–1.5 d |
+| S1.2 | `ndb_xxh3`: XXH3 with AVX2 chosen at run time (implemented, to be tested) | M, 2–3 d |
 | S1.3 | `ndb_pmem` core: map, prefault, copy, store, flush, drain; stubs | M, 3–4 d |
 | S1.4 | Platform queries: domain, bad blocks, dirty shutdown, NUMA | M, 3 d |
 | S1.5 | Power-loss emulation (`ndb_pmem_emul_*`) | M, 3 d |
@@ -41,10 +41,13 @@ Total about 36–42 person-days.
 1. `is_avx2_supported()` returns a static set to 0 and never written
    (`src/common/portlib/NdbHW.cpp:56`, `:507-510`) [V]. Its only caller is
    `rondb_hash.cpp:43`, inside `#if defined(__AVX2__)` [V]. NDB has no CPUID code [V, grep].
+   Since step 1 phase 1 it reports the detected AVX2, and `rondb_calc_hash` no longer
+   calls it.
 2. `NdbHW_Init()` is not called for mysqld (`src/common/util/ndb_init.cpp:113`) [V], so
-   `ndb_crc32c` must initialise itself.
-3. InnoDB's CRC32C has a seeded internal template `crc32<algo>(crc, data, len)` with `~crc`
-   in and out (`storage/innobase/ut/crc32.cc:698-745`, repo root) [V]; chaining works.
+   `ndb_xxh3` must initialise itself.
+3. XXH3 is in the tree as `include/util/ndb_xxhash.h`, for the hash of keys
+   (`xxhash_std.cpp`, `xxhash_avx2.cpp`). It chooses its vector code from `__AVX2__` at
+   compile time, and the build has no `-mavx2`, so AVX2 was never used [V].
 4. NDB unit tests are TAP tests: `NDB_ADD_TEST(name-t src.cpp LIBS ...)` compiles the source
    with `-DTEST_<NAME>` and links `mytap` (`cmake/ndb_add_test.cmake:28-75`); the body is
    `TAPTEST(x)` under `#ifdef TEST_<NAME>` (e.g. `src/common/util/rondb_hash.cpp:278`) [V].
@@ -126,6 +129,7 @@ Total about 36–42 person-days.
 ### S1.1 CPU feature detection
 
 - **Goal.** Real detection for S1.2 and S1.3. Fix `is_avx2_supported()` (fact 1).
+  **Implemented** in step 1 phase 1, to be tested (`step1_phases.md`).
 - **Change.** `include/portlib/NdbHW.hpp`: `struct ndb_cpu_features` and
   `const ndb_cpu_features *Ndb_GetCpuFeatures()`. `src/common/portlib/NdbHW.cpp`: detect once
   (function-local static), independent of `NdbHW_Init()` (fact 2); `is_avx2_supported()`
@@ -137,7 +141,8 @@ Total about 36–42 person-days.
     `AT_HWCAP2` for `HWCAP2_DCPODP`. macOS arm64: `sysctlbyname` for `hw.optional.armv8_crc32`,
     `hw.optional.arm.FEAT_PMULL`, `hw.optional.arm.FEAT_DPB` (`DC CVAP`) and
     `hw.optional.arm.FEAT_DPB2` (`DC CVADP`); all four are 1 on an Apple M5 Pro [V, sysctl].
-    InnoDB assumes CRC and PMULL for `CRC32_ARM64_APPLE` (`ut0crc32.h:140-147`) [V].
+  - `sse42`, `pclmul`, `arm_crc32` and `arm_pmull` were for CRC32C, which XXH3 replaced
+    (S1.2). They stay detected; nothing uses them.
   - macOS x86_64 is not supported (Q-A5): no detection or tests for it.
   ```c++
   struct ndb_cpu_features {
@@ -145,44 +150,51 @@ Total about 36–42 person-days.
     bool arm_crc32, arm_pmull, arm_dcpop, arm_dcpodp;                              // aarch64
   };
   ```
-- **File mode.** Additive. The AVX2 fix matters only in `-mavx2` builds, where XXH3 gives the
-  same hash on both paths [I]; `rondb_hash-t` checks it.
+- **File mode.** Additive. `ndb_xxh3` (S1.2) now makes the AVX2 choice for the hash of keys,
+  and every XXH3 implementation gives the same hash; `ndb_xxh3-t` and `rondb_hash-t` check it.
 - **Tests.** Extend `TAPTEST(NdbCPU)` (`NdbHW.cpp:4462`): print features; check
   `avx2 ⇒ avx`, `avx512f ⇒ avx`, `is_avx2_supported() == features->avx2`. Run `NdbHW-t`,
   `rondb_hash-t`.
 - **Depends** on nothing. **Risk.** XGETBV needs inline asm or `target("xsave")`.
 
-### S1.2 `ndb_crc32c`
+### S1.2 `ndb_xxh3`
 
-- **Goal.** CRC32C with SSE4.2 and ARMv8 paths and a slicing-by-8 fallback, for ndbmtd,
-  `ndb_redo_log_reader` and the tests.
-- **Where.** `include/util/ndb_crc32c.h`, `src/common/util/ndb_crc32c.cpp`, in `ndbgeneral`
+- **Goal.** XXH3 with the AVX2 code chosen at run time on x86-64, for the checksum of E4 in
+  ndbmtd, `ndb_redo_log_reader` and the tests, and for the hash of keys. **Implemented** in
+  step 1 phase 1, to be tested (`step1_phases.md`).
+- **Where.** `include/util/ndb_xxh3.h`, `src/common/util/ndb_xxh3.cpp`, in `ndbgeneral`
   (`src/common/util/CMakeLists.txt:36-79`) [V]. `ndb_redo_log_reader` links `ndbgeneral`
   (`src/kernel/blocks/dblqh/CMakeLists.txt:24-35`) [V].
   ```c++
-  // crc = 0 to start; pass the previous result to continue:
-  // ndb_crc32c(ndb_crc32c(0, a, n), b, m) == ndb_crc32c(0, a||b, n+m)
-  Uint32 ndb_crc32c(Uint32 crc, const void *buf, size_t len);
-  void   ndb_crc32c_init();   // idempotent; also resolved lazily on first call
+  // The results of XXH3_64bits() and XXH3_64bits_withSeed() of ndb_xxhash.h
+  Uint64 ndb_xxh3_64(const void *buf, size_t len);
+  Uint64 ndb_xxh3_64_seed(const void *buf, size_t len, Uint64 seed);
+  void   ndb_xxh3_init();               // idempotent; also done at the first input over 240 bytes
+  const char *ndb_xxh3_implementation();  // "avx2", "sse2", "neon", ...
   ```
-  E4's CRC over `w0' || w2..w(len-1) || S` is three chained calls.
-- **Port** from `storage/innobase/ut/crc32.cc` (repo root) [V]: slice-8 table and
-  `crc32_64_low` (`:129-213`); the hardware template with `use_pclmul` and
-  `use_unrolled_loop_poly_mul`, `consume_chunks`, `consume_pow2`, `roll`, `fold_64_to_32`
-  (`:415-745`); intrinsics `_mm_crc32_u64` (`:439-441`) and `__crc32cd` (`:466-468`). Keep the
-  environment split of `ut0crc32.h:53-69` as `NDB_CRC32C_X86_64`, `NDB_CRC32C_ARM64_APPLE`
-  (`APPLE_ARM`, `config.h.cmake:205`), `NDB_CRC32C_ARM64_DEFAULT`, else software. Windows and
-  big-endian use software. Keep the notices of `crc32.cc:1-100`.
-- **Dispatch.** An `std::atomic` function pointer that starts at a resolver using
-  `Ndb_GetCpuFeatures()`. `ndb_init_internal()` calls `ndb_crc32c_init()` for every caller.
-- **File mode.** Nothing calls it before S4.
-- **Tests.** `ndb_crc32c-t` (FOREACH list at `src/common/util/CMakeLists.txt:114-133`):
-  `"123456789"` → `0xE3069283`; RFC 3720 B.4: 32 × `0x00` → `0x8A9136AA`, 32 × `0xFF` →
-  `0x62A8AB43`, bytes 0..31 → `0x46DD794E`, 31..0 → `0x113FDB5C`; every variant the CPU has
-  equals software on random buffers of length 0..4200 at offsets 0..7; the chaining identity
-  at every split of a 200-byte buffer; informational timing for 16 B to 88 KB.
-- **Depends** on S1.1. **Risk.** Every function with an intrinsic needs its `target(...)`;
-  top-level variants need `flatten` (`crc32.cc:747-776`) [V].
+  E4's checksum is one call on the body (one more seeded call for each page header the
+  record crosses), then a seeded call on the 20 bytes of `w0` and `S`.
+- **Code.** The XXH3 of `ndb_xxhash.h` (fact 3). On x86-64 the AVX2 code is compiled with
+  `target("avx2")` and chosen at run time, as xxhash's own `xxh_x86dispatch.c` does, so the
+  build needs no `-mavx2`; SSE2 otherwise. NEON on aarch64. Inputs up to 240 bytes run the
+  same scalar code everywhere. All little-endian. `rondb_xxhash_std()` and
+  `rondb_calc_hash()` use it; `xxhash_avx2.cpp` and `xxhash_std.cpp` are gone. The AVX2
+  branch in `rondb_calc_hash` never ran (fact 1).
+- **Dispatch.** An `std::atomic` function pointer for inputs over 240 bytes, which starts at
+  a resolver using `Ndb_GetCpuFeatures()`. `ndb_init_internal()` calls `ndb_xxh3_init()`
+  for every caller.
+- **File mode.** The hash of keys gives the same values as before: every XXH3
+  implementation gives the same hash. Nothing else calls it before S4.
+- **Tests.** `ndb_xxh3-t` (FOREACH list at `src/common/util/CMakeLists.txt:114-133`): the
+  hash of no bytes is `0x2D06800538D394C2`; every implementation the CPU has equals the
+  header's XXH3 for all lengths 0..2100 and some long ones, at every alignment, with and
+  without seed; informational timing at the REDO record sizes (`step1_phases.md`,
+  Timings). `rondb_hash-t` checks the hash of keys.
+- **History.** Phase 1 first ported InnoDB's CRC32C (`ndb_crc32c`, commits 77a146884ec and
+  4102f7f1c7a). It was removed when the timings favoured XXH3 (`step1_phases.md`,
+  decision 5).
+- **Depends** on S1.1. **Risk.** The AVX2 functions need `target("avx2")`. A build with
+  `-mavx512f` uses the code the build chose instead of the run-time choice.
 
 ### S1.3 `ndb_pmem` core
 
@@ -664,7 +676,7 @@ the page cache holds the mapped file, but not an OS crash or a power loss;
 | Item | Written by | Package |
 |---|---|---|
 | Every byte zero, `fsync` | NDBFS `OM_INIT` (`AsyncFile.cpp:383-551`) | today; S3.5 sets flags |
-| Lap-0 mbyte headers in PMEM format with CRC (format W9) | `Dblqh::execFSWRITEREQ` callback → `redoPmemFormatInitPage()` | S4 writer, S3.5 hook |
+| Lap-0 mbyte headers in PMEM format with checksum (format W9) | `Dblqh::execFSWRITEREQ` callback → `redoPmemFormatInitPage()` | S4 writer, S3.5 hook |
 | Page 0: header, FD, FILLER | `redoPmemInitFile()` through the mapping | S4 |
 | File 0 page 0 control area: static config, both slots, dirty-shutdown count | `redoPmemInitFile()` | S4 (values S2.5) |
 | File 0 page 1: header, `COMPLETED_GCI(1)`, FILLER | `redoPmemInitFile()` | S4 |
@@ -745,10 +757,10 @@ S4 can start after S1.2, S1.3 and S3.4.
 
 | Kind | Name | Package |
 |---|---|---|
-| Files | `include/util/ndb_crc32c.h`, `src/common/util/ndb_crc32c.cpp` | S1.2 |
+| Files | `include/util/ndb_xxh3.h`, `src/common/util/ndb_xxh3.cpp` (replace `xxhash_avx2.cpp`, `xxhash_std.cpp`) | S1.2 |
 | Files | `include/portlib/ndb_pmem.h`, `src/common/portlib/ndb_pmem.cpp` | S1.3–S1.5 |
 | Files | `include/util/RedoLogPaths.hpp`, `src/common/util/RedoLogPaths.cpp` | S2.1 |
-| Functions | `ndb_crc32c`, `ndb_crc32c_init` | S1.2 |
+| Functions | `ndb_xxh3_64`, `ndb_xxh3_64_seed`, `ndb_xxh3_init`, `ndb_xxh3_implementation` | S1.2 |
 | Functions | `ndb_pmem_init`, `_method_name`, `_map`, `_unmap`, `_prefault`, `_copy_nt`, `_store32`, `_store64`, `_zero`, `_flush`, `_drain` | S1.3 |
 | Functions | `ndb_pmem_persistence_domain`, `_region_info`, `_numa_node`, `_badblocks_overlap`, `_dirty_shutdown`, `_set_sysfs_root` | S1.4 |
 | Functions | `ndb_pmem_emul_enable`, `_active`, `_pending`, `_power_fail`, `_on_crash`, `_get_stats` | S1.5 |
@@ -764,15 +776,15 @@ S4 can start after S1.2, S1.3 and S3.4.
 | NDBFS | `AsyncFile::m_pmem`, `Request::m_pmem_addr`, `Request::m_pmem_info`, `Ndbfs::probe_redo_path_pmem`, `get_redo_path_info`, `pmem_path_verdict` | S3.2, S2.5 |
 | DBLQH | `c_redo_pmem`, `c_redo_pmem_test_mode`, `c_ldm_numa_node`; `LogFileRecord::m_pmem_base`, `m_pmem_fileRef`, `m_pmem_domain`, `m_pmem_numa_node`; `LogPartRecord::m_redo_path_no`, `m_pmem_files_to_map`, `m_pmem_stats`; state `OPENING_PMEM_MAP_ALL`; `initNextLogfile()` | S3.4–S3.6, S2.4, S2.6 |
 | ndbinfo | `REDO_LOG_PMEM_TABLEID = 61`, `ndb$redo_log_pmem`, view `redo_log_pmem` | S2.6 |
-| Unit tests | `ndb_crc32c-t`, `ndb_pmem-t`, `RedoLogPaths-t`; extended `NdbHW-t`, `MgmConfig-t` | S1, S2 |
+| Unit tests | `ndb_xxh3-t`, `ndb_pmem-t`, `RedoLogPaths-t`; extended `NdbHW-t`, `MgmConfig-t` | S1, S2 |
 | MTR | `ndb.ndb_redo_pmem_config`, `_paths`, `_nodax`, `_dax`, `include/have_ndb_pmem.inc`; re-recorded `ndb.ndbinfo`, `ndb.ndbinfo_plans` | S2, S3 |
 | Autotest | `test/run-test/conf-pmem-nodax.cnf` | S3.6 |
 
 Unit test commands for the architect (`-DWITH_UNIT_TESTS=1`):
 
 ```
-cmake --build <build> --target ndb_crc32c-t ndb_pmem-t RedoLogPaths-t NdbHW-t MgmConfig-t rondb_hash-t
-ctest --test-dir <build> -R 'ndb_crc32c-t|ndb_pmem-t|RedoLogPaths-t|NdbHW-t|MgmConfig-t|rondb_hash-t' --output-on-failure
+cmake --build <build> --target ndb_xxh3-t ndb_pmem-t RedoLogPaths-t NdbHW-t MgmConfig-t rondb_hash-t
+ctest --test-dir <build> -R 'ndb_xxh3-t|ndb_pmem-t|RedoLogPaths-t|NdbHW-t|MgmConfig-t|rondb_hash-t' --output-on-failure
 NDB_PMEM_DIR=/mnt/pmem0 <build>/runtime_output_directory/ndb_pmem-t   # Linux, DAX mount
 ```
 

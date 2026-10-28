@@ -44,9 +44,7 @@ md5_hash(const Uint32* keybuf, Uint32 no_of_32_words)
   return result[0];
 }
 
-#if defined (__AVX2__)
-Uint64 rondb_xxhash_avx2(const char* key, Uint32 keylen_bytes);
-#endif
+/* XXH3 with 64-bit result, see ndb_xxh3.h; defined in ndb_xxh3.cpp */
 Uint64 rondb_xxhash_std(const char* key, Uint32 keylen_bytes);
 
 void

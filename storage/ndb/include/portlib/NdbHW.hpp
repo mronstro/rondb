@@ -121,7 +121,9 @@ struct ndb_hwinfo {
 };
 
 /**
- * CPU features used by the CRC32C and the persistent memory code.
+ * CPU features: AVX2 for XXH3 (ndb_xxh3.h), and the flush instructions
+ * of the persistent memory code. The CRC and carry-less multiply
+ * features are detected but not used.
  * A feature is only set if both the CPU and the OS support it.
  */
 struct ndb_cpu_features {
