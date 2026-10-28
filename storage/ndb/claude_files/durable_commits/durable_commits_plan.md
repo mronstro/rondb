@@ -164,7 +164,7 @@ The full design is `pmem_redo_design.md`. In short:
   means the file is not on DAX, and the node refuses to start in PMEM mode,
   with or without durable commits (D8; `implementation_plan.md` R8). Hidden
   test modes (`emulated`, `nodax`) let PMEM mode run on emulated memory or
-  on any file, macOS included, without durability, for development and CI
+  on any file, macOS included, without durability, for development and tests
   (review 10). Until PMEM hardware is available everything runs this way,
   release builds and durable commits included. A test mode changes only the
   map flags and the start checks; the persist code is the production code.

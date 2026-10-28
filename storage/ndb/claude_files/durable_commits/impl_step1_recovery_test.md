@@ -62,7 +62,7 @@ Names follow `impl_step1_platform.md` (P) and `impl_step1_lqh_write.md`
 | `ndb_pmem_copy_nt`, `ndb_pmem_zero`, `ndb_pmem_store32/64`, `ndb_pmem_flush`, `ndb_pmem_drain` | P S1.3 | Zeroing, the flag store, the slot write. Every PMEM write goes through them (P §1), or the emulation is blind |
 | `ndb_pmem_dirty_shutdown(int fd, Uint64 *count)`, returning `ENOTSUP` if absent | P S2.5 | Recorded in the slot (S6.3) |
 | `ndb_pmem_emul_*` (P S1.5), plus the two additions listed in S7.3 | P S1.5 | S7.3 |
-| `__RedoLogPmemTestMode=emulated` (`memmap=`) or `nodax` (macOS, CI); `__RedoLogPmemPowerLossEmulation=1` | P S2.7 | MTR and autotest without real PMEM (§4) |
+| `__RedoLogPmemTestMode=emulated` (`memmap=`) or `nodax` (macOS ARM64, Linux without `memmap=`); `__RedoLogPmemPowerLossEmulation=1` | P S2.7 | MTR and autotest without real PMEM (§4) |
 | `PmemRedoFormat.hpp` (namespace `PmemRedo`): constants, `w0` packing, suffix S, CRC accumulator, header image with `DRAM_ONLY_MASK` | W §3.1, S4.1 | The reader must hash exactly what the writer hashed |
 | Initial images, written by `redoPmemInitFile()` with the S6.3 builders: the control area; a valid page-0 header and FD in **every** file; `COMPLETED_GCI(1)` + FILLER at words 32–47 of page 1 of file 0 | W S4.8, P S3.5 | Phase 1 checks every page 0 it reads. `initFourth` puts the head at word 48 (W §7.2) |
 | The page-0 copy stops at the unit holding the FILLER header, so it never stores words ≥ 8128 | W S5.3, D4 | The slots in file 0 survive every lap |
@@ -874,7 +874,9 @@ strict but log every indeterminate transaction.
   `FileSystemPathRedoLog=CHOOSE_pmem_dir`). Each has a `.2node` and a
   `.4node` cluster, copied from `conf-autotest.cnf` (`40`) [V], with
   `NoOfFragmentLogFiles=6` and `FragmentLogFileSize=64M`.
-- New lists `daily-pmem--01-tests.txt` and `weekly-pmem--01-tests.txt`
+- New lists `pmem-redo-tests.txt` (run before pushes) and
+  `pmem-redo-long-tests.txt` (run before milestones); there is no CI, so
+  they are named by content, not by schedule
   (§4.1). They extend P S3.6's short list (`SR1`, `SR2`, `NoLoad`,
   `RestartOK`, `RestartFDSR`, `CheckNextRedoFileOpened`), which runs before
   S4. `CheckNextRedoFileOpened` drops out once S5 makes the file switch
@@ -916,24 +918,24 @@ Commands assume a build directory `$B` and `cd mysql-test` for MTR.
 | M5 | `ndb_pmem_torn_tail` | M | Torn tails and every crash point recover with zero loss of GCP-saved data | `./mtr ndb_pmem_torn_tail` | no |
 | M6 | `testNodeRestartGcpSaveAndFileChange` | M | GCP save during a file switch (slot ordering) | `./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf testNodeRestartGcpSaveAndFileChange` | no |
 | M7 | ndb suite in file mode | M | File mode is unchanged (regression) | `./mtr --suite=ndb --force --parallel=4` | no |
-| A1 | testSystemRestart in PMEM mode | A | SR replay, head, tail, invalidation under load and partial SRs. Cases: `SR1 T1`, `SR1 T6`, `SR2 T1`, `SR3 T6`, `SR4 T6`, `SR6 T1`, `SR7 T1`, `SR8 T1`, `SR9 T1`, `SR_UNDO T1`, `Bug24664`, `Bug27434 T1`, `Bug28770 T1`, `Bug29167 T1`, `Bug46651 T1`, `Bug54611 T1`, `basic T1`, `to T1`, `PLCP_1..5 T17`, `SR_DD_1 D2`, `SR_DD_2b D2` | `atrt` with `conf-pmem-nodax.cnf` (or `conf-pmem-emulated.cnf`), `--clusters=.2node --testcase-file=daily-pmem--01-tests.txt` | no/dax |
+| A1 | testSystemRestart in PMEM mode | A | SR replay, head, tail, invalidation under load and partial SRs. Cases: `SR1 T1`, `SR1 T6`, `SR2 T1`, `SR3 T6`, `SR4 T6`, `SR6 T1`, `SR7 T1`, `SR8 T1`, `SR9 T1`, `SR_UNDO T1`, `Bug24664`, `Bug27434 T1`, `Bug28770 T1`, `Bug29167 T1`, `Bug46651 T1`, `Bug54611 T1`, `basic T1`, `to T1`, `PLCP_1..5 T17`, `SR_DD_1 D2`, `SR_DD_2b D2` | `atrt` with `conf-pmem-nodax.cnf` (or `conf-pmem-emulated.cnf`), `--clusters=.2node --testcase-file=pmem-redo-tests.txt` | no/dax |
 | A2 | testNodeRestart in PMEM mode | A | NR on the same code. Cases: `Bug44952 T1`, `GCPSaveAndFileChange T3`, `RestartRandomNode`, `RestartRandomNodeError T6 T13`, `RestartAllNodesAbort T6 T13`, `NF_Hammer -r 5 T1`, `GCP T1`, `GcpStop`, `LateCommit`, `pnr_lcp`, `Bug57522 T1`; with 4 nodes `Bug36199`, `Bug36245`, `Bug36276` | as A1 (`--clusters=.4node` for the 4-node cases) | no/dax |
 | A3 | testRedo in PMEM mode | A | Many FD pages (`RestartFD -l 2`, `RestartFDSR`), `RestartOK`, `RedoFull` (expect 410 aborts, no queueing, Q7), `Bug36500`, `Latency410`, `CheckLCPStartsAfterSR`, `CheckLCPStartsAfterNR`. Not `CheckNextRedoFileOpened` or `RedoStallRecover` (file-mode only) | as A1 | no/dax |
 | A4 | testRestartGci in PMEM mode | A | `InsertRestartGci T1`, `InitialNodeRestartUpdate T1`, `GciLedgerSR -l 20`, `GciLedgerNR -l 10`, `GciLedgerTornTail -l 20`, `GciLedgerCrashPoints -l 3` | as A1 | no/dax |
 | A5 | New `testSystemRestart -n PmemRedoModeSwitch` | A | Changing `RedoLogMode` without an initial restart is refused with the message, in both directions; with an initial node restart it works (config change as `testRedo` `resizeRedoLog` does) | as A1 | no |
 | A6 | `GciLedgerPowerLoss -l 200` (weekly) | A | No missing fence or flush (M2 assertions plus random power loss at drains) | as A1 plus `__RedoLogPmemPowerLossEmulation=1`, `--testcase-file=weekly-pmem--01-tests.txt` | no |
-| A7 | File-mode daily lists | A | Regression: the A1–A4 cases already run in `daily-basic--*` | existing runs | no |
+| A7 | File-mode regression lists | A | Regression: the A1–A4 cases in file mode, from the existing `daily-basic--*` lists | run by the pusher | no |
 | Q1 | QEMU CXL Type 3 smoke | A | CXL region set-up, `persistence_domain` = `memory_controller` gives the ADR barrier mode, `MAP_SYNC` on CXL fsdax, region `numa_node` for the E20 warning; then `testRestartGci -n GciLedgerSR -l 3` | §4.4 | dax (QEMU) |
 | H1 | Power cut with ledger | H | Real persistence: IPMI power-off of all data-node hosts under ledger load, then SR and verify (P6/X8) | `ipmitool -H <bmc> chassis power off` on every host, then A4 verify | real |
 | H2 | Dirty-shutdown semantics | H | What the device's count means after a GPF failure (Q4, device-specific) | per device (P6) | real |
 
-### 4.2 Non-DAX test mode (macOS and CI)
+### 4.2 Non-DAX test mode (macOS ARM64, and Linux without `memmap=`)
 
 - Set `RedoLogMode=pmem` and `__RedoLogPmemTestMode=nodax` (P S2.7). The
   REDO files are then ordinary files mapped `MAP_SHARED` without
   `MAP_SYNC`. The domain, bad-block and dirty-shutdown checks are skipped.
   `ndb_pmem` still uses its NT-store and fence code (ARM: `STNP`,
-  `DC CVAP`, `DSB`).
+  `DC CVAP`, `DSB`), on macOS ARM64 too (platform S1.3).
 - A process crash keeps everything in the page cache, so it behaves like
   `memmap=` for every test except the DAX checks.
 - M2 (journal) works the same, because it is software.
@@ -1026,7 +1028,8 @@ S7.2, S7.1 (after S5 and S6.6) ── S7.3 (after S1 journal) ─┴── S7.5
    S6.6.
 5. **S6.7, S6.8**.
 6. **S7.2, S7.1**, then **S7.3** once the platform journal exists.
-7. **S7.5** lists and configs; M1/A1–A4 become daily.
+7. **S7.5** lists and configs; M1/A1–A4 join the tests run before every
+   push of PMEM code.
 
 | Package | Size | Days |
 |---|---|---|
@@ -1062,7 +1065,7 @@ S7.2, S7.1 (after S5 and S6.6) ── S7.3 (after S1 journal) ─┴── S7.5
 | Error inserts | 5155–5159, 5161–5172 (§S7.1); `Next DBLQH 5173` | `ERROR_codes.txt` |
 | DUMP | `LqhPmemRedoInfo` 2369, `LqhPmemPowerLoss` 2370 | `DumpStateOrd.hpp` |
 | Hook | power loss at `NdbShutdown` entry | `src/kernel/ndbd.cpp:1443` |
-| Tests | `pmem_redo_format-t`, `pmem_redo_scan-t`, `pmem_redo_slot-t`; `testRestartGci` cases `GciLedger*`; `testSystemRestart -n PmemRedoModeSwitch`; MTR `ndb_pmem_*`; `pmem_redo*.cnf`, `pmem_redo.skip`; `daily-pmem--01`, `weekly-pmem--01`; `ConfigFactory.pm` rule `fix_redo_log_path` | — |
+| Tests | `pmem_redo_format-t`, `pmem_redo_scan-t`, `pmem_redo_slot-t`; `testRestartGci` cases `GciLedger*`; `testSystemRestart -n PmemRedoModeSwitch`; MTR `ndb_pmem_*`; `pmem_redo*.cnf`, `pmem_redo.skip`; `pmem-redo-tests.txt`, `pmem-redo-long-tests.txt`; `ConfigFactory.pm` rule `fix_redo_log_path` | — |
 
 ---
 
