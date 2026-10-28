@@ -61,17 +61,43 @@ unchanged.
    Apache-2.0 code, which cannot be copied into GPLv2 files. InnoDB's
    code chooses the hardware path at run time and is already GPLv2.
 2. **`is_avx2_supported()` is left as it is** (always 0). The platform plan
-   fixes it in S1.1, but its only caller, `rondb_calc_hash`, computes the
-   distribution hash of every row: the fix would switch `-mavx2` builds
-   from the scalar to the AVX2 implementation of XXH3. XXH3 promises the
-   same output, but a difference would move rows. It is not needed for
-   PMEM, so it belongs in its own ticket, tested with `rondb_hash-t` on an
-   AVX2 build. `ndb_cpu_features::avx2` is detected correctly.
+   fixes it in S1.1, but the fix would change nothing in any build:
+   - Its only caller, `rondb_calc_hash`, checks it only under
+     `#if defined(__AVX2__)`, so without `-mavx2` the AVX2 branch does not
+     exist.
+   - With `-mavx2`, `xxhash_std.cpp` is compiled with AVX2 as well,
+     because `ndb_xxhash.h` chooses the vector code from `__AVX2__`. The
+     `XXH_VECTOR_TYPE` define in `xxhash_avx2.cpp` is not read. The two
+     functions are then the same code.
+
+   Every XXH3 variant (scalar, SSE2, AVX2, NEON) gives the same hash, so
+   the distribution of rows does not depend on this; AVX2 would only make
+   keys over 240 bytes faster. A run-time choice that works needs
+   `target("avx2")` functions, which belong in their own ticket, not in
+   PMEM. `ndb_cpu_features::avx2` is detected correctly.
 3. **Loads through `memcpy`** instead of InnoDB's pointer casts, so the
    port has no strict-aliasing questions; compilers emit the same load.
 4. **Windows and big-endian** use the software CRC; x86 detection runs only
    with GCC or Clang outside Windows. Neither is a supported platform
    (Q-A5).
+5. **CRC-32C or XXH3: open**, to be decided on the Linux x86_64 and
+   Linux ARM64 timings.
+   - In today's format (E4) a record is checksummed in three pieces:
+     `w0` without the invalidation bit, the body from `w2`, and the
+     16 bytes of `S`, which are never stored. A spanning record has more
+     pieces, around each page header.
+   - That format suits CRC-32C, whose chaining costs about 2 ns per piece
+     (`crc32c/3`).
+   - A format built for XXH3 would hash the body in one call with a fixed
+     seed, then mix in `w0` and `S` (`xxh3+mix`). It stays bound to lap and
+     position, because a different `S` gives a different checksum.
+   - On macOS ARM64, one-shot XXH3 is 2 to 3 times faster than
+     `crc32c/3` from 60 to 1000 bytes, and faster at every size from
+     60 bytes.
+   - Linux x86_64 matters most. There XXH3 uses SSE2, unless built with
+     `-mavx2`, which pays only above 240 bytes.
+   - Nothing calls `ndb_crc32c` yet, so a switch changes only E3/E4, the
+     format document and the reader.
 
 **Commands for the pusher** (from the build directory, configured with
 `-DWITH_UNIT_TESTS=1`), on Linux x86_64, Linux ARM64 and macOS ARM64:
@@ -86,5 +112,33 @@ ctest -R 'NdbHW-t|ndb_crc32c-t|rondb_hash-t' --output-on-failure
 platforms (`sse4.2+pclmul` on x86_64, `armv8-crc+pmull` on ARM64); it
 warns, without failing, on a CPU or VM CPU model without CRC32
 instructions. It also prints the timing table of CRC-32C against XXH3 at
-the REDO record sizes (20 bytes to 92 KB); please send that output from
-the three platforms.
+the REDO record sizes (20 bytes to 92 KB). The timings mean something only
+from an optimised build (`-DWITH_DEBUG=0`); a debug build measures call
+overhead.
+
+**Timings.** These come from `ndb_crc32c-t` in an optimised build, in ns
+per checksum. `crc32c/3` and `xxh3/3` checksum the same bytes in three
+pieces, 4 + body + 16, as a record is checksummed. `xxh3+mix` (added after
+the macOS run below) is a format built for XXH3: the body in one call,
+then a seeded XXH3 over the 20 bytes of `w0` and `S` with the body's hash
+as seed. Each result feeds the next input, so the loop measures latency
+with the data in cache.
+
+macOS ARM64, Apple M5 Pro, `armv8-crc+pmull`, XXH3 with NEON
+(2026-10-28):
+
+| bytes | crc32c | crc32c/3 | xxh3 | xxh3/3 |
+|---|---|---|---|---|
+| 20 | 4.0 | 7.5 | 4.7 | 8.0 |
+| 28 | 4.6 | 8.8 | 4.7 | 8.3 |
+| 60 | 7.2 | 11.5 | 4.8 | 9.7 |
+| 124 | 12.4 | 16.8 | 5.3 | 10.1 |
+| 300 | 26.8 | 31.3 | 10.6 | 24.5 |
+| 1000 | 61.4 | 65.3 | 18.9 | 55.2 |
+| 32768 | 917.0 | 922.1 | 619.0 | 1584.5 |
+| 92520 | 2703.2 | 2719.4 | 1791.3 | 4488.5 |
+
+At 92 KB this is 34 GB/s for CRC-32C, 52 GB/s for one-shot XXH3 and
+21 GB/s for streaming XXH3. Each extra CRC call costs about 2 ns.
+
+Linux x86_64 and Linux ARM64: to come.
