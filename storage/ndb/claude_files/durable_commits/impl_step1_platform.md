@@ -134,8 +134,11 @@ Total about 36–42 person-days.
     OSXSAVE; EDX bit 19 CLFLUSH. Leaf 7 EBX bit 5 AVX2, bit 16 AVX-512F, bit 23 CLFLUSHOPT,
     bit 24 CLWB; ECX bit 28 MOVDIR64B. AVX/AVX-512 also need the XGETBV(0) state bits [I].
   - aarch64 Linux: `getauxval(AT_HWCAP)` for `HWCAP_CRC32`, `HWCAP_PMULL`, `HWCAP_DCPOP`;
-    `AT_HWCAP2` for `HWCAP2_DCPODP`. macOS arm64: CRC and PMULL present, as InnoDB assumes
-    for `CRC32_ARM64_APPLE` (`ut0crc32.h:140-147`) [V]; DCPOP absent [I].
+    `AT_HWCAP2` for `HWCAP2_DCPODP`. macOS arm64: `sysctlbyname` for `hw.optional.armv8_crc32`,
+    `hw.optional.arm.FEAT_PMULL`, `hw.optional.arm.FEAT_DPB` (`DC CVAP`) and
+    `hw.optional.arm.FEAT_DPB2` (`DC CVADP`); all four are 1 on an Apple M5 Pro [V, sysctl].
+    InnoDB assumes CRC and PMULL for `CRC32_ARM64_APPLE` (`ut0crc32.h:140-147`) [V].
+  - macOS x86_64 is not supported (Q-A5): no detection or tests for it.
   ```c++
   struct ndb_cpu_features {
     bool sse42, pclmul, avx, avx2, avx512f, clflush, clflushopt, clwb, movdir64b;  // x86-64
@@ -227,14 +230,19 @@ Total about 36–42 person-days.
   changing them [I]. Fallback: a volatile read-then-write of one byte per 4 KB page, then
   `clwb` of that line and one `sfence`, so no dirty line stays cached. `MAP_POPULATE` only
   read-faults shared pages (hardware §4.1).
-- **Stubs** (macOS, Windows, others). Map returns `EOPNOTSUPP` unless `OPTIONAL`, then
-  `MAP_SHARED`. Copy = `memcpy`, flush = no-op, drain = `atomic_thread_fence(seq_cst)` (+
-  `dsb sy` on arm64). Everything builds and unit-tests on macOS.
+- **macOS arm64** (Q-A5). Map returns `EOPNOTSUPP` unless `OPTIONAL`, then `MAP_SHARED`; the
+  device queries are stubs. Copy, flush and drain are the **ARM64 code of Linux**: stores,
+  `DC CVAP` per line, `DSB`, chosen by `FEAT_DPB` (Q-A1: the production persist code runs in
+  every mode). That user code may execute `DC CVAP` on macOS is [I]; `ndb_pmem-t` would fail
+  with `SIGILL` if not, and the fallback is `DC CIVAC`.
+- **Stubs** (Windows, others). Map as on macOS. Copy = `memcpy`, flush = no-op, drain =
+  `atomic_thread_fence(seq_cst)`. They only need to build.
 - **Hot path.** Copy through a function pointer chosen at init (~1 ns against a 200–2000 ns
   persist); drain inline with one `unlikely(emulation)` branch.
 - **File mode.** Nothing calls it before S3.2.
 - **Tests.** `ndb_pmem-t` (`NDB_ADD_TEST(ndb_pmem-t ndb_pmem.cpp LIBS ndbmgmapi ndbgeneral
   ndbportlib)` next to `NdbHW-t`, `src/common/portlib/CMakeLists.txt:83`):
+  - runs on Linux x86_64, Linux ARM64 and macOS ARM64 (Q-A5);
   - a 4 MB file in `$TMPDIR`: `REQUIRED` gives `EOPNOTSUPP` on tmpfs, non-DAX ext4 and macOS;
     `OPTIONAL` maps;
   - each available copy method: random units on every line of a page, drain, unmap, `pread`
@@ -325,7 +333,7 @@ Total about 36–42 person-days.
     restore a random subset of its eight words.
   - A full list drops its oldest entry: that line "persisted early", which ADR allows.
   - Debug: a line pending in two threads is reported (two writers between fences, against E7).
-- Works on any file, DAX or not (macOS, CI). `kill -9` without `power_fail` means "every line
+- Works on any file, DAX or not (macOS, Linux without `memmap=`). `kill -9` without `power_fail` means "every line
   persisted", a legal outcome.
 - **Tests** (`ndb_pmem-t`, regular file): 3 lines + drain, 2 lines, `power_fail(seed, 0, 0)`
   → 3 new, 2 old; `store32` + drain without flush → old; `keep = 1000` → all new; torn lines
@@ -522,7 +530,7 @@ and no separate DRAM write path, so the same code runs on real hardware when it 
 |---|---|---|
 | `__RedoLogPmemTestMode=off` | Production rules | Default |
 | `=emulated` | `MAP_SYNC` required; empty `persistence_domain` accepted as ADR | `memmap=`: MTR, autotest |
-| `=nodax` | `MAP_SYNC` optional (`MAP_SHARED`); domain, bad-block, dirty-shutdown checks skipped; survives a process crash only | macOS, CI without `memmap=` |
+| `=nodax` | `MAP_SYNC` optional (`MAP_SHARED`); domain, bad-block, dirty-shutdown checks skipped; survives a process crash only | macOS ARM64, Linux without `memmap=` |
 | `__RedoLogPmemPowerLossEmulation=1` | S1.5 on; every crash is a power failure | S7, any mode |
 | `__RedoLogPmemCopyMethod` | Forces a copy method | P6 |
 | `__RedoLogPmemPersistDelayNs` | Spins for this many ns after each persist barrier, default 0 (Q-A11). Next free CFG id after 716, checked at merge | Commit latency and throughput for 200–2000 ns hardware, measured on DRAM |
@@ -808,14 +816,15 @@ NDB_PMEM_DIR=/mnt/pmem0 <build>/runtime_output_directory/ndb_pmem-t   # Linux, D
 1. Should `FileSystemPathRedoLog` move the REDO in file mode too? **Answered (Q-A2): no.** File
    mode keeps today's REDO placement; too much relies on it. The parameter is PMEM mode only.
 2. Is `node:path,node:path` (plus a plain single path) acceptable? Are 8 entries enough
-   (sub-NUMA clustering can give 4 nodes per socket)?
+   (sub-NUMA clustering can give 4 nodes per socket)? **Answered (Q-A3): yes**, both.
 3. May the test settings be used in release builds? **Answered (Q-A1): yes.** PMEM mode must
    run on normal DRAM until hardware is available.
 4. When `DurableCommits` arrives: allowed with `emulated`? With `nodax`? **Yes, both** (follows
    from Q-A1; S2.7).
 5. Interim dirty-shutdown action in step 1: warn (recommended) or refuse until `--initial`?
 6. Is ARM in scope? No ARM PMEM hardware was found (hardware §8). The plan builds and tests
-   ARM and refuses production PMEM mode on ARM without `DC CVAP`.
+   ARM and refuses production PMEM mode on ARM without `DC CVAP`. **Answered (Q-A5):** build
+   and unit-test on Linux x86_64, Linux ARM64 and macOS ARM64; macOS x86_64 is not supported.
 7. Latency histogram: sample 1 in 16 (recommended) or time every persist? Are the buckets
    right for 200–2000 ns hardware?
 8. Copy-method switch as a hidden parameter (this plan) or a compile-time choice?

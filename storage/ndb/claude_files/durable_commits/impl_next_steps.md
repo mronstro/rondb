@@ -52,8 +52,8 @@ COMPLETEREQ, which also breaks READ_BACKUP read-your-writes after a TC
 failure (`research_commit_protocol.md` §1 item 7).
 
 **Exit criteria.** No TCKEY_FAILCONF before the last COMPLETECONF of that
-transaction; new test passes; existing takeover tests in the daily suite
-pass.
+transaction; new test passes; existing takeover tests in
+`daily-basic-tests.txt` pass.
 
 ### X1.1 Move the ack (S, 1 pd)
 
@@ -166,8 +166,8 @@ and F on every path of plan §3.4; COMMIT records carry transid, gci_lo,
 opCount and `CF_DURABLE`; failed API node ids are held back.
 
 **Exit criteria.**
-- The persistence debug check of E7 never fires in the daily and durable
-  suites.
+- The persistence debug check of E7 never fires in the file-mode
+  regression lists and the durable test set.
 - A primary row is not visible to READ_COMMITTED or locking readers before
   its COMPLETE record is persistent (test with EI 5183).
 - No commit ack before the last COMPLETED, on any path.
@@ -440,7 +440,8 @@ GCP_SAVEREQ flag; interim: the start-time config).
   (8322); crash during ABORT after commit (5184).
 - The ledger under node failures: every acked commit survives node
   failures (no full crash) — regression of today's guarantee.
-- Daily suite with `DurableCommits=1` on `memmap=` PMEM.
+- The `daily-basic` lists with `DurableCommits=1` in a test mode, run by
+  the pusher before pushing commit-path changes.
 
 **Order inside X4:** X4.1 → X4.2 → X4.3 → X4.5 → X4.4 → X4.6 → X4.7 →
 X4.10 → X4.8 → X4.9 → X4.11 → X4.13; X4.12 and X4.14 alongside.
@@ -1076,4 +1077,4 @@ Step 1 adds the persist counters per part (E19).
 | Q10 | Where the node-failure file lives when `FileSystemPathRedoLog` has one path per NUMA node (proposed: the first path)? |
 | Q11 | Memory for the step-A hash table at SR, its limit, and what to do when it is exhausted |
 | Q12 | Force the parallel COMMITREQ/COMPLETEREQ path for durable transactions (2 serial persists instead of 2R)? Decide from X8.3 |
-| Q13 | Which CI hosts get `memmap=` PMEM so the durable MTR suite runs regularly? |
+| Q13 | There is no CI: which developer machines get `memmap=` PMEM, so the durable test set can run before pushes? |
