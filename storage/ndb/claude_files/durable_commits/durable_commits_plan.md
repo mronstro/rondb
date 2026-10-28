@@ -1,8 +1,9 @@
 # RONDB-1150 — Durable commits across a cluster restart: master plan
 
-Status: **Revision 6, 2026-10-27, aligned with the conclusion of the study
-(§0) and reviews 4 and 5. Research (P0) is done. Decisions D0–D8 are
-settled (§11). No code has been changed.**
+Status: **Revision 9, 2026-10-28. Decisions D0–D8 are settled (§11). The
+first implementation step, the REDO log on persistent memory, is designed in
+`pmem_redo_design.md` (planning subtask P2 done). No code has been
+changed.**
 Branch: `RONDB-1150-durable-commits` (base 26.10-main, commit 7128c75dca4).
 All paths are relative to `storage/ndb/`.
 
@@ -14,6 +15,11 @@ All paths are relative to `storage/ndb/`.
 | `research_system_restart.md` | System restart (SR) flow, the sysfile and the restorable GCI, REDO execution and invalidation, node-failure persistence, where an agreement phase fits |
 | `research_micro_gcp.md` | The GCP/micro-GCP protocol and the consistent-cut proof (used in §6), the durable-epoch alternative (not pursued) |
 | `research_literature.md` | 2PC variants, early lock release, epoch commit, how recovery cuts are computed in FoundationDB, Aurora, FaRM, CockroachDB and TiDB |
+| `pmem_redo_design.md` | **Step 1 design:** the REDO log on persistent memory. Consolidates the four notes below and settles their conflicts (decisions E1–E20, steps S1–S7, questions Q1–Q8 answered) |
+| `research_pmem_hardware.md` | Failure atomicity, devices available in 2026, flush instructions and their cost, Linux DAX interfaces, CRC32C |
+| `pmem_redo_format.md` | Record framing and checksum, write-once page header, every record layout, FILLER, space reservation and overhead |
+| `pmem_redo_recovery.md` | Today's head and tail search traced through the code, end-of-log rule, invalidation by zeroing, torn-safe last-file slots |
+| `pmem_redo_write_path.md` | Mapping the files, the persist primitive, barrier placement, shared log parts, mbyte and file switch, GCP save, config |
 
 **Revision history.**
 
@@ -41,6 +47,23 @@ All paths are relative to `storage/ndb/`.
   restart, not even phase 1; it joins by node restart afterwards, like
   today's not-restorable nodes. Recovery needs at least one non-stale node
   in each node group (D4 settled).
+- **Revision 7** (review 6). The first implementation step is PMEM support
+  for the REDO log. Four parallel notes and a consolidated design
+  (`pmem_redo_design.md`): W = 64 bytes; a position-bound CRC32C on every
+  record and page header; write-once page headers; a FILLER at every persist
+  point; records built in DRAM and copied out with non-temporal stores;
+  atomic COMMIT invalidation; two-slot "last file" pointer; invalidation by
+  zeroing. §2.1, §7, §9 and §10 updated.
+- **Revision 8** (review 7). "Immediately" defined: persist while handling
+  the COMMIT or COMPLETE signal, before the next COMMIT, COMMITTED,
+  COMPLETE or COMPLETED is sent, always. Both restart phases run in one
+  scan. W = 64 fixed. An unsafe shutdown reported by the device makes the
+  node stale. Target hardware: CXL 2.0 persistent memory, 200–2000 ns per
+  persist.
+- **Revision 9** (review 8). PMEM REDO refused with an encrypted file
+  system in the first version. No REDO log buffer in PMEM mode, so an
+  operation that cannot be logged aborts, as today. Each log part on the
+  persistent memory closest to its LDM. All step-1 questions answered.
 
 ---
 
@@ -79,7 +102,7 @@ This is the conclusion from review 3. The rest of the plan elaborates it.
 | # | Constraint |
 |---|---|
 | C2 | Durability is cluster-wide; no per-table or per-transaction combinations. Every logged write is durable |
-| C3 | Production uses persistent memory: a REDO write is persistent in well under a microsecond and is done synchronously, without a real-time break. No fsync, no NDBFS round trip, no group commit |
+| C3 | Production uses persistent memory, and a REDO write is persisted synchronously, without a real-time break. No fsync, no NDBFS round trip, no group commit. Target hardware (review 7): CXL 2.0 persistent memory modules, about 200–2000 ns per persist |
 | C5 | Recovery reaches a PREPARE only through the backward reference in a COMMIT record, so PREPAREs are never searched for. A PREPARE without a COMMIT record is never applied |
 | — | The REDO format used with memory-mapped files is new, with checksums and a reliable end of log built in; today's REDO checksum problems are out of scope |
 
@@ -98,7 +121,8 @@ This is the conclusion from review 3. The rest of the plan elaborates it.
   the node-failure file, §5.4).
 - **G4.** The cost on PMEM is one extra round of lock hold on the primary,
   plus one extra round of ack latency for tables without READ_BACKUP
-  (§3.2, §3.3).
+  (§3.2, §3.3), plus two persists per replica on the commit path (0.4–4 µs
+  per replica on CXL 2.0 persistent memory).
 
 **Scope.** Every logged table. No-logging tables are emptied at SR as today.
 
@@ -108,25 +132,48 @@ This is the conclusion from review 3. The rest of the plan elaborates it.
 
 ### 2.1 Memory-mapped REDO (conclusion 2)
 
-- A new config variable (name to be decided) makes each REDO log part a
-  memory-mapped file. NDBFS leaves the write path.
-- The memory-mapped REDO uses the new format (§7). Switching a node to it,
-  or back, needs an initial node restart of that node; a cluster switches
-  by rolling initial node restarts.
-- With memory-mapped REDO but without durable commits, the log is made
-  persistent at GCP save as today (`msync`, or a persist barrier on PMEM).
-- **Persistent memory (D1, D8).** The whole REDO is in PMEM:
-  - fsdax: files on an ext4 or xfs file system mounted with `-o dax`,
-    mapped with `MAP_SYNC`;
-  - ADR (barrier = `clwb` per cache line plus `sfence`) and eADR (`sfence`
-    only) are both supported, chosen at start from the region's
-    `persistence_domain`;
-  - with durable commits configured, a data node whose REDO is not on a DAX
-    mapping refuses to start.
+The full design is `pmem_redo_design.md`. In short:
+
+- A new config variable (`RedoLogMode = file | pmem`, names to be decided)
+  puts the REDO log parts in memory-mapped files on PMEM, with its own path
+  (`FileSystemPathRedoLog`). Switching a node to it, or back, needs an
+  initial node restart; a cluster switches by rolling initial node restarts.
+- **Mapping.** NDBFS opens and maps every REDO file once at start
+  (`MAP_SHARED_VALIDATE | MAP_SYNC`) and prefaults it; the files are fully
+  written at initial start. NDBFS leaves the write path. `MAP_SYNC` failing
+  means the file is not on DAX: with durable commits configured, the node
+  refuses to start (D8).
+- **Geometry kept.** Files, 1 MB mbytes, 32 KB pages with a header on each
+  page, the FD record in page 0, and today's head and tail search.
+- **Write unit W = 64 bytes**, fixed and recorded in the page header.
+- **Write path.** Records are built in DRAM log pages as today. At a persist
+  point the new bytes are padded with a FILLER to the next 64-byte boundary
+  and copied to the mapping with non-temporal stores, then `sfence`. The
+  same code serves ADR, eADR and CXL; store + `clwb` is a benchmarked
+  alternative. A persisted unit is not written again in that lap.
+- **Without durable commits**, the log is persisted at GCP save, mbyte
+  switch, file switch and page full, which keeps today's durability.
+- **Checks at start:** `persistence_domain` (empty, as with `memmap=`
+  emulation, is refused unless a test setting is on), the device's
+  dirty-shutdown count, its bad-block list. PMEM REDO is refused with
+  `EncryptedFileSystem` or `Diskless` in the first version (review 8).
+- **Placement (review 8).** Each log part's files go on the persistent
+  memory closest to the LDM that owns the part. `FileSystemPathRedoLog`
+  takes one path per NUMA node.
+- **REDO log full (review 8).** As today: there is no REDO log buffer in
+  PMEM mode, only a few staging pages, so an operation that cannot be logged
+  aborts (410 when log space is short). No queueing in PMEM mode.
+- **Hardware.** The target is CXL 2.0 persistent memory modules, about
+  200–2000 ns per persist (review 7). Linux reports them as
+  `memory_controller`, so flushes are needed; non-temporal stores + `sfence`
+  is the default barrier mode. Optane is discontinued and NVDIMM-N exists
+  only for DDR4. No cloud offering was found, so the feature runs on bare
+  metal.
 - **Testing without PMEM hardware.** The Linux `memmap=` kernel parameter
   creates a RAM-backed `/dev/pmem` device that passes the DAX check. Data
   survives a process crash but not a reboot, which is enough for MTR and
-  autotest. Power loss is emulated separately (P6).
+  autotest. It can never catch a missing barrier; that needs the
+  power-loss emulation of step S7.
 
 ### 2.2 Durable commits, activated online at a GCI (conclusion 1)
 
@@ -210,10 +257,17 @@ accordingly, and so does the number of lock waiters that fit within
 
 ### 3.3 When is the disk written, and is an extra round needed?
 
-- The COMMIT record (with the earlier PREPARE) is persisted before
-  COMMITTED; the COMPLETE record before visibility and before COMPLETED
-  (conclusion 4). Each barrier is sub-microsecond (C3). A batch of packed
-  COMPLETE signals can share one barrier.
+- **The rule (review 7):** the COMMIT or COMPLETE record is persisted as
+  part of handling the COMMIT or COMPLETE signal, and before the next
+  COMMIT, COMMITTED, COMPLETE or COMPLETED signal is sent. This holds
+  always: a later optimisation may delay the sync, but then it delays the
+  signal too. The local commit (visibility, lock release) also comes after
+  the barrier. One barrier covers every record written while handling the
+  signal, for example TUP's loop over the operations on one row
+  (`pmem_redo_design.md` E8).
+- Each barrier costs about 200–2000 ns on the target CXL 2.0 persistent
+  memory. With 2 replicas the linear chain has 4 barriers in series, so
+  0.8–8 µs more per transaction.
 - **No new message round.** The existing COMPLETE phase is the round that
   says "the COMMITs can be executed".
   - For READ_BACKUP tables the ack point is unchanged.
@@ -274,6 +328,15 @@ accordingly, and so does the number of lock waiters that fit within
 Runs in every log part of every starting node, on the tail records with
 GCI ≥ g (§2.2).
 
+**Where the scan starts.** The first COMMIT with GCI > R_gcp can come before
+`COMPLETED_GCI(R_gcp)` in the log, so step A cannot start at that record.
+Settled (review 7, `pmem_redo_design.md` E16): both phases run in one scan.
+Step A runs inside today's execution scan, which starts at the start mbyte for
+`logStartGci = R_gcp + 1`. COMMITs with GCI ≤ R_gcp are executed there as
+today, the others go to the hash table, and the scan continues to the end
+of log E. Step B's rescan starts at the same position. §6 shows this keeps
+each row's order.
+
 **Step A — first scan of the tail, in log order.**
 
 | Record | Action |
@@ -281,7 +344,7 @@ GCI ≥ g (§2.2).
 | COMMIT | Append a reference to the record to the FIFO queue of its transid in the part's hash table (create the entry if needed) |
 | COMPLETE, entry has COMMITs | Execute the queued COMMITs in FIFO order through their backward references, as today's replay does, using the record's GCI64. Remove the entry |
 | COMPLETE, no entry | Ignore: a later operation's COMPLETE of a transaction already executed, or a transaction with GCI ≤ R_gcp |
-| ABORT with transid (F) | Remove the entry; its COMMIT records are invalidated in step C |
+| ABORT flagged `AF_AFTER_COMMIT` (F) | Remove the entry; its COMMIT records are invalidated in step C. An unflagged ABORT (a prepared operation aborted, for example with `IgnoreError`) is ignored |
 
 - No COMMIT of T can follow a COMPLETE of T in the same log part, because
   COMPLETE is sent only after every COMMITTED. A violation is a crash
@@ -302,8 +365,9 @@ GCI ≥ g (§2.2).
    is in the received sets:
    - a COMPLETE whose transid is in the part's own in-doubt set means a
      corrupt log (step A would have executed it): crash;
-   - otherwise send "T complete" (or "T aborted" for an ABORT record) to
-     each part that listed T, and remove T from the received set.
+   - otherwise send "T complete" (or "T aborted" for an ABORT flagged
+     `AF_AFTER_COMMIT`) to each part that listed T, and remove T from the
+     received set.
 3. The part then sends "done" to every part. Signal order between two block
    instances is kept, so all of a part's "T complete" messages arrive
    before its "done".
@@ -316,7 +380,7 @@ For each transaction still in the part's in-doubt set:
 |---|---|
 | "T complete" received | Commit: execute the queued COMMITs in FIFO order |
 | Otherwise, fallback (§5.5): the counts received for T pass the node-group rule, and no "T aborted" was received | Commit, as above |
-| Otherwise | Abort: rewrite T's COMMIT records in place as `ZINVALID_COMMIT_TYPE` (cheap on PMEM) |
+| Otherwise | Abort: mark T's COMMIT records invalidated in place, one atomic flag store each (`pmem_redo_design.md` E9) |
 
 - Every part computes the verdict from the same exchanged data, so all parts
   agree with no coordinator (D2).
@@ -396,6 +460,12 @@ failure; this is about transactions that **start after** it.
 - **Stale node.** X is stale if some starting node recorded X's failure
   with GCI > R_gcp: X failed after the last GCP save, the cluster ran on
   without it, and no sysfile shows it.
+- **X is also stale if its PMEM device reports an unsafe shutdown** since
+  the last start (review 7). Its REDO is still readable up to its valid end,
+  because the checksums cut off lost or torn last writes, but writes
+  already acknowledged as persistent may be missing. How the flag is read,
+  and whether it really means lost acknowledged writes, depends on the
+  device (`pmem_redo_design.md` E17).
 - **A stale node takes no part in the cluster restart at all**, neither
   phase 1 nor phase 2 (review 5). It is restarted by a node restart after
   the non-stale nodes have recovered. This is the existing path for a node
@@ -514,23 +584,40 @@ event covers that.
 
 ## 7. REDO records
 
-The memory-mapped REDO uses a new format (§2.1).
+The memory-mapped REDO uses a new format (§2.1); the details are in
+`pmem_redo_design.md` E3–E13 and `pmem_redo_format.md`.
 
-| Record | Content | Purpose |
-|---|---|---|
-| Every page | Checksum (CRC32C), format version, lap/generation | Reliable end of log; recycled pages are recognisable |
-| PREPARE | As today. Optionally the transid, for debugging and `redoLogReader` | Reached only through the COMMIT back-reference |
-| COMMIT | Today's fields (table, schemaVersion, fragment, PREPARE reference) plus **transid**, **GCI64** (gci_lo added), **opCount**. About 9 → 13 words | Phase 2 queue; exact row GCI64 (replay sets `gci_lo = 0` today); partial-SR fallback |
-| **COMPLETE** (new) | type and transid, 3 words (the same shape as ABORT). One per operation (D7) | Executes T's queued COMMITs |
-| ABORT | transid plus operation identity; also after a COMMIT record (F) | Removes T from the phase-2 queue |
-| SR head | R_gcp, G', restart sequence | Repeatable SR; stop point for the next SR |
+**Framing.** Every record is 8-byte aligned with an even length. Word 0 holds
+type, flags and length; word 1 a CRC32C over the record and a 16-byte
+suffix that is never stored: lap, a reserved word, log part and file, and
+the position. So a record from an earlier lap at the same offset never
+validates. The page header is written once at page init with its own CRC
+and never updated; its GCI fields keep their meaning as snapshots at page
+start. There is no whole-page checksum and no fill index on PMEM.
 
-The node-failure records (§5.4) are not REDO records; they live in a
-separate node-failure file.
+| Record | Words | Content | Purpose |
+|---|---|---|---|
+| PREPARE | 8 + key + attrinfo, even | As today; the length moves into word 0, the CRC takes its slot | Reached only through the COMMIT back-reference |
+| COMMIT | 12 | tableId, schemaVersion, fragId, the PREPARE reference packed into 2 words, gci_hi, **gci_lo**, **transid**, **opCount**. Flags: durable, invalidated | Phase 2 queue; exact row GCI64 (replay sets `gci_lo = 0` today); partial-SR fallback |
+| **COMPLETE** (new) | 4 | transid. One per operation (D7) | Executes T's queued COMMITs |
+| ABORT | 4 | transid. Flag `AF_AFTER_COMMIT` when written after a COMMIT (F) | Removes T from the phase-2 queue; only flagged ABORTs veto the fallback |
+| COMPLETED_GCI | 4 | gci | As today |
+| NEXT_MBYTE | 2 | — | As today, now with a CRC |
+| **FILLER** (new) | 2 + n | — | Pads to the next 64-byte boundary at every persist point |
+| SR_HEAD | 6 | R_gcp, G', restart sequence | Repeatable SR; stop point for the next SR |
 
-**Space.** The per-operation reservation for commit and abort records
-(`ZCOMMIT_LOG_SIZE+1`, `research_redo_log.md` §6) must also cover the
-COMPLETE record.
+- **Invalidating a COMMIT** sets a flag bit in word 0 with one aligned store;
+  the bit is outside the CRC, so the record stays valid. A type rewrite
+  would fail the CRC and cut the log there.
+- **The "last file in use" pointer** in page 0 of file 0 becomes two
+  checksummed slots, written alternately.
+- The node-failure records (§5.4) are not REDO records; they live in a
+  separate node-failure file.
+
+**Space.** The per-operation reservation grows from 10 to 46 words: COMMIT,
+COMPLETE or ABORT, and two FILLERs. A small update (2 key and 10 attrinfo
+words) takes 192 bytes per replica instead of 116 today; a 100-word update
+576 instead of 476. The default REDO size can stay.
 
 ---
 
@@ -578,7 +665,23 @@ COMPLETE record.
 7. **Activation boundary.** Phase 2 must apply only to GCI ≥ g, and only
    when R_gcp ≥ g − 1 (§2.2).
 8. **Testing.** Emulated PMEM (`memmap=`) for functional tests; power-loss
-   emulation for barrier bugs.
+   emulation for barrier bugs. Tests on `memmap=` never catch a missing
+   barrier.
+9. **Fence cost at high rates.** On CXL 2.0 persistent memory a hot LDM at
+   200k write operations per second would spend 8–80 % of its time in
+   `sfence`. The adaptive scheme (`pmem_redo_design.md` §4), one fence per
+   log part per scheduler round with the dependent signals held back until
+   it is done, is the expected second iteration.
+10. **Device health.** An unsafe shutdown reported by the device's
+    dirty-shutdown count makes the node stale (§5.4); reading a bad block
+    through the mapping kills the process. Both are checked at start, and
+    the meaning of the dirty-shutdown flag must be verified per device.
+11. **Hardware supply.** Optane is gone; CXL persistent memory is new and
+    needs flushes. No cloud offering exists. Functional tests of the CXL
+    path can use QEMU's emulated CXL Type 3 device with a persistent backend;
+    performance needs real modules.
+12. **REDO encryption** works on 32 KB units and cannot be combined with
+    line-level persistence; refused in iteration 1.
 
 ---
 
@@ -590,7 +693,7 @@ COMPLETE record.
 |---|---|---|---|
 | P0 | Research | five `research_*.md` | **DONE** |
 | P1 | Decision record (§11) | this plan | **DONE** except D3 |
-| P2 | Memory-mapped REDO, new format, PMEM persistence layer | `redo_v2_design.md` | P1 |
+| P2 | Memory-mapped REDO, new format, PMEM persistence layer | `pmem_redo_design.md` (**DONE**, with four supporting notes) | P1 |
 | P3 | Commit-path changes | `commit_path_design.md` | P2 |
 | P4 | SR phases 1–3 | `sr_tail_resolution.md` | P2, P3 |
 | P5 | Configuration and online activation | `config_activation.md` | P1 |
@@ -598,9 +701,10 @@ COMPLETE record.
 
 What each design document covers:
 
-- **P2:** the formats in §7; DAX mapping and the start-up check; barrier
-  implementation (range flush per log part); the shared log-part mutex;
-  space reservations; `redoLogReader` for the new format.
+- **P2 (done):** the formats in §7; DAX mapping and the start-up checks;
+  the persist primitive and barrier placement; the shared log-part mutex;
+  space reservations; end of log and invalidation at restart;
+  `redoLogReader` for the new format. See `pmem_redo_design.md`.
 - **P3:** invariants C, K, L, A and F on every path in §3.4; moving the
   primary's local commit; `writeCompleteLog`; opCount, including takeover;
   the forced late ack and the takeover-ack move; holding back a failed API
@@ -624,7 +728,7 @@ What each design document covers:
 | Phase | Content |
 |---|---|
 | X1 | Takeover-ack fix (TCKEY_FAILCONF after COMPLETE). Independent; it also fixes READ_BACKUP read-your-writes after takeover today |
-| X2 | Memory-mapped REDO config, the new format writer (COMMIT with transid, COMPLETE, checksums), the PMEM persistence layer |
+| X2 | **First step: the REDO log on PMEM**, in steps S1–S7 of `pmem_redo_design.md` §3: portlib CRC32C and PMEM helpers; config and start checks; NDBFS mapping; record writers; write path; recovery; power-loss testing. Ends with the REDO on PMEM at today's (GCP-based) durability |
 | X3 | Test harness: ledger, crash of all nodes, power-loss emulation (losses beyond R_gcp expected until X5) |
 | X4 | Commit path: barriers, primary local commit at COMPLETE, forced late ack, rule F, opCount, API node-id hold-back |
 | X5 | SR phases 1–3. From here the ledger must show zero losses with all nodes starting |
