@@ -666,9 +666,10 @@ identical replicas.
   path, beside the REDO, not in a log part, e.g. `D_NF/nodefail.dat` [I,
   Q10]. Mapped through NDBFS with `OM_MAP_SYNC` in QMGR's STTOR (`723`) [V],
   before the node can take part in a failure protocol.
-- **Layout:** header (magic, version, own node id, CRC) and, per failed
-  node id, two 64-byte slots `{seq64, failedNodeId, gci_hi, failNo,
-  crc32c}`, written alternately as in E10. Only the highest failure GCI per
+- **Layout:** header (magic, version, own node id, checksum) and, per
+  failed node id, two 64-byte slots `{seq64, failedNodeId, gci_hi, failNo,
+  checksum}`, written alternately as in E10. Each checksum is the low 32
+  bits of XXH3 over the other fields. Only the highest failure GCI per
   node matters (stale iff > R), so a slot per node replaces the plan's
   ring (DI-12). About 18 KB.
 - **Write:** in `execCLOSE_COMCONF` (`7559`) just before PREP_FAILCONF

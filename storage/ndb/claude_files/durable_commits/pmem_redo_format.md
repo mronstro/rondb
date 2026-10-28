@@ -22,19 +22,19 @@ inferred. Nothing was built or run.
 | Topic | Decision |
 |---|---|
 | Geometry | Unchanged: files, 1 MB mbytes, 32 KB pages, a 32-word header on every page, positions `(fileNo, pageNo, pageIndex)`. No record spans an mbyte |
-| Record header | Two words on every record. `w0` = type (8 bits), flags (8 bits), length in words (16 bits). `w1` = CRC32C |
-| What the CRC covers | `w0` (without the mutable INVALIDATED bit), then `w2 … w(len-1)` in logical order (interleaved page headers skipped), then a 16-byte suffix `(lap, restartGen, logPart/fileNo, word position)` that is not stored |
-| Stale records | Rejected by the suffix. A record from an older lap, from before a restart, or from another position gives a different CRC. No lap word per record |
-| Alignment | Every record starts on 8 bytes and has an even length. So every gap is ≥ 2 words and every FILLER carries a CRC. Every word the reader interprets is CRC-checked |
-| Page header | Written once, complete with its own CRC, when the page is started. Never updated. Fill index, links, dirty flag and debug words move to DRAM |
-| Spanning records | One CRC per record over its logical words (option A, §6). A record is valid only if every page header it crosses is valid |
-| FILLER | Type 10, 2 + n words, CRC over its header. Written at every persist barrier to close the current write unit W. In the last unit of an mbyte, NEXT_MBYTE closes it instead |
+| Record header | Two words on every record. `w0` = type (8 bits), flags (8 bits), length in words (16 bits). `w1` = checksum, 32 bits of XXH3 (§3.3) |
+| What the checksum covers | The body `w2 … w(len-1)` in logical order (interleaved page headers skipped), hashed with XXH3; then a seeded XXH3 over `w0` (without the mutable INVALIDATED bit) and a 16-byte suffix `(lap, restartGen, logPart/fileNo, word position)` that is not stored (E4 of `pmem_redo_design.md`) |
+| Stale records | Rejected by the suffix. A record from an older lap, from before a restart, or from another position gives a different checksum. No lap word per record |
+| Alignment | Every record starts on 8 bytes and has an even length. So every gap is ≥ 2 words and every FILLER carries a checksum. Every word the reader interprets is covered by a checksum |
+| Page header | Written once, complete with its own checksum, when the page is started. Never updated. Fill index, links, dirty flag and debug words move to DRAM |
+| Spanning records | One checksum per record over its logical words (option A, §6). A record is valid only if every page header it crosses is valid |
+| FILLER | Type 10, 2 + n words, checksum over its header. Written at every persist barrier to close the current write unit W. In the last unit of an mbyte, NEXT_MBYTE closes it instead |
 | COMMIT | 12 words (48 B): adds transid, gci_lo, opCount; the 4 prepare-reference fields packed into 2 |
 | COMPLETE | 4 words (16 B): header + transid |
 | ABORT | 4 words; flag `AF_AFTER_COMMIT` marks a rule-F abort |
 | INVALID_COMMIT | A flag bit in the COMMIT header, set by one 4-byte store. Type 9 is retired |
 | Overhead | Small update: 116 B today → 192 / 256 / 512 B at W = 64 / 128 / 256. Large update: 476 B → 576 / 640 / 768 B (§8) |
-| Checksum code | NDB has no CRC32C helper. Add one, ported from InnoDB's `ut_crc32` (§9) |
+| Checksum code | `ndb_xxh3` (`util/ndb_xxh3.h`): XXH3 with AVX2 chosen at run time on x86-64, SSE2 otherwise, NEON on aarch64 (§9) |
 
 ---
 
@@ -48,7 +48,7 @@ inferred. Nothing was built or run.
 | SR phase 1 reads the header of the first page of each mbyte: lap, max GCI completed, max GCI started, last prepare reference | `readSrLastMbyteLab` `36367-36461` [V] | Keep these header fields with today's meaning |
 | The FD record sits at word 32 of page 0 | `writeFileHeaderOpen` `36073-36161`; position check `39221-39229`; arrays read by `initGciInLogFileRec` `42279-42320` [V] | Keep the place; offsets inside it shift by one word |
 | PREPARE header has fixed offsets 2–7 | `writeLogHeader` `14221-14255`, `readLogHeader` `43000-43047` [V] | Keep offsets 2–7 |
-| SR rewrites a COMMIT in place as `ZINVALID_COMMIT_TYPE` | `DblqhMain.cpp:39113-39133` [V]; plan §5.2 step C | The rewrite must be one atomic store and must not break the CRC |
+| SR rewrites a COMMIT in place as `ZINVALID_COMMIT_TYPE` | `DblqhMain.cpp:39113-39133` [V]; plan §5.2 step C | The rewrite must be one atomic store and must not break the checksum |
 | Page 0 of file 0 is rewritten at each file change to record the last file | `firstPageWriteLab` `35190-35199`, `lastWriteInFileLab` `35297-35307` [V] | An in-place update of a persisted page. Drop it (§4.3) |
 | The reader uses `ZCURR_PAGE_INDEX` of the page as its cursor and writes it | `43057-43061`, `42777-42778` [V] | On PMEM the reader must not store into the mapping (§11) |
 | Max PREPARE size | `MAX_LOG_RECORD_SIZE_WORDS` = 18000 + 4096 (`include/kernel/ndb_limits.h:142,175-176`), enforced in `DbtupExecQuery.cpp:6670` [V]; key ≤ 1023 words (`ndb_limits.h:154`) [V] | Max PREPARE = 8 + 2 + 1023 + 22096 + 1 pad = 23130 words. Fits a 16-bit length. It can span **4 pages**, not 3 (§6.3) |
@@ -68,9 +68,9 @@ What PMEM changes [I, to be confirmed by `research_pmem_hardware.md`]:
 | # | Principle |
 |---|---|
 | P1 | **Write once per (lap, restartGen).** Every word of a page is stored once in a lap. The only in-place change is the INVALIDATED bit, set by SR |
-| P2 | **Every interpreted word is CRC-checked.** The bodies of FILLERs and the area after NEXT_MBYTE are dead space and are never read |
-| P3 | **The CRC is bound to where and when the record was written** (§3.3). A checksum alone does not stop a stale, intact record |
-| P4 | **8-byte alignment and even lengths.** Gaps are even, so a FILLER always has room for its CRC. `w0` and `w1` share one 8-byte unit |
+| P2 | **Every interpreted word is covered by a checksum.** The bodies of FILLERs and the area after NEXT_MBYTE are dead space and are never read |
+| P3 | **The checksum is bound to where and when the record was written** (§3.3). A checksum alone does not stop a stale, intact record |
+| P4 | **8-byte alignment and even lengths.** Gaps are even, so a FILLER always has room for its checksum. `w0` and `w1` share one 8-byte unit |
 | P5 | **The log is the longest valid prefix.** Recovery stops at the first invalid record and never skips one |
 | P6 | **W is a performance parameter only.** No correctness argument relies on a W unit being written atomically. Torn units are possible at any W |
 
@@ -108,7 +108,7 @@ cannot be mixed by accident.
 | 11 | — | COMPLETE, 4 words (§5.3) |
 | 12 | — | SR_HEAD (§5.9, content owned by recovery) |
 
-| Flag bit | Name | Types | Meaning | In CRC |
+| Flag bit | Name | Types | Meaning | In checksum |
 |---|---|---|---|---|
 | 0 (`w0` bit 8) | `RF_INVALIDATED` | COMMIT | Cancelled by SR; replaces type 9 | **No** (mutable) |
 | 1 | `CF_DURABLE` | COMMIT | Written under the durable protocol (GCI ≥ g). A COMPLETE or a rule-F ABORT is expected | Yes |
@@ -116,33 +116,47 @@ cannot be mixed by accident.
 | 1 | `PF_TRANSID` | PREPARE | Words 8–9 hold the transid | Yes |
 | 2–7 | — | — | Reserved, 0 | Yes |
 
-### 3.3 What the CRC covers
+### 3.3 What the checksum covers
 
-`w1` = CRC32C (Castagnoli, as in iSCSI: initial value `0xFFFFFFFF`, final
-XOR `0xFFFFFFFF`) over this byte string, words in little-endian memory order:
+`w1` is the checksum of E4 of `pmem_redo_design.md`, words in little-endian
+memory order:
 
 ```
-(w0 & ~0x00000100)  ||  w2 || w3 || ... || w(n-1)  ||  S
-S = [ lap, restartGen, (logPartNo << 16) | fileNo, pageNo * 8192 + pageIndex ]
+H  = XXH3_64bits( w2 || w3 || ... || w(n-1) )
+w1 = low 32 bits of XXH3_64bits_withSeed( (w0 & ~0x00000100) || S, 20 bytes, seed = H )
+S  = [ lap, restartGen, (logPartNo << 16) | fileNo, pageNo * 8192 + pageIndex ]
 ```
 
 - `n = len` for every type except FILLER, where `n = 2` (the body is dead).
 - `w1` itself is not part of the input.
 - `w2 … w(n-1)` are the record's logical words. Page headers that sit inside
-  the record are skipped; they have their own CRC (§4.2).
+  the record are skipped; they have their own checksum (§4.2). The body is
+  then in pieces p1 … pk, the non-empty segments between page headers:
+  `H = XXH3_64bits(p1)`,
+  then `H = XXH3_64bits_withSeed(pi, seed = H)` for i = 2 … k.
+- With `n = 2` (NEXT_MBYTE, and every FILLER, whose body is not covered)
+  `H` = `XXH3_64bits` of no bytes = `0x2D06800538D394C2`, a constant.
 - `S` is 16 bytes and is **not stored**. The reader knows it: `(pageNo,
   pageIndex)` is where `w0` lies; `lap`, `restartGen` and `logPartNo` come
   from the header of the page that holds `w0`; `fileNo` from the file.
-- `S` comes last so that the writer can compute the CRC of the record body
-  before it takes the log-part lock, and add only `S` under the lock (§11, W8).
+  E12 of `pmem_redo_design.md` keeps the `restartGen` word reserved, and 0,
+  in iteration 1 (§4.4).
+- The body is hashed in one call, or one per page if it spans pages, at
+  XXH3's full speed. `w0` and `S` are not next to it in memory,
+  so a second, 20-byte hash mixes them in. Only that mix needs the position,
+  so the writer can hash the body before it takes the log-part lock and do
+  only the mix under the lock (§11, W8). Whether the record spans a page is
+  known only under the lock; if it does, the body is hashed again in its
+  pieces there.
+- 32 bits miss a torn or stale record with probability 2⁻³².
 
-**Why the suffix, and why no lap word per record.** CRC alone fails in three
-cases. Each is common, not theoretical:
+**Why the suffix, and why no lap word per record.** A checksum alone fails in
+three cases. Each is common, not theoretical:
 
-| Stale record | Why it passes a plain CRC | What rejects it |
+| Stale record | Why it passes a plain checksum | What rejects it |
 |---|---|---|
 | From an older lap, at the same offset | Fillers make records start on W boundaries in every lap, so old and new record starts coincide often [I] | `lap` in `S` |
-| From before a restart, same lap | An SR or node restart moves the head back to `COMPLETED_GCI(R)` and the same positions are written again (`invalidateLogAfterLastGCI` exists for this, `DblqhMain.cpp:39534-39858`) [V]. Records beyond the new end keep their old valid CRC | `restartGen` in `S` (§4.4) |
+| From before a restart, same lap | An SR or node restart moves the head back to `COMPLETED_GCI(R)` and the same positions are written again (`invalidateLogAfterLastGCI` exists for this, `DblqhMain.cpp:39534-39858`) [V]. Records beyond the new end keep their old valid checksum | `restartGen` in `S` (§4.4) |
 | Misplaced data (another part, file or offset) | A file restored to the wrong directory, a bug in the position arithmetic | `logPartNo`, `fileNo`, position in `S` |
 
 An explicit lap word in each record would cost 4 bytes per record and still
@@ -162,10 +176,10 @@ A record at position p is valid iff all of these hold:
 4. The record ends before the end of the mbyte.
 5. Every page header that the record crosses is valid (§4.2) and carries the
    same `lap` and `restartGen` as the page where it starts.
-6. The CRC matches `w1`.
+6. The checksum matches `w1`.
 
-Bounds are checked before the CRC, so a garbage `len` never makes the reader
-run off the mbyte.
+Bounds are checked before the checksum, so a garbage `len` never makes the
+reader run off the mbyte.
 
 ---
 
@@ -180,7 +194,7 @@ Today the header is cleared and filled in `initLogpage` (`DblqhMain.cpp:
 
 | Word | Name (`Dblqh.hpp:188-211`) | Today | PMEM: written once at page init |
 |---|---|---|---|
-| 0 | `ZPOS_CHECKSUM` | 37, set at every write | CRC32C over words 1–31 |
+| 0 | `ZPOS_CHECKSUM` | 37, set at every write | Checksum over words 1–31: low 32 bits of `XXH3_64bits` of those 124 bytes (E5) |
 | 1 | `ZPOS_LOG_LAP` | at init | same |
 | 2 | `ZPOS_MAX_GCI_COMPLETED` | at init | same |
 | 3 | `ZPOS_MAX_GCI_STARTED` | at init | same |
@@ -205,11 +219,11 @@ Today the header is cleared and filled in `initLogpage` (`DblqhMain.cpp:
 
 ### 4.2 Header validity
 
-A header is valid iff the magic matches, the CRC matches, and words 15, 16 and
-24 equal the page's real position and log part. A zeroed page has no magic and
-is invalid. Recovery treats an invalid header as "not written in this lap"
+A header is valid iff the magic matches, the checksum matches, and words 15, 16
+and 24 equal the page's real position and log part. A zeroed page has no magic
+and is invalid. Recovery treats an invalid header as "not written in this lap"
 (§11, R1). The header is 128 bytes, two cache lines at W = 64, so a torn header
-is possible; its CRC catches that.
+is possible; its checksum catches that.
 
 ### 4.3 Which fields are final at page init, and what replaces the others
 
@@ -225,10 +239,10 @@ number of log parts, plus the new identity fields. [V] for "set at init":
 | Field | Replacement |
 |---|---|
 | `ZCURR_PAGE_INDEX` | DRAM cursor in the writer. Recovery finds the end of data by walking valid records (P5) |
-| `ZPOS_CHECKSUM` (whole page) | Header-only CRC at init plus one CRC per record |
+| `ZPOS_CHECKSUM` (whole page) | Header-only checksum at init plus one checksum per record |
 | Debug words 12–20 | Dropped on PMEM. They described each 32 KB write, which no longer exists. Words 15–16 keep the page identity |
 | `ZNEXT_PAGE`, `ZPREV_PAGE`, `ZPOS_DIRTY`, in-free-list, in-writing | DRAM only |
-| Word 34 of page 0 in file 0 (last file in use) | **Dropped.** Recovery finds the last file by reading the page-0 header of every file (lap, then restartGen). On PMEM that is a few memory reads per file. This also removes the file-change page-0 write from the write path. Fallback if recovery wants to keep it: declare that word mutable (excluded from the FD CRC, like `RF_INVALIDATED`) and update it with one 4-byte store |
+| Word 34 of page 0 in file 0 (last file in use) | **Dropped.** Recovery finds the last file by reading the page-0 header of every file (lap, then restartGen). On PMEM that is a few memory reads per file. This also removes the file-change page-0 write from the write path. Fallback if recovery wants to keep it: declare that word mutable (excluded from the FD checksum, like `RF_INVALIDATED`) and update it with one 4-byte store |
 
 **The "page GCI" fields.** Words 2 and 3 are snapshots of
 `logPartNewestCompletedGCI` and `cnewestGci` when the page was started. They
@@ -262,14 +276,14 @@ stay write-once. Two remarks for recovery [I]:
 
 ## 5. Record layouts
 
-All records: `w0` = header (§3.1), `w1` = CRC (§3.3). Sizes in 32-bit words.
+All records: `w0` = header (§3.1), `w1` = checksum (§3.3). Sizes in 32-bit words.
 
 ### 5.1 PREPARE (type 1), `8 + key + attrinfo`, rounded up to even
 
 | Word | Field | Today (`writeLogHeader`, `DblqhMain.cpp:14221-14255`) [V] |
 |---|---|---|
 | 0 | `w0`: type 1, flags, len | type 1 |
-| 1 | CRC | total length |
+| 1 | checksum | total length |
 | 2 | hashValue | same |
 | 3 | operation (incl. `ZINSERT_TTL`, replayed as ZINSERT, `43042-43044`) | same |
 | 4 | aiLen | same |
@@ -282,9 +296,11 @@ All records: `w0` = header (§3.1), `w1` = CRC (§3.3). Sizes in 32-bit words.
 | last | 0, pad word if `keyLen + aiLen` is odd | — |
 
 - The header stays 8 words: the length moves into `w0`, and `w1`, which held
-  the length, now holds the CRC.
-- Writer: compute the CRC while `writeKey` and `writeAttrinfoLab` copy the
-  sections, then store `w1` last. Both copy through `writeLogWords`
+  the length, now holds the checksum.
+- Writer: once `writeKey` and `writeAttrinfoLab` have copied the sections,
+  hash the body where it lies in the log pages, one piece per page (§3.3),
+  then mix in `w0` and `S` and store `w1` last. The pieces are fixed by the
+  page ends, not by the section chunks. Both copy through `writeLogWords`
   (`43746-43787`), which already handles page changes.
 - `checkNewMbyte` (`14188-14190`) must add the pad word and, with
   `PF_TRANSID`, 2 words.
@@ -296,7 +312,7 @@ All records: `w0` = header (§3.1), `w1` = CRC (§3.3). Sizes in 32-bit words.
 | Word | Field | Today (`writeCommitLog`, `43566-43621`) [V] |
 |---|---|---|
 | 0 | `w0`: type 2, flags (`CF_DURABLE`, `RF_INVALIDATED`), len 12 | type 2 |
-| 1 | CRC | tableId |
+| 1 | checksum | tableId |
 | 2 | tableId | schemaVersion |
 | 3 | schemaVersion | fragId |
 | 4 | fragId | prepare fileNo |
@@ -309,9 +325,9 @@ All records: `w0` = header (§3.1), `w1` = CRC (§3.3). Sizes in 32-bit words.
 | 11 | opCount (new, plan §5.5) | — |
 
 - Plan §7 counts 13 content words: today's 9 plus 4. The new header adds the
-  CRC (14). Packing saves 2 (12). Packing is safe: all four prepare fields are
-  `Uint16` in `TcConnectionrec` (`Dblqh.hpp:3259-3262`) [V]; page index <
-  8192, page number < 32768 for a 1 GB file.
+  checksum (14). Packing saves 2 (12). Packing is safe: all four prepare
+  fields are `Uint16` in `TcConnectionrec` (`Dblqh.hpp:3259-3262`) [V];
+  page index < 8192, page number < 32768 for a 1 GB file.
 - Durable and non-durable COMMITs use the same 12 words. A log can hold both
   (online activation at GCI g, plan §2.2). `CF_DURABLE` lets phase 2 check
   `CF_DURABLE == (gci_hi ≥ g)`.
@@ -321,29 +337,29 @@ All records: `w0` = header (§3.1), `w1` = CRC (§3.3). Sizes in 32-bit words.
   TcConnectionrec in a part [I].
 - Invalidation (today `39113-39133`: type word → 9, page marked dirty, page
   rewritten by `writeDirty` `43669ff`) [V] becomes: one 4-byte store of
-  `w0 | 0x100`, then flush and fence. The CRC excludes that bit, so the record
-  stays valid and is read as INVALID_COMMIT. Readers skip `len` words, as
-  `39099-39103` does today with `ZCOMMIT_LOG_SIZE`.
+  `w0 | 0x100`, then flush and fence. The checksum excludes that bit, so the
+  record stays valid and is read as INVALID_COMMIT. Readers skip `len`
+  words, as `39099-39103` does today with `ZCOMMIT_LOG_SIZE`.
 
 ### 5.3 COMPLETE (type 11), 4 words, new
 
 | Word | Field |
 |---|---|
 | 0 | `w0`: type 11, flags 0, len 4 |
-| 1 | CRC |
+| 1 | checksum |
 | 2 | transid1 |
 | 3 | transid2 |
 
-Plan §7 says "3 words, same shape as ABORT". It is 4 here because of the CRC.
-One per operation (D7). Written by the new `writeCompleteLog`, then persisted
-(invariant K).
+Plan §7 says "3 words, same shape as ABORT". It is 4 here because of the
+checksum. One per operation (D7). Written by the new `writeCompleteLog`, then
+persisted (invariant K).
 
 ### 5.4 ABORT (type 3), 4 words
 
 | Word | Field | Today (`writeAbortLog`, `43542-43559`) [V] |
 |---|---|---|
 | 0 | `w0`: type 3, flag `AF_AFTER_COMMIT`, len 4 | type 3 |
-| 1 | CRC | transid1 |
+| 1 | checksum | transid1 |
 | 2 | transid1 | transid2 |
 | 3 | transid2 | — |
 
@@ -362,13 +378,13 @@ One per operation (D7). Written by the new `writeCompleteLog`, then persisted
 
 ### 5.5 COMPLETED_GCI (type 8), 4 words
 
-`[w0: type 8, len 4 | CRC | gci | 0]`. Today `[8, gci]`
+`[w0: type 8, len 4 | checksum | gci | 0]`. Today `[8, gci]`
 (`writeCompletedGciLog`, `43631-43662`; initial `COMPLETED_GCI(1)` in file 0
 page 1, `35408-35413`) [V]. Word 3 is a pad for 8-byte alignment.
 
 ### 5.6 NEXT_MBYTE (type 7), 2 words
 
-`[w0: type 7, len 2 | CRC]`. The rest of the mbyte after it is dead space.
+`[w0: type 7, len 2 | checksum]`. The rest of the mbyte after it is dead space.
 Today it is 1 word stored at the fill index without advancing it
 (`43824-43826`), with 2 words reserved by `ZNEXT_LOG_SIZE` (`Dblqh.hpp:245`,
 comment at `233-240`) [V]. The new record uses exactly that reserve.
@@ -378,7 +394,7 @@ comment at `233-240`) [V]. The new record uses exactly that reserve.
 | Word | Field |
 |---|---|
 | 0 | `w0`: type 10, flags 0, len = distance to the next W boundary (or to the page end on the FD page) |
-| 1 | CRC over `w0 ‖ S` only |
+| 1 | checksum over `w0 ‖ S` only; `H` is the constant of no bytes (§3.3) |
 | 2 … len-1 | dead, not stored by the writer, never read |
 
 - Gaps are even (P4), so a 1-word gap cannot occur and no 1-word form is
@@ -391,7 +407,7 @@ comment at `233-240`) [V]. The new record uses exactly that reserve.
 | Word | Field | Today (`writeFileHeaderOpen`, `36082-36129`) [V] |
 |---|---|---|
 | 0 | `w0`: type 4, len = 4 + 3·nFD·clogFileSize (+1 pad if odd) | type 4 |
-| 1 | CRC | nFD |
+| 1 | checksum | nFD |
 | 2 | nFD | fileNo (in file 0, rewritten as "last file", §4.3) |
 | 3 | own fileNo, never rewritten | first array word |
 | 4 … | nFD × (`maxGciCompleted[mb]`, `maxGciStarted[mb]`, `lastPrepRef[mb]`) for mb = 0 … clogFileSize-1 | same arrays, from word 3 |
@@ -407,7 +423,7 @@ comment at `233-240`) [V]. The new record uses exactly that reserve.
 
 ### 5.9 SR_HEAD (type 12), 6 words, placeholder
 
-`[w0: type 12, len 6 | CRC | R_gcp | G' | restartGen | 0]`. Plan §5.3. The
+`[w0: type 12, len 6 | checksum | R_gcp | G' | restartGen | 0]`. Plan §5.3. The
 recovery subtask owns its content; the format reserves the type and the
 framing.
 
@@ -416,14 +432,14 @@ framing.
 | Function | `DblqhMain.cpp` | Change |
 |---|---|---|
 | `writeLogHeader` fast path | `14234-14244` | Store `w0`; leave `w1` for the end |
-| `writeKey`, `writeAttrinfoLab` | `14262-14308` | CRC update per copied chunk; pad; finalize with `S`; store `w1` |
+| `writeKey`, `writeAttrinfoLab` | `14262-14308` | Unchanged copy; then pad, hash the body in the log pages one piece per page, mix with `w0` and `S`, store `w1` |
 | `checkNewMbyte` | `14188-14214` | Pad and optional transid in the size |
 | `writeCommitLog` | `43566-43621` | 12 words; then (durable) close the unit and persist; two-step reservation (§7.3) |
 | `writeAbortLog` | `43542-43559` | 4 words; with rule F, flag, close and persist |
 | `writeCompletedGciLog` | `43631-43662` | 4 words |
-| `writeNextLog` | `43801-44003` | 2-word NEXT_MBYTE with CRC; barrier before the next mbyte's header |
-| `writeFileHeaderOpen` | `36073-36161` | FD with CRC; FILLER to page end |
-| `initLogpage` | `35577-35605` | New fields; header CRC; complete at once |
+| `writeNextLog` | `43801-44003` | 2-word NEXT_MBYTE with checksum; barrier before the next mbyte's header |
+| `writeFileHeaderOpen` | `36073-36161` | FD with checksum; FILLER to page end |
+| `initLogpage` | `35577-35605` | New fields; header checksum; complete at once |
 | `writeDbgInfoPageHeader`, `calcPageCheckSum` | `46632-46639`, `46750-46762` | Not used on PMEM |
 | `firstPageWriteLab`, `lastWriteInFileLab` | `35190-35199`, `35297-35307` | No page-0 rewrite on PMEM |
 | `initWriteEndLab`, `initFirstPageLab`, `execFSWRITEREQ` | `35371-35418`, `35763-35779` | Initial format in the new framing |
@@ -438,19 +454,20 @@ framing.
 
 ### 6.1 Options
 
-| Option | CRC | For | Against |
+| Option | Checksum | For | Against |
 |---|---|---|---|
-| **A. Logical CRC, keep every page header** | One CRC per record over its logical words; interleaved headers skipped and checked on their own | Addressing, readers' header skipping (`43054-43103`, `43514-43535`), mbyte headers and COMMIT back-references all stay. CRC32C is streaming, so pieces cost nothing extra | A reader must check every header the record crosses |
-| B. Fragments, one CRC each | Each piece in a page gets its own header and CRC | Pages are self-contained | Changes the meaning of `len` and of the back-reference; 8 B per piece; reassembly in SR; more types |
-| C. No page headers inside an mbyte | Contiguous CRC | Simplest record CRC; saves 0.4 % | Writer (`writeLogWord(s)`, `43721-43787`) and SR reader (`readLogword`, `stepAhead`, `readExecLog`, the page cache) assume a header on every page. The old format stays in use on non-PMEM nodes, so there would be two reader paths |
+| **A. Logical checksum, keep every page header** | One checksum per record over its logical words; interleaved headers skipped and checked on their own | Addressing, readers' header skipping (`43054-43103`, `43514-43535`), mbyte headers and COMMIT back-references all stay. The body hash is chained across the pieces through the seed (§3.3), so each crossed header costs one more short call | A reader must check every header the record crosses |
+| B. Fragments, one checksum each | Each piece in a page gets its own header and checksum | Pages are self-contained | Changes the meaning of `len` and of the back-reference; 8 B per piece; reassembly in SR; more types |
+| C. No page headers inside an mbyte | Contiguous checksum | Simplest record checksum; saves 0.4 % | Writer (`writeLogWord(s)`, `43721-43787`) and SR reader (`readLogword`, `stepAhead`, `readExecLog`, the page cache) assume a header on every page. The old format stays in use on non-PMEM nodes, so there would be two reader paths |
 
 ### 6.2 Recommendation: option A
 
-- `len` and the CRC input are logical, as today's PREPARE length
+- `len` and the checksum input are logical, as today's PREPARE length
   (`stepAhead(logWord - 2)` at `39091-39092` skips headers) [V].
 - **A record is valid only if every page header it crosses is valid and has
-  the same `(lap, restartGen)`** (§3.4 rule 5). The record CRC does not cover
-  those headers. Without this rule a valid record could hide a torn header.
+  the same `(lap, restartGen)`** (§3.4 rule 5). The record checksum does not
+  cover those headers. Without this rule a valid record could hide a torn
+  header.
 - The header of a new page is stored when the writer moves onto the page
   (`writeLogWords` calls `initLogpage`, `43765-43770`) [V], before the rest of
   the record. Both are persisted by the same barrier.
@@ -604,29 +621,27 @@ per node.
 
 ## 9. Checksum implementation
 
-`grep -rn -i crc32c` over `include/`, `mysys/`, `storage/ndb/` and the rest of
-the tree [V]:
+The checksum is XXH3 (E4 and E18 of `pmem_redo_design.md`). This section
+first proposed a port of InnoDB's CRC32C. Step 1 phase 1 implemented that
+and then replaced it with XXH3, when the timings favoured XXH3
+(`step1_phases.md`, decision 5).
 
-| Found | Usable in ndbd? |
-|---|---|
-| `storage/innobase/ut/crc32.cc`: CRC-32C with SSE4.2 `_mm_crc32_u64` (`:440`) and ARMv8 `__crc32cd` (`:467`), runtime selection (`ut0crc32.h:149-165`) | Not linked into NDB; portable code in the same tree and licence |
-| `extra/abseil/.../absl/crc/crc32c.h` | Built only with bundled protobuf (`CMakeLists.txt:2154-2161`) |
-| `storage/ndb/src/common/util/ndbxfrm_file.cpp:1339`: `crc32()` | zlib CRC-32, a different polynomial |
-| `storage/ndb/include/util/Checksum.hpp` | XOR checksums only |
-| `storage/ndb/include/util/ndb_xxhash.h` (lists CRC32C only in a benchmark table, `:76`) | xxHash, not CRC |
-
-NDB has no CRC32C helper. Proposal:
-- Add `include/util/ndb_crc32c.h` and `src/common/util/ndb_crc32c.cpp`:
-  `Uint32 ndb_crc32c_update(Uint32 crc, const void *buf, size_t len)` plus
-  init and finalize helpers. Use SSE4.2 on x86-64 and the ARMv8 CRC extension
-  on aarch64 (this includes the macOS development machines), with a
-  slice-by-8 table fallback. Port it from InnoDB's `crc32.cc`. Select the
-  implementation at run time, in the way `rondb_hash.cpp:41` does for AVX2
-  [V].
-- Unit test against the standard vector: CRC-32C("123456789") = `0xE3069283`.
-- Cost [I]: one 8-byte instruction per 8 bytes, about 3 cycles latency each.
-  A COMMIT plus suffix (64 B) is about 10 ns; a 440 B PREPARE about 50 ns on
-  one stream, less if interleaved. A fused copy-and-CRC loop hides most of it.
+- `include/util/ndb_xxh3.h` and `src/common/util/ndb_xxh3.cpp`:
+  `Uint64 ndb_xxh3_64(const void *buf, size_t len)` and
+  `Uint64 ndb_xxh3_64_seed(const void *buf, size_t len, Uint64 seed)`, with
+  the results of `XXH3_64bits` and `XXH3_64bits_withSeed`. The code is the
+  XXH3 of `include/util/ndb_xxhash.h`. Inputs over 240 bytes use vector code:
+  on x86-64 AVX2 is chosen at run time (the build has no `-mavx2`), SSE2
+  otherwise; NEON on aarch64, which includes the macOS development machines.
+  The hash of keys uses the same functions.
+- Unit test `ndb_xxh3-t`: every implementation equals the header's XXH3 for
+  all lengths 0 … 2100 and some long ones, at every alignment, with and
+  without seed; the hash of no bytes is `0x2D06800538D394C2`.
+- Cost, measured (`step1_phases.md`, Timings): on x86-64 with AVX2 about
+  12 ns for a COMMIT or a COMPLETE and 28 ns for a 1000-byte PREPARE (55 ns
+  with SSE2); on an Apple M5 Pro 9 ns for a COMMIT and 22 ns for a 1000-byte
+  PREPARE. A spanning record adds one seeded call per page header it
+  crosses.
 
 ---
 
@@ -642,13 +657,16 @@ enough for a 4-page PREPARE [V/I].
 Changes:
 1. **Detect the format** from the magic in the page-0 header. Keep the old
    path unchanged.
-2. **Headers:** check the CRC, magic and identity; print lap, restartGen, W,
-   log part and node id; `--lap` also prints restartGen. Ignore words 4, 5, 8
-   and 11.
+2. **Headers:** check the checksum, magic and identity; print lap, restartGen,
+   W, log part and node id; `--lap` also prints restartGen. Ignore words 4, 5,
+   8 and 11.
 3. **Records:** parse `w0`. Gather the record's logical words into a scratch
-   buffer, skipping page headers (any span). Check the bounds and the CRC with
-   `S` taken from the header of the start page. Stop the page walk at the
-   first invalid record and print it as "end of valid log", with the reason.
+   buffer, skipping page headers (any span), and keep where each page's piece
+   ends: the body hash is chained piece by piece (§3.3), so it is computed
+   over the pieces, not over the gathered buffer in one call. Check the
+   bounds and the checksum with `S` taken from the header of the start page.
+   Stop the page walk at the first invalid record and print it as "end of
+   valid log", with the reason.
 4. **Types:** 12-word COMMIT with unpacked prepare reference, transid, gci_lo,
    opCount and the INVALIDATED flag; COMPLETE; ABORT with
    `AF_AFTER_COMMIT`; COMPLETED_GCI; NEXT_MBYTE; FILLER (print only with
@@ -680,15 +698,15 @@ an INVALIDATE record appended at the head that names the COMMIT's position.
 
 | # | Requirement |
 |---|---|
-| W1 | Store all 32 header words, CRC included, once at page init; never again. Fill index, links, dirty and debug state live in DRAM |
+| W1 | Store all 32 header words, checksum included, once at page init; never again. Fill index, links, dirty and debug state live in DRAM |
 | W2 | Every word of a record, `w1` included, is stored before the barrier that persists it; `w1` may be stored last |
 | W3 | Close the unit before every barrier (§7.1) |
 | W4 | At an mbyte switch: store NEXT_MBYTE, barrier, then store the next mbyte's first header. Then a valid current-lap mbyte header means the mbyte before it is complete, and holes stay in the last mbyte |
 | W5 | Count fillers in free space; reserve R per operation (§7.3) |
 | W6 | After a restart that resumes writing: increment restartGen and start at a fresh mbyte (§4.4) |
 | W7 | No rewrite of page 0 of file 0 |
-| W8 | The CRC of a record body may be computed before taking the log-part lock; only `S` is added under the lock |
-| W9 | Files fully allocated and formatted at initial start (mbyte headers with valid CRC), no sparse holes |
+| W8 | The hash `H` of the body of a record that does not span a page may be computed before taking the log-part lock; only the 20-byte mix of `w0` and `S` needs the lock |
+| W9 | Files fully allocated and formatted at initial start (mbyte headers with valid checksum), no sparse holes |
 | W10 | Invalidation: one 4-byte store of `w0 \| 0x100`, then flush and fence |
 
 ### 11.3 Recovery (`pmem_redo_recovery.md`)
@@ -713,9 +731,9 @@ Read after this document was written. To settle when the drafts are merged.
 |---|---|---|---|
 | Atomicity, W | H1–H4; W = 64 suggested | `research_pmem_hardware.md`: only aligned 8-byte stores are failure-atomic; W = 64, fixed, recorded in the file | Agree. An aligned 4-byte store lies inside one 8-byte chunk, so H1 holds. Keep W in the page header so the reader validates FILLERs |
 | Last-file word in page 0 of file 0 | Dropped; recovery scans page-0 headers | Recovery: two checksummed slots with sequence numbers in a control area. Write path: one aligned store of word 34 | Three answers; pick one. Any of them is torn-safe. Dropping it is the smallest change to the write path |
-| INVALID_COMMIT | Flag bit, excluded from the CRC | Recovery: store type 9 in the type byte, CRC computed as if the type were COMMIT | Equivalent. The flag needs no special case in the CRC routine |
-| Orphans after a restart | `restartGen` in the CRC suffix (no space cost), with a fresh mbyte after each restart | Recovery: zero `[H, end of last mbyte)` and keep writing in the head page; a generation is rejected as "a word per record" | Zeroing alone is sound. `restartGen` costs no word here, since it comes from the page header. It only helps if writing restarts at a fresh mbyte; otherwise keep it constant |
-| Header image | Words 4, 5, 8, 11, 12–14, 17–20 are 0 on PMEM; CRC over the final words | Write path: records built in DRAM pages, new bytes copied to PMEM | The copy of a page's first 128 bytes must be the PMEM header image (§4.1), not the DRAM header with its fill index and links |
+| INVALID_COMMIT | Flag bit, excluded from the checksum | Recovery: store type 9 in the type byte, checksum computed as if the type were COMMIT | Equivalent. The flag needs no special case in the checksum routine |
+| Orphans after a restart | `restartGen` in the checksum suffix (no space cost), with a fresh mbyte after each restart | Recovery: zero `[H, end of last mbyte)` and keep writing in the head page; a generation is rejected as "a word per record" | Zeroing alone is sound. `restartGen` costs no word here, since it comes from the page header. It only helps if writing restarts at a fresh mbyte; otherwise keep it constant |
+| Header image | Words 4, 5, 8, 11, 12–14, 17–20 are 0 on PMEM; checksum over the final words | Write path: records built in DRAM pages, new bytes copied to PMEM | The copy of a page's first 128 bytes must be the PMEM header image (§4.1), not the DRAM header with its fill index and links |
 | Filler worst case | `W/4 − 2` words (gaps are even) | Write path: `W − 4` bytes; 14-word COMMIT | Use 12 words and `W/4 − 2`: R = 46 words at W = 64 (write path: 48) |
 
 ---
@@ -726,9 +744,9 @@ Read after this document was written. To settle when the drafts are merged.
    geometry but checksums only the header.
 2. **"A checksum on each record, including page headers."** Agreed, but a
    checksum alone is not enough. With W-aligned fillers, record starts recur
-   at the same offsets in every lap, so a stale record with a valid CRC is
-   likely to sit right after the end of the log. Restarts that move the head
-   back create the same risk within one lap. The CRC must be bound to lap,
+   at the same offsets in every lap, so a stale record with a valid checksum
+   is likely to sit right after the end of the log. Restarts that move the head
+   back create the same risk within one lap. The checksum must be bound to lap,
    restart generation and position (§3.3). FILLERs must be checked too,
    otherwise a stale filler can carry the reader over a hole.
 3. **"Keep the MByte headers; consider the page GCI."** Agreed. The page GCI
@@ -736,8 +754,8 @@ Read after this document was written. To settle when the drafts are merged.
    in-place updates are the fill index and the last-file word in page 0 of
    file 0, and both can go.
 4. **"Minimum write size W, filler records."** Risky in two ways.
-   - W gives no atomicity. A torn unit is possible at any W; only the CRCs
-     protect. Nothing should be built on "a unit is all or nothing".
+   - W gives no atomicity. A torn unit is possible at any W; only the
+     checksums protect. Nothing should be built on "a unit is all or nothing".
    - A filler at every barrier is expensive for small writes: 4.4× the REDO
      volume and 2 × 256 B of PMEM writes per small update at W = 256. W = 64
      costs 1.66×. Choose W from measurements, start with 64, and keep the
@@ -785,12 +803,12 @@ Read after this document was written. To settle when the drafts are merged.
 ## Recommendations
 
 1. Keep today's geometry and page headers. Make the header write-once with its
-   own CRC, identity fields, a format magic, W and restartGen (§4).
-2. Frame every record with `w0` = type/flags/len and `w1` = CRC32C over the
-   logical words plus the unstored suffix `(lap, restartGen, part/file,
-   position)` (§3).
-3. Align records to 8 bytes with even lengths, so every FILLER has a CRC and
-   every interpreted word is checked.
+   own checksum, identity fields, a format magic, W and restartGen (§4).
+2. Frame every record with `w0` = type/flags/len and `w1` = a 32-bit XXH3
+   checksum of the logical words, mixed with `w0` and the unstored suffix
+   `(lap, restartGen, part/file, position)` (§3).
+3. Align records to 8 bytes with even lengths, so every FILLER has a checksum
+   and every interpreted word is checked.
 4. Use option A for spanning records, with the rule that every crossed page
    header must be valid (§6).
 5. Close the current unit at every barrier with a FILLER, or with NEXT_MBYTE
@@ -802,8 +820,8 @@ Read after this document was written. To settle when the drafts are merged.
 7. Drop the rewrite of page 0 of file 0 on PMEM.
 8. Start with W = 64; allow one barrier per signal rather than per record;
    keep the REDO default size and document the multiplier (§8).
-9. Add an `ndb_crc32c` helper ported from InnoDB, with a hardware path on
-   x86-64 and aarch64 (§9).
-10. Teach `redoLogReader` the new format, with CRC checks, gathering of
+9. Use the `ndb_xxh3` helper, with AVX2 chosen at run time on x86-64 and
+   NEON on aarch64 (§9).
+10. Teach `redoLogReader` the new format, with checksum checks, gathering of
     spanning records and transaction filters (§10).
 11. Refuse memory-mapped REDO together with REDO encryption in iteration 1.

@@ -27,7 +27,7 @@
 #include <NdbMutex.h>
 #include <NdbSpin.h>
 #include <ndb_global.h>
-#include <util/ndb_crc32c.h>
+#include <util/ndb_xxh3.h>
 #include "my_sys.h"
 
 class EventLogger *g_eventLogger = nullptr;
@@ -102,7 +102,7 @@ void ndb_init_internal(Uint32 caller) {
     NdbCondition_initialize();
     NdbGetRUsage_Init();
     NdbSpin_Init();
-    ndb_crc32c_init();
+    ndb_xxh3_init();
   }
   if (init_all) {
     NdbThread_Init();

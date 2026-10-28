@@ -23,9 +23,9 @@ debug checks and a benchmark switch.
 | Item | Plan |
 |---|---|
 | Branching | Separate PMEM functions for every record body, entered by one `if (c_redo_pmem)` at the top of today's writer. Small `if (c_redo_pmem)` blocks only in shared control flow (`checkNewMbyte`, `completedLogPage`, `writeNextLog`, `start_synch_gcp`, `writeSinglePage`, the reservation helpers). File-mode bodies stay byte for byte as today (§2) |
-| Format code | A new header-only `PmemRedoFormat.hpp` with constants, `w0` packing, the suffix S, the CRC accumulator, the page-header image and minimal decoders. DBLQH, unit tests and `redoLogReader` (S6) share it |
-| Fixed-size records | Built in a stack array, CRC finished, then appended with one `writeLogWords`. No fast and slow path per record |
-| PREPARE | Header on the stack with a `w1` slot; key and attrinfo CRC'd per section chunk inside `writeKey`/`writeAttrinfoLab`; pad word; `w1` stored last |
+| Format code | A new header-only `PmemRedoFormat.hpp` with constants, `w0` packing, the suffix S, the checksum accumulator, the page-header image and minimal decoders. DBLQH, unit tests and `redoLogReader` (S6) share it |
+| Fixed-size records | Built in a stack array, checksum finished (the body split where the page ends, if it does), then appended with one `writeLogWords`. No fast and slow path per record |
+| PREPARE | Header on the stack with a `w1` slot; key and attrinfo copied by `writeKey`/`writeAttrinfoLab` as today; pad word; the body hashed where it lies in the log pages, one piece per page; `w1` stored last |
 | Persist | `redoCopyOut` = copy + `ndb_pmem_drain` + advance + release, always together. `redoPersist` = `redoPadToUnit` + `redoCopyOut` |
 | Persist points in step 1 | GCP save, mbyte switch, file switch, page full (at record end). Plus, with the benchmark switch, at the X4 places of invariant C |
 | Benchmark switch | `DUMP 2368 1` (works in release builds), block variable `c_redo_pmem_persist_commit` |
@@ -40,8 +40,8 @@ debug checks and a benchmark switch.
 | F1 | Every append runs under `lock_log_part`, and a whole record is written in one critical section | `13381`/`13567`/`13579`, `15310`/`15345`, `17106`/`17125` [V] | Copy-out at record end never sees half a record, also with shared parts |
 | F2 | Writers reach `LogFileRecord`s through `logPartPtrP->my_block` (the owner's arrays), because another LDM may write a shared part | `43571-43573`, `13479-13480` [V] | All new helpers must do the same, also for `m_pmem_base` |
 | F3 | A full page is linked to the file's filled list by `completedLogPage`; it writes only at 8 pages or for `ZENFORCE_WRITE`/`ZLAST_WRITE_IN_FILE` | `41045-41065` [V] | PMEM mode keeps the link and returns |
-| F4 | `writeLogWord`/`writeLogWords` complete a page and start the next one inside the record writer | `43729-43738`, `43754-43774` [V] | The CRC of a spanning record must skip page headers: CRC the source words, not the page |
-| F5 | `initLogpage` runs before `currentFilepage++` in `writeLogWord`/`writeLogWords` (`43735-43737`, `43767-43769`) but after it in `writeNextLog` (`43882`, `43896`) and before it in `writeFileHeaderOpen` (`36157-36159`) [V] | | `initLogpage` cannot know the page number reliably. Page identity and header CRC are set when the PMEM image is built at the first copy (§10, D2) |
+| F4 | `writeLogWord`/`writeLogWords` complete a page and start the next one inside the record writer | `43729-43738`, `43754-43774` [V] | The checksum of a spanning record skips page headers and chains the body through the seed, one piece per page (E4). The pieces are fixed by the page ends, not by the source chunks, so the body is hashed in the log pages after the copy |
+| F5 | `initLogpage` runs before `currentFilepage++` in `writeLogWord`/`writeLogWords` (`43735-43737`, `43767-43769`) but after it in `writeNextLog` (`43882`, `43896`) and before it in `writeFileHeaderOpen` (`36157-36159`) [V] | | `initLogpage` cannot know the page number reliably. Page identity and header checksum are set when the PMEM image is built at the first copy (§10, D2) |
 | F6 | NEXT_MBYTE is stored at the fill index without advancing it; the page is then linked as a partial "filled" page | `43824-43826`, `43845`, `43866` [V] | `redoCopyOut` copies each filled page up to its own fill index, not to 8192 |
 | F7 | The new mbyte 0 of the next file has one page less (page 0 is the FD) | `43827-43833` [V] | `research_redo_log.md` §1.2 says "the last mbyte"; the code reduces the first mbyte of the next file. No change needed |
 | F8 | `writeSinglePage` sets `ZNEXT_PAGE = RNIL` (`36212`) and stamps debug words and the checksum (`36214-36217`); `releaseLfoPages` walks `ZNEXT_PAGE` after FSWRITECONF (`35915-35926`) [V] | | A page written by file I/O cannot hold the clean PMEM header image during the write (§10, D1) |
@@ -65,7 +65,7 @@ line each; `if (c_redo_pmem)` blocks only in shared control flow.**
 Reasons from the code:
 
 1. **Every word offset changes.** Today's COMMIT has `tableId` in word 1
-   (`43611`); PMEM has the CRC there, packs four fields into two, and is 12
+   (`43611`); PMEM has the checksum there, packs four fields into two, and is 12
    words instead of 9. An `if` per word would touch every line of the file
    writer.
 2. **Each writer has two paths.** A fast path into the page and a
@@ -81,8 +81,8 @@ Reasons from the code:
 
 Shared helpers stay shared and unchanged: `writeLogWord`, `writeLogWords`,
 `changeMbyte`, `writeFileDescriptor`, `initLogpage`. `writeKey` and
-`writeAttrinfoLab` get an optional CRC accumulator (nullptr in file mode),
-because they are generic section copiers; their bytes do not change.
+`writeAttrinfoLab` stay unchanged too: they are generic section copiers, and
+the PREPARE body is hashed in the log pages after they copy it (S4.3, F4).
 
 | Function | `DblqhMain.cpp` | File mode | PMEM mode |
 |---|---|---|---|
@@ -105,7 +105,7 @@ because they are generic section copiers; their bytes do not change.
 
 ### 3.1 New header `src/kernel/blocks/dblqh/PmemRedoFormat.hpp`
 
-Header-only. Depends on `ndb_types.h` and `util/ndb_crc32c.h` (S1). No block
+Header-only. Depends on `ndb_types.h` and `util/ndb_xxh3.h` (S1). No block
 types, so DBLQH, the NDBFS-thread callback `Dblqh::execFSWRITEREQ`, unit
 tests and `redoLogReader` can all include it.
 
@@ -130,19 +130,22 @@ constexpr Uint32 RESERVE_AT_COMMIT = COMMIT + FILLER_MAX;        // 26
 constexpr Uint32 HDR_FORMAT_MAGIC = 22, HDR_RESTART_GEN = 23, HDR_LOG_PART_NO = 24,
                  HDR_WRITE_UNIT = 25, HDR_NODE_ID = 26;
 constexpr Uint32 FORMAT_MAGIC = 0x504D5231;                      // "PMR1", version 1
-// Words of the 32-word header that live in DRAM only; 0 in the image and in the CRC (D1)
+// Words of the 32-word header that live in DRAM only; 0 in the image and in the checksum (D1)
 constexpr Uint32 DRAM_ONLY_MASK = (1u<<4)|(1u<<5)|(1u<<8)|(1u<<9)|(1u<<11)|
     (1u<<12)|(1u<<13)|(1u<<14)|(0xFu<<17)|(0x1Fu<<27);
 // Suffix S (E4), never stored
 struct Suffix { Uint32 lap, gen, partFile, pos; };
 inline Suffix suffix(Uint32 lap, Uint32 part, Uint32 file, Uint32 page, Uint32 idx)
   { return Suffix{lap, 0, (part << 16) | file, page * 8192 + idx}; }
-// CRC accumulator: CRC32C(w0 & ~RF_INVALIDATED || w2..w(n-1) || S)
-struct RecCrc {
-  Uint32 crc; Uint32 *w1; Suffix s;
-  void begin(Uint32 w0v, Uint32 *w1p, const Suffix &sx);   // CRC of masked w0
-  void add(const Uint32 *p, Uint32 nWords);                // body words in logical order
-  void finish();                                           // add S, store *w1
+// Checksum accumulator (E4). H = XXH3 of w2..w(n-1), one piece per page:
+//   H = ndb_xxh3_64(p1), then H = ndb_xxh3_64_seed(pi, H).
+// w1 = low 32 bits of ndb_xxh3_64_seed((w0 & ~RF_INVALIDATED) || S, 20, H).
+constexpr Uint64 EMPTY_HASH = 0x2D06800538D394C2ULL;  // no bytes: no body, FILLER
+struct RecChecksum {
+  Uint64 h; bool first; Uint32 w0; Uint32 *w1; Suffix s;
+  void begin(Uint32 w0v, Uint32 *w1p, const Suffix &sx);   // h = EMPTY_HASH
+  void piece(const Uint32 *p, Uint32 nWords);              // one page's body words; 0: no-op
+  void finish();                                           // mix masked w0 || S, store *w1
 };
 inline Uint32 padWords(Uint32 pageIdx) { return (W_WORDS - (pageIdx % W_WORDS)) % W_WORDS; }
 inline Uint32 prepareLen(Uint32 key, Uint32 ai, bool transid)
@@ -164,7 +167,7 @@ Type and flag names in `Dblqh.hpp`, next to the type codes at
 #define ZFILLER_TYPE 10
 #define ZCOMPLETE_TYPE 11
 #define ZSR_HEAD_TYPE 12
-#define RF_INVALIDATED  (1u << 8)   // w0 flag bit 0, COMMIT, outside the CRC
+#define RF_INVALIDATED  (1u << 8)   // w0 flag bit 0, COMMIT, outside the checksum
 #define CF_DURABLE      (1u << 9)   // COMMIT
 #define AF_AFTER_COMMIT (1u << 9)   // ABORT (rule F)
 #define PF_TRANSID      (1u << 9)   // PREPARE, off in iteration 1
@@ -226,7 +229,7 @@ address(f, p, w)  = file(f).m_pmem_base + p * 32768 + w * 4
 
 ### S4.1 `PmemRedoFormat.hpp` and its unit test
 
-- **Goal.** One tested definition of the bytes: `w0`, CRC with suffix,
+- **Goal.** One tested definition of the bytes: `w0`, checksum with suffix,
   page-header image, padding, sizes, reservation.
 - **Files.** New `src/kernel/blocks/dblqh/PmemRedoFormat.hpp` (§3.1); new
   `src/kernel/blocks/dblqh/pmem_redo_format-t.cpp`; add
@@ -236,18 +239,24 @@ address(f, p, w)  = file(f).m_pmem_base + p * 32768 + w * 4
   3, 6, 7, 10, 21 from the DRAM header (lap, GCI snapshots, version, files,
   last prepare ref, parts); set 15 = pageNo, 16 = fileNo, 22 = magic,
   23 = 0 (reserved restart generation, E12), 24 = logPartNo, 25 = 64,
-  26 = nodeId; word 0 = CRC32C over words 1-31 with the `DRAM_ONLY_MASK`
-  words read as 0. With the mask (D1) a header written by file I/O at
-  initial start, with `ZNEXT_PAGE = RNIL` in word 4, is still valid.
+  26 = nodeId; word 0 = low 32 bits of `ndb_xxh3_64` over words 1-31
+  (124 bytes, E5) with the `DRAM_ONLY_MASK` words read as 0. With the mask
+  (D1) a header written by file I/O at initial start, with
+  `ZNEXT_PAGE = RNIL` in word 4, is still valid.
 - **File mode.** Not included by any file-mode path.
 - **Tests.**
   `ctest -R pmem_redo_format-t --output-on-failure` (from the build directory):
-  - CRC32C("123456789") = `0xE3069283` through `RecCrc` with an empty
-    suffix (catches a wrong chaining convention of `ndb_crc32c`, Q1);
+  - fixed vectors through `RecChecksum`: a COMMIT with given words and
+    suffix gives the `w1` computed directly with `XXH3_64bits` and
+    `XXH3_64bits_withSeed` of `ndb_xxhash.h`; a record without a body uses
+    `EMPTY_HASH`; a body in two pieces gives the seeded chain, not the hash
+    of the whole body in one call (catches a wrong order of pieces and mix,
+    Q1);
   - each record type built and accepted by `recordOk`; one changed body
     word, one changed suffix word (lap, part, file, position) → rejected;
   - `RF_INVALIDATED` set on a COMMIT → still accepted;
-  - FILLER: CRC covers only `w0` and S; changing a body word → accepted;
+  - FILLER: the checksum covers only `w0` and S; changing a body word →
+    accepted;
   - header: changing any of words 1-3, 6, 7, 10, 15, 16, 21-26 → rejected;
     changing a `DRAM_ONLY_MASK` word → accepted; zero page → rejected;
   - `padWords(idx)` for every even idx in [32, 8190]: result even, < 16,
@@ -255,23 +264,25 @@ address(f, p, w)  = file(f).m_pmem_base + p * 32768 + w * 4
   - `prepareLen` even and ≤ 23130 for the limits of `ndb_limits.h`;
     `fdLen(2, 1024)` = 6148; `fdLen` ≤ 8037 for every `clogFileSize` in
     [4, 1024] with `nFD = min(40, 8032/(3*size))`; `RESERVE` = 46.
-- **Depends on.** S1 `ndb_crc32c`.
+- **Depends on.** S1 `ndb_xxh3`.
 - **Size.** M, 3 days.
 - **Review points.** The mask list must match recovery's reader (S6), which
-  should use this same header. Little-endian word order of the CRC input
-  (format §3.3).
+  should use this same header. Little-endian word order of the checksum
+  input (format §3.3).
 
 ### S4.2 Framing helpers in DBLQH
 
 - **Goal.** One way to frame a record at the current position.
 - **Functions (new, `DblqhMain.cpp`, beside `writeLogWords` at `43746`):**
-  - `void redoRecBegin(PmemRedo::RecCrc &c, LogPartRecord *part, LogFileRecord *file, LogPageRecord *page, Uint32 w0, Uint32 *w1)`:
+  - `void redoRecBegin(PmemRedo::RecChecksum &c, LogPartRecord *part, LogFileRecord *file, LogPageRecord *page, Uint32 w0, Uint32 *w1)`:
     S from `page->logPageWord[ZPOS_LOG_LAP]` (F10), `part->logPartNo`,
     `file->fileNo`, `file->currentFilepage`, `page->logPageWord[ZCURR_PAGE_INDEX]`.
   - `void redoAppendFixed(Signal*, LogPartRecord*, Uint32 *rec, Uint32 len)`:
     for COMMIT, ABORT, COMPLETE, COMPLETED_GCI and SR_HEAD (recovery). Order:
     mbyte check `len + ZNEXT_LOG_SIZE > remainingWordsInMbyte → changeMbyte`
-    (as `43578-43582`); take the position; `RecCrc` over `rec`; store
+    (as `43578-43582`); take the position; `RecChecksum` over `rec`, with
+    `k = min(len, words left in the page)`: `piece(rec + 2, k − 2)`, then
+    `piece(rec + k, len − k)` if the record crosses the page end; store
     `rec[1]`; `writeLogWords(rec, len)`; `remainingWordsInMbyte -= len`;
     `m_total_written_words += len`; `redoEndOfRecord`.
 - **File mode.** Not called.
@@ -282,7 +293,7 @@ address(f, p, w)  = file(f).m_pmem_base + p * 32768 + w * 4
 
 ### S4.3 PREPARE writer
 
-- **Goal.** PREPARE with the length in `w0` and the CRC in `w1` (format §5.1).
+- **Goal.** PREPARE with the length in `w0` and the checksum in `w1` (format §5.1).
 - **Changes.**
   - `doWritePrepareLog` `DblqhMain.cpp:13529-13538`: `if (c_redo_pmem)
     writePrepareLogPmem(...) else { writeLogHeader; writeKey; writeAttrinfoLab; }`.
@@ -292,31 +303,31 @@ address(f, p, w)  = file(f).m_pmem_base + p * 32768 + w * 4
     build words 0-7 on the stack (`w0 = PmemRedo::w0(ZPREP_OP_TYPE, 0, len)`,
     `w1 = 0`, then hashValue, operation, aiLen, keyLen, rowid as
     `14239-14244`); remember `w1p = &page[idx + 1]` (`w0` is at an even
-    index, so `w1` is on the same page); `redoRecBegin`; CRC words 2-7;
-    `writeLogWords(hdr, 8)`; `writeKey(..., &c)`; `writeAttrinfoLab(..., &c)`;
-    if `keyLen + aiLen` is odd, append and CRC one 0 word; `c.finish()`
-    (stores `*w1p` last); `m_total_written_words += len`;
-    `redoEndOfRecord`.
-  - `writeKey` `14262` and `writeAttrinfoLab` `14286`: new last parameter
-    `PmemRedo::RecCrc *crc = nullptr`; in the chunk loops (`14273-14276`,
-    `14303-14306`) add `if (crc) crc->add(srcPtr, length);`. The CRC reads
-    the section chunk, so interleaved page headers are skipped by
-    construction (F4).
+    index, so `w1` is on the same page); `redoRecBegin`;
+    `writeLogWords(hdr, 8)`; `writeKey`; `writeAttrinfoLab`; if
+    `keyLen + aiLen` is odd, append one 0 word. Then hash the body where it
+    lies (F4): `c.piece` from `w2` to the record end or the page end in the
+    start page, then from word 32 of each next page, following `ZNEXT_PAGE`
+    of the filled list (F3) up to the current page. `c.finish()` (stores
+    `*w1p` last); `m_total_written_words += len`; `redoEndOfRecord`.
+  - `writeKey` `14262` and `writeAttrinfoLab` `14286`: unchanged. Hashing
+    the section chunks as they are copied would give pieces that the reader
+    cannot see; the pieces must be the page segments (E4).
   - `checkNewMbyte` `14188-14189`: `ttotalLogSize = c_redo_pmem ?
     PmemRedo::prepareLen(primKeyLen, currTupAiLen, false) : <today>`.
   - Declarations at `Dblqh.hpp:4164-4170`, `4230`.
-- **File mode.** `writeKey`/`writeAttrinfoLab` get `nullptr`; one branch
-  per section chunk, no change of bytes. `checkNewMbyte` keeps today's
-  expression.
+- **File mode.** `writeKey`/`writeAttrinfoLab` are not changed.
+  `checkNewMbyte` keeps today's expression.
 - **Tests.** Unit: S4.1 PREPARE vectors. Integration: the debug self-check
   (S5.2) on every PREPARE in MTR on PMEM; large rows (attrinfo > 2 pages)
   with `ndb_bulk_load`-style inserts of 14000-byte rows; `redoLogReader`
   (S6) on the files.
 - **Depends on.** S4.1, S4.2.
 - **Size.** M, 2 days.
-- **Risks.** The pointer `w1p` must stay valid until `finish`: the page is
-  on the filled list or current, and pages are released only by
-  `redoCopyOut`, which runs after `finish` (S5.2). `PF_TRANSID` is never set.
+- **Risks.** The pointer `w1p` and the pages of the body must stay valid
+  until `finish`: they are on the filled list or current, and pages are
+  released only by `redoCopyOut`, which runs after `finish` (S5.2).
+  `PF_TRANSID` is never set.
 
 ### S4.4 COMMIT, ABORT, COMPLETED_GCI and COMPLETE
 
@@ -364,16 +375,17 @@ address(f, p, w)  = file(f).m_pmem_base + p * 32768 + w * 4
 - **Changes.**
   - New `void writeFillerPmem(Signal*, LogPartRecord*, LogPageRecordPtr&, LogFileRecordPtr&, Uint32 len)`:
     `ndbrequire(len >= 2 && len % 2 == 0)`; `w0(ZFILLER_TYPE, 0, len)`,
-    CRC over `w0 || S`; zero the body in DRAM, so the copied unit is
-    deterministic (the body is not interpreted); `writeLogWords`;
+    checksum over `w0 || S` with `H = EMPTY_HASH`; zero the body in DRAM,
+    so the copied unit is deterministic (the body is not interpreted);
+    `writeLogWords`;
     `remainingWordsInMbyte -= len`; `m_pmem_filler_words += len`. Not
     counted in `m_total_written_words`. Does not call `redoEndOfRecord`
     (only `redoPersist` writes fillers; its copy follows at once).
   - New `void writeNextMbytePmem(LogPartRecord*, LogFileRecord*, LogPageRecord*)`:
     at `idx = ZCURR_PAGE_INDEX`, store `w0(ZNEXT_MBYTE_TYPE, 0, 2)` and the
-    CRC; zero words up to the next W boundary; set `ZCURR_PAGE_INDEX` to that
-    boundary so the copy includes the unit (F6). The `ZNEXT_LOG_SIZE = 2`
-    reserve (`Dblqh.hpp:245`) guarantees room [V].
+    checksum (`H = EMPTY_HASH`); zero words up to the next W boundary; set
+    `ZCURR_PAGE_INDEX` to that boundary so the copy includes the unit (F6).
+    The `ZNEXT_LOG_SIZE = 2` reserve (`Dblqh.hpp:245`) guarantees room [V].
   - `redoPadToUnit` (S5.2) decides between them with `PmemRedo::padWords`.
 - **File mode.** Not called.
 - **Tests.** Unit: `padWords` table. MTR on PMEM: a test that writes enough
@@ -396,8 +408,9 @@ address(f, p, w)  = file(f).m_pmem_base + p * 32768 + w * 4
       own fileNo (never rewritten), arrays from word 36 with today's loop
       (`36104-36125`, base `ZPAGE_HEADER_SIZE + PmemRedo::FD_HEADER`), pad
       word if odd;
-    - CRC over the words in the page with S = (header lap, part, fileNo,
-      page 0, index 32);
+    - checksum over the words in the page, the body in one piece (the FD
+      never leaves page 0), with S = (header lap, part, fileNo, page 0,
+      index 32);
     - FILLER from the FD end to word 8192 (only `w0` and `w1` are stored;
       the body is neither zeroed nor copied, D4);
     - `ndbrequire(fdEnd + 2 <= PmemRedo::CONTROL_AREA_WORD)` (F12);
@@ -463,13 +476,13 @@ address(f, p, w)  = file(f).m_pmem_base + p * 32768 + w * 4
   - `initFourth` `40451`: PMEM head index `ZPAGE_HEADER_SIZE + 16`. This
     line is in the restart code; agreed with recovery (§7.2).
 - **Alternative.** If the platform maps the files before these writes, use
-  the run-time copy path instead of `writeSinglePage`. The masked CRC makes
-  both work.
+  the run-time copy path instead of `writeSinglePage`. The masked checksum
+  makes both work.
 - **Decided** (`implementation_plan.md` R2 and §5.1, Q-A4 answered):
   the alternative. The platform plan (S3.5) maps every file at open with
   `OM_INIT`, and `redoPmemInitFile()` writes page 0 of every file and
   page 1 of file 0 through the mapping, with no LFO and no FSWRITEREQ. The
-  header CRC then covers all of words 1–31 and `DRAM_ONLY_MASK` goes; the
+  header checksum then covers all of words 1–31 and `DRAM_ONLY_MASK` goes; the
   S4.1 test "changing a `DRAM_ONLY_MASK` word → accepted" becomes
   "changing any of words 1–31 → rejected".
 - **File mode.** Every change is under `if (c_redo_pmem)`.
@@ -773,7 +786,7 @@ redoEndOfRecord(part, file)            // called by every writer except FILLER a
 
 | Item | What this plan needs |
 |---|---|
-| `ndb_crc32c(Uint32 crc, const void*, size_t)` | zlib-style chaining: start with 0, pass the previous result, the function applies the initial and final inversion (Q1). Pure and thread-safe (used from the NDBFS thread in `execFSWRITEREQ`) |
+| `ndb_xxh3_64(const void*, size_t)`, `ndb_xxh3_64_seed(const void*, size_t, Uint64 seed)` | The results of `XXH3_64bits` and `XXH3_64bits_withSeed` (E4, Q1). Pure and thread-safe (used from the NDBFS thread in `execFSWRITEREQ`). Done in step 1 phase 1 |
 | `ndb_pmem_copy_nt(void *dst, const void *src, size_t len)` | Non-temporal copy, no fence inside. `dst` 64-byte aligned, `len` a multiple of 64; `src` 64-byte aligned (DRAM pages and an `alignas(64)` stack image) |
 | `ndb_pmem_drain()` | `sfence` (x86) / `DSB` (ARM). Drains this thread's copies |
 | Power-loss emulation (S1) | Must see every PMEM store, so DBLQH stores to the mapping only through `ndb_pmem_copy_nt` |
@@ -818,7 +831,7 @@ S3 (platform) ─────────── S4.8 ─────────
 
 | PR | Packages | Testable by | Needs |
 |---|---|---|---|
-| PR1 "PMEM REDO format" | S4.1 | unit test | S1 CRC |
+| PR1 "PMEM REDO format" | S4.1 | unit test | S1 `ndb_xxh3` |
 | PR2 "PMEM REDO writers" | S4.2-S4.7, S5.1 | unit test; file-mode regression (writers dispatch, `c_redo_pmem` false) | PR1 |
 | PR3 "PMEM REDO write path" | S4.8, S5.2-S5.5 | initial start and DML on `memmap=` PMEM, `DUMP 2368 3` | PR2, S1-S3 |
 | PR4 "PMEM REDO checks and benchmark switch" | S5.6-S5.9 | shared-part and benchmark tests | PR3 |
@@ -836,7 +849,7 @@ S5 ≈ 18.5 (1 + 5 + 3 + 1.5 + 1.5 + 1 + 1 + 1.5 + 3).
 
 | Symbol | Kind | Where | Package |
 |---|---|---|---|
-| `PmemRedoFormat.hpp`, namespace `PmemRedo` (constants, `w0`, `Suffix`, `RecCrc`, `buildPageHeader`, `pageHeaderOk`, `recordOk`, `padWords`, `prepareLen`, `fdLen`, `lsn`) | header | `src/kernel/blocks/dblqh/` | S4.1 |
+| `PmemRedoFormat.hpp`, namespace `PmemRedo` (constants, `w0`, `Suffix`, `RecChecksum`, `EMPTY_HASH`, `buildPageHeader`, `pageHeaderOk`, `recordOk`, `padWords`, `prepareLen`, `fdLen`, `lsn`) | header | `src/kernel/blocks/dblqh/` | S4.1 |
 | `pmem_redo_format-t` | unit test | same | S4.1 |
 | `ZFILLER_TYPE` 10, `ZCOMPLETE_TYPE` 11, `ZSR_HEAD_TYPE` 12 | macro | `Dblqh.hpp:~263` | S4.1 |
 | `RF_INVALIDATED`, `CF_DURABLE`, `AF_AFTER_COMMIT`, `PF_TRANSID` | macro | `Dblqh.hpp` | S4.1 |
@@ -864,8 +877,8 @@ S5 ≈ 18.5 (1 + 5 + 3 + 1.5 + 1.5 + 1 + 1 + 1.5 + 3).
 
 | # | Issue | Evidence | Proposal |
 |---|---|---|---|
-| D1 | E5 says the header CRC covers words 1-31. At initial start, page 0 of every file and page 1 of file 0 are written by `writeSinglePage` through an LFO, which needs `ZNEXT_PAGE = RNIL` in the page during the I/O and stamps words 0 and 12-20 (F8). That page cannot carry the clean image | `36212-36217`, `35915-35926` [V] | Define the header CRC over words 1-31 with the DRAM-only words (4, 5, 8, 9, 11, 12-14, 17-20, 27-31) read as 0; the reader masks the same words. Run-time copies still store zeros there. No space cost. Alternative: write those pages through the mapping after S3 maps the files. **Decided** (Q-A4, `implementation_plan.md` R2, §5.1): the alternative, since S3.5 already maps the files at open and writes these pages with `redoPmemInitFile()`; no mask |
-| D2 | E5 says the header is "written at page init with a CRC". `initLogpage` cannot know the page number (F5) | `43735-43737`, `43882`, `43896`, `36157-36159` [V] | Build the image, identity and CRC at the first copy, from the copy position. Same bytes on PMEM; `initLogpage` unchanged |
+| D1 | E5 says the header checksum covers words 1-31. At initial start, page 0 of every file and page 1 of file 0 are written by `writeSinglePage` through an LFO, which needs `ZNEXT_PAGE = RNIL` in the page during the I/O and stamps words 0 and 12-20 (F8). That page cannot carry the clean image | `36212-36217`, `35915-35926` [V] | Define the header checksum over words 1-31 with the DRAM-only words (4, 5, 8, 9, 11, 12-14, 17-20, 27-31) read as 0; the reader masks the same words. Run-time copies still store zeros there. No space cost. Alternative: write those pages through the mapping after S3 maps the files. **Decided** (Q-A4, `implementation_plan.md` R2, §5.1): the alternative, since S3.5 already maps the files at open and writes these pages with `redoPmemInitFile()`; no mask |
+| D2 | E5 says the header is "written at page init with a checksum". `initLogpage` cannot know the page number (F5) | `43735-43737`, `43882`, `43896`, `36157-36159` [V] | Build the image, identity and checksum at the first copy, from the copy position. Same bytes on PMEM; `initLogpage` unchanged |
 | D3 | E15 says "about 8 staging pages per part". With fewer than 10 free pages `count_free_log_pages` reports "buffer full", and every prepare would queue or fail with 1221 (F9) | `991`, `13383-13431` [V] | At least 16 pages for writing; ask for 32 (1 MB) per part, or SR's need if larger |
 | D4 | The FD is followed by "a FILLER to the page end" (E13), and the control area is in the last 256 bytes of page 0 of file 0 (E10), inside that FILLER's body. The write-path note zeroes filler bodies before the copy, which would overwrite the control area | design E10, E13; write path §4.1 | The FD FILLER body is never stored: the page-0 copy stops at the unit holding the FILLER header (S5.3). Other FILLERs (≤ 14 words) lie inside one unit and are zeroed in DRAM. Say this in the format note |
 | D5 | The design reserves 46 words per prepare. In step 1 no COMPLETE is written, so the second half must also be released at COMMIT, or `m_committed_words` grows without bound | `47888-47909` [V] | S4.7: release everything at COMMIT for non-durable operations |
@@ -877,9 +890,11 @@ S5 ≈ 18.5 (1 + 5 + 3 + 1.5 + 1.5 + 1 + 1 + 1.5 + 3).
 
 ## 11. Open questions
 
-1. **`ndb_crc32c` convention** (platform): zlib-style chaining assumed. The
-   unit test of S4.1 fails if it is not.
-2. **Header CRC mask (D1)**: accept, or require initial-start writes through
+1. **Checksum functions** (platform): `ndb_xxh3_64` and `ndb_xxh3_64_seed`
+   give the results of `XXH3_64bits` and `XXH3_64bits_withSeed`.
+   **Answered:** `ndb_xxh3-t` checks this for every implementation (step 1
+   phase 1); the vectors of S4.1 check it again.
+2. **Header checksum mask (D1)**: accept, or require initial-start writes through
    the mapping? **Answered (Q-A4, `implementation_plan.md` §5.1):** through
    the mapping, no mask.
 3. **Who owns the initial-start images** (S4.8 here, NDBFS part in S3):
@@ -894,8 +909,10 @@ S5 ≈ 18.5 (1 + 5 + 3 + 1.5 + 1.5 + 1 + 1 + 1.5 + 3).
 7. **Persist-latency histogram**: `NdbTick_getCurrentTicks` costs a clock
    read per barrier (tens of ns [I]). Always on, or only with the
    benchmark switch?
-8. **CRC outside the lock** (format W8): the body CRC of PREPARE could be
-   computed before `lock_log_part`, adding only S under the lock. Not in
-   step 1; worth it if the shared-part mutex shows up in profiles.
+8. **Checksum outside the lock** (format W8): the body hash of a PREPARE
+   could be computed before `lock_log_part`, leaving only the 20-byte mix of
+   `w0` and S under the lock. It needs the body in one buffer, and holds only
+   if the record does not span a page, which is known only under the lock.
+   Not in step 1; worth it if the shared-part mutex shows up in profiles.
 9. **GCP progress check in MTR** for S5.4: which observable does the test
    subtask prefer (cluster log GCP lines, ndbinfo, or a DUMP)?

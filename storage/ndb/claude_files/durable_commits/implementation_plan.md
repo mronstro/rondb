@@ -11,7 +11,7 @@ is explained in §5.1).
 |---|---|
 | `implementation_plan.md` | This file: order, milestones, pull requests, conventions, reconciled points, open questions |
 | `step1_phases.md` | Step 1 progress: the phases, their gates and state |
-| `impl_step1_platform.md` | Step 1, S1–S3: portlib (CPU features, CRC32C, PMEM helper, device queries, power-loss emulation), configuration and start-up checks, NDBFS mapping |
+| `impl_step1_platform.md` | Step 1, S1–S3: portlib (CPU features, XXH3 checksum, PMEM helper, device queries, power-loss emulation), configuration and start-up checks, NDBFS mapping |
 | `impl_step1_lqh_write.md` | Step 1, S4–S5: DBLQH record writers, the persist primitive, bypassing the file write path, GCP save, mbyte and file switch, benchmark switch |
 | `impl_step1_recovery_test.md` | Step 1, S6–S7: restart reading and end of log, control area, zeroing, node restart, `redoLogReader`, power-loss testing, the test plan for step 1 |
 | `impl_next_steps.md` | Steps after step 1: X1 and X3–X8, with new signals, milestones and design issues |
@@ -78,7 +78,7 @@ one person counts only this chain.)
 
 | Stream | Packages | Size |
 |---|---|---|
-| **Platform** (`impl_step1_platform.md`) | S1.1 CPU features and the `is_avx2_supported` fix · S1.2 `ndb_crc32c` · S1.3 `ndb_pmem` map, prefault, copy, flush, drain, stubs · S1.4 domain, bad-block, dirty-shutdown and NUMA queries · S1.5 power-loss emulation · S2.1 parameters and path parser · S2.2 management-server checks · S2.3 data-node reads · S2.4 part → NUMA node → path · S2.5 start-time refusals · S2.6 ndbinfo `redo_log_pmem` · S2.7 test settings · S3.1 signal changes · S3.2 map in the IO thread · S3.3 REDO base paths · S3.4 DBLQH open flags · S3.5 initial start · S3.6 every file mapped at SR and NR | 36–42 pd |
+| **Platform** (`impl_step1_platform.md`) | S1.1 CPU features and the `is_avx2_supported` fix · S1.2 `ndb_xxh3` · S1.3 `ndb_pmem` map, prefault, copy, flush, drain, stubs · S1.4 domain, bad-block, dirty-shutdown and NUMA queries · S1.5 power-loss emulation · S2.1 parameters and path parser · S2.2 management-server checks · S2.3 data-node reads · S2.4 part → NUMA node → path · S2.5 start-time refusals · S2.6 ndbinfo `redo_log_pmem` · S2.7 test settings · S3.1 signal changes · S3.2 map in the IO thread · S3.3 REDO base paths · S3.4 DBLQH open flags · S3.5 initial start · S3.6 every file mapped at SR and NR | 36–42 pd |
 | **Write side** (`impl_step1_lqh_write.md`) | S4.1 `PmemRedoFormat.hpp` · S4.2 framing helpers · S4.3 PREPARE · S4.4 COMMIT, ABORT, COMPLETED_GCI, COMPLETE · S4.5 FILLER, NEXT_MBYTE · S4.6 header image and FD · S4.7 reservation · S4.8 initial-start images · S5.1 LSN and fields · S5.2 persist primitive and copy-out · S5.3 mbyte and file switch · S5.4 GCP_SAVEREQ · S5.5 bypasses · S5.6 shared parts · S5.7 debug send check · S5.8 benchmark switch and counters · S5.9 test wiring | 33 pd |
 | **Recovery and tests** (`impl_step1_recovery_test.md`) | S6.1 restart reads from the mapping · S6.2 reader module `PmemRedoScan` and unit tests · S6.3 control area and slots · S6.4 phase 1 and exact E · S6.5 `execSr` and `readCommitLog` · S6.6 phase 4 and zeroing · S6.7 node restart · S6.8 `redoLogReader` · S7.1 crash error inserts · S7.2 torn-copy injector · S7.3 power-loss emulation wiring · S7.4 GCP-saved ledger · S7.5 MTR and autotest configs | 47 pd |
 
@@ -98,7 +98,7 @@ regression tests in file mode.
 |---|---|---|---|---|
 | 0 | **Bug fix, separate ticket:** `ZMIN_READ_BUFFER_SIZE` 3 → 4 in both modes (R13, Q-A6) | — | A test with PREPARE records of the largest size, then SR, in file mode; the same in PMEM mode once pull request 9 is in | — |
 | 1 | GCP-saved ledger checker | S7.4 | Runs in file mode on today's code: no loss at or below R_gcp after a full crash | — |
-| 2 | CPU features and CRC32C | S1.1, S1.2 | CRC vector unit tests on the three platforms (§2.4) and the software fallback | — |
+| 2 | CPU features and XXH3 | S1.1, S1.2 | `ndb_xxh3-t` on the three platforms (§2.4): every implementation, the scalar one included, equals the header's XXH3 | — |
 | 3 | PMEM helper | S1.3, S1.4 | `ndb_pmem-t` on a plain file on the three platforms, and on `memmap=` | 2 |
 | 4 | Configuration | S2.1–S2.3, S2.7 | Config unit tests; management-server refusals | — |
 | 5 | NDBFS mapping and placement | S3.1–S3.4, S2.4, S2.5 | PMEM mode with today's format: the MTR ndb suite and a testSystemRestart subset in `nodax` and on `memmap=` (**M0.2**) | 3, 4 |
@@ -149,8 +149,8 @@ design changes are recorded in `pmem_redo_design.md` §6.
 | # | Point | Decision | Source |
 |---|---|---|---|
 | R1 | Staging buffer per log part | RedoBuffer in PMEM mode defaults to **2 MB per part**. Writing needs at least 32 pages (below 10 free pages counts as "buffer full"), SR reading at least 43 pages. E15's "about 8 pages" was too few | write D3, recovery |
-| R2 | Page-header CRC (**answered, Q-A4: option B**, §5.1) | Covers all of words 1–31; the DRAM-only words (links, fill index, dirty flag, debug stamps, unused words) are stored as 0. The initial-start pages are written through the mapping by `redoPmemInitFile()`, as the platform plan (S3.5) and the recovery plan already assume, not by `writeSinglePage`. No mask. The write plan's S4.8 and D1 change accordingly | write D1, platform S3.5, recovery §1 |
-| R3 | Page identity and header CRC | Set at the first copy of the page, not in `initLogpage`, which cannot know the page number. The bytes on PMEM are the same | write D2 |
+| R2 | Page-header checksum (**answered, Q-A4: option B**, §5.1) | Covers all of words 1–31; the DRAM-only words (links, fill index, dirty flag, debug stamps, unused words) are stored as 0. The initial-start pages are written through the mapping by `redoPmemInitFile()`, as the platform plan (S3.5) and the recovery plan already assume, not by `writeSinglePage`. No mask. The write plan's S4.8 and D1 change accordingly | write D1, platform S3.5, recovery §1 |
+| R3 | Page identity and header checksum | Set at the first copy of the page, not in `initLogpage`, which cannot know the page number. The bytes on PMEM are the same | write D2 |
 | R4 | Control area | Words 8128–8191 of page 0 of file 0, owned by recovery. The FILLER after the FD covers it, so a FILLER body is never stored, and page 0 is never copied in full | write D4, recovery D1, D7 |
 | R5 | Reservation release in step 1 | Released in full at COMMIT, since no COMPLETE is written yet. The two-step release starts in X4 | write D5 |
 | R6 | Initial head | Word 48 (`ZPAGE_HEADER_SIZE + 16`) in PMEM mode: COMPLETED_GCI(1) and a FILLER come first | write D8, recovery |
@@ -161,7 +161,7 @@ design changes are recorded in `pmem_redo_design.md` §6.
 | R11 | Placement can change between starts | A node in PMEM mode looks for its files under every REDO path | platform issue 3 |
 | R12 | Prefault | `MADV_POPULATE_WRITE`, with a write-touch fallback; `MAP_POPULATE` does not make shared pages writable | platform issue 5 |
 | R13 | Read buffer (**answered, Q-A6**) | `ZMIN_READ_BUFFER_SIZE` 3 → 4 in **both modes**: a PREPARE can span 4 pages. A separate bug fix with its own ticket, pull request 0 | format, recovery D5 |
-| R14 | CRC chaining | `ndb_crc32c(crc, buf, len)` chains like zlib; the InnoDB port has a seeded internal routine | platform |
+| R14 | Checksum functions | `ndb_xxh3_64(buf, len)` and `ndb_xxh3_64_seed(buf, len, seed)` give the results of `XXH3_64bits` and `XXH3_64bits_withSeed`. A record that crosses a page header chains its body hash through the seed (E4) | platform |
 | R15 | Base-path fallback | `get_base_path()` falls back to the main file system path when the REDO path is unset. Cleanup at initial start must never act on an unset REDO path, or it wipes the whole node file system. PMEM mode only, by R18 | platform |
 | R16 | `secondFileFlags` | Never initialised by DBLQH; zero it before the new use | platform issue 4 |
 | R17 | Numbers | DUMP 2368 (benchmark), 2369 (state), 2370 (power loss now). DBLQH error inserts 5155–5159 and 5161–5172 for step 1 (5160 is taken; next free becomes 5173); 5180–5199 for later steps | write, recovery, next steps |
@@ -180,7 +180,7 @@ x86_64 is not supported.
 | Platform | Builds | Runs | Does not cover |
 |---|---|---|---|
 | Linux x86_64 | Everything | Every test set below; `memmap=` with `emulated` on a machine booted with it | Real CXL latencies |
-| Linux ARM64 | Everything | The unit tests; the PMEM set in `nodax` | `getauxval` CPU detection and the Linux ARM64 CRC path are only here |
+| Linux ARM64 | Everything | The unit tests; the PMEM set in `nodax` | `getauxval` CPU detection is only here |
 | macOS ARM64 | Everything | The unit tests; the PMEM set in `nodax` | `MAP_SYNC`, device queries (stubs), `memmap=` |
 
 On macOS ARM64 the copy, flush and fence are the ARM64 code of Linux:
@@ -255,7 +255,7 @@ the ones marked * need your decision, see §5):
 | Kind | Names |
 |---|---|
 | Config | `RedoLogMode` (`file` \| `pmem`), `FileSystemPathRedoLog` (PMEM mode only, R18; one path per NUMA node, `node:path,...`), `DurableCommits` (X7); hidden test settings of R9, allowed in release builds. CFG ids 711–716 are free on 26.10, 26.05 and 25.10 |
-| Portlib | `include/util/ndb_crc32c.h` (`ndb_crc32c`); `include/portlib/ndb_pmem.h` (`ndb_pmem_map`, `_unmap`, `_prefault`, `_copy_nt`, `_flush`, `_drain`, `_persistence_domain`, `_numa_node`, emulation `ndb_pmem_emul_*`) |
+| Portlib | `include/util/ndb_xxh3.h` (`ndb_xxh3_64`, `ndb_xxh3_64_seed`); `include/portlib/ndb_pmem.h` (`ndb_pmem_map`, `_unmap`, `_prefault`, `_copy_nt`, `_flush`, `_drain`, `_persistence_domain`, `_numa_node`, emulation `ndb_pmem_emul_*`) |
 | NDBFS | `FsOpenReq::OM_MAP_SYNC`; FSOPENCONF grows from 5 to 7 words with the mapping address |
 | DBLQH | `c_redo_pmem`; `LogFileRecord::m_pmem_base`; `LogPartRecord::m_pmem_persisted_lsn`; `TcConnectionrec::m_redo_end_lsn`; `redoPersist`, `redoPersistOp`, `redoCopyOut`, `redoPadToUnit`, `redoEndOfRecord`, `redoInitWritePosition`, `redoWriteLastFileSlot`; format constants in `PmemRedoFormat.hpp`; reader in `PmemRedoScan` |
 | Files | REDO files stay `D<8+p>/DBLQH/S<n>.FragLog`, under the REDO path of the part's NUMA node |
@@ -276,12 +276,12 @@ the ones marked * need your decision, see §5):
 | Q-A1 | Accept the hidden test modes of R9, with `nodax` running PMEM mode on any file (macOS, Linux without PMEM)? Allowed in release builds? Durable commits never allowed with `nodax`? | **Answered (review 10):** PMEM mode must run on normal DRAM, since no PMEM hardware is available, release builds included. The code is built for real PMEM so it can be tested when hardware arrives. Consequence: durable commits are allowed in the test modes too (R9) |
 | Q-A2 | Should `FileSystemPathRedoLog` also move the REDO log in file mode? | **Answered (review 10):** no. File mode keeps today's REDO placement; too much relies on it (R18) |
 | Q-A3 | Path syntax `node:path,...`, at most 8 entries? | **Answered (review 11):** yes |
-| Q-A4 | Header CRC over all of words 1–31 with the initial-start pages written through the mapping, or a CRC that skips the DRAM-only words so they can still be written by `writeSinglePage`? See §5.1 | **Answered (review 10):** B, through the mapping, no mask |
-| Q-A5 | Is ARM in scope for the first version? | **Answered (review 11):** build and unit-test on Linux x86_64, Linux ARM64 and macOS ARM64; macOS x86_64 is not supported. Every step-1 unit test runs on all three (`ndb_crc32c-t`, `ndb_pmem-t`, `RedoLogPaths-t`, `pmem_redo_format-t`, the `PmemRedoScan` tests). On ARM64 the persist path is stores, `DC CVAP` per line and `DSB`, on macOS too (§2.4) |
+| Q-A4 | Header checksum over all of words 1–31 with the initial-start pages written through the mapping, or a checksum that skips the DRAM-only words so they can still be written by `writeSinglePage`? See §5.1 | **Answered (review 10):** B, through the mapping, no mask |
+| Q-A5 | Is ARM in scope for the first version? | **Answered (review 11):** build and unit-test on Linux x86_64, Linux ARM64 and macOS ARM64; macOS x86_64 is not supported. Every step-1 unit test runs on all three (`ndb_xxh3-t`, `ndb_pmem-t`, `RedoLogPaths-t`, `pmem_redo_format-t`, the `PmemRedoScan` tests). On ARM64 the persist path is stores, `DC CVAP` per line and `DSB`, on macOS too (§2.4) |
 | Q-A6 | Fix `ZMIN_READ_BUFFER_SIZE` (3 → 4) in file mode too? | **Answered (review 10):** yes, as a separate bug fix for both file mode and PMEM mode (pull request 0) |
 | Q-A7 | Unsafe shutdown before X6: warn or refuse? | Warn and record (R10) |
 | Q-A8 | Bad blocks elsewhere on the device, when they cannot be mapped to a file: refuse or warn? | Warn |
-| Q-A9 | Should a full CRC check of every record run in the restart's execution scan, not only in phase 1? | Yes; the cost is small next to applying the records |
+| Q-A9 | Should a full checksum check of every record run in the restart's execution scan, not only in phase 1? | Yes; the cost is small next to applying the records |
 | Q-A10 | Persist-latency histogram: time every persist, or 1 in 16? | 1 in 16 |
 | Q-A11 | New, from Q-A1: on DRAM a persist costs far less than the 200–2000 ns of CXL persistent memory. Add a hidden setting that spins for a given time after each persist barrier, so commit latency and throughput can be measured for the target hardware before it exists? | **Answered (review 10):** yes, `__RedoLogPmemPersistDelayNs`, default 0, about 1 pd, in pull request 10 with the benchmark switch |
 
@@ -338,7 +338,8 @@ tear on a power loss, since only 8-byte stores are failure-atomic, and a
 torn header would make the whole page unreadable. A word such as the fill
 index, which changes with every record, can therefore not be part of the
 stored header. The stored header holds the recovery words and 0 in every
-DRAM-only word, and word 0 holds a CRC32C of words 1–31.
+DRAM-only word, and word 0 holds a checksum of words 1–31, the low 32 bits
+of their XXH3 (E5).
 
 **The question.** At run time the copy-out builds this clean image, so it
 is always right. The first page of each mbyte, formatted in the NDBFS
@@ -352,14 +353,14 @@ the write completes `releaseLfoPages` follows word 4 to free the pages
 (`DblqhMain.cpp:35915-35926`), and `writeDbgInfoPageHeader` stamps words
 12–20 (`36212-36217`). NDBFS writes the page as it is in memory, so the
 stored header would hold RNIL and debug values where the clean image holds
-0, and a CRC over all of words 1–31 would not be the CRC of the clean
-image. There are two ways out:
+0, and a checksum over all of words 1–31 would not be the checksum of the
+clean image. There are two ways out:
 
-| | A: the CRC skips the DRAM-only words | B: write these pages through the mapping |
+| | A: the checksum skips the DRAM-only words | B: write these pages through the mapping |
 |---|---|---|
-| Rule | CRC over words 1–31 with the DRAM-only words read as 0, whatever they hold; the reader does the same | CRC over all of words 1–31; every stored header has 0 in the DRAM-only words |
+| Rule | Checksum over words 1–31 with the DRAM-only words read as 0, whatever they hold; the reader does the same | Checksum over all of words 1–31; every stored header has 0 in the DRAM-only words |
 | Initial start | As today: `writeSinglePage` and an NDBFS write | `redoPmemInitFile()` copies the pages into the mapping with the run-time copy and persists them; no log-file operation, no NDBFS write |
-| What the CRC protects | Every word recovery reads; not the DRAM-only words, which nothing reads | Every word of the header |
+| What the checksum protects | Every word recovery reads; not the DRAM-only words, which nothing reads | Every word of the header |
 | Cost | One mask constant in `PmemRedoFormat.hpp`, shared by writer and reader; a later use of one of these words on PMEM must take it out of the mask | A PMEM-only path in initial start. The files are already mapped at that point (S3.5 maps them at open with `OM_INIT`), so it is small |
 | Power-loss emulation | Does not see these writes. Harmless at initial start, but it breaks the rule that every PMEM write goes through the `ndb_pmem` calls | Sees every PMEM write |
 

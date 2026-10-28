@@ -66,10 +66,10 @@ Terms used below:
 5. **End-of-log rule.** Scanning forward from an mbyte start, E is the
    first position whose page header or record fails a check: header
    checksum, header lap and position, record type and length, record
-   checksum seeded with the record's LSN. Phase 1 finds E exactly by
-   scanning the last mbyte (≤ 1 MB). Every later scan stops at E. An invalid
-   record before E means corruption, and the node stops; it never silently
-   shortens the log.
+   checksum bound to the record's lap and position (E4). Phase 1 finds E
+   exactly by scanning the last mbyte (≤ 1 MB). Every later scan stops at
+   E. An invalid record before E means corruption, and the node stops; it
+   never silently shortens the log.
 6. **Lap and position checks are not enough.** A hole can be followed by
    valid records of the current lap: lines evicted under ADR, or part of a
    torn non-temporal copy. They must be zeroed before anything is written
@@ -338,8 +338,9 @@ A header is written only when it is invalid (W7 in §8).
 **The last-file slots.** Each log part has a control area. It holds
 static config (format magic and version, NoOfFragmentLogParts, the part
 number, NoOfFragmentLogFiles, FragmentLogFileSize, W) and two slots. Each
-slot is `{seq (64 bit), lastFileNo, lap of that file, crc}` and fits in
-one 64-byte line.
+slot is `{seq (64 bit), lastFileNo, lap of that file, checksum}` and fits
+in one 64-byte line. The checksum is the low 32 bits of XXH3 over the
+slot's other fields (E10 of `pmem_redo_design.md`).
 
 - **Write:** take seq = current seq + 1, store the slot `seq & 1`, flush
   it, `sfence`.
@@ -409,7 +410,7 @@ of these hold:
 | V1 page | The header of the page holding p passes its checksum. Its lap, fileNo, pageNo and log part number match the expected ones |
 | V2 header | The type is a known type; type 0 is invalid. The length is within the bounds of the type. The record ends inside the mbyte |
 | V3 spanned pages | Every further page that the record spans passes V1 |
-| V4 checksum | The CRC over the record (page headers in between left out, COMMIT and INVALID_COMMIT hashed alike) seeded with (magic, part number, LSN(p)) equals the stored CRC |
+| V4 checksum | The checksum of E4 of `pmem_redo_design.md` equals the stored one: XXH3 of the body (page headers in between left out), mixed with word 0 (COMMIT and INVALID_COMMIT hashed alike) and with `S`, which binds it to the lap, log part, file and position p |
 | V5 structure | FD only at word 32 of page 0; FILLER ends on a W boundary; nothing follows NEXT_MBYTE in its mbyte |
 
 After a valid record the next position is p + length, skipping page
@@ -426,7 +427,7 @@ be in the next file.
 | Case | What the scan sees | Result |
 |---|---|---|
 | Torn last record | some words new, some old; V4 fails (false pass about 2⁻³²) | E = start of that record |
-| Record of the previous lap at p | V4 fails: the CRC was seeded with an older LSN. V1 also fails if the page header is old | E = p |
+| Record of the previous lap at p | V4 fails: the checksum was bound to an older lap through S. V1 also fails if the page header is old | E = p |
 | Page header torn or not yet written | V1 fails for the page, or V3 for a record that spans into it | E = the first record that touches the page |
 | Mbyte header torn or old | phase 1 sees the lap drop there (an invalid header counts as "lap < L") | E = the first record position of that mbyte |
 | Filler at the end | the filler is valid and ends on a unit boundary; the next unit holds old data or zero, and V1 or V4 fails | E = that unit boundary |
@@ -656,14 +657,14 @@ instead of shortening the tail.
 
 | # | Requirement | Why |
 |---|---|---|
-| F1 | Every record has a CRC32C over its type, length and body. That includes NEXT_MBYTE, FILLER, FD, COMPLETED_GCI, the restart record and any page-skip record. The CRC is seeded with (format magic, log part number, LSN of the record start). Page headers that a record spans are left out | V4; previous-lap records fail; a misparsed offset fails |
+| F1 | Every record has a checksum over its type, length and body (E4 of `pmem_redo_design.md`). That includes NEXT_MBYTE, FILLER, FD, COMPLETED_GCI, the restart record and any page-skip record. The checksum is bound to the lap, log part, file and position of the record start through S. Page headers that a record spans are left out | V4; previous-lap records fail; a misparsed offset fails |
 | F2 | Records start on 8-byte boundaries and have an even word length. The first 8 bytes hold the type and the length | the type and length are one failure-atomic unit (A1); fillers always fit |
-| F3 | Type 0 is invalid. An all-zero record or header never passes (non-zero seed) | zeroed and never-written space ends the log |
+| F3 | Type 0 is invalid. An all-zero record or header never passes (its type is 0; a header needs the magic) | zeroed and never-written space ends the log |
 | F4 | Each type has length bounds. No record spans an mbyte (as today) | V2, V5 |
-| F5 | The COMMIT type word sits alone in an aligned 4-byte slot. The CRC is computed with INVALID_COMMIT read as COMMIT. The same applies to any record later rewritten in place | invalidation by one atomic store keeps the record valid |
-| F6 | Page header: written once per lap; holds magic and version, part number, lap, fileNo, pageNo, and in the first page of each mbyte `maxGciCompleted`, `maxGciStarted`, `lastPrepRef` (start values); has a CRC seeded with its position. `ZCURR_PAGE_INDEX`, `ZNEXT_PAGE`, `ZPREV_PAGE`, `ZPOS_DIRTY` and the debug words are either outside the persistent header or outside the CRC and never stored after init. Keeping the 32-word layout lets recovery reuse its buffers | V1; no header rewrite |
-| F7 | A control area per log part that the lap-change rewrite never touches: static config plus two last-file slots `{seq64, lastFileNo, lap, crc}` | torn-safe last-file pointer (§2.4) |
-| F8 | FILLER: a checksummed header, a length that ends it on a W boundary; the body may be left out of the CRC | V5; a filler costs one 8-byte store |
+| F5 | The COMMIT type word sits alone in an aligned 4-byte slot. The checksum is computed with INVALID_COMMIT read as COMMIT. The same applies to any record later rewritten in place | invalidation by one atomic store keeps the record valid |
+| F6 | Page header: written once per lap; holds magic and version, part number, lap, fileNo, pageNo, and in the first page of each mbyte `maxGciCompleted`, `maxGciStarted`, `lastPrepRef` (start values); has a checksum over words 1–31, which hold its position (E5). `ZCURR_PAGE_INDEX`, `ZNEXT_PAGE`, `ZPREV_PAGE`, `ZPOS_DIRTY` and the debug words are either outside the persistent header or outside the checksum and never stored after init. Keeping the 32-word layout lets recovery reuse its buffers | V1; no header rewrite |
+| F7 | A control area per log part that the lap-change rewrite never touches: static config plus two last-file slots `{seq64, lastFileNo, lap, checksum}` | torn-safe last-file pointer (§2.4) |
+| F8 | FILLER: a checksummed header, a length that ends it on a W boundary; the body may be left out of the checksum | V5; a filler costs one 8-byte store |
 | F9 | Optional: an explicit lap (or LSN) tag in each record | diagnostics in `redoLogReader`; tells "old lap" from "torn" |
 | F10 | Optional: a 64-bit checksum | lowers the 2⁻³² false-pass rate |
 
@@ -698,8 +699,8 @@ instead of shortening the tail.
 | Function (today) | Change |
 |---|---|
 | `readSrFrontpageLab` `36289` | Read the control area: config check, last-file slot |
-| `readSrLastFileLab` `36332`, `readSrLastMbyteLab` `36367` | Verify header CRC and identity. An invalid mbyte header counts as a lap drop. Then scan lastMbyte for E, store E, zero `[E, end)` |
-| `initGciInLogFileRec` `42279` | Verify the FD record's CRC first |
+| `readSrLastFileLab` `36332`, `readSrLastMbyteLab` `36367` | Verify header checksum and identity. An invalid mbyte header counts as a lap drop. Then scan lastMbyte for E, store E, zero `[E, end)` |
+| `initGciInLogFileRec` `42279` | Verify the FD record's checksum first |
 | `readExecSr` `42893`, `readExecLog` `42814`, `readSinglePage` `43112` | Copy from the mapping instead of `FSREADREQ`. Verify checksums on the copy |
 | `execSr` `38962` | Track the expected lap per file. Check V1, V2, V5 per record and V4 for interpreted records. Stop at E. Invalid before E → corruption stop. NEXT_MBYTE in the stop mbyte is no error in durable mode |
 | `execSr` COMMIT gci > R `39117-39132`; `writeDirty` `43669` | Store the type word in the mapping, `clwb`; one `sfence` per batch. No page write |
@@ -723,9 +724,10 @@ instead of shortening the tail.
    run under the part mutex and each ends with its own `sfence`
    (`pmem_redo_write_path.md` §2.4). W1 must stay true if a later design
    copies outside the mutex.
-4. **Q4. CRC32C or a 64-bit checksum?** The rate is 2⁻³² per torn record.
+4. **Q4. A 32-bit or a 64-bit checksum?** The rate is 2⁻³² per torn record.
    A false pass at E would accept one garbage record. It would most likely
-   be a PREPARE, since it is the last record.
+   be a PREPARE, since it is the last record. E4 stores 32 bits, the low
+   half of XXH3.
 5. **Q5. Later simplifications.** Should phase 1 read every mbyte header
    directly (N·F line reads, milliseconds), so that the FD record becomes a
    cross-check only? Should a restart generation (§4.4) be added as
@@ -752,7 +754,7 @@ instead of shortening the tail.
 4. **Replace the in-place page-0 rewrite** by two checksummed slots in a
    control area that the lap change never touches.
 5. **Make COMMIT invalidation a single atomic type-word store**, with the
-   CRC computed as if the type were COMMIT (F5). Without it, today's
+   checksum computed as if the type were COMMIT (F5). Without it, today's
    invalidation and phase 2's step C would truncate the log.
 6. **Stop re-initialising the head page's header** at restart (W7).
 7. **Require W1-W8 from the write path**, above all W1 (barrier frontier)
@@ -776,6 +778,6 @@ change beyond not rewriting the head page. Four gaps come with it:
 - Checksums detect torn and previous-lap data, but not orphans after a
   hole, which are of the current lap (§4.1). Bounded zeroing, which rests
   on W2, is still required.
-- The filler and the NEXT_MBYTE record must be checksummed, position-seeded
+- The filler and the NEXT_MBYTE record must be checksummed, position-bound
   records too. A 1-word NEXT_MBYTE left from the previous lap would
   otherwise let the scan jump over garbage.
