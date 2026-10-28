@@ -4,8 +4,8 @@ Status: **plan, 2026-10-28. No code has been changed.** This is the
 top-level implementation plan for durable commits. It orders the work,
 splits step 1 into pull requests, settles where the detail plans differ,
 and collects the questions for the architect. All paths are relative to
-`storage/ndb/`. Review 10 answered Q-A1, Q-A2, Q-A4 (explained in §5.1),
-Q-A6 and Q-A11 (§5).
+`storage/ndb/`. Reviews 10 and 11 answered Q-A1–Q-A6 and Q-A11 (§5; Q-A4
+is explained in §5.1).
 
 | Document | Content |
 |---|---|
@@ -57,10 +57,10 @@ one person counts only this chain.)
 
 | # | After | Demonstrable |
 |---|---|---|
-| M0.1 | S1, S2 | Portlib and config merged; unit tests pass on Linux and macOS; file mode unchanged |
+| M0.1 | S1, S2 | Portlib and config merged; unit tests pass on Linux x86_64, Linux ARM64 and macOS ARM64; file mode unchanged |
 | M0.2 | S3 | PMEM mode maps, places and checks the REDO files with **today's format**; today's SR and NR tests pass in PMEM mode |
 | M0.3 | S4–S6 | The new format end to end: initial start, traffic, SR and NR in PMEM mode |
-| M0.4 | S7 | Power-loss emulation runs daily: no loss at or below R_gcp |
+| M0.4 | S7 | Power-loss emulation is part of the tests run before every push of PMEM code (§2.4): no loss at or below R_gcp |
 | M1 | X1 | READ_BACKUP read-your-writes after TC takeover |
 | M2 | X3 | The ledger measures the loss above R_gcp after a full crash (expected until M4) |
 | M3 | X4 | Durable protocol on: rows visible only after COMPLETE is persistent, ack after the last COMPLETED, rule-F aborts; commit latency measured |
@@ -97,17 +97,17 @@ regression tests in file mode.
 |---|---|---|---|---|
 | 0 | **Bug fix, separate ticket:** `ZMIN_READ_BUFFER_SIZE` 3 → 4 in both modes (R13, Q-A6) | — | A test with PREPARE records of the largest size, then SR, in file mode; the same in PMEM mode once pull request 9 is in | — |
 | 1 | GCP-saved ledger checker | S7.4 | Runs in file mode on today's code: no loss at or below R_gcp after a full crash | — |
-| 2 | CPU features and CRC32C | S1.1, S1.2 | CRC vector unit tests on x86, ARM and the software fallback; builds on macOS | — |
-| 3 | PMEM helper | S1.3, S1.4 | `ndb_pmem-t` on a plain file and on `memmap=`; stubs build on macOS | 2 |
+| 2 | CPU features and CRC32C | S1.1, S1.2 | CRC vector unit tests on the three platforms (§2.4) and the software fallback | — |
+| 3 | PMEM helper | S1.3, S1.4 | `ndb_pmem-t` on a plain file on the three platforms, and on `memmap=` | 2 |
 | 4 | Configuration | S2.1–S2.3, S2.7 | Config unit tests; management-server refusals | — |
 | 5 | NDBFS mapping and placement | S3.1–S3.4, S2.4, S2.5 | PMEM mode with today's format: the MTR ndb suite and a testSystemRestart subset in `nodax` and on `memmap=` (**M0.2**) | 3, 4 |
 | 6 | Initial start and restarts with every file mapped; ndbinfo | S3.5, S3.6, S2.6 | Initial start, SR and NR in PMEM mode; ndbinfo rows | 5 |
-| 7 | Format and reader module | S4.1, S6.2 | Unit tests over synthetic logs: framing, every torn, stale-lap and orphan case | 2 |
+| 7 | Format and reader module | S4.1, S6.2 | Unit tests over synthetic logs, on the three platforms: framing, every torn, stale-lap and orphan case | 2 |
 | 8 | Record writers | S4.2–S4.7, S5.1 | Unit tests; file-mode regression | 7 |
 | 9 | **PMEM REDO end to end** | S4.8, S5.2–S5.5, S6.1, S6.3–S6.6 | Initial start, traffic, SR and NR in PMEM mode; ledger in PMEM mode (**M0.3**) | 6, 8 |
 | 10 | Checks and benchmark switch | S5.6–S5.9, persist delay (Q-A11) | Shared log parts; debug send checks; `DUMP 2368` persist-latency numbers, also with `__RedoLogPmemPersistDelayNs` at 200–2000 ns | 9 |
 | 11 | Node restart and `redoLogReader` | S6.7, S6.8 | testNodeRestart subset; reader on files from crash tests | 9 |
-| 12 | Power-loss testing | S1.5, S7.1–S7.3, S7.5 | Power-loss emulation and crash inserts in daily autotest (**M0.4**) | 9, 11 |
+| 12 | Power-loss testing | S1.5, S7.1–S7.3, S7.5 | Power-loss emulation and crash inserts in `pmem-redo-tests.txt`, run before every push of PMEM code (**M0.4**) | 9, 11 |
 
 Pull request 9 is the one where PMEM mode starts writing the new format.
 It contains both the write path and the recovery that reads it, so PMEM
@@ -165,6 +165,40 @@ design changes are recorded in `pmem_redo_design.md` §6.
 | R16 | `secondFileFlags` | Never initialised by DBLQH; zero it before the new use | platform issue 4 |
 | R17 | Numbers | DUMP 2368 (benchmark), 2369 (state), 2370 (power loss now). DBLQH error inserts 5155–5159 and 5161–5172 for step 1 (5160 is taken; next free becomes 5173); 5180–5199 for later steps | write, recovery, next steps |
 | R18 | REDO path in file mode (**answered, Q-A2**) | `FileSystemPathRedoLog` is used **only in PMEM mode**. File mode keeps its REDO files exactly where they are today, under `FileSystemPath`; NDBFS treats the parameter as unset there. If it is set in file mode, the management server warns that it has no effect. Switching a node back from PMEM mode to file mode leaves the old files under the REDO path; the user removes them | architect |
+
+### 2.4 Testing without CI
+
+There is no CI. Whoever pushes to the git tree runs the tests and is
+responsible for them. The gate column of §2.2 is therefore what the pusher
+runs before pushing that pull request. The pull request description lists
+the commands and their results.
+
+**Platforms** (Q-A5): Linux x86_64, Linux ARM64 and macOS ARM64. macOS
+x86_64 is not supported.
+
+| Platform | Builds | Runs | Does not cover |
+|---|---|---|---|
+| Linux x86_64 | Everything | Every test set below; `memmap=` with `emulated` on a machine booted with it | Real CXL latencies |
+| Linux ARM64 | Everything | The unit tests; the PMEM set in `nodax` | `getauxval` CPU detection and the Linux ARM64 CRC path are only here |
+| macOS ARM64 | Everything | The unit tests; the PMEM set in `nodax` | `MAP_SYNC`, device queries (stubs), `memmap=` |
+
+On macOS ARM64 the copy, flush and fence are the ARM64 code of Linux:
+stores, `DC CVAP` per line and `DSB`. An Apple M5 Pro reports
+`hw.optional.arm.FEAT_DPB` = 1 (`sysctl`), so `DC CVAP` exists there.
+Whether user code may run it on macOS is not yet verified; `ndb_pmem-t`
+shows it, and the fallback is `DC CIVAC`. This replaces the platform plan's
+`memcpy` stub for macOS, so the production persist code runs on every
+supported platform (Q-A1).
+
+**What runs before a push:**
+
+| Set | Content | Before pushing |
+|---|---|---|
+| Unit | Every step-1 unit test on the three platforms | Any change to portlib, configuration, the format or the reader |
+| File mode | Today's REDO and restart cases in file mode (recovery plan A7) and the MTR `ndb` tests of the area changed | Every pull request, since each must leave file mode unchanged |
+| PMEM | MTR `ndb_pmem_*` and `ndb_redo_pmem_*`, and the autotest list `pmem-redo-tests.txt`, in `nodax` | Any PMEM change, from pull request 5 on |
+| Power loss and ledger | The power-loss emulation and the GCP-saved ledger (recovery plan S7) | Any change to the persist path, the PMEM helper or recovery, from pull request 12 on. The ledger in file mode from pull request 1 on |
+| Long | `pmem-redo-long-tests.txt`, and the PMEM set on `memmap=` with `emulated` | Before each milestone |
 
 ---
 
@@ -227,7 +261,8 @@ the ones marked * need your decision, see §5):
 | ndbinfo | `redo_log_pmem` (step 1); `durable_commits`, `durable_commit_stats`, `node_failure_records` (later steps) |
 | Error inserts | DBLQH 5155–5172 (step 1), 5180–5199 (later); DBTC 8320–8339; DBDIH 7260–7279; QMGR 990–998; NDBCNTR 1040–1049 |
 | DUMP | 2368–2370 (step 1) |
-| Tests | Unit tests with `NDB_ADD_TEST` and `TAPTEST`; MTR with `--defaults-extra-file=suite/ndb/pmem_redo.cnf` (`nodax`) or `pmem_redo_dax.cnf` (`memmap=`, `MTR_NDB_PMEM_DIR`); autotest lists with about 50 existing restart cases in PMEM mode |
+| Platforms | Linux x86_64, Linux ARM64, macOS ARM64 (Q-A5); not macOS x86_64 |
+| Tests | Unit tests with `NDB_ADD_TEST` and `TAPTEST`; MTR with `--defaults-extra-file=suite/ndb/pmem_redo.cnf` (`nodax`) or `pmem_redo_dax.cnf` (`memmap=`, `MTR_NDB_PMEM_DIR`); autotest lists `pmem-redo-tests.txt` and `pmem-redo-long-tests.txt` with about 50 existing restart cases in PMEM mode; no CI, the pusher runs them (§2.4) |
 
 ---
 
@@ -237,11 +272,11 @@ the ones marked * need your decision, see §5):
 
 | # | Question | Proposal or answer |
 |---|---|---|
-| Q-A1 | Accept the hidden test modes of R9, with `nodax` running PMEM mode on any file (macOS, CI)? Allowed in release builds? Durable commits never allowed with `nodax`? | **Answered (review 10):** PMEM mode must run on normal DRAM, since no PMEM hardware is available, release builds included. The code is built for real PMEM so it can be tested when hardware arrives. Consequence: durable commits are allowed in the test modes too (R9) |
+| Q-A1 | Accept the hidden test modes of R9, with `nodax` running PMEM mode on any file (macOS, Linux without PMEM)? Allowed in release builds? Durable commits never allowed with `nodax`? | **Answered (review 10):** PMEM mode must run on normal DRAM, since no PMEM hardware is available, release builds included. The code is built for real PMEM so it can be tested when hardware arrives. Consequence: durable commits are allowed in the test modes too (R9) |
 | Q-A2 | Should `FileSystemPathRedoLog` also move the REDO log in file mode? | **Answered (review 10):** no. File mode keeps today's REDO placement; too much relies on it (R18) |
-| Q-A3 | Path syntax `node:path,...`, at most 8 entries? | Yes |
+| Q-A3 | Path syntax `node:path,...`, at most 8 entries? | **Answered (review 11):** yes |
 | Q-A4 | Header CRC over all of words 1–31 with the initial-start pages written through the mapping, or a CRC that skips the DRAM-only words so they can still be written by `writeSinglePage`? See §5.1 | **Answered (review 10):** B, through the mapping, no mask |
-| Q-A5 | Is ARM in scope for the first version? | Build and unit-test it, no performance work |
+| Q-A5 | Is ARM in scope for the first version? | **Answered (review 11):** build and unit-test on Linux x86_64, Linux ARM64 and macOS ARM64; macOS x86_64 is not supported. Every step-1 unit test runs on all three (`ndb_crc32c-t`, `ndb_pmem-t`, `RedoLogPaths-t`, `pmem_redo_format-t`, the `PmemRedoScan` tests). On ARM64 the persist path is stores, `DC CVAP` per line and `DSB`, on macOS too (§2.4) |
 | Q-A6 | Fix `ZMIN_READ_BUFFER_SIZE` (3 → 4) in file mode too? | **Answered (review 10):** yes, as a separate bug fix for both file mode and PMEM mode (pull request 0) |
 | Q-A7 | Unsafe shutdown before X6: warn or refuse? | Warn and record (R10) |
 | Q-A8 | Bad blocks elsewhere on the device, when they cannot be mapped to a file: refuse or warn? | Warn |
@@ -265,7 +300,7 @@ the ones marked * need your decision, see §5):
 | Q-B10 | Path of the node-failure file | Under the REDO path of NUMA node 0 |
 | Q-B11 | Memory for the step-A hash table, and what happens when it runs out | Sized from the transaction-record count; out of memory stops the SR with a clear message |
 | Q-B12 | Force durable transactions onto the parallel commit path? | No; measure first |
-| Q-B13 | Which CI hosts get `memmap=` PMEM, and when real CXL modules | Needed by pull request 5 |
+| Q-B13 | There is no CI (§2.4). Which developer machines cover Linux ARM64 and `memmap=`, and when do real CXL modules arrive? | Linux ARM64 by pull request 2, `memmap=` by pull request 5 |
 
 ### 5.1 Q-A4 explained: the DRAM-only words of the page header
 
@@ -342,6 +377,8 @@ a REDO page through NDBFS. Recovery behaves the same with A or B.
    keep it reviewable.
 2. **Power-loss emulation** is the only test that catches a missing
    barrier. If it slips, M0.4 and everything after rests on review alone.
+   With no CI it runs only when the pusher runs it, so it belongs in the
+   tests run before every push of PMEM code (§2.4).
 3. **The commit path (X4)** touches the hottest code in DBTC and DBLQH,
    including takeover; the TLA+ model should run before X5.4.
 4. **Hardware.** CXL 2.0 persistent memory modules are needed for real
