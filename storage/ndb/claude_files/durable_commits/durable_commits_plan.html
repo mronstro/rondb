@@ -208,6 +208,16 @@ figcaption b { color: var(--ink); font-weight: 600; }
 .rf .f { font-family: var(--font-mono); font-size: 10.5px; fill: currentColor; text-anchor: middle; }
 .rf .brk { stroke: var(--muted); stroke-width: 1; fill: none; }
 .rf .brk.new { stroke: var(--accent); }
+.u-P { fill: color-mix(in srgb, var(--prep) 22%, var(--panel)); stroke: var(--prep); stroke-width: 1.2; }
+.u-C { fill: color-mix(in srgb, var(--commit) 22%, var(--panel)); stroke: var(--commit); stroke-width: 1.2; }
+.u-X { fill: var(--complete); stroke: var(--complete); stroke-width: 1.2; }
+.u-F { fill: var(--accent-tint); stroke: var(--accent); stroke-width: 1.2; stroke-dasharray: 4 3; }
+.u-bar { stroke: var(--accent); stroke-width: 2.5; }
+.u-hole { fill: url(#f9-hatch); stroke: var(--abort); stroke-width: 1.2; }
+.u-orph { fill: color-mix(in srgb, var(--commit) 22%, var(--panel)); stroke: var(--abort); stroke-width: 1.6; stroke-dasharray: 4 3; }
+.u-old { fill: var(--band); stroke: var(--rule); stroke-width: 1.2; }
+.f9-hl { stroke: var(--abort); stroke-width: 2; }
+.u-k { font-weight: 700; font-size: 12px; fill: var(--ink); text-anchor: middle; }
 
 /* log-part stepper */
 .stepper { border: 1px solid var(--rule); border-radius: 6px; background: var(--panel); padding: 14px 14px 16px; }
@@ -341,7 +351,7 @@ footer code { background: none; padding: 0; }
 <main class="page">
 
 <header class="col">
-  <p class="eyebrow">RONDB-1150 · Plan, revision 6 · 27 October 2026</p>
+  <p class="eyebrow">RONDB-1150 · Plan, revision 9 · 28 October 2026</p>
   <h1>Durable commits across a cluster restart</h1>
   <p class="lede">Today a cluster restart brings the database back to the last GCI saved by the global checkpoint, so commits acknowledged in the last GCP interval can be lost. This plan makes every acknowledged commit survive a crash of all data nodes, power loss included, by putting the REDO log on persistent memory and logging one more record per operation.</p>
   <div class="chips">
@@ -362,6 +372,7 @@ footer code { background: none; padding: 0; }
     <li><a href="#failures"><span class="n">7</span>Node failures</a></li>
     <li><a href="#decisions"><span class="n">8</span>Decisions</a></li>
     <li><a href="#work"><span class="n">9</span>Risks and work plan</a></li>
+    <li><a href="#pmem"><span class="n">10</span>First step: REDO on PMEM</a></li>
   </ol>
 </nav>
 
@@ -379,15 +390,18 @@ footer code { background: none; padding: 0; }
     <li><span>A cluster restart first runs the <strong>normal recovery</strong> to the GCI that the global checkpoint made durable.</span></li>
     <li><span>A <strong>second phase</strong> then recovers the last GCI, which mixes committed and aborted transactions. A hash table keyed by transaction id queues the COMMIT records; a COMPLETE record executes them. Transactions left without a COMPLETE are resolved by asking the other REDO log parts.</span></li>
   </ol>
-  <p><strong>What it costs.</strong> On persistent memory a REDO write is persistent in well under a microsecond, so there is no fsync and no group commit. The cost is message latency: the primary holds its row locks one round longer, and tables without READ_BACKUP get their ack one round later.</p>
+  <p><strong>What it costs.</strong> On the target hardware, CXL 2.0 persistent memory, a persist takes about 0.2–2 µs, so there is no fsync and no group commit. Each replica persists twice per write operation, and with two replicas the linear commit chain has four persists in series, 0.8–8 µs per transaction. The rest is message latency: the primary holds its row locks one round longer, and tables without READ_BACKUP get their ack one round later.</p>
 </section>
 
 <!-- 2 -->
 <section class="col" id="config">
   <h2><span class="num">2</span>Configuration and activation</h2>
   <ul>
-    <li><strong>Memory-mapped REDO.</strong> Each REDO log part becomes a memory-mapped file in a new format with checksums and a reliable end of log. A node switches to it with an initial node restart, so a cluster switches by rolling initial node restarts.</li>
-    <li><strong>Persistent memory.</strong> The whole REDO log lives in PMEM: files on an ext4 or xfs file system mounted with <code>-o dax</code>, mapped with <code>MAP_SYNC</code>. Both ADR (flush each cache line, then fence) and eADR (fence only) are supported. With durable commits configured, a node whose REDO is not on a DAX mapping refuses to start.</li>
+    <li><strong>Memory-mapped REDO.</strong> Each REDO log part becomes a memory-mapped file in a new format with a checksum on every record. A node switches to it with an initial node restart, so a cluster switches by rolling initial node restarts.</li>
+    <li><strong>Persistent memory.</strong> The whole REDO log lives in PMEM: files on an ext4 or xfs file system mounted with <code>-o dax</code>, mapped once at start with <code>MAP_SYNC</code> and prefaulted. If <code>MAP_SYNC</code> fails the file is not on DAX, and with durable commits configured the node refuses to start.</li>
+    <li><strong>Writing.</strong> Records are built in DRAM log pages as today. At each persist point the new bytes are padded with a FILLER to the next 64-byte boundary, copied to PMEM with non-temporal stores and fenced. The same code serves ADR, eADR and CXL memory. Without durable commits the log is persisted at GCP save, at mbyte and file switches and when a page fills, which keeps today's durability.</li>
+    <li><strong>Placement.</strong> Each log part's files sit on the persistent memory closest to the LDM thread that owns the part.</li>
+    <li><strong>Refused in the first version:</strong> an encrypted file system, and Diskless. When an operation cannot be logged it aborts, as today; PMEM mode has no REDO log buffer to queue it in.</li>
     <li><strong>Online activation.</strong> When every node runs memory-mapped REDO, the DIH master picks an activation GCI <i>g</i>, sends it with the GCP protocol and writes it to the sysfile. Every transaction with GCI ≥ <i>g</i> uses the durable protocol.</li>
     <li><strong>Turning it off</strong> takes a cluster restart. That restart still recovers the durable tail, because the mode recorded in the sysfile governs the tail.</li>
     <li><strong>Testing without PMEM hardware.</strong> The Linux <code>memmap=</code> kernel parameter creates a RAM-backed <code>/dev/pmem</code> device that passes the DAX check. Data survives a process crash but not a reboot, which is enough for MTR and autotest.</li>
@@ -531,24 +545,25 @@ footer code { background: none; padding: 0; }
     </tbody>
   </table>
   </div>
-  <p style="margin-top:1em">Here t_p is the prepare chain, t_c one hop and R the number of replicas. No sync time is added on PMEM. A hot row's throughput limit, about one over the hold time, drops accordingly. Detached triggers, SUMA, the binlog and backup logging see the change one round later on the primary.</p>
+  <p style="margin-top:1em">Here t_p is the prepare chain, t_c one hop and R the number of replicas; each replica also adds its persist time, 0.2–2 µs per barrier on CXL 2.0 persistent memory. A record is always persisted while its COMMIT or COMPLETE signal is handled, before the next COMMIT, COMMITTED, COMPLETE or COMPLETED is sent. A hot row's throughput limit, about one over the hold time, drops accordingly. Detached triggers, SUMA, the binlog and backup logging see the change one round later on the primary.</p>
 </section>
 
 <!-- 4 -->
 <section class="col" id="records">
   <h2><span class="num">4</span>REDO records</h2>
   <p>A PREPARE record holds the after-image of the row but no transaction id, table or GCI. Recovery can only reach it through the backward reference in a COMMIT record, and a PREPARE can be gigabytes back in the log. So recovery is driven by COMMIT records, as today, and a PREPARE without a COMMIT is never applied and never searched for.</p>
+  <p>On persistent memory the log keeps its geometry: files, 1 MB mbytes, 32 KB pages with a header on each page, and today's head and tail search. What changes is the unit of writing. A persist covers 64-byte units, so every record carries its own checksum and every page header is written once and never updated.</p>
 </section>
 
 <figure aria-labelledby="cap-rf">
   <div class="fig-scroll">
-  <svg class="rf" viewBox="0 0 870 336" style="min-width: 760px" role="img" aria-label="Word layouts of the REDO records. PREPARE is unchanged. COMMIT grows from 9 to 13 words by adding transid, gci_lo and opCount. COMPLETE is a new 3-word record with type and transid. ABORT is unchanged at 3 words.">
+  <svg class="rf" viewBox="0 0 870 404" style="min-width: 760px" role="img" aria-label="Word layouts of the REDO records on persistent memory. Every record starts with a type and length word and a CRC32C word. PREPARE keeps its 8-word header. COMMIT grows from 9 to 12 words by adding the CRC, gci_lo, the transaction id and opCount, with the PREPARE reference packed into 2 words. COMPLETE and ABORT are 4 words. FILLER pads to the next 64-byte boundary.">
     <!-- PREPARE -->
     <text class="s-t s-b" x="0" y="44">PREPARE</text>
-    <text class="s-t s-sm s-mut" x="0" y="59">unchanged</text>
+    <text class="s-t s-sm s-mut" x="0" y="59">header unchanged</text>
     <g>
-      <rect class="cellr r-P" x="124" y="30" width="56" height="30"/><text class="f" x="152" y="49">type</text>
-      <rect class="cellr r-P" x="180" y="30" width="56" height="30"/><text class="f" x="208" y="49">len</text>
+      <rect class="cellr r-P" x="124" y="30" width="56" height="30"/><text class="f" x="152" y="49">type/len</text>
+      <rect class="cellr r-new" x="180" y="30" width="56" height="30"/><text class="f" x="208" y="49">CRC</text>
       <rect class="cellr r-P" x="236" y="30" width="56" height="30"/><text class="f" x="264" y="49">hash</text>
       <rect class="cellr r-P" x="292" y="30" width="56" height="30"/><text class="f" x="320" y="49">op</text>
       <rect class="cellr r-P" x="348" y="30" width="56" height="30"/><text class="f" x="376" y="49">aiLen</text>
@@ -576,48 +591,116 @@ footer code { background: none; padding: 0; }
     </g>
 
     <!-- COMMIT new -->
-    <text class="s-t s-sm s-acc tm" x="740" y="151">added</text>
-    <path class="brk new" d="M628,162 V155 H852 V162"/>
+    <text class="s-t s-sm s-mut tm" x="432" y="151">PREPARE reference, packed</text>
+    <path class="brk" d="M404,162 V155 H516 V162"/>
+    <text class="s-t s-sm s-acc tm" x="712" y="151">added</text>
+    <path class="brk new" d="M628,162 V155 H796 V162"/>
     <text class="s-t s-b" x="0" y="180">COMMIT</text>
-    <text class="s-t s-sm s-mut" x="0" y="195">new, 13 words</text>
+    <text class="s-t s-sm s-mut" x="0" y="195">PMEM, 12 words</text>
     <g>
-      <rect class="cellr r-C" x="124" y="166" width="56" height="30"/><text class="f" x="152" y="185">type</text>
-      <rect class="cellr r-C" x="180" y="166" width="56" height="30"/><text class="f" x="208" y="185">table</text>
-      <rect class="cellr r-C" x="236" y="166" width="56" height="30"/><text class="f" x="264" y="185">schVer</text>
-      <rect class="cellr r-C" x="292" y="166" width="56" height="30"/><text class="f" x="320" y="185">frag</text>
-      <rect class="cellr r-C" x="348" y="166" width="56" height="30"/><text class="f" x="376" y="185">file</text>
-      <rect class="cellr r-C" x="404" y="166" width="56" height="30"/><text class="f" x="432" y="185">page</text>
-      <rect class="cellr r-C" x="460" y="166" width="56" height="30"/><text class="f" x="488" y="185">index</text>
-      <rect class="cellr r-C" x="516" y="166" width="56" height="30"/><text class="f" x="544" y="185">stop</text>
-      <rect class="cellr r-C" x="572" y="166" width="56" height="30"/><text class="f" x="600" y="185">gci_hi</text>
+      <rect class="cellr r-C" x="124" y="166" width="56" height="30"/><text class="f" x="152" y="185">type/len</text>
+      <rect class="cellr r-new" x="180" y="166" width="56" height="30"/><text class="f" x="208" y="185">CRC</text>
+      <rect class="cellr r-C" x="236" y="166" width="56" height="30"/><text class="f" x="264" y="185">table</text>
+      <rect class="cellr r-C" x="292" y="166" width="56" height="30"/><text class="f" x="320" y="185">schVer</text>
+      <rect class="cellr r-C" x="348" y="166" width="56" height="30"/><text class="f" x="376" y="185">frag</text>
+      <rect class="cellr r-C" x="404" y="166" width="56" height="30"/><text class="f" x="432" y="185">file|idx</text>
+      <rect class="cellr r-C" x="460" y="166" width="56" height="30"/><text class="f" x="488" y="185">page|stop</text>
+      <rect class="cellr r-C" x="516" y="166" width="56" height="30"/><text class="f" x="544" y="185">gci_hi</text>
+      <rect class="cellr r-new" x="572" y="166" width="56" height="30"/><text class="f" x="600" y="185">gci_lo</text>
       <rect class="cellr r-new" x="628" y="166" width="56" height="30"/><text class="f" x="656" y="185">transid1</text>
       <rect class="cellr r-new" x="684" y="166" width="56" height="30"/><text class="f" x="712" y="185">transid2</text>
-      <rect class="cellr r-new" x="740" y="166" width="56" height="30"/><text class="f" x="768" y="185">gci_lo</text>
-      <rect class="cellr r-new" x="796" y="166" width="56" height="30"/><text class="f" x="824" y="185">opCount</text>
+      <rect class="cellr r-new" x="740" y="166" width="56" height="30"/><text class="f" x="768" y="185">opCount</text>
     </g>
 
     <!-- COMPLETE -->
     <text class="s-t s-b" x="0" y="246">COMPLETE</text>
-    <text class="s-t s-sm s-acc" x="0" y="261">new, 3 words</text>
+    <text class="s-t s-sm s-acc" x="0" y="261">new, 4 words</text>
     <g>
-      <rect class="cellr r-new" x="124" y="232" width="56" height="30"/><text class="f" x="152" y="251">type</text>
-      <rect class="cellr r-new" x="180" y="232" width="56" height="30"/><text class="f" x="208" y="251">transid1</text>
-      <rect class="cellr r-new" x="236" y="232" width="56" height="30"/><text class="f" x="264" y="251">transid2</text>
+      <rect class="cellr r-new" x="124" y="232" width="56" height="30"/><text class="f" x="152" y="251">type/len</text>
+      <rect class="cellr r-new" x="180" y="232" width="56" height="30"/><text class="f" x="208" y="251">CRC</text>
+      <rect class="cellr r-new" x="236" y="232" width="56" height="30"/><text class="f" x="264" y="251">transid1</text>
+      <rect class="cellr r-new" x="292" y="232" width="56" height="30"/><text class="f" x="320" y="251">transid2</text>
     </g>
-    <text class="s-t s-sm s-mut" x="306" y="251">written at COMPLETE, one per operation, before the change becomes visible</text>
+    <text class="s-t s-sm s-mut" x="362" y="251">one per operation, persisted before the change becomes visible</text>
 
     <!-- ABORT -->
     <text class="s-t s-b" x="0" y="304">ABORT</text>
-    <text class="s-t s-sm s-mut" x="0" y="319">today, 3 words</text>
+    <text class="s-t s-sm s-mut" x="0" y="319">4 words</text>
     <g>
-      <rect class="cellr r-A" x="124" y="290" width="56" height="30"/><text class="f" x="152" y="309">type</text>
-      <rect class="cellr r-A" x="180" y="290" width="56" height="30"/><text class="f" x="208" y="309">transid1</text>
-      <rect class="cellr r-A" x="236" y="290" width="56" height="30"/><text class="f" x="264" y="309">transid2</text>
+      <rect class="cellr r-A" x="124" y="290" width="56" height="30"/><text class="f" x="152" y="309">type/len</text>
+      <rect class="cellr r-new" x="180" y="290" width="56" height="30"/><text class="f" x="208" y="309">CRC</text>
+      <rect class="cellr r-A" x="236" y="290" width="56" height="30"/><text class="f" x="264" y="309">transid1</text>
+      <rect class="cellr r-A" x="292" y="290" width="56" height="30"/><text class="f" x="320" y="309">transid2</text>
     </g>
-    <text class="s-t s-sm s-mut" x="306" y="309">now also written after a COMMIT when rule F aborts the transaction</text>
+    <text class="s-t s-sm s-mut" x="362" y="309">flagged AF_AFTER_COMMIT when rule F writes it after a COMMIT</text>
+
+    <!-- FILLER -->
+    <text class="s-t s-b" x="0" y="362">FILLER</text>
+    <text class="s-t s-sm s-acc" x="0" y="377">new, 2 + n words</text>
+    <g>
+      <rect class="cellr r-new" x="124" y="348" width="56" height="30"/><text class="f" x="152" y="367">type/len</text>
+      <rect class="cellr r-new" x="180" y="348" width="56" height="30"/><text class="f" x="208" y="367">CRC</text>
+      <rect class="cellr r-new r-var" x="236" y="348" width="224" height="30"/><text class="f" x="348" y="367">unused, to the next 64 B</text>
+    </g>
+    <text class="s-t s-sm s-mut" x="474" y="367">written at every persist point; its CRC covers only its header</text>
   </svg>
   </div>
-  <figcaption id="cap-rf"><b>Record layouts, one cell per 32-bit word.</b> The COMMIT record gains the transaction id, which the restart uses as the hash key; <code>gci_lo</code>, so replay restores the exact GCI64 of the row (today it sets 0); and <code>opCount</code>, the number of logged write operations of the transaction, for the partial-restart fallback. Every page of the new format also carries a CRC32C checksum and a lap number. The per-operation space reservation for commit and abort records must also cover the COMPLETE record.</figcaption>
+  <figcaption id="cap-rf"><b>Record layouts on persistent memory, one cell per 32-bit word.</b> Every record is 8-byte aligned and starts with a type/flags/length word and a CRC32C. The CRC covers word 0 (except the invalidated flag), the body, and a 16-byte suffix that is never stored: the lap, the log part and file, and the record's position. A record left from an earlier lap at the same offset therefore never validates. The COMMIT record gains the transaction id (the restart's hash key), <code>gci_lo</code> (replay restores the exact GCI64; today it sets 0) and <code>opCount</code> (the partial-restart fallback); packing the four 16-bit PREPARE-reference fields into two words pays for the CRC. Page headers are written once with their own CRC; there is no whole-page checksum.</figcaption>
+</figure>
+
+<figure class="mid" aria-labelledby="cap-units">
+  <div class="fig-scroll">
+  <svg viewBox="0 0 800 176" style="min-width: 640px" role="img" aria-label="Two write operations on one log part, drawn on a grid of 64-byte units. The first fills two units with PREPARE and COMMIT and is persisted, then COMPLETE and a FILLER fill a third unit. The second needs a FILLER after its COMMIT and another after its COMPLETE. Every persist ends on a 64-byte boundary.">
+    <text class="s-t s-sm s-mut" x="40" y="24">one log part, 64-byte units (byte offsets below)</text>
+    <g>
+      <rect class="s-box" x="40" y="50" width="90" height="44" style="fill:none;stroke:var(--rule)"/>
+      <rect class="s-box" x="130" y="50" width="90" height="44" style="fill:none;stroke:var(--rule)"/>
+      <rect class="s-box" x="220" y="50" width="90" height="44" style="fill:none;stroke:var(--rule)"/>
+      <rect class="s-box" x="310" y="50" width="90" height="44" style="fill:none;stroke:var(--rule)"/>
+      <rect class="s-box" x="400" y="50" width="90" height="44" style="fill:none;stroke:var(--rule)"/>
+      <rect class="s-box" x="490" y="50" width="90" height="44" style="fill:none;stroke:var(--rule)"/>
+      <rect class="s-box" x="580" y="50" width="90" height="44" style="fill:none;stroke:var(--rule)"/>
+      <rect class="s-box" x="670" y="50" width="90" height="44" style="fill:none;stroke:var(--rule)"/>
+    </g>
+    <!-- op 1: PREPARE 80 B, COMMIT 48 B, COMPLETE 16 B, FILLER 48 B -->
+    <rect class="u-P" x="40" y="56" width="112.5" height="32"/><text class="s-t s-sm tm" x="96" y="76">PREPARE T1</text>
+    <rect class="u-C" x="152.5" y="56" width="67.5" height="32"/><text class="s-t s-sm tm" x="186" y="76">COMMIT</text>
+    <rect class="u-X" x="220" y="56" width="22.5" height="32"/>
+    <rect class="u-F" x="242.5" y="56" width="67.5" height="32"/><text class="s-t s-sm s-acc tm" x="276" y="76">FILLER</text>
+    <!-- op 2: PREPARE 160 B, COMMIT 48 B, FILLER 48 B, COMPLETE 16 B, FILLER 48 B -->
+    <rect class="u-P" x="310" y="56" width="225" height="32"/><text class="s-t s-sm tm" x="422" y="76">PREPARE T2</text>
+    <rect class="u-C" x="535" y="56" width="67.5" height="32"/><text class="s-t s-sm tm" x="569" y="76">COMMIT</text>
+    <rect class="u-F" x="602.5" y="56" width="67.5" height="32"/><text class="s-t s-sm s-acc tm" x="636" y="76">FILLER</text>
+    <rect class="u-X" x="670" y="56" width="22.5" height="32"/>
+    <rect class="u-F" x="692.5" y="56" width="67.5" height="32"/><text class="s-t s-sm s-acc tm" x="726" y="76">FILLER</text>
+    <!-- barriers -->
+    <line class="u-bar" x1="220" y1="40" x2="220" y2="104"/>
+    <line class="u-bar" x1="310" y1="40" x2="310" y2="104"/>
+    <line class="u-bar" x1="670" y1="40" x2="670" y2="104"/>
+    <line class="u-bar" x1="760" y1="40" x2="760" y2="104"/>
+    <text class="s-t s-sm s-acc tm" x="220" y="36">C</text>
+    <text class="s-t s-sm s-acc tm" x="310" y="36">K</text>
+    <text class="s-t s-sm s-acc tm" x="670" y="36">C</text>
+    <text class="s-t s-sm s-acc tm" x="760" y="36">K</text>
+    <!-- COMPLETE labels below their thin bars -->
+    <text class="s-t s-sm tm s-ok" x="231" y="122">COMPLETE</text>
+    <text class="s-t s-sm tm s-ok" x="681" y="122">COMPLETE</text>
+    <!-- offsets -->
+    <g class="s-t s-sm s-mut">
+      <text class="tm s-mut" x="40" y="142">0</text>
+      <text class="tm s-mut" x="130" y="142">64</text>
+      <text class="tm s-mut" x="220" y="142">128</text>
+      <text class="tm s-mut" x="310" y="142">192</text>
+      <text class="tm s-mut" x="400" y="142">256</text>
+      <text class="tm s-mut" x="490" y="142">320</text>
+      <text class="tm s-mut" x="580" y="142">384</text>
+      <text class="tm s-mut" x="670" y="142">448</text>
+      <text class="tm s-mut" x="760" y="142">512</text>
+    </g>
+    <text class="s-t s-sm s-mut" x="40" y="166">amber lines: persist barriers for COMMIT (C) and COMPLETE (K); each ends a 64-byte unit</text>
+  </svg>
+  </div>
+  <figcaption id="cap-units"><b>Persist units.</b> T1 is a small update: its 80-byte PREPARE and 48-byte COMMIT fill exactly two units, so the COMMIT persist needs no filler; its 16-byte COMPLETE needs a 48-byte FILLER. T2's larger PREPARE leaves its COMMIT mid-unit, so both of its persists pad. Here 144 of 512 bytes are filler. Records are built in DRAM and each persist copies whole units with non-temporal stores, then fences, so a persisted unit is never written again in that lap. Under concurrency, records of other transactions fill the space a filler would otherwise take.</figcaption>
 </figure>
 
 <!-- 5 -->
@@ -626,7 +709,7 @@ footer code { background: none; padding: 0; }
   <h3>Phase 1: normal recovery to R_gcp</h3>
   <p>LCP restore, disk-data UNDO, and replay of the COMMIT records with GCI ≤ R_gcp run as today. Three things are no longer done for the durable tail: rewriting COMMIT records above R_gcp as invalid, moving the log head to the <code>COMPLETED_GCI</code> record of R_gcp, and the phase-4 invalidation. Nothing in the log is touched before phase 2 has decided.</p>
   <h3>Phase 2: the tail</h3>
-  <p>The tail is normally the last GCI. It also holds the GCI before it if the crash came while that GCI's GCP save was still running. Each REDO log part of each starting node runs three steps. Step through the first one below on an example log part.</p>
+  <p>The tail is normally the last GCI. It also holds the GCI before it if the crash came while that GCI's GCP save was still running. Each REDO log part of each starting node runs three steps. Step A runs inside the normal REDO execution scan, so phase 1 and phase 2 read the log in a single pass: COMMITs with GCI ≤ R_gcp are executed as today and the others go to the hash table. Step through phase 2 below on an example log part.</p>
 </section>
 
 <figure aria-labelledby="cap-lg">
@@ -743,7 +826,7 @@ footer code { background: none; padding: 0; }
     <tbody>
       <tr><td>"T complete" received</td><td>Commit: execute the queued COMMITs in log order.</td></tr>
       <tr><td>Otherwise the counts pass the node-group rule (§7) and no "T aborted" was received</td><td>Commit, the same way.</td></tr>
-      <tr><td>Otherwise</td><td>Abort: rewrite the transaction's COMMIT records in place as <code>ZINVALID_COMMIT_TYPE</code>.</td></tr>
+      <tr><td>Otherwise</td><td>Abort: mark the transaction's COMMIT records invalidated, one atomic flag store each. The flag sits outside the CRC, so the records stay valid and the log is not cut there.</td></tr>
     </tbody>
   </table>
   </div>
@@ -832,7 +915,7 @@ footer code { background: none; padding: 0; }
 
 <section class="col">
   <h3>Stale nodes</h3>
-  <p>A starting node X is <strong>stale</strong> if some starting node recorded X's failure in a GCI above R_gcp: X failed after the last GCP save, the cluster ran on without it, and no sysfile shows it. A stale node takes no part in the cluster restart, neither phase 1 nor phase 2. It is restarted by a node restart once the other nodes have recovered, the same way NDBCNTR already treats a node that cannot be restored from its own REDO log (<code>m_withLogNotRestorable</code>, <code>NdbcntrMain.cpp:2730-2743</code>). The node-failure records therefore travel with each node's start request, before the master fixes the node sets. <strong>Recovery needs at least one non-stale node in each node group.</strong></p>
+  <p>A starting node X is <strong>stale</strong> if some starting node recorded X's failure in a GCI above R_gcp: X failed after the last GCP save, the cluster ran on without it, and no sysfile shows it. A stale node takes no part in the cluster restart, neither phase 1 nor phase 2. It is restarted by a node restart once the other nodes have recovered, the same way NDBCNTR already treats a node that cannot be restored from its own REDO log (<code>m_withLogNotRestorable</code>, <code>NdbcntrMain.cpp:2730-2743</code>). The node-failure records therefore travel with each node's start request, before the master fixes the node sets. A node is also stale if its PMEM device reports an unsafe shutdown since the last start: its REDO is still readable up to its valid end, since the checksums cut off failed last writes, but writes already acknowledged as persistent may be missing. <strong>Recovery needs at least one non-stale node in each node group.</strong></p>
   <h3>The proof of commit is on a missing node (D5)</h3>
   <p>With linear complete, the backup writes its COMPLETE and makes the row visible before the primary gets COMPLETE. If the backup's node does not come back, no starting log part may have a COMPLETE for the transaction, although someone may have seen it. The fallback uses the counts from step B.</p>
   <ul>
@@ -920,7 +1003,7 @@ footer code { background: none; padding: 0; }
     <tbody>
       <tr><td class="id">P0</td><td>Research <span class="pill ok">Done</span></td><td>Five research notes on the commit protocol, REDO log, system restart, micro-GCPs and the literature.</td></tr>
       <tr><td class="id">P1</td><td>Decision record <span class="pill ok">Done</span></td><td>This plan; all decisions settled.</td></tr>
-      <tr><td class="id">P2</td><td>Memory-mapped REDO and PMEM layer</td><td>The new format, DAX mapping and start-up check, barriers per log part, space reservations, <code>redoLogReader</code>.</td></tr>
+      <tr><td class="id">P2</td><td>REDO log on PMEM <span class="pill ok">Done</span></td><td><code>pmem_redo_design.md</code>: 64-byte write unit, position-bound record checksums, write-once page headers, FILLER, copy-out write path and barrier placement, end of log and zeroing at restart, two-slot last-file pointer, start-up checks.</td></tr>
       <tr><td class="id">P3</td><td>Commit path</td><td>Invariants C, K, L, A and F on every path; moving the primary's local commit; <code>writeCompleteLog</code>; <code>opCount</code>; the late ack; API node-id hold-back; the node-failure file write.</td></tr>
       <tr><td class="id">P4</td><td>Cluster restart</td><td>Phases 1 to 3, steps A to C and their signals, the count fallback, stale nodes and the D4 check, the ordering proof with code references.</td></tr>
       <tr><td class="id">P5</td><td>Configuration and activation</td><td>The two config variables, activation at GCI <i>g</i> through the GCP protocol, the sysfile field, turning it off by cluster restart, ndbinfo.</td></tr>
@@ -935,7 +1018,7 @@ footer code { background: none; padding: 0; }
 <div class="col">
   <div class="chain">
     <div class="step indep"><b>X1 · independent</b>Takeover ack after COMPLETE; also fixes read-your-writes after takeover today.</div>
-    <div class="step"><b>X2</b>Memory-mapped REDO config, new record writer, PMEM persistence layer.</div>
+    <div class="step"><b>X2 · first step</b>REDO log on PMEM, steps S1–S7: CRC32C and PMEM helpers, config, NDBFS mapping, record writers, write path, recovery, power-loss tests.</div>
     <div class="step"><b>X3</b>Test harness: ledger, crash of all nodes, power-loss emulation.</div>
     <div class="step"><b>X4</b>Commit path: barriers, primary commit at COMPLETE, late ack, rule F, <span class="mono">opCount</span>.</div>
     <div class="step"><b>X5</b>Restart phases 1 to 3. From here the ledger must show zero losses.</div>
@@ -945,10 +1028,99 @@ footer code { background: none; padding: 0; }
   </div>
 </div>
 
+<!-- 10 -->
+<section class="col" id="pmem">
+  <h2><span class="num">10</span>First step: the REDO log on persistent memory</h2>
+  <p>The first implementation step puts the REDO log on persistent memory with today's durability: a GCI is durable once the global checkpoint has saved it. The durable-commit protocol and restart phase 2 build on it. The full design is <code>pmem_redo_design.md</code>; everything below is settled.</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Topic</th><th>Decision</th></tr></thead>
+    <tbody>
+      <tr><td>Target hardware</td><td>CXL 2.0 persistent memory modules, about 200–2000 ns per persist. Linux reports them as needing flushes, so the barrier is non-temporal stores plus <code>sfence</code>.</td></tr>
+      <tr><td>Write unit</td><td>64 bytes, fixed, recorded in every page header.</td></tr>
+      <tr><td>Checksum</td><td>CRC32C on every record and every page header, bound to the lap, log part, file and position. No whole-page checksum.</td></tr>
+      <tr><td>Page header</td><td>Written once at page init, never updated. Its GCI fields are snapshots taken at page start, which is what the head and tail search needs.</td></tr>
+      <tr><td>FILLER</td><td>At every persist point, to the next 64-byte boundary. A persisted unit is not written again in that lap.</td></tr>
+      <tr><td>Write path</td><td>Records are built in DRAM pages. A persist copies the new bytes with non-temporal stores and fences; the copying thread fences before it releases the log-part mutex.</td></tr>
+      <tr><td>When to persist</td><td>While the COMMIT or COMPLETE signal is handled, before the next COMMIT, COMMITTED, COMPLETE or COMPLETED is sent. Always, also when a later optimisation delays the sync.</td></tr>
+      <tr><td>COMMIT invalidation</td><td>One atomic store of a flag bit outside the CRC, so the record stays valid.</td></tr>
+      <tr><td>Last file in use</td><td>Two checksummed slots in page 0 of file 0, written alternately.</td></tr>
+      <tr><td>End of log</td><td>The first invalid position, E. The log is always recoverable up to E; failed or torn last writes are cut off by the checksums.</td></tr>
+      <tr><td>Leftovers</td><td>Zero from E to the end of its mbyte at every restart, and the abandoned range when the head moves back.</td></tr>
+      <tr><td>Restart scan</td><td>One scan runs both phases: COMMITs at or below R_gcp execute as today, the rest go to the hash table.</td></tr>
+      <tr><td>Mapping</td><td>NDBFS maps every file once at start with <code>MAP_SYNC</code> and prefaults it. If <code>MAP_SYNC</code> fails, the file is not on DAX and the node refuses to start.</td></tr>
+      <tr><td>Placement</td><td>Each log part on the persistent memory closest to the LDM that owns it; one path per NUMA node.</td></tr>
+      <tr><td>REDO log full</td><td>No REDO log buffer, only a few staging pages. An operation that cannot be logged aborts, as today.</td></tr>
+      <tr><td>Unsafe shutdown</td><td>If the device reports one, the node is stale: its REDO is still read up to E, but it stays out of the restart and joins by node restart.</td></tr>
+      <tr><td>Refused in the first version</td><td>Encrypted file system, Diskless.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <h3>Finding the end of the log at restart</h3>
+  <p>Between two barriers the 64-byte lines of a copy can reach persistent memory in any order. A crash can therefore leave a valid record after an invalid one.</p>
+</section>
+
+<figure class="mid" aria-labelledby="cap-eol">
+  <div class="fig-scroll">
+  <svg viewBox="0 0 800 200" style="min-width: 640px" role="img" aria-label="One mbyte at restart. Persisted records up to the last barrier, then the copy that was in flight: R1 reached memory, the next unit is torn, R2 reached memory after it. Data from the previous lap follows. E, the end of log, is the torn unit. Everything from E to the end of the mbyte is zeroed at restart.">
+    <defs>
+      <pattern id="f9-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" class="f9-hl"/></pattern>
+    </defs>
+    <text class="s-t s-sm s-mut tm" x="185" y="52">persisted</text>
+    <text class="s-t s-sm s-mut tm" x="390" y="52">copy in flight at the crash</text>
+    <text class="s-t s-sm s-mut tm" x="605" y="52">previous lap</text>
+    <rect class="u-P" x="40" y="60" width="70" height="40"/><text class="u-k" x="75" y="85">P</text>
+    <rect class="u-C" x="110" y="60" width="40" height="40"/><text class="u-k" x="130" y="85">C</text>
+    <rect class="u-P" x="150" y="60" width="60" height="40"/><text class="u-k" x="180" y="85">P</text>
+    <rect class="u-C" x="210" y="60" width="40" height="40"/><text class="u-k" x="230" y="85">C</text>
+    <rect class="u-X" x="250" y="60" width="18" height="40"/>
+    <rect class="u-F" x="268" y="60" width="62" height="40"/><text class="s-t s-sm s-acc tm" x="299" y="84">FILLER</text>
+    <rect class="u-P" x="330" y="60" width="40" height="40"/><text class="u-k" x="350" y="85">R1</text>
+    <rect class="u-hole" x="370" y="60" width="30" height="40"/>
+    <rect class="u-orph" x="400" y="60" width="50" height="40"/><text class="u-k" x="425" y="85">R2</text>
+    <rect class="u-old" x="450" y="60" width="310" height="40"/><text class="s-t s-sm s-mut tm" x="605" y="84">old records: the lap check rejects them</text>
+    <line class="u-bar" x1="330" y1="34" x2="330" y2="108"/>
+    <text class="s-t s-sm s-acc tm" x="330" y="28">last barrier</text>
+    <line class="s-msg" x1="760" y1="40" x2="760" y2="108"/>
+    <text class="s-t s-sm te" x="760" y="34">end of mbyte</text>
+    <polygon points="370,106 364,118 376,118" class="ah"/>
+    <text class="s-t s-b tm" x="370" y="134">E</text>
+    <text class="s-t s-sm tm" x="370" y="148">end of log</text>
+    <path class="brk" d="M40,160 V166 H366 V160" style="stroke: var(--muted); fill: none"/>
+    <text class="s-t s-sm tm" x="205" y="184">the log: replayed, R1 included</text>
+    <path class="brk" d="M374,160 V166 H760 V160" style="stroke: var(--accent); fill: none"/>
+    <text class="s-t s-sm s-acc tm" x="580" y="184">zeroed in phase 1 of every restart, from E</text>
+  </svg>
+  </div>
+  <figcaption id="cap-eol"><b>End of log after a crash.</b> R1 reached persistent memory and lies before the torn unit, so it is part of the log; its barrier never finished, so no signal depending on it was sent. E, the first invalid position, is the end of the log. R2 also reached memory and has a valid CRC for the current lap, but it lies after the hole. The checksum rejects the previous lap's data but not R2. So every restart zeroes from E to the end of the mbyte: otherwise a later crash could end the log exactly where R2 starts and the scan would accept it. Nothing in the next mbyte can hold new data, because the NEXT_MBYTE record is fenced before any byte of the next mbyte is written.</figcaption>
+</figure>
+
+<section class="col">
+  <h3>Implementation steps</h3>
+  <p>Each step ends in something that can be tested on its own. After S7 the REDO log runs on persistent memory at today's durability.</p>
+</section>
+
+<div class="col">
+  <div class="chain">
+    <div class="step"><b>S1</b>CRC32C and PMEM helpers: map, prefault, non-temporal copy, fences, power-loss emulation.</div>
+    <div class="step"><b>S2 · parallel</b>Config: <span class="mono">RedoLogMode</span>, a path per NUMA node, start-up refusals, ndbinfo.</div>
+    <div class="step"><b>S3</b>NDBFS maps the files with <span class="mono">MAP_SYNC</span>; full initialisation at initial start.</div>
+    <div class="step"><b>S4</b>Record writers: header and CRC, write-once page header, FILLER, new COMMIT and ABORT.</div>
+    <div class="step"><b>S5</b>Write path: the persist primitive, copy-out, GCP save, mbyte and file switch.</div>
+    <div class="step"><b>S6</b>Recovery: end of log, slots, zeroing, new record types, node restart, <span class="mono">redoLogReader</span>.</div>
+    <div class="step"><b>S7</b>Power-loss tests: torn-copy error insert, emulation, acknowledged-write checker.</div>
+  </div>
+</div>
+
+<section class="col">
+  <p style="margin-top:1.2em">Tests on emulated persistent memory (<code>memmap=</code>, or QEMU's emulated CXL memory device) prove the format, the write path and the recovery logic, and survive <code>kill -9</code>. They can never catch a missing barrier; only the power-loss emulation of S1 and S7 can. Performance needs real CXL modules.</p>
+</section>
+
 <footer class="col">
   Source documents in <code>storage/ndb/claude_files/durable_commits/</code>:
   <ul>
-    <li><code>durable_commits_plan.md</code>, the plan this page summarises (revision 6)</li>
+    <li><code>durable_commits_plan.md</code>, the plan this page summarises (revision 9)</li>
+    <li><code>pmem_redo_design.md</code>, the design of the first step, with <code>research_pmem_hardware.md</code>, <code>pmem_redo_format.md</code>, <code>pmem_redo_recovery.md</code>, <code>pmem_redo_write_path.md</code></li>
     <li><code>research_commit_protocol.md</code>, <code>research_redo_log.md</code>, <code>research_system_restart.md</code>, <code>research_micro_gcp.md</code>, <code>research_literature.md</code></li>
   </ul>
 </footer>
