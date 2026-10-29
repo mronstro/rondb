@@ -74,6 +74,7 @@ ADD_CONVENIENCE_LIBRARY(ndbportlib
   NdbSpin.cpp
   NdbTimestamp.cpp
   ndb_pmem.cpp
+  ndb_pmem_region.cpp
   LINK_LIBRARIES mysys ${LIBSOCKET}
   )
 
@@ -84,6 +85,8 @@ ENDIF()
 NDB_ADD_TEST(NdbHW-t NdbHW.cpp LIBS ndbmgmapi ndbgeneral ndbportlib)
 
 NDB_ADD_TEST(ndb_pmem-t ndb_pmem.cpp LIBS ndbmgmapi ndbgeneral ndbportlib)
+NDB_ADD_TEST(ndb_pmem_region-t ndb_pmem_region.cpp
+  LIBS ndbmgmapi ndbgeneral ndbportlib)
 
 NDB_ADD_TEST(NdbDir-t NdbDir.cpp LIBS ndbmgmapi ndbgeneral ndbportlib)
 

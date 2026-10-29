@@ -634,6 +634,60 @@ const struct ndb_cpu_features *Ndb_GetCpuFeatures()
   return &features;
 }
 
+#ifdef __linux__
+#include <dirent.h>
+#include <sched.h>
+#endif
+
+/**
+ * The node is the one whose cpulist holds every CPU of the thread's
+ * affinity mask. Nodes without CPUs, such as CXL memory, never match.
+ */
+int Ndb_GetThreadNumaNode()
+{
+#ifdef __linux__
+  cpu_set_t cpus;
+  CPU_ZERO(&cpus);
+  if (sched_getaffinity(0, sizeof(cpus), &cpus) != 0) return -1;
+  const int ncpus = CPU_COUNT(&cpus);
+  if (ncpus == 0) return -1;
+  DIR *dir = opendir("/sys/devices/system/node");
+  if (dir == nullptr) return -1;
+  int result = -1;
+  struct dirent *entry;
+  while ((entry = readdir(dir)) != nullptr) {
+    int node;
+    char rest;
+    if (sscanf(entry->d_name, "node%d%c", &node, &rest) != 1) continue;
+    char path[128];
+    snprintf(path, sizeof(path), "/sys/devices/system/node/node%d/cpulist",
+             node);
+    FILE *f = fopen(path, "r");
+    if (f == nullptr) continue;
+    char line[4096];
+    const bool got = fgets(line, sizeof(line), f) != nullptr;
+    fclose(f);
+    if (!got) continue;
+    line[strcspn(line, "\n")] = 0;
+    SparseBitmask mask(CPU_SETSIZE);
+    if (::parse_mask(line, mask) < 0) continue;
+    int in_node = 0;
+    for (int cpu = 0; cpu < CPU_SETSIZE; cpu++) {
+      if (CPU_ISSET(cpu, &cpus) && mask.get(cpu)) in_node++;
+    }
+    if (in_node == ncpus) {
+      result = node;
+      break;
+    }
+    if (in_node > 0) break;  // The CPUs span several nodes
+  }
+  closedir(dir);
+  return result;
+#else
+  return -1;
+#endif
+}
+
 int NdbHW_Init()
 {
   /**
@@ -4611,6 +4665,9 @@ test_cpu_features()
   OK(f->arm_crc32 && f->arm_pmull);
 #endif
 #endif
+  const int node = Ndb_GetThreadNumaNode();
+  printf("thread NUMA node %d (-1: several or unknown)\n", node);
+  OK(node >= -1);
 }
 
 TAPTEST(NdbCPU) {

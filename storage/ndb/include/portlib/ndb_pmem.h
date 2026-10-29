@@ -126,4 +126,56 @@ void ndb_pmem_flush(const void *addr, size_t len);
 /* Wait until the copies, zeroing and flushes of this thread are done */
 void ndb_pmem_drain();
 
+/**
+ * Platform queries for the start-up checks (E17, E20), from sysfs on
+ * Linux (ndb_pmem_region.cpp). Elsewhere every answer is "unknown".
+ */
+enum ndb_pmem_domain {
+  NDB_PMEM_DOMAIN_UNKNOWN = 0,   // no persistent memory region found
+  NDB_PMEM_DOMAIN_NONE = 1,      // a region without a domain, e.g. memmap=
+  NDB_PMEM_DOMAIN_MEMCTRL = 2,   // ADR: persistent at the memory controller
+  NDB_PMEM_DOMAIN_CPU_CACHE = 3  // eADR: the CPU caches are persistent too
+};
+
+struct ndb_pmem_region_info {
+  ndb_pmem_domain domain; // the weakest of all regions behind the file
+  int numa_node;          // closest CPU node of the regions; -1: not one
+  int target_node;        // memory node of the regions; -1: not one
+  Uint64 dirty_shutdown;  // summed over DIMMs or memory devices; ~0: none
+  Uint32 badblock_ranges; // bad-block ranges on the devices
+  bool stacked;           // device mapper or md: several devices below
+  bool dax_inode;         // the file is DAX (statx STATX_ATTR_DAX)
+  char device[32];        // block device of the file system, e.g. "pmem0"
+  char region[256];       // sysfs path of the first region, for messages
+};
+
+/**
+ * What lies behind the file system of fd. 0, or the errno of fstat. A
+ * file that is not on a persistent memory region gives 0 and
+ * NDB_PMEM_DOMAIN_UNKNOWN.
+ */
+int ndb_pmem_get_region_info(int fd, ndb_pmem_region_info *info);
+int ndb_pmem_persistence_domain(int fd, ndb_pmem_domain *domain);
+
+/**
+ * The NUMA node of the region; else of the page at addr, a mapped
+ * address or nullptr; -1 if not known.
+ */
+int ndb_pmem_numa_node(int fd, const void *addr);
+
+/* The summed dirty-shutdown count; ENOTSUP if the devices have none */
+int ndb_pmem_dirty_shutdown(int fd, Uint64 *count);
+
+/**
+ * The number of bad-block ranges under bytes [off, off + len) of the
+ * file. *exact is false when the file's extents cannot be known (no
+ * FIEMAP, several devices below, no device found); every range on the
+ * devices then counts.
+ */
+int ndb_pmem_badblocks_overlap(int fd, Uint64 off, Uint64 len, Uint32 *n,
+                               bool *exact);
+
+/* Tests: read sysfs below root; nullptr or "" for the real one */
+void ndb_pmem_set_sysfs_root(const char *root);
+
 #endif
