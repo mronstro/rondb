@@ -786,16 +786,19 @@ Jit1Prog *jit1_compile(NdbJitCodeMem *mem,
     errno = EFAULT;
     goto fail;
   }
-  const void *rx = slot.rx;
 
   if (out_timing) t_seal_end = j1_now_ns();
 
-  Jit1Prog *handle = (Jit1Prog *)calloc(1, sizeof(*handle));
+  /* No initializer: the gotos above jump past this declaration to
+   * fail, and GCC's -Wjump-misses-init rejects that for an initialized
+   * variable. */
+  Jit1Prog *handle;
+  handle = (Jit1Prog *)calloc(1, sizeof(*handle));
   if (!handle) {
     errno = ENOMEM;
     goto fail;
   }
-  handle->rx_entry = (const uint8_t *)rx;
+  handle->rx_entry = (const uint8_t *)slot.rx;
   handle->emitted  = total;
   handle->mem      = mem;
   handle->slot     = slot;
