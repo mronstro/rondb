@@ -627,17 +627,21 @@ long minor_faults() {
 }
 #endif
 
-/* After a prefault, writing every page takes no page fault */
+/**
+ * After a prefault, writing every page of the mapping takes no page
+ * fault. Only the mapping is written while the faults are counted.
+ */
 void test_prefault(char *base, std::vector<Uint8> &expected) {
   OK(ndb_pmem_prefault(base, TEST_FILE_SIZE) == 0);
 #ifdef __linux__
+  const bool populate = madvise(base, 4096, MADV_POPULATE_WRITE) == 0;
+  printf("ndb_pmem: MADV_POPULATE_WRITE %s\n",
+         populate ? "used" : "not supported, pages written instead");
   const long before = minor_faults();
 #endif
   for (size_t off = 0; off < TEST_FILE_SIZE; off += 4096) {
     ndb_pmem_store64(reinterpret_cast<Uint64 *>(base + off), off);
     ndb_pmem_flush(base + off, sizeof(Uint64));
-    const Uint64 v = off;
-    memcpy(expected.data() + off, &v, sizeof(v));
   }
   ndb_pmem_drain();
 #ifdef __linux__
@@ -646,6 +650,10 @@ void test_prefault(char *base, std::vector<Uint8> &expected) {
          faults, TEST_FILE_SIZE / 4096);
   OK(faults <= (long)(TEST_FILE_SIZE / 4096 / 64));
 #endif
+  for (size_t off = 0; off < TEST_FILE_SIZE; off += 4096) {
+    const Uint64 v = off;
+    memcpy(expected.data() + off, &v, sizeof(v));
+  }
 }
 
 /**
