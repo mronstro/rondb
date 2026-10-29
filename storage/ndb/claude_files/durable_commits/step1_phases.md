@@ -13,7 +13,7 @@ unchanged.
 | Phase | Pull request | Content | Packages | Gate (what the pusher runs) | Needs | State |
 |---|---|---|---|---|---|---|
 | 1 | 2 | CPU feature detection and XXH3, with AVX2 chosen at run time | S1.1, S1.2 | `NdbHW-t`, `ndb_xxh3-t`, `rondb_hash-t` on Linux x86_64, Linux ARM64 and macOS ARM64; file-mode regression | — | **Done**: the XXH3 version passed all tests (reported 2026-10-29); the first, CRC32C version had passed on 2026-10-28 |
-| 2 | 3 | PMEM helper and platform queries | S1.3, S1.4 | `ndb_pmem-t` on a plain file on the three platforms and on `memmap=` | 1 | Not started |
+| 2 | 3 | PMEM helper and platform queries | S1.3, S1.4 | `ndb_pmem-t` on a plain file on the three platforms and on `memmap=` | 1 | **In progress**: S1.3 passed `ndb_pmem-t` on macOS ARM64 (2026-10-29), Linux to be tested; S1.4 next |
 | 3 | 4 | Configuration: parameters, path parser, checks, test settings | S2.1–S2.3, S2.7 | Config unit tests, management-server refusals | — | Not started |
 | 4 | 5 | NDBFS mapping and placement; PMEM mode with today's format (**M0.2**) | S3.1–S3.4, S2.4, S2.5 | MTR ndb suite and a testSystemRestart subset in `nodax` and on `memmap=` | 2, 3 | Not started |
 | 5 | 6 | Initial start and restarts with every file mapped; ndbinfo `redo_log_pmem` | S3.5, S3.6, S2.6 | Initial start, SR and NR in PMEM mode; ndbinfo rows | 4 | Not started |
@@ -264,3 +264,68 @@ Linux x86_64, Intel Core i9-13900K, normal build without `-mavx2`,
   4 times faster than scalar.
 
 Linux ARM64: to come.
+
+---
+
+## Phase 2: PMEM helper and platform queries
+
+**Scope.** `implementation_plan.md` pull request 3; platform plan S1.3 and
+S1.4. It is written in two parts, tested one at a time:
+
+| Part | Package | Content | State |
+|---|---|---|---|
+| 2a | S1.3 | `ndb_pmem` core: map, prefault, copy, in-place stores, zero, flush, drain | Passed on macOS ARM64 (2026-10-29); Linux to be tested |
+| 2b | S1.4 | Platform queries: persistence domain, region, NUMA node, bad blocks, dirty shutdown; `Ndb_GetThreadNumaNode()` | Not started |
+
+Nothing calls the helper before S3.2, so file mode is unchanged.
+
+**Changes in 2a.**
+
+| File | Change |
+|---|---|
+| `include/portlib/ndb_pmem.h` | The API of S1.3 |
+| `src/common/portlib/ndb_pmem.cpp` | The copy methods, chosen once and used through a function pointer, and the write-back chosen by CPU. On x86-64: MOVDIR64B, NT stores (AVX, else SSE2), or stores with CLWB, else CLFLUSHOPT, else CLFLUSH; the drain is SFENCE. On aarch64: stores with DC CVAP, or DC CVAC without FEAT_DPB; the drain is DSB SY. Elsewhere `memcpy` and a fence. The map reserves 2 MB more, maps at a 2 MB boundary and releases the rest. The prefault uses `MADV_POPULATE_WRITE`, else writes back one byte per 4 KB. The unit test is in the same file |
+| `src/common/portlib/CMakeLists.txt` | `ndb_pmem.cpp` in `ndbportlib`; `ndb_pmem-t` |
+
+**Decisions taken while implementing.**
+
+1. **No new build checks.** `MAP_SHARED_VALIDATE`, `MAP_SYNC` and
+   `MADV_POPULATE_WRITE` take the kernel's values when the C library lacks
+   them. The platform plan had CMake checks and `ndb_config.h` defines.
+2. **MOVDIR64B is written as bytes**, as the Linux kernel does, so no
+   compiler support is needed.
+3. **`ndb_pmem_init()` can change the method.** It returns `ENOTSUP` for a
+   method the CPU lacks and keeps the current one. Calling it again with
+   the same method does nothing.
+4. **The drain is a function in `ndb_pmem.cpp`, not inline.** The call costs
+   about 1 ns against a persist of 200 to 2000 ns, and the power-loss
+   emulation of S1.5 hooks in there.
+5. **`ndb_pmem_zero()` takes any range.** The end of log E of E12 is not on
+   a line boundary. The whole lines in the range use the method; the partial
+   lines at either end use stores and a write-back.
+6. **On aarch64, `CLWB` means the same as `AUTO`**: stores and DC CVAP.
+   `NTSTORE` and `MOVDIR64B` return `ENOTSUP` there.
+
+**Commands for the pusher.** `cmake .` first, because there is a new source
+file. Then, on Linux x86_64, Linux ARM64 and macOS ARM64:
+
+```
+cmake --build . --target ndb_pmem-t
+ctest -R ndb_pmem-t --output-on-failure
+./runtime_output_directory/ndb_pmem-t            # methods, faults, timings
+NDB_PMEM_DIR=/mnt/pmem ./runtime_output_directory/ndb_pmem-t   # Linux, a DAX mount on memmap=
+```
+
+`ndb_pmem-t` maps a 4 MB file in `$TMPDIR`. There `MAP_SYNC` must fail with
+`EOPNOTSUPP` and the optional mapping must work. It tests every copy method
+the CPU has with copies, in-place stores and zeroing, and reads the file
+back. On Linux it checks that writing every page after the prefault takes
+no page faults. It prints ns per copy and drain for each method; on a plain
+file these are not the costs on persistent memory. With `NDB_PMEM_DIR`, it
+also requires `MAP_SYNC` to work there. On macOS it is the first run of DC
+CVAP from user space: a `SIGILL` would mean macOS forbids it (S1.3).
+
+On macOS ARM64 (Apple M5 Pro) `ndb_pmem-t` passed, with DC CVAP and DC
+CVAC both running from user space; `auto` chooses `store+dc-cvap`. macOS
+reports `EOPNOTSUPP` as "Operation not supported on socket".
+
