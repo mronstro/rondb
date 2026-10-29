@@ -217,5 +217,11 @@ extern "C"
    * first call, which is thread safe and does not need ndb_init().
    */
   const struct ndb_cpu_features *Ndb_GetCpuFeatures();
+
+  /**
+   * The NUMA node that holds every CPU this thread may run on; -1 if
+   * they span several nodes or it is not known (not Linux).
+   */
+  int Ndb_GetThreadNumaNode();
 }
 #endif

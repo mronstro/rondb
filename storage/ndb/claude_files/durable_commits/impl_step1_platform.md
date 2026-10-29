@@ -282,9 +282,10 @@ Total about 36–42 person-days.
     char device[32], region[256];  // "pmem0", sysfs path for messages
   };
   int ndb_pmem_persistence_domain(int fd, ndb_pmem_domain *dom);
-  int ndb_pmem_region_info(int fd, ndb_pmem_region_info *info);
+  int ndb_pmem_get_region_info(int fd, ndb_pmem_region_info *info);
   int ndb_pmem_numa_node(int fd, const void *addr);       // -1 if unknown
-  int ndb_pmem_badblocks_overlap(int fd, Uint64 off, Uint64 len, Uint32 *n);
+  int ndb_pmem_badblocks_overlap(int fd, Uint64 off, Uint64 len, Uint32 *n,
+                                 bool *exact);
   int ndb_pmem_dirty_shutdown(int fd, Uint64 *count);     // ENOTSUP if absent
   void ndb_pmem_set_sysfs_root(const char *root);         // test hook
   int Ndb_GetThreadNumaNode();   // NdbHW: node of all CPUs this thread may run on, else -1
@@ -465,7 +466,7 @@ Total about 36–42 person-days.
 
 - **Probe.** New `Ndbfs::probe_redo_path_pmem(i)`, from `Ndbfs::execREAD_CONFIG_REQ`, for each
   REDO base path (or `BP_FS`), PMEM mode only: create `ndb_<id>_pmem_probe.tmp` of 2 MB, map
-  `REQUIRED`, `ndb_pmem_region_info()`, unmap, remove. It fails before an initial start writes
+  `REQUIRED`, `ndb_pmem_get_region_info()`, unmap, remove. It fails before an initial start writes
   gigabytes. Results go to a read-only table `Ndbfs::get_redo_path_info(i)`, read by DBLQH
   after its own READ_CONFIG (NDBFS runs first, fact 13; `get_base_path()` is already read
   from other threads, `Ndbfs.cpp:257-258`) [V]. The verdict is a pure function
