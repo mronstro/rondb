@@ -455,6 +455,16 @@ int ndb_pmem_prefault(void *addr, size_t len) {
 #endif
 }
 
+int ndb_pmem_lock(void *addr, size_t len) {
+#ifdef _WIN32
+  (void)addr;
+  (void)len;
+  return EOPNOTSUPP;
+#else
+  return mlock(addr, len) == 0 ? 0 : errno;
+#endif
+}
+
 void ndb_pmem_copy_nt(void *dst, const void *src, size_t len) {
   assert(((uintptr_t)dst % NDB_PMEM_LINE) == 0);
   assert((len % NDB_PMEM_LINE) == 0);
@@ -628,15 +638,11 @@ long minor_faults() {
 #endif
 
 /**
- * After a prefault, writing every page of the mapping takes no page
- * fault. Only the mapping is written while the faults are counted.
+ * Write the offset into the first word of every 4 KB page; the minor
+ * faults that takes on Linux, else -1.
  */
-void test_prefault(char *base, std::vector<Uint8> &expected) {
-  OK(ndb_pmem_prefault(base, TEST_FILE_SIZE) == 0);
+long write_every_page(char *base) {
 #ifdef __linux__
-  const bool populate = madvise(base, 4096, MADV_POPULATE_WRITE) == 0;
-  printf("ndb_pmem: MADV_POPULATE_WRITE %s\n",
-         populate ? "used" : "not supported, pages written instead");
   const long before = minor_faults();
 #endif
   for (size_t off = 0; off < TEST_FILE_SIZE; off += 4096) {
@@ -645,14 +651,70 @@ void test_prefault(char *base, std::vector<Uint8> &expected) {
   }
   ndb_pmem_drain();
 #ifdef __linux__
-  const long faults = minor_faults() - before;
-  printf("ndb_pmem: %ld minor faults writing %zu pages after prefault\n",
-         faults, TEST_FILE_SIZE / 4096);
-  OK(faults <= (long)(TEST_FILE_SIZE / 4096 / 64));
+  return minor_faults() - before;
+#else
+  return -1;
 #endif
+}
+
+/**
+ * The minor faults of writing every page of a new file in dir, mapped
+ * with flags, after a prefault if asked and a lock if asked. -1 if not
+ * Linux, -2 if the lock was refused.
+ */
+long faults_on_new_file(const char *dir, unsigned flags, bool prefault,
+                        bool lock) {
+  TestFile f;
+  OK(create_file(dir, &f));
+  ndb_pmem_mapping m;
+  OK(ndb_pmem_map(f.fd, TEST_FILE_SIZE, flags, &m) == 0);
+  long faults = -2;
+  if (prefault) {
+    OK(ndb_pmem_prefault(m.addr, TEST_FILE_SIZE) == 0);
+  }
+  const int r = lock ? ndb_pmem_lock(m.addr, TEST_FILE_SIZE) : 0;
+  if (r == 0) {
+    faults = write_every_page(static_cast<char *>(m.addr));
+  } else {
+    printf("ndb_pmem: lock refused: %s\n", strerror(r));
+  }
+  OK(ndb_pmem_unmap(&m) == 0);
+  remove_file(&f);
+  return faults;
+}
+
+/**
+ * After a prefault, writing every page of the mapping takes no page
+ * fault. That is required on DAX (map_sync) only: on a page-cache file
+ * the count depends on how the kernel maps the cache. New files without
+ * prefault, and with prefault and lock, show the difference. Only a
+ * mapping is written while the faults are counted.
+ */
+void test_prefault(char *base, std::vector<Uint8> &expected, bool map_sync,
+                   const char *dir) {
+  OK(ndb_pmem_prefault(base, TEST_FILE_SIZE) == 0);
+#ifdef __linux__
+  const bool populate = madvise(base, 4096, MADV_POPULATE_WRITE) == 0;
+  printf("ndb_pmem: MADV_POPULATE_WRITE %s\n",
+         populate ? "used" : "not supported, pages written instead");
+#endif
+  const long faults = write_every_page(base);
   for (size_t off = 0; off < TEST_FILE_SIZE; off += 4096) {
     const Uint64 v = off;
     memcpy(expected.data() + off, &v, sizeof(v));
+  }
+  if (faults < 0) return;
+
+  const unsigned flags =
+      map_sync ? NDB_PMEM_MAP_SYNC_REQUIRED : NDB_PMEM_MAP_SYNC_OPTIONAL;
+  const long faults_without = faults_on_new_file(dir, flags, false, false);
+  const long faults_locked = faults_on_new_file(dir, flags, true, true);
+  printf("ndb_pmem: minor faults writing %zu pages: %ld after prefault, "
+         "%ld without prefault, %ld after prefault and lock%s\n",
+         TEST_FILE_SIZE / 4096, faults, faults_without, faults_locked,
+         map_sync ? "" : " (page cache, not checked)");
+  if (map_sync) {
+    OK(faults <= (long)(TEST_FILE_SIZE / 4096 / 64));
   }
 }
 
@@ -771,7 +833,7 @@ void test_dir(const char *dir, bool dax) {
 
   std::vector<Uint8> expected(TEST_FILE_SIZE, 0);
   OK(memcmp(base, expected.data(), TEST_FILE_SIZE) == 0);
-  test_prefault(base, expected);
+  test_prefault(base, expected, m.map_sync, dir);
 
   const std::vector<TestVariant> variants = test_variants();
   size_t at = 0;

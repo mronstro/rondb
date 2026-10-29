@@ -305,6 +305,17 @@ Nothing calls the helper before S3.2, so file mode is unchanged.
    lines at either end use stores and a write-back.
 6. **On aarch64, `CLWB` means the same as `AUTO`**: stores and DC CVAP.
    `NTSTORE` and `MOVDIR64B` return `ENOTSUP` there.
+7. **`ndb_pmem_lock()` (`mlock`) for the DRAM test modes.**
+   - On a page-cache file it keeps the REDO pages from being evicted; an
+     evicted page would turn a write into a read from disk.
+   - It faults shared pages in for reading only, so the prefault comes
+     first.
+   - Linux skips DAX mappings in `mlock`, so on DAX it does nothing.
+   - With `LockPagesInMainMemory` the data node's `mlockall(MCL_CURRENT |
+     MCL_FUTURE)` (`src/kernel/vm/ndbd_malloc_impl.cpp:1348`) locks the
+     mappings anyway.
+   - Locked page cache counts against `RLIMIT_MEMLOCK`, so S3.2 should
+     warn and go on if the lock is refused.
 
 **Commands for the pusher.** `cmake .` first, because there is a new source
 file. Then, on Linux x86_64, Linux ARM64 and macOS ARM64:
@@ -319,8 +330,13 @@ NDB_PMEM_DIR=/mnt/pmem ./runtime_output_directory/ndb_pmem-t   # Linux, a DAX mo
 `ndb_pmem-t` maps a 4 MB file in `$TMPDIR`. There `MAP_SYNC` must fail with
 `EOPNOTSUPP` and the optional mapping must work. It tests every copy method
 the CPU has with copies, in-place stores and zeroing, and reads the file
-back. On Linux it checks that writing every page after the prefault takes
-no page faults. It prints ns per copy and drain for each method; on a plain
+back. On Linux it counts the page faults of writing every page in three
+cases: after the prefault, on a new file without it, and on a new file
+after prefault and lock. It requires none after the prefault only on DAX. On a page-cache file the count depends on how the
+kernel maps the cache: Linux x86_64 took 64 faults for 1024 pages, one per
+64 KB, on xfs with kernel 6.11; most likely one per large folio (not
+verified). A run with `TMPDIR=/dev/shm` (tmpfs, no write tracking) tells
+the two apart. It prints ns per copy and drain for each method; on a plain
 file these are not the costs on persistent memory. With `NDB_PMEM_DIR`, it
 also requires `MAP_SYNC` to work there. On macOS it is the first run of DC
 CVAP from user space: a `SIGILL` would mean macOS forbids it (S1.3).
