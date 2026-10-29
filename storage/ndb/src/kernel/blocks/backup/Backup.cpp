@@ -11867,6 +11867,13 @@ void Backup::execABORT_BACKUP_ORD(Signal *signal) {
       ptr.p->m_remove_files_after_cleanup = true;
       cleanup(signal, ptr);
       return;
+    case AbortBackupOrd::RemoveFailedBackupFiles:
+    case AbortBackupOrd::RemoveFailedBackupFilesConf:
+    case AbortBackupOrd::RemoveFailedBackupFilesRef:
+      /* The debris sweep orders are handled, and return, before the
+       * record lookup above.
+       */
+      ndbabort();
     case AbortBackupOrd::BackupFailure:
     case AbortBackupOrd::BackupFailureDueToNodeFail:
     case AbortBackupOrd::OkToClean:
