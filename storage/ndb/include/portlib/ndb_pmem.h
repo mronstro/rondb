@@ -99,6 +99,15 @@ int ndb_pmem_unmap(ndb_pmem_mapping *m);
 int ndb_pmem_prefault(void *addr, size_t len);
 
 /**
+ * Lock the pages of a mapping in memory, so that the kernel cannot evict
+ * them. It matters on a page-cache file, as in the DRAM test modes; Linux
+ * ignores it on DAX, which has no page cache. Locking faults pages in for
+ * reading only, so prefault first. 0 or an errno, e.g. ENOMEM or EPERM
+ * when RLIMIT_MEMLOCK is too low.
+ */
+int ndb_pmem_lock(void *addr, size_t len);
+
+/**
  * Copy whole lines: dst is aligned to NDB_PMEM_LINE and len is a
  * multiple of it. The copy includes the write-back of the lines.
  */
