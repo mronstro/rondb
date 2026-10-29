@@ -275,7 +275,7 @@ S1.4. It is written in two parts, tested one at a time:
 | Part | Package | Content | State |
 |---|---|---|---|
 | 2a | S1.3 | `ndb_pmem` core: map, prefault, copy, in-place stores, zero, flush, drain | Passed on macOS ARM64 and Linux x86_64 (2026-10-29); Linux ARM64 to be tested |
-| 2b | S1.4 | Platform queries: persistence domain, region, NUMA node, bad blocks, dirty shutdown; `Ndb_GetThreadNumaNode()` | `ndb_pmem_region-t` passed on macOS ARM64 (2026-10-29), fixture trees included; Linux x86_64 and ARM64 to be tested, and `NdbHW-t` with the thread's node |
+| 2b | S1.4 | Platform queries: persistence domain, region, NUMA node, bad blocks, dirty shutdown; `Ndb_GetThreadNumaNode()` | `ndb_pmem_region-t` passed on macOS ARM64 (2026-10-29), fixture trees included; `NdbHW-t` gives thread node -1 on macOS, as it should; Linux x86_64 and ARM64 to be tested |
 
 Nothing calls the helper before S3.2, so file mode is unchanged.
 
