@@ -61,6 +61,7 @@ protected:
 
   // The signal processing functions
   void execREAD_CONFIG_REQ(Signal *signal);
+  void read_redo_pmem_config(const ndb_mgm_configuration_iterator *p);
   void execDUMP_STATE_ORD(Signal *signal);
   void execFSOPENREQ(Signal *signal);
   void execFSCLOSEREQ(Signal *signal);

@@ -316,8 +316,8 @@
 #define CFG_DB_COMPILED_INTERPRETER 710 /* 708 was taken by
   CFG_DB_ENABLE_PROACTIVE_DEADLOCK_DETECTION in the 26.10 merge (and 705
   by upstream before that): a duplicate id makes the DBLQH proxy read the
-  OTHER parameter as the JIT mode -> JIT silently OFF node-wide. Keep
-  this the highest DB id; check for duplicates after every merge.
+  OTHER parameter as the JIT mode -> JIT silently OFF node-wide. Check
+  for duplicates after every merge (MgmConfig-t checks it).
   2026-09-18: 707 went to NodeStartLogReportFrequency (released 25.10,
   lower version wins), so 707/708/709 above moved to 708/709/710. */
 /* Values for CFG_DB_COMPILED_INTERPRETER (CompiledInterpreter enum param):
@@ -326,6 +326,30 @@
 #define NDB_COMPILED_INTERPRETER_OFF   0  /* JIT disabled (interpreter only) — default */
 #define NDB_COMPILED_INTERPRETER_AUTO  1  /* JIT every eligible program (x86_64 / aarch64 only) */
 #define NDB_COMPILED_INTERPRETER_ON    2  /* force JIT (reserved; == AUTO today) */
+
+/* RONDB-1150: the REDO log on persistent memory. 716 is kept for
+ * DurableCommits. Keep CFG_DB_REDO_PMEM_COPY_METHOD the highest DB id. */
+#define CFG_DB_REDO_LOG_MODE              711
+#define CFG_DB_REDO_LOG_PATH              712
+#define CFG_DB_REDO_PMEM_TEST_MODE        713
+#define CFG_DB_REDO_PMEM_POWER_LOSS_EMUL  714
+#define CFG_DB_REDO_PMEM_COPY_METHOD      715
+
+/* Values for CFG_DB_REDO_LOG_MODE (RedoLogMode) */
+#define NDB_REDO_LOG_MODE_FILE 0 /* files written through NDBFS (default) */
+#define NDB_REDO_LOG_MODE_PMEM 1 /* files mapped on persistent memory */
+
+/* Values for CFG_DB_REDO_PMEM_TEST_MODE (__RedoLogPmemTestMode) */
+#define NDB_REDO_PMEM_TEST_MODE_OFF      0 /* production checks (default) */
+#define NDB_REDO_PMEM_TEST_MODE_EMULATED 1 /* memmap=: no persistence domain */
+#define NDB_REDO_PMEM_TEST_MODE_NODAX    2 /* any file, without MAP_SYNC */
+
+/* Values for CFG_DB_REDO_PMEM_COPY_METHOD (__RedoLogPmemCopyMethod), the
+ * same as enum ndb_pmem_copy_method in portlib/ndb_pmem.h */
+#define NDB_REDO_PMEM_COPY_AUTO      0
+#define NDB_REDO_PMEM_COPY_NTSTORE   1
+#define NDB_REDO_PMEM_COPY_MOVDIR64B 2
+#define NDB_REDO_PMEM_COPY_CLWB      3
 
 /* End RonDB only configuration parameters */
 

@@ -1,0 +1,32 @@
+-- source include/have_ndb.inc
+
+# RONDB-1150: RedoLogMode=pmem and its settings, checked by the
+# management server when it reads config.ini (platform plan S2.2).
+# ndb_config runs the same checks.
+
+# Node 1: FileSystemPathRedoLog in file mode, a warning.
+# Node 2: PMEM mode without FileSystemPathRedoLog, a warning.
+# Node 3: PMEM mode, one path per NUMA node; sparse becomes full.
+# Node 4: the three test settings, a warning each.
+echo == 1 == accepted;
+--replace_regex /.*\[ndb_config\]//
+--exec $NDB_CONFIG --config-file=$MYSQL_TEST_DIR/suite/ndb/ndb_redo_pmem_config.ini --query=NodeId,RedoLogMode,InitFragmentLogFiles,__RedoLogPmemTestMode,__RedoLogPmemPowerLossEmulation,__RedoLogPmemCopyMethod --type=ndbd 2>&1
+
+echo == 2 == FileSystemPathRedoLog;
+--exec $NDB_CONFIG --config-file=$MYSQL_TEST_DIR/suite/ndb/ndb_redo_pmem_config.ini --query=FileSystemPathRedoLog --nodeid=1 2> /dev/null
+--exec $NDB_CONFIG --config-file=$MYSQL_TEST_DIR/suite/ndb/ndb_redo_pmem_config.ini --query=FileSystemPathRedoLog --nodeid=3 2> /dev/null
+
+echo == 3 == refused with EncryptedFileSystem;
+--replace_regex /.*\[ndb_config\]//
+--error 255
+--exec $NDB_CONFIG --config-file=$MYSQL_TEST_DIR/suite/ndb/ndb_redo_pmem_encrypted.ini 2>&1
+
+echo == 4 == refused with Diskless;
+--replace_regex /.*\[ndb_config\]//
+--error 255
+--exec $NDB_CONFIG --config-file=$MYSQL_TEST_DIR/suite/ndb/ndb_redo_pmem_diskless.ini 2>&1
+
+echo == 5 == refused for a NUMA node given twice;
+--replace_regex /.*\[ndb_config\]//
+--error 255
+--exec $NDB_CONFIG --config-file=$MYSQL_TEST_DIR/suite/ndb/ndb_redo_pmem_path.ini 2>&1

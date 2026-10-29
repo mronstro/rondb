@@ -14,7 +14,7 @@ unchanged.
 |---|---|---|---|---|---|---|
 | 1 | 2 | CPU feature detection and XXH3, with AVX2 chosen at run time | S1.1, S1.2 | `NdbHW-t`, `ndb_xxh3-t`, `rondb_hash-t` on Linux x86_64, Linux ARM64 and macOS ARM64; file-mode regression | — | **Done**: the XXH3 version passed all tests (reported 2026-10-29); the first, CRC32C version had passed on 2026-10-28 |
 | 2 | 3 | PMEM helper and platform queries | S1.3, S1.4 | `ndb_pmem-t` on a plain file on the three platforms and on `memmap=` | 1 | **In progress**: S1.3 passed `ndb_pmem-t` on macOS ARM64 and Linux x86_64 (2026-10-29); Linux ARM64 to be tested. S1.4 passed `ndb_pmem_region-t` and `NdbHW-t` on macOS ARM64 and Linux x86_64 (2026-10-29); Linux ARM64 to be tested |
-| 3 | 4 | Configuration: parameters, path parser, checks, test settings | S2.1–S2.3, S2.7 | Config unit tests, management-server refusals | — | Not started |
+| 3 | 4 | Configuration: parameters, path parser, checks, test settings | S2.1–S2.3, S2.7 | Config unit tests, management-server refusals | — | **In progress**: `RedoLogPaths-t`, `MgmConfig-t`, `ndb.ndb_redo_pmem_config`, `ndb.ndb_config` and `ndb.ndb_basic` in PMEM mode passed on macOS ARM64 (2026-10-29); Linux to be tested |
 | 4 | 5 | NDBFS mapping and placement; PMEM mode with today's format (**M0.2**) | S3.1–S3.4, S2.4, S2.5 | MTR ndb suite and a testSystemRestart subset in `nodax` and on `memmap=` | 2, 3 | Not started |
 | 5 | 6 | Initial start and restarts with every file mapped; ndbinfo `redo_log_pmem` | S3.5, S3.6, S2.6 | Initial start, SR and NR in PMEM mode; ndbinfo rows | 4 | Not started |
 | 6 | 7 | Record format and reader module | S4.1, S6.2 | Unit tests over synthetic logs on the three platforms | 1 | Not started |
@@ -412,3 +412,86 @@ memory, about 50 ns here, and grows little up to 8 lines. Stores plus a
 write-back grow faster, and CLFLUSH orders every line. So `auto` is right
 to prefer MOVDIR64B, then NT stores.
 
+---
+
+## Phase 3: Configuration
+
+**Scope.** `implementation_plan.md` pull request 4; platform plan S2.1,
+S2.2, S2.3 and S2.7. The parameters exist, the management server checks
+them, and the data node reads them. PMEM mode is accepted but nothing
+maps a file before phase 4: the REDO log is written as in file mode,
+with full initialisation and without ODirect, and the node says so at
+every start. File mode is unchanged.
+
+**Changes.**
+
+| File | Change |
+|---|---|
+| `include/mgmapi/mgmapi_config_parameters.h` | Ids 711–715 (`CFG_DB_REDO_LOG_MODE`, `_REDO_LOG_PATH`, `_REDO_PMEM_TEST_MODE`, `_REDO_PMEM_POWER_LOSS_EMUL`, `_REDO_PMEM_COPY_METHOD`) and their values; 716 is kept for `DurableCommits` |
+| `src/common/mgmcommon/ConfigInfo.cpp` | `RedoLogMode` (`file`, `pmem`), `FileSystemPathRedoLog`, `__RedoLogPmemTestMode` (`off`, `emulated`, `nodax`), `__RedoLogPmemPowerLossEmulation`, `__RedoLogPmemCopyMethod` (`auto`, `ntstore`, `movdir64b`, `clwb`). The checks are `checkRedoLogPmem()`, called from `checkDbConstraints` |
+| `include/util/RedoLogPaths.hpp`, `src/common/util/RedoLogPaths.cpp` | The parser of `FileSystemPathRedoLog`, in `ndbgeneral`; the unit test is in the same file |
+| `src/common/util/CMakeLists.txt` | `RedoLogPaths.cpp`; `RedoLogPaths-t` |
+| `src/mgmsrv/testConfig.cpp` | `MgmConfig-t`: the new values in `test_param_values`; `test_redo_log_pmem()` for the checks and what reaches the data node; `test_unique_param_ids()`, no two parameters of one section with the same id |
+| `src/kernel/blocks/dblqh/Dblqh.hpp`, `DblqhMain.cpp` | `c_redo_pmem`, `c_redo_pmem_test_mode`. In PMEM mode: refuses `EncryptedFileSystem` and `Diskless`, writes the files in full at an initial start, and opens them without ODirect |
+| `src/kernel/blocks/ndbfs/Ndbfs.hpp`, `Ndbfs.cpp` | `read_redo_pmem_config()`, before any file is opened. In PMEM mode: checks the path, refuses `__RedoLogPmemPowerLossEmulation`, chooses the copy method with `ndb_pmem_init()` and refuses one the CPU lacks, and logs the method, the test mode and that the files are not mapped yet |
+| `mysql-test/suite/ndb/t/ndb_redo_pmem_config.test`, `r/…result`, `ndb_redo_pmem_*.ini` | `ndb_config` on four config files: warnings, values, three refusals |
+| `mysql-test/suite/ndb/pmem_redo.cnf` | Puts a test run in PMEM mode with `nodax` (`--defaults-extra-file`) |
+
+**What the management server checks** (platform plan S2.2):
+
+| Setting | Result |
+|---|---|
+| `pmem` with `EncryptedFileSystem=1` or `Diskless=1` | Error |
+| `pmem`, `FileSystemPathRedoLog` does not parse | Error with the parser's reason |
+| `pmem`, `InitFragmentLogFiles` other than `full` | Replaced by `full`, no warning |
+| `pmem`, test mode `off`, no `FileSystemPathRedoLog` | Warning: the REDO log goes under `FileSystemPath`, which must be DAX |
+| `pmem`, each test setting set | Warning: test setting |
+| `file` with `FileSystemPathRedoLog` | Warning: no effect |
+| `file` with a test setting | Warning: no effect |
+
+**Decisions taken while implementing.**
+
+1. **PMEM mode starts before phase 4**, written as in file mode, with a
+   warning at every start. Refusing it would leave the data-node checks
+   of this phase untestable until phase 4.
+2. **`__RedoLogPmemPowerLossEmulation` is refused by the data node until
+   S1.5 (phase 11).** A test that believes it emulates a power loss but
+   does not would pass for the wrong reason. The management server
+   accepts it with a warning, so configurations need no change later.
+3. **Every test setting gets a warning**, not only the test mode, and
+   each one says "no effect" in file mode.
+4. **`index_for_node()` reports whether the node had its own entry**
+   (`bool *found`). S2.4 warns when a part's node has none.
+5. **NUMA node ids go up to 1023**, the largest Linux allows, and blanks
+   around an entry and around its `:` are ignored. A path may contain
+   `:`; only digits and `:` at the start of an entry name a node.
+6. **No allowlist in `test_unique_param_ids()`.** A scan of the 374
+   entries in `ConfigInfo.cpp` found no two names with one id in a
+   section.
+7. **NDBFS parses the path again but does not keep it yet.** The REDO
+   base paths come with S3.3 in phase 4.
+8. **DBLQH turns ODirect off for the REDO log in PMEM mode.** DBLQH's
+   `c_o_direct` is used only by the three REDO open functions.
+
+**Commands for the pusher.** `cmake .` first, because there are new source
+files. Then, on Linux x86_64, Linux ARM64 and macOS ARM64:
+
+```
+cmake --build .
+ctest -R 'RedoLogPaths-t|MgmConfig-t' --output-on-failure
+cd mysql-test
+./mtr ndb.ndb_redo_pmem_config ndb.ndb_config
+./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndb_basic
+```
+
+The whole build is needed: MTR runs `ndb_config`, `ndb_mgmd`, `ndbmtd`
+and `mysqld`, which all hold the new parameters.
+
+`ndb_redo_pmem_config.result` was written by hand. The first run showed
+that a refused section also got the warning about a missing
+`FileSystemPathRedoLog`; `checkRedoLogPmem()` now stops at the first
+error, and the result was kept as written. The last run starts the cluster in PMEM mode with
+`nodax`; the data node logs show the copy method, the test-mode warning
+and that the files are not mapped yet. The initial start writes every
+REDO log file in full (4 files of 64 MB per log part in the MTR
+configuration), so it takes longer than in file mode.
