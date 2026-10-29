@@ -2800,6 +2800,49 @@ void Dblqh::execREAD_CONFIG_REQ(Signal *signal) {
     c_o_direct_sync_flag = false;
   }
 
+  /**
+   * RONDB-1150: RedoLogMode=pmem (platform plan S2.3). The management
+   * server refuses the same configurations; a configuration without
+   * RedoLogMode gives file mode.
+   */
+  {
+    Uint32 redo_log_mode = NDB_REDO_LOG_MODE_FILE;
+    ndb_mgm_get_int_parameter(p, CFG_DB_REDO_LOG_MODE, &redo_log_mode);
+    c_redo_pmem = (redo_log_mode == NDB_REDO_LOG_MODE_PMEM);
+    c_redo_pmem_test_mode = NDB_REDO_PMEM_TEST_MODE_OFF;
+    ndb_mgm_get_int_parameter(p, CFG_DB_REDO_PMEM_TEST_MODE,
+                              &c_redo_pmem_test_mode);
+  }
+  if (c_redo_pmem) {
+    jam();
+    const bool log = !m_is_query_block && instance() <= 1;
+    if (c_encrypted_filesystem) {
+      progError(__LINE__, NDBD_EXIT_INVALID_CONFIG,
+                "RedoLogMode=pmem cannot be used with EncryptedFileSystem=1");
+    }
+    if (c_diskless) {
+      progError(__LINE__, NDBD_EXIT_INVALID_CONFIG,
+                "RedoLogMode=pmem cannot be used with Diskless=1");
+    }
+    if (m_use_om_init == 0) {
+      m_use_om_init = 1;
+      if (log) {
+        g_eventLogger->info(
+            "RedoLogMode=pmem: the REDO log files are fully written at an "
+            "initial start, as with InitFragmentLogFiles=full");
+      }
+    }
+    if (c_o_direct || c_o_direct_sync_flag) {
+      c_o_direct = 0;
+      c_o_direct_sync_flag = false;
+      if (log) {
+        g_eventLogger->info(
+            "RedoLogMode=pmem: ODirect and ODirectSyncFlag are not used for "
+            "the REDO log");
+      }
+    }
+  }
+
   {
     /**
      * Used by both LDM threads and Query threads, but only LDM

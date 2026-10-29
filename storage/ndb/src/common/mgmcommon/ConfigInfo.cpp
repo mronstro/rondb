@@ -44,6 +44,7 @@
 #include "portlib/ndb_localtime.h"
 #include "portlib/ndb_openssl_version.h"
 #include "portlib/ndb_sockaddr.h"
+#include "util/RedoLogPaths.hpp"
 
 #define KEY_INTERNAL 0
 #define MAX_INT_RNIL 0xfffffeff
@@ -255,6 +256,25 @@ static const ConfigInfo::Typelib compiled_interpreter_typelib[] = {
     {"OFF", NDB_COMPILED_INTERPRETER_OFF},
     {"AUTO", NDB_COMPILED_INTERPRETER_AUTO},
     {"ON", NDB_COMPILED_INTERPRETER_ON},
+    {nullptr, 0}};
+
+/* RONDB-1150: the REDO log on persistent memory */
+static const ConfigInfo::Typelib redo_log_mode_typelib[] = {
+    {"file", NDB_REDO_LOG_MODE_FILE},
+    {"pmem", NDB_REDO_LOG_MODE_PMEM},
+    {nullptr, 0}};
+
+static const ConfigInfo::Typelib redo_pmem_test_mode_typelib[] = {
+    {"off", NDB_REDO_PMEM_TEST_MODE_OFF},
+    {"emulated", NDB_REDO_PMEM_TEST_MODE_EMULATED},
+    {"nodax", NDB_REDO_PMEM_TEST_MODE_NODAX},
+    {nullptr, 0}};
+
+static const ConfigInfo::Typelib redo_pmem_copy_method_typelib[] = {
+    {"auto", NDB_REDO_PMEM_COPY_AUTO},
+    {"ntstore", NDB_REDO_PMEM_COPY_NTSTORE},
+    {"movdir64b", NDB_REDO_PMEM_COPY_MOVDIR64B},
+    {"clwb", NDB_REDO_PMEM_COPY_CLWB},
     {nullptr, 0}};
 
 static const ConfigInfo::Typelib
@@ -981,6 +1001,74 @@ const ConfigInfo::ParamInfo ConfigInfo::m_ParamInfo[] = {
     ConfigInfo::CI_ENUM,
     "OFF",    /* default (2026-09-08; was AUTO during development) */
     compiled_interpreter_typelib },
+
+  {
+    CFG_DB_REDO_LOG_MODE,
+    "RedoLogMode",
+    DB_TOKEN,
+    "Where the REDO log is written: file (default) = files written through "
+    "the file system; pmem = files mapped on persistent memory, which "
+    "FileSystemPathRedoLog or else FileSystemPath must be on (a DAX file "
+    "system). Changing it needs an initial node restart",
+    ConfigInfo::CI_USED,
+    CI_RESTART_INITIAL,
+    ConfigInfo::CI_ENUM,
+    "file",
+    redo_log_mode_typelib },
+
+  {
+    CFG_DB_REDO_LOG_PATH,
+    "FileSystemPathRedoLog",
+    DB_TOKEN,
+    "Directory of the REDO log files with RedoLogMode=pmem, unused in file "
+    "mode: one absolute path, or one per NUMA node as "
+    "node:path,node:path (at most 8). A log part takes the path of the "
+    "NUMA node its LDM thread runs on. Unset: FileSystemPath",
+    ConfigInfo::CI_USED,
+    CI_RESTART_INITIAL,
+    ConfigInfo::CI_STRING,
+    nullptr,
+    nullptr, nullptr },
+
+  {
+    CFG_DB_REDO_PMEM_TEST_MODE,
+    "__RedoLogPmemTestMode",
+    DB_TOKEN,
+    "Test setting for RedoLogMode=pmem without persistent memory, not safe "
+    "against power loss: off (default) = production checks; emulated = "
+    "memmap= device, no persistence domain needed; nodax = any file, "
+    "mapped without MAP_SYNC",
+    ConfigInfo::CI_USED,
+    false,
+    ConfigInfo::CI_ENUM,
+    "off",
+    redo_pmem_test_mode_typelib },
+
+  {
+    CFG_DB_REDO_PMEM_POWER_LOSS_EMUL,
+    "__RedoLogPmemPowerLossEmulation",
+    DB_TOKEN,
+    "Test setting for RedoLogMode=pmem: a crash of the data node loses "
+    "the REDO log writes not yet persistent, as a power loss would",
+    ConfigInfo::CI_USED,
+    false,
+    ConfigInfo::CI_BOOL,
+    "false",
+    "false", "true" },
+
+  {
+    CFG_DB_REDO_PMEM_COPY_METHOD,
+    "__RedoLogPmemCopyMethod",
+    DB_TOKEN,
+    "Test setting for RedoLogMode=pmem: how REDO records are copied to "
+    "persistent memory. auto (default) = movdir64b if the CPU has it, else "
+    "ntstore; ntstore = non-temporal stores; movdir64b; clwb = stores and "
+    "a write-back per cache line",
+    ConfigInfo::CI_USED,
+    false,
+    ConfigInfo::CI_ENUM,
+    "auto",
+    redo_pmem_copy_method_typelib },
 
     /* End RonDB additions */
 
@@ -4098,6 +4186,113 @@ static bool fixShmKey(InitConfigFileParser::Context &ctx, const char *) {
 }
 
 /**
+ * RONDB-1150: RedoLogMode=pmem and its settings (platform plan S2.2).
+ * The data node checks the errors again at start.
+ */
+static bool checkRedoLogPmem(InitConfigFileParser::Context &ctx) {
+  bool ok = true;
+  Uint32 mode = NDB_REDO_LOG_MODE_FILE;
+  Uint32 testMode = NDB_REDO_PMEM_TEST_MODE_OFF;
+  Uint32 powerLossEmul = 0;
+  Uint32 copyMethod = NDB_REDO_PMEM_COPY_AUTO;
+  const char *path = nullptr;
+  ctx.m_currentSection->get("RedoLogMode", &mode);
+  ctx.m_currentSection->get("__RedoLogPmemTestMode", &testMode);
+  ctx.m_currentSection->get("__RedoLogPmemPowerLossEmulation",
+                            &powerLossEmul);
+  ctx.m_currentSection->get("__RedoLogPmemCopyMethod", &copyMethod);
+  ctx.m_currentSection->get("FileSystemPathRedoLog", &path);
+  const bool testSettings = testMode != NDB_REDO_PMEM_TEST_MODE_OFF ||
+                            powerLossEmul != 0 ||
+                            copyMethod != NDB_REDO_PMEM_COPY_AUTO;
+
+  if (mode != NDB_REDO_LOG_MODE_PMEM) {
+    if (path != nullptr) {
+      ctx.reportWarning(
+          "FileSystemPathRedoLog has no effect with RedoLogMode=file, the "
+          "REDO log stays under FileSystemPath (section starting at line "
+          "%u)",
+          ctx.m_sectionLineno);
+    }
+    if (testSettings) {
+      ctx.reportWarning(
+          "__RedoLogPmem settings have no effect with RedoLogMode=file "
+          "(section starting at line %u)",
+          ctx.m_sectionLineno);
+    }
+    return true;
+  }
+
+  Uint32 encrypted = 0;
+  Uint32 diskless = 0;
+  ctx.m_currentSection->get("EncryptedFileSystem", &encrypted);
+  ctx.m_currentSection->get("Diskless", &diskless);
+  if (encrypted != 0) {
+    ctx.reportError(
+        "RedoLogMode=pmem cannot be used with EncryptedFileSystem=1"
+        " - [%s] starting at line: %d",
+        ctx.fname, ctx.m_sectionLineno);
+    ok = false;
+  }
+  if (diskless != 0) {
+    ctx.reportError(
+        "RedoLogMode=pmem cannot be used with Diskless=1"
+        " - [%s] starting at line: %d",
+        ctx.fname, ctx.m_sectionLineno);
+    ok = false;
+  }
+  if (path != nullptr) {
+    RedoLogPaths paths;
+    BaseString err;
+    if (paths.parse(path, err) != 0) {
+      ctx.reportError(
+          "FileSystemPathRedoLog '%s': %s - [%s] starting at line: %d", path,
+          err.c_str(), ctx.fname, ctx.m_sectionLineno);
+      ok = false;
+    }
+  }
+  /* No warnings for a section that is refused */
+  if (!ok) return false;
+
+  /**
+   * PMEM mode writes every page of the REDO log files at an initial
+   * start. The default sparse cannot be told from a sparse set by the
+   * user, so it is replaced without a warning; the data node logs it.
+   */
+  const char *init = nullptr;
+  if (!ctx.m_currentSection->get("InitFragmentLogFiles", &init) ||
+      native_strcasecmp(init, "full") != 0) {
+    ctx.m_currentSection->put("InitFragmentLogFiles", "full", true);
+  }
+
+  if (testMode != NDB_REDO_PMEM_TEST_MODE_OFF) {
+    ctx.reportWarning(
+        "__RedoLogPmemTestMode=%s is a test setting, the REDO log is not "
+        "safe against power loss (section starting at line %u)",
+        redo_pmem_test_mode_typelib[testMode].name, ctx.m_sectionLineno);
+  } else if (path == nullptr) {
+    ctx.reportWarning(
+        "RedoLogMode=pmem without FileSystemPathRedoLog: the REDO log goes "
+        "under FileSystemPath, which must be on a DAX file system (section "
+        "starting at line %u)",
+        ctx.m_sectionLineno);
+  }
+  if (powerLossEmul != 0) {
+    ctx.reportWarning(
+        "__RedoLogPmemPowerLossEmulation is a test setting, a crash of the "
+        "data node loses REDO log writes (section starting at line %u)",
+        ctx.m_sectionLineno);
+  }
+  if (copyMethod != NDB_REDO_PMEM_COPY_AUTO) {
+    ctx.reportWarning(
+        "__RedoLogPmemCopyMethod=%s is a test setting (section starting at "
+        "line %u)",
+        redo_pmem_copy_method_typelib[copyMethod].name, ctx.m_sectionLineno);
+  }
+  return true;
+}
+
+/**
  * DB Node rule: Check various constraints
  */
 #define CHECK_RESERVED_LESS_THAN_OR_EQUAL_TO_MAX_NO_OF(name)        \
@@ -4228,6 +4423,8 @@ static bool checkDbConstraints(InitConfigFileParser::Context &ctx,
     ctx.m_currentSection->put("TransactionInactiveTimeout",
                               Uint32(MAX_TRANSACTION_INACTIVE_TIMEOUT), true);
   }
+
+  if (!checkRedoLogPmem(ctx)) ok = false;
 
   return ok;
 }

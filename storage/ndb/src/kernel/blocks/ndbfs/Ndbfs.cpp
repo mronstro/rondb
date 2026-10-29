@@ -58,6 +58,8 @@
 #include <NdbConfig.h>
 #include "debugger/DebuggerNames.hpp"
 #include "util/cstrbuf.h"
+#include "util/RedoLogPaths.hpp"
+#include "portlib/ndb_pmem.h"
 
 #include <EventLogger.hpp>
 
@@ -277,6 +279,84 @@ BaseString Ndbfs::get_base_path_param_name(Uint32 no) {
   return {};  // should never happen
 }
 
+static_assert(NDB_REDO_PMEM_COPY_AUTO == NDB_PMEM_COPY_AUTO);
+static_assert(NDB_REDO_PMEM_COPY_NTSTORE == NDB_PMEM_COPY_NTSTORE);
+static_assert(NDB_REDO_PMEM_COPY_MOVDIR64B == NDB_PMEM_COPY_MOVDIR64B);
+static_assert(NDB_REDO_PMEM_COPY_CLWB == NDB_PMEM_COPY_CLWB);
+
+/**
+ * RONDB-1150: RedoLogMode=pmem (platform plan S2.3, S2.7). The copy
+ * method is chosen before any file is opened. The management server
+ * checks the path too; a configuration without RedoLogMode gives file
+ * mode, and file mode reads nothing more.
+ */
+void Ndbfs::read_redo_pmem_config(const ndb_mgm_configuration_iterator *p) {
+  Uint32 mode = NDB_REDO_LOG_MODE_FILE;
+  ndb_mgm_get_int_parameter(p, CFG_DB_REDO_LOG_MODE, &mode);
+  if (mode != NDB_REDO_LOG_MODE_PMEM) return;
+
+  Uint32 test_mode = NDB_REDO_PMEM_TEST_MODE_OFF;
+  Uint32 power_loss_emul = 0;
+  Uint32 copy_method = NDB_REDO_PMEM_COPY_AUTO;
+  const char *spec = nullptr;
+  ndb_mgm_get_int_parameter(p, CFG_DB_REDO_PMEM_TEST_MODE, &test_mode);
+  ndb_mgm_get_int_parameter(p, CFG_DB_REDO_PMEM_POWER_LOSS_EMUL,
+                            &power_loss_emul);
+  ndb_mgm_get_int_parameter(p, CFG_DB_REDO_PMEM_COPY_METHOD, &copy_method);
+  ndb_mgm_get_string_parameter(p, CFG_DB_REDO_LOG_PATH, &spec);
+  static const char *const test_mode_name[] = {"off", "emulated", "nodax"};
+  static const char *const copy_method_name[] = {"auto", "ntstore",
+                                                 "movdir64b", "clwb"};
+  if (test_mode >= NDB_ARRAY_SIZE(test_mode_name) ||
+      copy_method >= NDB_ARRAY_SIZE(copy_method_name)) {
+    ERROR_SET(fatal, NDBD_EXIT_INVALID_CONFIG,
+              "Unknown __RedoLogPmemTestMode or __RedoLogPmemCopyMethod",
+              "RedoLogMode=pmem");
+  }
+
+  if (spec != nullptr) {
+    RedoLogPaths paths;
+    BaseString err;
+    if (paths.parse(spec, err) != 0) {
+      BaseString msg;
+      msg.assfmt("FileSystemPathRedoLog '%s': %s", spec, err.c_str());
+      ERROR_SET(fatal, NDBD_EXIT_INVALID_CONFIG, msg.c_str(),
+                "FileSystemPathRedoLog");
+    }
+  }
+  if (power_loss_emul != 0) {
+    ERROR_SET(fatal, NDBD_EXIT_INVALID_CONFIG,
+              "__RedoLogPmemPowerLossEmulation is not implemented yet",
+              "__RedoLogPmemPowerLossEmulation");
+  }
+  if (ndb_pmem_init(ndb_pmem_copy_method(copy_method)) != 0) {
+    BaseString msg;
+    msg.assfmt("__RedoLogPmemCopyMethod=%s is not available on this CPU",
+               copy_method_name[copy_method]);
+    ERROR_SET(fatal, NDBD_EXIT_INVALID_CONFIG, msg.c_str(),
+              "__RedoLogPmemCopyMethod");
+  }
+
+  g_eventLogger->info(
+      "RedoLogMode=pmem: REDO log copied to persistent memory with %s, "
+      "__RedoLogPmemTestMode=%s",
+      ndb_pmem_method_name(), test_mode_name[test_mode]);
+  if (test_mode == NDB_REDO_PMEM_TEST_MODE_EMULATED) {
+    g_eventLogger->warning(
+        "__RedoLogPmemTestMode=emulated is a test setting: a region without "
+        "a persistence domain is accepted, and the REDO log on it is not "
+        "safe against power loss");
+  } else if (test_mode == NDB_REDO_PMEM_TEST_MODE_NODAX) {
+    g_eventLogger->warning(
+        "__RedoLogPmemTestMode=nodax is a test setting: the REDO log files "
+        "are mapped without MAP_SYNC and survive a crash of the data node, "
+        "but not a crash of the OS or a power loss");
+  }
+  g_eventLogger->warning(
+      "RedoLogMode=pmem: this version does not map the REDO log files "
+      "yet, they are written as in file mode, under FileSystemPath");
+}
+
 void Ndbfs::execREAD_CONFIG_REQ(Signal *signal) {
   const ReadConfigReq *req = (ReadConfigReq *)signal->getDataPtr();
 
@@ -374,6 +454,8 @@ void Ndbfs::execREAD_CONFIG_REQ(Signal *signal) {
       }
     }
   }
+
+  read_redo_pmem_config(p);
 
   m_maxFiles = 0;
   ndb_mgm_get_int_parameter(p, CFG_DB_MAX_OPEN_FILES, &m_maxFiles);
