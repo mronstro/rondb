@@ -1,0 +1,19 @@
+== 1 == accepted
+ WARNING  -- at line 8: FileSystemPathRedoLog has no effect with RedoLogMode=file, the REDO log stays under FileSystemPath (section starting at line 4)
+ WARNING  -- at line 12: RedoLogMode=pmem without FileSystemPathRedoLog: the REDO log goes under FileSystemPath, which must be on a DAX file system (section starting at line 8)
+ WARNING  -- at line 25: __RedoLogPmemTestMode=nodax is a test setting, the REDO log is not safe against power loss (section starting at line 18)
+ WARNING  -- at line 25: __RedoLogPmemPowerLossEmulation is a test setting, a crash of the data node loses REDO log writes (section starting at line 18)
+ WARNING  -- at line 25: __RedoLogPmemCopyMethod=clwb is a test setting (section starting at line 18)
+1,0,sparse,0,0,0 2,1,full,0,0,0 3,1,full,0,0,0 4,1,full,2,1,3
+== 2 == FileSystemPathRedoLog
+/mnt/pmem0
+0:/mnt/pmem0,1:/mnt/pmem1
+== 3 == refused with EncryptedFileSystem
+ ERROR    -- at line 9: RedoLogMode=pmem cannot be used with EncryptedFileSystem=1 - [DB] starting at line: 4
+ ERROR    -- at line 9: Could not store previous section of configuration file.
+== 4 == refused with Diskless
+ ERROR    -- at line 9: RedoLogMode=pmem cannot be used with Diskless=1 - [DB] starting at line: 4
+ ERROR    -- at line 9: Could not store previous section of configuration file.
+== 5 == refused for a NUMA node given twice
+ ERROR    -- at line 9: FileSystemPathRedoLog '0:/mnt/pmem0,0:/mnt/pmem1': NUMA node 0 is given twice - [DB] starting at line: 4
+ ERROR    -- at line 9: Could not store previous section of configuration file.

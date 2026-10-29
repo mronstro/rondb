@@ -390,11 +390,12 @@ Total about 36–42 person-days.
   ```c++
   static constexpr Uint32 NDB_MAX_REDO_LOG_PATHS = 8;
   struct RedoLogPaths {
-    struct Entry { Int32 numa_node; /* -1 = any */ BaseString path; };
+    struct Entry { Int32 numa_node = -1; /* -1 = any */ BaseString path; };
     Uint32 count = 0;
     Entry entry[NDB_MAX_REDO_LOG_PATHS];
     int parse(const char *spec, BaseString &err);  // 0 = ok
-    Uint32 index_for_node(int numa_node) const;    // else 0
+    Uint32 index_for_node(int numa_node,           // else 0
+                          bool *found = nullptr) const;
   };
   ```
 - **File mode.** Defaults are `file` and unset.
@@ -437,7 +438,8 @@ Total about 36–42 person-days.
   `:2765-2778`, with an info line; ignore `ODirect`/`ODirectSyncFlag` for REDO (info line).
 - `Ndbfs::execREAD_CONFIG_REQ` (`Ndbfs.cpp:280`): mode, test mode, emulation flag, copy
   method; `ndb_pmem_emul_enable()` and `ndb_pmem_init(method)` before any open; paths (S3.3);
-  probes (S2.5).
+  probes (S2.5). Phase 3 implements this as `Ndbfs::read_redo_pmem_config()`, which refuses
+  the emulation flag until S1.5 exists (`step1_phases.md`, phase 3).
 - `Ndbcntr`: parse the paths for the initial-start cleanup (S3.3).
 - `Configuration::get_and_set_redo_buffer` (`vm/Configuration.cpp:1006`) belongs to S5.
 - **File mode.** Every read defaults to `file`. **Tests.** S2.2, S3.6. **Depends** on S2.1.

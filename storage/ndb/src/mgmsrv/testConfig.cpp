@@ -371,6 +371,24 @@ static void test_param_values(void) {
       {"LockExecuteThreadToCPU=x", false},
       {"LockExecuteThreadToCPU=x-1", false},
       {"LockExecuteThreadToCPU=x-x", false},
+      // RONDB-1150: the REDO log on persistent memory
+      {"RedoLogMode=file", true},
+      {"RedoLogMode=pmem", true},
+      {"RedoLogMode=PMEM", true},
+      {"RedoLogMode=disk", false},
+      {"RedoLogMode=", false},
+      {"FileSystemPathRedoLog=/mnt/pmem0", true},
+      {"FileSystemPathRedoLog=0:/mnt/pmem0,1:/mnt/pmem1", true},
+      {"__RedoLogPmemTestMode=off", true},
+      {"__RedoLogPmemTestMode=emulated", true},
+      {"__RedoLogPmemTestMode=nodax", true},
+      {"__RedoLogPmemTestMode=dax", false},
+      {"__RedoLogPmemPowerLossEmulation=true", true},
+      {"__RedoLogPmemCopyMethod=auto", true},
+      {"__RedoLogPmemCopyMethod=ntstore", true},
+      {"__RedoLogPmemCopyMethod=movdir64b", true},
+      {"__RedoLogPmemCopyMethod=clwb", true},
+      {"__RedoLogPmemCopyMethod=memcpy", false},
       {0, false}};
 
   for (struct test *t = tests; t->param; t++) {
@@ -612,6 +630,152 @@ static void test_shm_key_node_ids(void) {
   delete c;
 }
 
+/* The value of a parameter of the first data node; 0 if it has none */
+static int get_db_param(Config *c, Uint32 param, Uint32 *value,
+                        const char **str) {
+  ConfigIter iter(c, CFG_SECTION_NODE);
+  for (; iter.valid(); iter.next()) {
+    Uint32 type = 0;
+    CHECK(iter.get(CFG_TYPE_OF_SECTION, &type) == 0);
+    if (type != NODE_TYPE_DB) continue;
+    if (str != nullptr) return iter.get(param, str) == 0;
+    return iter.get(param, value) == 0;
+  }
+  return 0;
+}
+
+static Uint32 get_db_uint(Config *c, Uint32 param) {
+  Uint32 value = ~Uint32(0);
+  CHECK(get_db_param(c, param, &value, nullptr));
+  return value;
+}
+
+static const char *get_db_string(Config *c, Uint32 param) {
+  const char *str = nullptr;
+  if (!get_db_param(c, param, nullptr, &str)) return nullptr;
+  return str;
+}
+
+/* RONDB-1150: RedoLogMode=pmem and its settings (checkRedoLogPmem) */
+static void test_redo_log_pmem(void) {
+  ndbout_c("test_redo_log_pmem");
+  struct test {
+    const char *param1;
+    const char *param2;
+    bool result;
+    const char *init_redo;  // InitFragmentLogFiles afterwards
+  } tests[] = {
+      {"RedoLogMode=file", "NoOfFragmentLogParts=4", true, "sparse"},
+      {"RedoLogMode=file", "InitFragmentLogFiles=full", true, "full"},
+      // File mode only warns
+      {"RedoLogMode=file", "FileSystemPathRedoLog=relative", true, "sparse"},
+      {"RedoLogMode=file", "__RedoLogPmemTestMode=nodax", true, "sparse"},
+      {"RedoLogMode=file", "EncryptedFileSystem=1", true, "sparse"},
+      {"RedoLogMode=file", "Diskless=true", true, "sparse"},
+      // PMEM mode writes the whole REDO log at an initial start
+      {"RedoLogMode=pmem", "NoOfFragmentLogParts=4", true, "full"},
+      {"RedoLogMode=pmem", "InitFragmentLogFiles=sparse", true, "full"},
+      {"RedoLogMode=pmem", "InitFragmentLogFiles=full", true, "full"},
+      {"RedoLogMode=pmem", "__RedoLogPmemTestMode=nodax", true, "full"},
+      {"RedoLogMode=pmem", "__RedoLogPmemPowerLossEmulation=true", true,
+       "full"},
+      {"RedoLogMode=pmem", "__RedoLogPmemCopyMethod=clwb", true, "full"},
+      {"RedoLogMode=pmem", "FileSystemPathRedoLog=/mnt/pmem0", true, "full"},
+      {"RedoLogMode=pmem", "FileSystemPathRedoLog=0:/mnt/p0,1:/mnt/p1", true,
+       "full"},
+      // Refused
+      {"RedoLogMode=pmem", "EncryptedFileSystem=1", false, nullptr},
+      {"RedoLogMode=pmem", "Diskless=true", false, nullptr},
+      {"RedoLogMode=pmem", "FileSystemPathRedoLog=relative", false, nullptr},
+      {"RedoLogMode=pmem", "FileSystemPathRedoLog=0:/a,0:/b", false, nullptr},
+      {"RedoLogMode=pmem", "FileSystemPathRedoLog=0:/a,", false, nullptr},
+      {"RedoLogMode=pmem", "FileSystemPathRedoLog=/a,/b", false, nullptr},
+      {nullptr, nullptr, false, nullptr}};
+
+  for (struct test *t = tests; t->param1; t++) {
+    ndbout_c("testing %s %s", t->param1, t->param2);
+    Config *c = create_config("[ndbd]", "NoOfReplicas=1", t->param1,
+                              t->param2, "[ndb_mgmd]", "HostName=localhost",
+                              "[mysqld]", NULL);
+    if (!t->result) {
+      CHECK(c == NULL);
+      continue;
+    }
+    CHECK(c);
+    const char *init_redo = get_db_string(c, CFG_DB_INIT_REDO);
+    CHECK(init_redo != nullptr && strcmp(init_redo, t->init_redo) == 0);
+    delete c;
+  }
+
+  // The values reach the data node
+  Config *c = create_config(
+      "[ndbd]", "NoOfReplicas=1", "RedoLogMode=pmem",
+      "FileSystemPathRedoLog=0:/mnt/p0,1:/mnt/p1",
+      "__RedoLogPmemTestMode=emulated", "__RedoLogPmemPowerLossEmulation=1",
+      "__RedoLogPmemCopyMethod=movdir64b", "[ndb_mgmd]",
+      "HostName=localhost", "[mysqld]", NULL);
+  CHECK(c);
+  CHECK(get_db_uint(c, CFG_DB_REDO_LOG_MODE) == NDB_REDO_LOG_MODE_PMEM);
+  const char *path = get_db_string(c, CFG_DB_REDO_LOG_PATH);
+  CHECK(path != nullptr && strcmp(path, "0:/mnt/p0,1:/mnt/p1") == 0);
+  CHECK(get_db_uint(c, CFG_DB_REDO_PMEM_TEST_MODE) ==
+        NDB_REDO_PMEM_TEST_MODE_EMULATED);
+  CHECK(get_db_uint(c, CFG_DB_REDO_PMEM_POWER_LOSS_EMUL) == 1);
+  CHECK(get_db_uint(c, CFG_DB_REDO_PMEM_COPY_METHOD) ==
+        NDB_REDO_PMEM_COPY_MOVDIR64B);
+  delete c;
+
+  // The defaults
+  c = create_config("[ndbd]", "NoOfReplicas=1", "[ndb_mgmd]",
+                    "HostName=localhost", "[mysqld]", NULL);
+  CHECK(c);
+  CHECK(get_db_uint(c, CFG_DB_REDO_LOG_MODE) == NDB_REDO_LOG_MODE_FILE);
+  CHECK(get_db_string(c, CFG_DB_REDO_LOG_PATH) == nullptr);
+  CHECK(get_db_uint(c, CFG_DB_REDO_PMEM_TEST_MODE) ==
+        NDB_REDO_PMEM_TEST_MODE_OFF);
+  CHECK(get_db_uint(c, CFG_DB_REDO_PMEM_POWER_LOSS_EMUL) == 0);
+  CHECK(get_db_uint(c, CFG_DB_REDO_PMEM_COPY_METHOD) ==
+        NDB_REDO_PMEM_COPY_AUTO);
+  delete c;
+
+  // The same rules apply to a my.cnf
+  c = create_mycnf("[cluster_config]", "ndb_mgmd=localhost",
+                   "ndbd=localhost,localhost", "ndbapi=localhost",
+                   "NoOfReplicas=1", "RedoLogMode=pmem", NULL);
+  CHECK(c);
+  const char *init_redo = get_db_string(c, CFG_DB_INIT_REDO);
+  CHECK(init_redo != nullptr && strcmp(init_redo, "full") == 0);
+  delete c;
+  c = create_mycnf("[cluster_config]", "ndb_mgmd=localhost",
+                   "ndbd=localhost,localhost", "ndbapi=localhost",
+                   "NoOfReplicas=1", "RedoLogMode=pmem",
+                   "EncryptedFileSystem=1", NULL);
+  CHECK(c == NULL);
+}
+
+/**
+ * No two parameters of one section may share an id. A merge can give
+ * two new parameters the same id, and the data node then reads one as
+ * the other (CFG_DB_COMPILED_INTERPRETER in mgmapi_config_parameters.h).
+ */
+static void test_unique_param_ids(void) {
+  ndbout_c("test_unique_param_ids");
+  for (int i = 0; i < ConfigInfo::m_NoOfParams; i++) {
+    const ConfigInfo::ParamInfo &a = ConfigInfo::m_ParamInfo[i];
+    if (a._type == ConfigInfo::CI_SECTION || a._paramId == 0) continue;
+    for (int j = 0; j < i; j++) {
+      const ConfigInfo::ParamInfo &b = ConfigInfo::m_ParamInfo[j];
+      if (b._type == ConfigInfo::CI_SECTION || b._paramId != a._paramId ||
+          strcmp(a._section, b._section) != 0 ||
+          native_strcasecmp(a._fname, b._fname) == 0)
+        continue;
+      fprintf(stderr, "testConfig: %s and %s in [%s] have the same id %u\n",
+              b._fname, a._fname, a._section, a._paramId);
+      CHECK(false);
+    }
+  }
+}
+
 #include <NdbTap.hpp>
 
 #include <EventLogger.hpp>
@@ -628,6 +792,8 @@ TAPTEST(MgmConfig) {
   test_rdma_api_db_connections();
 #endif
   test_shm_key_node_ids();
+  test_redo_log_pmem();
+  test_unique_param_ids();
   if (false) print_restart_info();
   test_config_v1_with_dyn_ports();
   ndb_end(0);

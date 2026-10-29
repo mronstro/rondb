@@ -1,0 +1,6 @@
+# RONDB-1150: the REDO log in PMEM mode on any file system, without
+# persistent memory (__RedoLogPmemTestMode=nodax). Add it to a test run:
+#   ./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndb_basic
+[cluster_config]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax

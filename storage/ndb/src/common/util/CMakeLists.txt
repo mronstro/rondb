@@ -62,6 +62,7 @@ ADD_CONVENIENCE_LIBRARY(ndbgeneral
   Parser.cpp
   ProcessInfo.cpp
   Properties.cpp
+  RedoLogPaths.cpp
   SimpleProperties.cpp
   SocketAuthenticator.cpp
   SocketClient.cpp
@@ -89,7 +90,7 @@ ADD_CONVENIENCE_LIBRARY(ndbgeneral
 SET_TARGET_PROPERTIES(ndbgeneral PROPERTIES LINK_INTERFACE_MULTIPLICITY 3)
 
 FOREACH(tests BaseString Bitmask SparseBitmask Parser HashMap2 LinkedStack
-    NodeCertificate
+    NodeCertificate RedoLogPaths
     TlsKeyManager ndb_zlib cstrbuf span)
   NDB_ADD_TEST("${tests}-t" "${tests}.cpp" LIBS ndbgeneral)
 ENDFOREACH(tests)

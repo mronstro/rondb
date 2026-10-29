@@ -5373,6 +5373,13 @@ public:
   bool c_encrypted_filesystem;
 
   /**
+   * RONDB-1150: RedoLogMode=pmem, the REDO log on persistent memory, and
+   * __RedoLogPmemTestMode (NDB_REDO_PMEM_TEST_MODE_*).
+   */
+  bool c_redo_pmem;
+  Uint32 c_redo_pmem_test_mode;
+
+  /**
    * Variable keeping track of which GCI to keep in REDO log
    * after completing a LCP.
    */
