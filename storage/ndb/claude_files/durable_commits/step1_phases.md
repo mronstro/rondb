@@ -13,7 +13,7 @@ unchanged.
 | Phase | Pull request | Content | Packages | Gate (what the pusher runs) | Needs | State |
 |---|---|---|---|---|---|---|
 | 1 | 2 | CPU feature detection and XXH3, with AVX2 chosen at run time | S1.1, S1.2 | `NdbHW-t`, `ndb_xxh3-t`, `rondb_hash-t` on Linux x86_64, Linux ARM64 and macOS ARM64; file-mode regression | — | **Done**: the XXH3 version passed all tests (reported 2026-10-29); the first, CRC32C version had passed on 2026-10-28 |
-| 2 | 3 | PMEM helper and platform queries | S1.3, S1.4 | `ndb_pmem-t` on a plain file on the three platforms and on `memmap=` | 1 | **In progress**: S1.3 passed `ndb_pmem-t` on macOS ARM64 (2026-10-29), Linux to be tested; S1.4 next |
+| 2 | 3 | PMEM helper and platform queries | S1.3, S1.4 | `ndb_pmem-t` on a plain file on the three platforms and on `memmap=` | 1 | **In progress**: S1.3 passed `ndb_pmem-t` on macOS ARM64 and Linux x86_64 (2026-10-29); Linux ARM64 to be tested. S1.4: `ndb_pmem_region-t` passed on macOS ARM64 (2026-10-29), Linux to be tested |
 | 3 | 4 | Configuration: parameters, path parser, checks, test settings | S2.1–S2.3, S2.7 | Config unit tests, management-server refusals | — | Not started |
 | 4 | 5 | NDBFS mapping and placement; PMEM mode with today's format (**M0.2**) | S3.1–S3.4, S2.4, S2.5 | MTR ndb suite and a testSystemRestart subset in `nodax` and on `memmap=` | 2, 3 | Not started |
 | 5 | 6 | Initial start and restarts with every file mapped; ndbinfo `redo_log_pmem` | S3.5, S3.6, S2.6 | Initial start, SR and NR in PMEM mode; ndbinfo rows | 4 | Not started |
@@ -274,8 +274,8 @@ S1.4. It is written in two parts, tested one at a time:
 
 | Part | Package | Content | State |
 |---|---|---|---|
-| 2a | S1.3 | `ndb_pmem` core: map, prefault, copy, in-place stores, zero, flush, drain | Passed on macOS ARM64 (2026-10-29); Linux to be tested |
-| 2b | S1.4 | Platform queries: persistence domain, region, NUMA node, bad blocks, dirty shutdown; `Ndb_GetThreadNumaNode()` | Not started |
+| 2a | S1.3 | `ndb_pmem` core: map, prefault, copy, in-place stores, zero, flush, drain | Passed on macOS ARM64 and Linux x86_64 (2026-10-29); Linux ARM64 to be tested |
+| 2b | S1.4 | Platform queries: persistence domain, region, NUMA node, bad blocks, dirty shutdown; `Ndb_GetThreadNumaNode()` | `ndb_pmem_region-t` passed on macOS ARM64 (2026-10-29), fixture trees included; Linux x86_64 and ARM64 to be tested, and `NdbHW-t` with the thread's node |
 
 Nothing calls the helper before S3.2, so file mode is unchanged.
 
@@ -317,15 +317,49 @@ Nothing calls the helper before S3.2, so file mode is unchanged.
    - Locked page cache counts against `RLIMIT_MEMLOCK`, so S3.2 should
      warn and go on if the lock is refused.
 
-**Commands for the pusher.** `cmake .` first, because there is a new source
-file. Then, on Linux x86_64, Linux ARM64 and macOS ARM64:
+**Changes in 2b.**
+
+| File | Change |
+|---|---|
+| `include/portlib/ndb_pmem.h` | `ndb_pmem_domain`, `ndb_pmem_region_info` and the queries of S1.4 |
+| `src/common/portlib/ndb_pmem_region.cpp` | The queries, from sysfs: `fstat` gives the device number; `/sys/dev/block/M:m` gives the block device. Device mapper and md are followed through `slaves/`. The region is the closest directory above with `persistence_domain`, and has `numa_node`, `target_node` and `mapping<k>` naming the DIMMs or memory devices with their dirty-shutdown counts. Bad blocks come from the disk's `badblocks` and the file's `FS_IOC_FIEMAP` extents. DAX comes from `statx`. The NUMA node falls back to `get_mempolicy` on a mapped address. The unit test is in the same file |
+| `include/portlib/NdbHW.hpp`, `src/common/portlib/NdbHW.cpp` | `Ndb_GetThreadNumaNode()`: the node whose `cpulist` holds every CPU of the thread's affinity mask, else -1. `NdbHW-t` prints it |
+| `src/common/portlib/CMakeLists.txt` | `ndb_pmem_region.cpp` in `ndbportlib`; `ndb_pmem_region-t` |
+
+**Decisions taken in 2b.**
+
+8. **The queries have their own file and test**, `ndb_pmem_region.cpp`
+   and `ndb_pmem_region-t`, not `ndb_pmem-t` as the plan had it. They are
+   plain sysfs reading, tested on fixture trees, and share nothing with the
+   copy code.
+9. **`ndb_pmem_get_region_info()`, not `ndb_pmem_region_info()`.** A
+   function with the name of the struct would hide the struct in C++, as
+   `stat()` hides `struct stat`.
+10. **`ndb_pmem_badblocks_overlap()` returns whether the count is exact.**
+    It is not when FIEMAP fails, when several devices lie below (device
+    mapper), or when no device is found; every range then counts.
+11. **An unknown `persistence_domain` string gives `UNKNOWN`**, the
+    weakest answer, so a new kernel value never passes as persistent.
+12. **`Ndb_GetThreadNumaNode()` reads the node CPU lists itself.** The plan
+    had it go through `ndb_cpuinfo_data`, but `NdbHW_Init()` is not called
+    in every program, and the start check needs the answer once.
+
+**Commands for the pusher.** `cmake .` first, because there are new source
+files. Then, on Linux x86_64, Linux ARM64 and macOS ARM64:
 
 ```
-cmake --build . --target ndb_pmem-t
-ctest -R ndb_pmem-t --output-on-failure
+cmake --build . --target NdbHW-t ndb_pmem-t ndb_pmem_region-t
+ctest -R 'NdbHW-t|ndb_pmem-t|ndb_pmem_region-t' --output-on-failure
 ./runtime_output_directory/ndb_pmem-t            # methods, faults, timings
+./runtime_output_directory/ndb_pmem_region-t     # prints what lies behind $TMPDIR
 NDB_PMEM_DIR=/mnt/pmem ./runtime_output_directory/ndb_pmem-t   # Linux, a DAX mount on memmap=
+NDB_PMEM_DIR=/mnt/pmem ./runtime_output_directory/ndb_pmem_region-t
 ```
+
+`ndb_pmem_region-t` checks the parsing on fixture trees: `memmap=`, NFIT
+with two DIMMs, CXL-like, eADR, no block device, NVMe, a partition, and
+device mapper over two regions. It then prints what lies behind a file in
+`$TMPDIR`; with `NDB_PMEM_DIR` it requires a region and a DAX inode.
 
 `ndb_pmem-t` maps a 4 MB file in `$TMPDIR`. There `MAP_SYNC` must fail with
 `EOPNOTSUPP` and the optional mapping must work. It tests every copy method
@@ -344,4 +378,37 @@ CVAP from user space: a `SIGILL` would mean macOS forbids it (S1.3).
 On macOS ARM64 (Apple M5 Pro) `ndb_pmem-t` passed, with DC CVAP and DC
 CVAC both running from user space; `auto` chooses `store+dc-cvap`. macOS
 reports `EOPNOTSUPP` as "Operation not supported on socket".
+
+ns per copy and drain on a plain file, optimised build, macOS ARM64 (Apple
+M5 Pro). These are cache and DRAM costs, not those of persistent memory:
+
+| method | 1 line | 2 lines | 8 lines |
+|---|---|---|---|
+| store+dc-cvap | 6.0 | 23.0 | 35.9 |
+| store+dc-cvac | 6.1 | 21.1 | 33.6 |
+
+On Linux x86_64 (i9-13900K, kernel 6.11) `ndb_pmem-t` passed on tmpfs
+(`TMPDIR=/dev/shm`), with all six methods: `auto` chooses `movdir64b`.
+
+- **The prefault works.** Writing the 1024 pages took 0 faults after the
+  prefault, 1024 on a new file without it, and 0 after prefault and lock.
+- **On xfs it took 64 faults all the same.** That comes from xfs tracking
+  writes to its page cache, most likely one fault per 64 KB folio. DAX has
+  no page cache.
+
+ns per copy and drain on tmpfs, optimised build:
+
+| method | 1 line | 2 lines | 8 lines |
+|---|---|---|---|
+| ntstore-sse2 | 55.9 | 57.2 | 63.3 |
+| ntstore-avx | 51.9 | 55.9 | 60.4 |
+| movdir64b | 51.5 | 53.9 | 60.8 |
+| store+clwb | 64.8 | 69.0 | 106.8 |
+| store+clflushopt | 65.8 | 73.8 | 118.5 |
+| store+clflush | 72.2 | 139.0 | 535.8 |
+
+The SFENCE after NT stores and MOVDIR64B waits for the writes to reach
+memory, about 50 ns here, and grows little up to 8 lines. Stores plus a
+write-back grow faster, and CLFLUSH orders every line. So `auto` is right
+to prefer MOVDIR64B, then NT stores.
 
