@@ -27,6 +27,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 #include <NdbApi.hpp>
 
@@ -64,6 +65,32 @@ struct raw_value
   size_t len = 0;
 };
 
+// Parser-only construction state; the nodes remain owned by the arena.
+// Keep this trivial so Bison can copy semantic values with memcpy. Initialize
+// both pointers before use; append accepts one node whose next pointer is NULL.
+template <typename Node>
+struct RonSQLListBuilder
+{
+  Node* head;
+  Node* tail;
+
+  void append(Node* node)
+  {
+    ndbrequire((head == NULL) == (tail == NULL));
+    ndbrequire(node != NULL && node->next == NULL);
+    if (tail == NULL)
+      head = node;
+    else
+      tail->next = node;
+    tail = node;
+  }
+};
+
+static_assert(std::is_trivial<RonSQLListBuilder<IndexHintList>>::value,
+              "Bison semantic values must remain trivial.");
+static_assert(std::is_trivial<RonSQLListBuilder<JoinCondition>>::value,
+              "Bison semantic values must remain trivial.");
+
 // Phase I.5 v2b: linked list of operands for an n-ary GREATEST / LEAST.
 // Built bottom-up by the parser via mk_arg_list / append_arg_list.
 struct ArithExprList
@@ -71,6 +98,9 @@ struct ArithExprList
   AggregationAPICompiler::Expr* head;
   ArithExprList* next;
 };
+
+static_assert(std::is_trivial<RonSQLListBuilder<ArithExprList>>::value,
+              "Bison semantic values must remain trivial.");
 
 /*
   NdbAPI is not consistent wrt to the datatype used for attrId. For example,
@@ -143,6 +173,8 @@ public:
     void set_err_state(ErrState state, char* err_pos, size_t err_len);
     AggregationAPICompiler* get_agg();
     ArenaMalloc* get_allocator();
+    // Allocate an arena-owned statement with its default member initializers.
+    SelectStatement* make_select_statement();
     Uint32 column_name_to_idx(LexCString);
     Uint32 qualified_column_name_to_idx(LexCString table, LexCString column);
     // Returns `e` for use as an operand of arithmetic or as an arm of a
@@ -169,13 +201,12 @@ public:
         bool is_greatest);
     // Build a two-element list (the smallest the n-ary grammar
     // accepts).
-    struct ArithExprList* mk_arg_list(
+    RonSQLListBuilder<ArithExprList> mk_arg_list(
         AggregationAPICompiler::Expr* a,
         AggregationAPICompiler::Expr* b);
-    // Append one operand at the end of an existing list, in source
-    // order.  Returns the same list head.
-    struct ArithExprList* append_arg_list(
-        struct ArithExprList* list,
+    // Append one operand in source order and return the updated head/tail.
+    RonSQLListBuilder<ArithExprList> append_arg_list(
+        RonSQLListBuilder<ArithExprList> list,
         AggregationAPICompiler::Expr* x);
     // RONDB-1135: `output` was parsed from `function_name(column)` in a
     // SELECT list.  Records it as an AVRO() output and returns true, or sets
@@ -661,7 +692,7 @@ private:
       const CteKeyCoverageResult& r);
   void normalize_cte_join_key_order();
   Int32 classify_ce_table_resolved(const QueryScope& scope,
-                                   ConditionalExpression* ce) const;
+                                   const ConditionalExpression* ce) const;
   void classify_where_by_table(QueryScope& scope,
                                 ConditionalExpression* where_ce);
   // Phase i26: register linked projections for ancestor columns in

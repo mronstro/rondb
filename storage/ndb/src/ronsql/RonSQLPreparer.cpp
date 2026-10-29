@@ -33,6 +33,7 @@
 #include "RonSQLLexer.l.hpp"
 #include "RonSQLPreparer.hpp"
 #include <iostream>
+#include <new>
 #include <sstream>
 #include <cctype>
 #include <cstdlib>
@@ -590,38 +591,21 @@ require_run(bool condition, const char* msg)
   throw std::runtime_error(msg);
 }
 
-/*
- * Walk a ConditionalExpression subtree and determine which table its
- * columns reference.  Returns:
- *   >= 0 : all columns belong to that table index
- *     -1 : no column references (constant-only subtree)
- *     -2 : columns span multiple tables (cross-table condition)
- *
- * Every operator with operands must have a case here: the default
- * counts a node as a constant, and a constant conjunct is filtered on
- * the root table, where apply_filter_cmp uses a joined column's
- * attribute number against the root (F32: LIKE; then XOR, GREATEST /
- * LEAST and the outer side of IN (subquery) / correlated subqueries).
- */
-Int32
-RonSQLPreparer::classify_ce_table_resolved(
-    const QueryScope& scope,
-    struct ConditionalExpression* ce) const
+namespace {
+struct ConditionChildren
 {
-  if (ce == NULL)
-    return -1;
-  switch (ce->op)
+  const ConditionalExpression* first;
+  const ConditionalExpression* second;
+};
+
+// Return only children in the current SELECT scope. Subquery statements
+// and aggregation-program expressions are traversed separately. A node
+// without children is not necessarily a constant.
+ConditionChildren
+condition_children(const ConditionalExpression& ce)
+{
+  switch (ce.op)
   {
-  case T_IDENTIFIER:
-  {
-    ndbrequire(scope.resolved_columns != NULL);
-    const QueryScope::ResolvedColumnRef& ref =
-        scope.resolved_columns[ce->col_idx];
-    if (ref.kind == QueryScope::ResolvedColumnRef::Kind::Unresolved ||
-        ref.kind == QueryScope::ResolvedColumnRef::Kind::AliasOnly)
-      return -1;
-    return (Int32)ref.join_op_idx;
-  }
   case T_OR:
   case T_XOR:
   case T_AND:
@@ -632,14 +616,8 @@ RonSQLPreparer::classify_ce_table_resolved(
   case T_LE:
   case T_LT:
   case T_LIKE:
-  // GREATEST / LEAST hold their argument list (T_COMMA nodes: item in
-  // args.left, the rest in args.right) in args.left; simplify_ce lowers
-  // them only after this classification.
-  case T_GREATEST:
-  case T_LEAST:
   case T_COMMA:
   case T_PLUS:
-  case T_MINUS:
   case T_MULTIPLY:
   case T_SLASH:
   case T_DIV:
@@ -651,44 +629,86 @@ RonSQLPreparer::classify_ce_table_resolved(
   case T_BITWISE_XOR:
   case T_DATE_ADD:
   case T_DATE_SUB:
-  {
-    Int32 left_t = classify_ce_table_resolved(scope, ce->args.left);
-    Int32 right_t = classify_ce_table_resolved(scope, ce->args.right);
-    if (left_t == -1) return right_t;
-    if (right_t == -1) return left_t;
-    if (left_t == right_t) return left_t;
-    return -2;  // cross-table
-  }
+    return {ce.args.left, ce.args.right};
+  case T_MINUS:
+    // Unary minus stores its operand on the right.
+    if (ce.args.left == NULL)
+      return {ce.args.right, NULL};
+    return {ce.args.left, ce.args.right};
   case T_NOT:
   case T_EXCLAMATION:
-    return classify_ce_table_resolved(scope, ce->args.left);
+    // Synthetic NOT nodes need not initialize args.right.
+    return {ce.args.left, NULL};
+  case T_GREATEST:
+  case T_LEAST:
+    // args.left holds a T_COMMA list: item on the left, rest on the right.
+    return {ce.args.left, NULL};
   case T_IS:
-    return classify_ce_table_resolved(scope, ce->is.arg);
+    return {ce.is.arg, NULL};
   case T_INTERVAL:
-    return classify_ce_table_resolved(scope, ce->interval.arg);
+    return {ce.interval.arg, NULL};
   case T_EXTRACT:
-    return classify_ce_table_resolved(scope, ce->extract.arg);
+    return {ce.extract.arg, NULL};
   case I_IN_SUBQUERY:
-    // The subquery is uncorrelated (a correlated EXISTS was rewritten
-    // to IN with the outer correlation column as expr); the outer
-    // expression decides the table.
-    return classify_ce_table_resolved(scope, ce->in_subquery.expr);
+    return {ce.in_subquery.expr, NULL};
   case I_CORR_SCALAR:
-  {
-    Int32 cmp_t = classify_ce_table_resolved(scope, ce->corr_scalar.cmp_expr);
-    Int32 key_t = classify_ce_table_resolved(scope, ce->corr_scalar.key_expr);
-    if (cmp_t == -1) return key_t;
-    if (key_t == -1) return cmp_t;
-    if (cmp_t == key_t) return cmp_t;
-    return -2;
-  }
+    return {ce.corr_scalar.cmp_expr, ce.corr_scalar.key_expr};
   case T_EXISTS:
   case I_SUBQUERY:
-    return -1;  // Uncorrelated subqueries are constants
+  case T_IDENTIFIER:
+  case T_INT:
+  case T_FLOAT:
+  case T_STRING:
+  case I_MYSQL_TIME:
+  case T_SUM:
+  case T_MIN:
+  case T_MAX:
+  case T_COUNT:
+  case T_AVG:
+  case T_NULL:
+    return {NULL, NULL};
   default:
-    // Constants, strings, etc. — no column reference
-    return -1;
+    throw RonSQLPermanentError(
+        RonSQLErrorClass::INTERNAL,
+        "Unknown conditional-expression operator. Please report a bug.");
   }
+}
+}  // namespace
+
+/*
+ * Walk a ConditionalExpression subtree and determine which table its
+ * columns reference.  Returns:
+ *   >= 0 : all columns belong to that table index
+ *     -1 : no resolved column references in this SELECT scope
+ *     -2 : columns span multiple tables (cross-table condition)
+ *
+ * condition_children determines the same-scope operands for each operator;
+ * subquery bodies and aggregation programs are not part of this walk.
+ */
+Int32
+RonSQLPreparer::classify_ce_table_resolved(
+    const QueryScope& scope,
+    const ConditionalExpression* ce) const
+{
+  if (ce == NULL)
+    return -1;
+  if (ce->op == T_IDENTIFIER)
+  {
+    ndbrequire(scope.resolved_columns != NULL);
+    const QueryScope::ResolvedColumnRef& ref =
+        scope.resolved_columns[ce->col_idx];
+    if (ref.kind == QueryScope::ResolvedColumnRef::Kind::Unresolved ||
+        ref.kind == QueryScope::ResolvedColumnRef::Kind::AliasOnly)
+      return -1;
+    return (Int32)ref.join_op_idx;
+  }
+  const ConditionChildren children = condition_children(*ce);
+  const Int32 first_t = classify_ce_table_resolved(scope, children.first);
+  const Int32 second_t = classify_ce_table_resolved(scope, children.second);
+  if (first_t == -1) return second_t;
+  if (second_t == -1) return first_t;
+  if (first_t == second_t) return first_t;
+  return -2;  // cross-table
 }
 
 static Uint32 filter_expr_reg_depth(ConditionalExpression* ce);
@@ -1914,6 +1934,7 @@ RonSQLPreparer::synthesize_from_for_scalar_ctes()
   // dummy-key + setParent path patterned on testCteNdbApi.cpp
   // Test 20.
   TableRef* root = m_amalloc->alloc_exc<TableRef>(1);
+  new (root) TableRef();
   root->database = LexCString{NULL, 0};
   root->name = matched_qualifiers[0];
   root->alias = matched_qualifiers[0];
@@ -1924,6 +1945,7 @@ RonSQLPreparer::synthesize_from_for_scalar_ctes()
   JoinClause* tail = NULL;
   for (Uint32 i = 1; i < matched_qualifiers.size(); i++) {
     JoinClause* jc = m_amalloc->alloc_exc<JoinClause>(1);
+    new (jc) JoinClause();
     jc->join_type = JoinClause::INNER_JOIN;
     jc->table.database = LexCString{NULL, 0};
     jc->table.name = matched_qualifiers[i];
@@ -2424,27 +2446,11 @@ RonSQLPreparer::ce_has_subquery(const ConditionalExpression* ce)
   case I_IN_SUBQUERY:
   case I_CORR_SCALAR:
     return true;
-  case T_IS:
-    return ce_has_subquery(ce->is.arg);
-  case T_INTERVAL:
-    return ce_has_subquery(ce->interval.arg);
-  case T_EXTRACT:
-    return ce_has_subquery(ce->extract.arg);
-  case T_IDENTIFIER:
-  case T_INT:
-  case T_FLOAT:
-  case T_STRING:
-  case I_MYSQL_TIME:
-  case T_SUM:
-  case T_MIN:
-  case T_MAX:
-  case T_COUNT:
-  case T_AVG:
-  case T_NULL:
-    return false;
   default:
-    return ce_has_subquery(ce->args.left) || ce_has_subquery(ce->args.right);
+    break;
   }
+  const ConditionChildren children = condition_children(*ce);
+  return ce_has_subquery(children.first) || ce_has_subquery(children.second);
 }
 
 void
@@ -6385,8 +6391,7 @@ RonSQLPreparer::decorrelate_exists()
     char* sql_buf = sql.str();
 
     // Create a new inner SelectStatement for the IN subquery
-    SelectStatement* new_inner = m_amalloc->alloc_exc<SelectStatement>(1);
-    new (new_inner) SelectStatement();
+    SelectStatement* new_inner = m_context.make_select_statement();
     new_inner->table = inner_stmt->table;
     new_inner->root_table = inner_stmt->root_table;
     new_inner->sql_begin = sql_buf;
@@ -6822,8 +6827,7 @@ RonSQLPreparer::decorrelate_scalar()
     char* sql_buf = sql.str();
 
     // Create new inner SelectStatement
-    SelectStatement* new_inner = m_amalloc->alloc_exc<SelectStatement>(1);
-    new (new_inner) SelectStatement();
+    SelectStatement* new_inner = m_context.make_select_statement();
     new_inner->table = inner_stmt->table;
     new_inner->root_table = inner_stmt->root_table;
     new_inner->sql_begin = sql_buf;
@@ -7536,46 +7540,14 @@ RonSQLPreparer::mark_scope_column_refs_ce(
 {
   if (ce == NULL)
     return;
-  switch (ce->op)
+  if (ce->op == T_IDENTIFIER)
   {
-  case T_IDENTIFIER:
     mark_scope_column_ref(refs, ce->col_idx);
     return;
-  case T_IS:
-    mark_scope_column_refs_ce(refs, ce->is.arg);
-    return;
-  case T_INTERVAL:
-    mark_scope_column_refs_ce(refs, ce->interval.arg);
-    return;
-  case T_EXTRACT:
-    mark_scope_column_refs_ce(refs, ce->extract.arg);
-    return;
-  case T_EXISTS:
-  case I_SUBQUERY:
-    return;
-  case I_IN_SUBQUERY:
-    mark_scope_column_refs_ce(refs, ce->in_subquery.expr);
-    return;
-  case I_CORR_SCALAR:
-    mark_scope_column_refs_ce(refs, ce->corr_scalar.cmp_expr);
-    mark_scope_column_refs_ce(refs, ce->corr_scalar.key_expr);
-    return;
-  case T_INT:
-  case T_FLOAT:
-  case T_STRING:
-  case I_MYSQL_TIME:
-  case T_SUM:
-  case T_MIN:
-  case T_MAX:
-  case T_COUNT:
-  case T_AVG:
-  case T_NULL:
-    return;
-  default:
-    mark_scope_column_refs_ce(refs, ce->args.left);
-    mark_scope_column_refs_ce(refs, ce->args.right);
-    return;
   }
+  const ConditionChildren children = condition_children(*ce);
+  mark_scope_column_refs_ce(refs, children.first);
+  mark_scope_column_refs_ce(refs, children.second);
 }
 
 void
@@ -20319,6 +20291,12 @@ RonSQLPreparer::Context::get_allocator()
   return m_parser.m_amalloc;
 }
 
+SelectStatement*
+RonSQLPreparer::Context::make_select_statement()
+{
+  return new (get_allocator()->alloc_exc<SelectStatement>(1)) SelectStatement();
+}
+
 // Phase I.5 v2b — n-ary GREATEST / LEAST.
 //
 // Lowering at parse time: the operand list is folded left-associative
@@ -20346,7 +20324,7 @@ RonSQLPreparer::Context::get_allocator()
 //   (Greatest2(x, x) returns the existing Load expression).
 // - Nullable column operands rejected post-resolution via
 //   `validate_greatest_least_pair_loads`.
-ArithExprList*
+RonSQLListBuilder<ArithExprList>
 RonSQLPreparer::Context::mk_arg_list(
     AggregationAPICompiler::Expr* a,
     AggregationAPICompiler::Expr* b)
@@ -20358,21 +20336,19 @@ RonSQLPreparer::Context::mk_arg_list(
   ArithExprList* list = amalloc->alloc_exc<ArithExprList>(1);
   list->head = a;
   list->next = tail;
-  return list;
+  return {list, tail};
 }
 
-ArithExprList*
+RonSQLListBuilder<ArithExprList>
 RonSQLPreparer::Context::append_arg_list(
-    ArithExprList* list,
+    RonSQLListBuilder<ArithExprList> list,
     AggregationAPICompiler::Expr* x)
 {
   ArenaMalloc* amalloc = get_allocator();
   ArithExprList* node = amalloc->alloc_exc<ArithExprList>(1);
   node->head = x;
   node->next = NULL;
-  ArithExprList* cur = list;
-  while (cur->next != NULL) cur = cur->next;
-  cur->next = node;
+  list.append(node);
   return list;
 }
 

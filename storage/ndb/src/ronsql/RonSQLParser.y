@@ -144,6 +144,7 @@ extern void rsqlp_error(RSQLP_LTYPE* yylloc, yyscan_t yyscanner, const char* s);
   struct TableRef* table_ref;
   struct JoinClause* join_clause;
   struct JoinCondition* join_condition;
+  RonSQLListBuilder<JoinCondition> join_condition_list;
   struct {
     JoinClause* head;
     JoinClause* tail;
@@ -163,13 +164,13 @@ extern void rsqlp_error(RSQLP_LTYPE* yylloc, yyscan_t yyscanner, const char* s);
     CteDefinition* head;
     CteDefinition* tail;
   } cte_list;
-  struct ArithExprList* arith_expr_list;
+  RonSQLListBuilder<ArithExprList> arith_expr_list;
   /* W1: MySQL-style index hint (FORCE/USE/IGNORE INDEX) on a table ref. */
   struct {
     TableRef::HintKind kind;
     IndexHintList* list;
   } index_hint;
-  struct IndexHintList* index_name_list;
+  RonSQLListBuilder<IndexHintList> index_name_list;
 }
 
 %token<bival> T_INT
@@ -251,7 +252,8 @@ extern void rsqlp_error(RSQLP_LTYPE* yylloc, yyscan_t yyscanner, const char* s);
 %type<index_hint> index_hint_opt
 %type<index_name_list> index_name_list
 %type<join_clause> join_clause
-%type<join_condition> join_condition join_condition_list
+%type<join_condition> join_condition
+%type<join_condition_list> join_condition_list
 %type<join_list> join_list
 %type<from_clause_val> from_clause
 %type<subquery_stmt> subquery
@@ -329,7 +331,7 @@ cte_def:
     AggregationAPICompiler* cte_agg = context->leave_subquery();
     initptr($$);
     $$->name = $1;
-    $$->stmt = context->get_allocator()->alloc_exc<SelectStatement>(1);
+    $$->stmt = context->make_select_statement();
     $$->stmt->agg = cte_agg;
     $$->stmt->do_explain = false;
     $$->stmt->cte_list = NULL;
@@ -344,8 +346,7 @@ cte_def:
     $$->stmt->having_expression = $12;
     $$->stmt->orderby_columns = $13;
     $$->stmt->limit = $14;
-    /* alloc_exc does not run default member initializers; the
-     * FRAGS_PER_WORKER hint is main-statement-only. */
+    /* FRAGS_PER_WORKER is a main-statement-only hint. */
     $$->stmt->frags_per_worker = 0;
     $$->stmt->is_single_row_cte = false;
     $$->stmt->sql_begin = (@5).begin;
@@ -473,10 +474,10 @@ nonaliased_output:
  * pipeline sees a regular aggregate output: over a single-row
  * scalar input, MAX of one value equals the GREATEST/LEAST itself. */
 | T_GREATEST T_LEFT arith_expr_list T_RIGHT
-                                        { init_aggfun($$, @$, T_MAX, context->lower_greatest_least_nary($3, /*is_greatest*/true));
+                                        { init_aggfun($$, @$, T_MAX, context->lower_greatest_least_nary($3.head, /*is_greatest*/true));
                                           $$->aggregate.implicit_scalar_pair_op = true; }
 | T_LEAST T_LEFT arith_expr_list T_RIGHT
-                                        { init_aggfun($$, @$, T_MAX, context->lower_greatest_least_nary($3, /*is_greatest*/false));
+                                        { init_aggfun($$, @$, T_MAX, context->lower_greatest_least_nary($3.head, /*is_greatest*/false));
                                           $$->aggregate.implicit_scalar_pair_op = true; }
 
 /* T_COUNT not included here, in order to implement COUNT(*) */
@@ -511,9 +512,9 @@ arith_expr:
                                                                             context->non_case_operand($5),
                                                                             context->non_case_operand($7)); }
 | T_GREATEST T_LEFT arith_expr_list T_RIGHT
-                                        { $$ = context->lower_greatest_least_nary($3, /*is_greatest*/true); }
+                                        { $$ = context->lower_greatest_least_nary($3.head, /*is_greatest*/true); }
 | T_LEAST T_LEFT arith_expr_list T_RIGHT
-                                        { $$ = context->lower_greatest_least_nary($3, /*is_greatest*/false); }
+                                        { $$ = context->lower_greatest_least_nary($3.head, /*is_greatest*/false); }
 
 arith_expr_list:
   arith_expr T_COMMA arith_expr         { $$ = context->mk_arg_list($1, $3); }
@@ -572,13 +573,13 @@ index_hint_opt:
   %empty
   { $$.kind = TableRef::HintKind::HINT_NONE; $$.list = NULL; }
 | T_FORCE index_kw T_LEFT index_name_list T_RIGHT
-  { $$.kind = TableRef::HintKind::HINT_FORCE; $$.list = $4; }
+  { $$.kind = TableRef::HintKind::HINT_FORCE; $$.list = $4.head; }
 | T_USE index_kw T_LEFT index_name_list T_RIGHT
-  { $$.kind = TableRef::HintKind::HINT_USE; $$.list = $4; }
+  { $$.kind = TableRef::HintKind::HINT_USE; $$.list = $4.head; }
 | T_USE index_kw T_LEFT T_RIGHT
   { $$.kind = TableRef::HintKind::HINT_USE; $$.list = NULL; }
 | T_IGNORE index_kw T_LEFT index_name_list T_RIGHT
-  { $$.kind = TableRef::HintKind::HINT_IGNORE; $$.list = $4; }
+  { $$.kind = TableRef::HintKind::HINT_IGNORE; $$.list = $4.head; }
 
 index_kw:
   T_INDEX
@@ -587,19 +588,18 @@ index_kw:
 index_name_list:
   identifier_c
   {
-    initptr($$);
-    $$->index_name = $1;
-    $$->next = NULL;
+    initptr($$.head);
+    $$.head->index_name = $1;
+    $$.head->next = NULL;
+    $$.tail = $$.head;
   }
 | index_name_list T_COMMA identifier_c
   {
     IndexHintList* node = context->get_allocator()->alloc_exc<IndexHintList>(1);
     node->index_name = $3;
     node->next = NULL;
-    IndexHintList* tail = $1;
-    while (tail->next != NULL) tail = tail->next;
-    tail->next = node;
     $$ = $1;
+    $$.append(node);
   }
 
 join_list:
@@ -615,29 +615,29 @@ join_list:
 join_clause:
   T_JOIN table_ref T_ON join_condition_list
   {
-    context->check_join_conditions(*$2, $4);
+    context->check_join_conditions(*$2, $4.head);
     initptr($$);
     $$->join_type = JoinClause::INNER_JOIN;
     $$->table = *$2;
-    $$->conditions = $4;
+    $$->conditions = $4.head;
     $$->next = NULL;
   }
 | T_KW_LEFT T_JOIN table_ref T_ON join_condition_list
   {
-    context->check_join_conditions(*$3, $5);
+    context->check_join_conditions(*$3, $5.head);
     initptr($$);
     $$->join_type = JoinClause::LEFT_OUTER_JOIN;
     $$->table = *$3;
-    $$->conditions = $5;
+    $$->conditions = $5.head;
     $$->next = NULL;
   }
 | T_KW_LEFT T_KW_OUTER T_JOIN table_ref T_ON join_condition_list
   {
-    context->check_join_conditions(*$4, $6);
+    context->check_join_conditions(*$4, $6.head);
     initptr($$);
     $$->join_type = JoinClause::LEFT_OUTER_JOIN;
     $$->table = *$4;
-    $$->conditions = $6;
+    $$->conditions = $6.head;
     $$->next = NULL;
   }
 | T_COMMA table_ref
@@ -659,15 +659,12 @@ join_clause:
 join_condition_list:
   join_condition
   {
-    $$ = $1;
+    $$ = {$1, $1};
   }
 | join_condition_list T_AND join_condition
   {
-    /* Append $3 to end of list starting at $1 */
-    struct JoinCondition *tail = $1;
-    while (tail->next != NULL) tail = tail->next;
-    tail->next = $3;
     $$ = $1;
+    $$.append($3);
   }
 
 join_condition:
@@ -809,7 +806,7 @@ subquery:
   groupby_opt having_opt orderby_opt limit_opt
   {
     AggregationAPICompiler* subq_agg = context->leave_subquery();
-    $$ = context->get_allocator()->alloc_exc<SelectStatement>(1);
+    $$ = context->make_select_statement();
     $$->agg = subq_agg;
     $$->do_explain = false;
     $$->outputs = $3.head;
@@ -823,8 +820,7 @@ subquery:
     $$->having_expression = $9;
     $$->orderby_columns = $10;
     $$->limit = $11;
-    /* alloc_exc does not run default member initializers; the
-     * FRAGS_PER_WORKER hint is main-statement-only. */
+    /* FRAGS_PER_WORKER is a main-statement-only hint. */
     $$->frags_per_worker = 0;
     $$->is_single_row_cte = false;
     $$->sql_begin = (@2).begin;
