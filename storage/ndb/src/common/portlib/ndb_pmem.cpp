@@ -367,6 +367,35 @@ int ndb_pmem_map(int fd, size_t len, unsigned flags, ndb_pmem_mapping *out) {
   return EOPNOTSUPP;
 #else
   if (len == 0) return EINVAL;
+  const size_t page = (size_t)sysconf(_SC_PAGESIZE);
+  /**
+   * Whether MAP_SYNC works is found on one page mapped where the kernel
+   * chooses, before the file is mapped over the reserved range. A
+   * MAP_FIXED mmap that the file system refuses, as it refuses MAP_SYNC
+   * without DAX, can have unmapped the range already (Linux 6.11), and
+   * another thread may map into it before this one maps it again.
+   */
+  int map_flags = MAP_SHARED;
+  bool map_sync = false;
+  int err = EOPNOTSUPP;
+#ifdef __linux__
+  void *probe = mmap(nullptr, page, PROT_READ | PROT_WRITE,
+                     MAP_SHARED_VALIDATE | MAP_SYNC, fd, 0);
+  if (probe != MAP_FAILED) {
+    munmap(probe, page);
+    map_flags = MAP_SHARED_VALIDATE | MAP_SYNC;
+    map_sync = true;
+  } else {
+    err = errno;
+    /* Kernels before 4.15 do not know MAP_SHARED_VALIDATE */
+    if (err == EINVAL) err = EOPNOTSUPP;
+  }
+#endif
+  if (!map_sync &&
+      (err != EOPNOTSUPP || !(flags & NDB_PMEM_MAP_SYNC_OPTIONAL))) {
+    return err;
+  }
+
   /**
    * Reserve 2 MB more than needed, map the file at the first 2 MB
    * boundary inside, and release the rest.
@@ -382,35 +411,18 @@ int ndb_pmem_map(int fd, size_t len, unsigned flags, ndb_pmem_mapping *out) {
   const uintptr_t reserve_start = (uintptr_t)reserve;
   const uintptr_t reserve_end = reserve_start + reserve_len;
   const uintptr_t base = (reserve_start + align - 1) & ~(uintptr_t)(align - 1);
-
-  void *addr = MAP_FAILED;
-  bool map_sync = false;
-  int err = EOPNOTSUPP;
-#ifdef __linux__
-  addr = mmap((void *)base, len, PROT_READ | PROT_WRITE,
-              MAP_SHARED_VALIDATE | MAP_SYNC | MAP_FIXED, fd, 0);
-  if (addr != MAP_FAILED) {
-    map_sync = true;
-  } else {
-    err = errno;
-    /* Kernels before 4.15 do not know MAP_SHARED_VALIDATE */
-    if (err == EINVAL) err = EOPNOTSUPP;
-  }
-#endif
-  if (addr == MAP_FAILED && err == EOPNOTSUPP &&
-      (flags & NDB_PMEM_MAP_SYNC_OPTIONAL)) {
-    addr = mmap((void *)base, len, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED,
-                fd, 0);
-    if (addr == MAP_FAILED) err = errno;
-  }
-  if (addr == MAP_FAILED) {
-    munmap(reserve, reserve_len);
-    return err;
-  }
-  const size_t page = (size_t)sysconf(_SC_PAGESIZE);
   const uintptr_t end = base + ((len + page - 1) / page) * page;
+
+  void *addr = mmap((void *)base, len, PROT_READ | PROT_WRITE,
+                    map_flags | MAP_FIXED, fd, 0);
+  if (addr == MAP_FAILED) err = errno;
+  /**
+   * After a failure [base, end) may be unmapped and another thread's
+   * now: it is left alone, at worst a reserved range is lost.
+   */
   if (base > reserve_start) munmap(reserve, base - reserve_start);
   if (end < reserve_end) munmap((void *)end, reserve_end - end);
+  if (addr == MAP_FAILED) return err;
   out->addr = addr;
   out->len = len;
   out->map_sync = map_sync;
@@ -521,6 +533,7 @@ void ndb_pmem_drain() { drain_cpu(); }
 #include <util/NdbTap.hpp>
 #include <algorithm>
 #include <chrono>
+#include <thread>
 #include <vector>
 
 #ifndef _WIN32
@@ -858,6 +871,61 @@ void test_dir(const char *dir, bool dax) {
   remove_file(&f);
 }
 
+/**
+ * Threads that map, fault in, write and read back their own files at the
+ * same time, as the NDBFS IO threads do. Without DAX the MAP_SYNC attempt
+ * fails; that must not leave a gap that another thread maps into, which
+ * Linux 6.11 does for a refused MAP_FIXED mmap. Before the fix the fault
+ * in failed with ENOMEM, or a page held another thread's tag.
+ */
+void test_concurrent_maps(const char *dir) {
+  constexpr Uint32 THREADS = 8;
+  constexpr Uint32 PASSES = 30;
+  std::atomic<Uint32> failures{0};
+  auto run = [&](Uint32 thread_no) {
+    for (Uint32 pass = 0; pass < PASSES; pass++) {
+      TestFile f;
+      if (!create_file(dir, &f)) {
+        failures++;
+        return;
+      }
+      ndb_pmem_mapping m;
+      int r =
+          ndb_pmem_map(f.fd, TEST_FILE_SIZE, NDB_PMEM_MAP_SYNC_OPTIONAL, &m);
+      const char *step = "map";
+      if (r == 0) {
+        step = "prefault";
+        r = ndb_pmem_prefault(m.addr, TEST_FILE_SIZE);
+      }
+      if (r == 0) {
+        step = "read back";
+        volatile Uint64 *base = static_cast<volatile Uint64 *>(m.addr);
+        const Uint64 tag = (Uint64(thread_no) << 48) | (Uint64(pass) << 32);
+        for (size_t off = 0; off < TEST_FILE_SIZE; off += 4096) {
+          base[off / sizeof(Uint64)] = tag | off;
+        }
+        for (size_t off = 0; off < TEST_FILE_SIZE; off += 4096) {
+          if (base[off / sizeof(Uint64)] != (tag | off)) r = -1;
+        }
+      }
+      if (r != 0 && failures++ == 0) {
+        printf("ndb_pmem: thread %u pass %u: %s failed: %s\n", thread_no, pass,
+               step, r > 0 ? strerror(r) : "a page holds another tag");
+      }
+      ndb_pmem_unmap(&m);
+      remove_file(&f);
+      if (r != 0) return;
+    }
+  };
+  std::vector<std::thread> threads;
+  for (Uint32 t = 0; t < THREADS; t++) threads.emplace_back(run, t);
+  for (std::thread &t : threads) t.join();
+  printf("ndb_pmem: %u threads mapped %u files each at the same time in %s: "
+         "%u failed\n",
+         THREADS, PASSES, dir, failures.load());
+  OK(failures.load() == 0);
+}
+
 #endif
 
 }  // namespace
@@ -868,7 +936,9 @@ TAPTEST(ndb_pmem) {
 #else
   test_init();
   const char *tmp = getenv("TMPDIR");
-  test_dir((tmp != nullptr && *tmp != 0) ? tmp : "/tmp", false);
+  const char *tmp_dir = (tmp != nullptr && *tmp != 0) ? tmp : "/tmp";
+  test_dir(tmp_dir, false);
+  test_concurrent_maps(tmp_dir);
   /* A directory on a DAX file system, e.g. ext4 with -o dax on memmap= */
   const char *dax_dir = getenv("NDB_PMEM_DIR");
   if (dax_dir != nullptr && *dax_dir != 0) {

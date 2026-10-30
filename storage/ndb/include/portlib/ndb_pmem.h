@@ -86,7 +86,8 @@ const char *ndb_pmem_method_name();
  * aligned to 2 MB so that large pages can be used. 0 or an errno:
  * EOPNOTSUPP means MAP_SYNC is not possible (no DAX, old kernel, not
  * Linux); with NDB_PMEM_MAP_SYNC_OPTIONAL the file is then mapped with
- * MAP_SHARED and out->map_sync is false.
+ * MAP_SHARED and out->map_sync is false. Threads may map at the same
+ * time.
  */
 int ndb_pmem_map(int fd, size_t len, unsigned flags, ndb_pmem_mapping *out);
 int ndb_pmem_unmap(ndb_pmem_mapping *m);
