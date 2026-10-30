@@ -78,6 +78,16 @@ class FsConf {
    *   static const UintR SignalLength = 2;
    */
 
+  /**
+   * RONDB-1150: FSOPENCONF of a file opened with OM_MAP_SYNC has
+   * PMEM_MAPPED in fileInfo and 7 words, words 5 and 6 holding the
+   * address of the mapping. PMEM_MAP_SYNC: it is mapped with MAP_SYNC.
+   */
+  static constexpr Uint32 OpenSignalLength = 5;
+  static constexpr Uint32 OpenPmemSignalLength = 7;
+  static constexpr Uint32 PMEM_MAPPED = 2;
+  static constexpr Uint32 PMEM_MAP_SYNC = 4;
+
  private:
   /**
    * DATA VARIABLES
@@ -98,6 +108,8 @@ class FsConf {
   Uint32 fileInfo;
   Uint32 file_size_hi;
   Uint32 file_size_lo;
+  Uint32 pmem_addr_hi;  // FSOPENCONF with PMEM_MAPPED
+  Uint32 pmem_addr_lo;
 };
 
 

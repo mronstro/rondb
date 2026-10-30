@@ -140,6 +140,14 @@ class FsOpenReq {
   static constexpr Uint32 OM_ENCRYPT_XTS = 0x4000000;
   static constexpr Uint32 OM_SIZE_ESTIMATED = 0x8000000;
   static constexpr Uint32 OM_PARTIAL_LAST_BLOCK = 0x10000000;
+  /**
+   * RONDB-1150: map the file and fault every page in, after it is opened
+   * and initialised, for the REDO log on persistent memory. Needs
+   * OM_READWRITE and a definite file size; not with OM_APPEND, OM_GZ,
+   * OM_DIRECT or encryption. MAP_SYNC is required unless
+   * __RedoLogPmemTestMode=nodax.
+   */
+  static constexpr Uint32 OM_MAP_SYNC = 0x20000000;
 
   static constexpr Uint32 OM_ENCRYPT_KEY_MATERIAL_MASK =
       OM_ENCRYPT_PASSWORD | OM_ENCRYPT_KEY;

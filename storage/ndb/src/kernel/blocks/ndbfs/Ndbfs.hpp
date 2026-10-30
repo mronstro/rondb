@@ -150,9 +150,17 @@ protected:
    */
   Uint32 m_active_bound_threads_cnt;
 
+  /**
+   * RONDB-1150: NDB_PMEM_MAP_SYNC_REQUIRED or _OPTIONAL for OM_MAP_SYNC.
+   * Set in READ_CONFIG_REQ before the IO threads start; they read it.
+   */
+  unsigned m_pmem_map_flags;
+  bool m_pmem_first_map_logged;  // the first mapped file is logged
+
  public:
   const BaseString &get_base_path(Uint32 no) const;
   static BaseString get_base_path_param_name(Uint32 no);
+  unsigned get_pmem_map_flags() const { return m_pmem_map_flags; }
 };
 
 class VoidFs : public Ndbfs {

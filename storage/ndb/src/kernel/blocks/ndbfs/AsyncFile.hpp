@@ -34,6 +34,7 @@
 #include "kernel/signaldata/FsOpenReq.hpp"
 #include "portlib/NdbTick.h"
 #include "portlib/ndb_file.h"
+#include "portlib/ndb_pmem.h"
 #include "util/ndbxfrm_file.h"
 
 #define JAM_FILE_ID 391
@@ -111,6 +112,7 @@ class AsyncFile {
 
  private:
   int ndbxfrm_append(Request *request, ndbxfrm_input_iterator *in);
+  int map_pmem(Uint64 size);
 
   bool check_odirect_request(const char *buf, size_t sz, ndb_off_t offset);
   void log_set_odirect_result(int result);
@@ -125,6 +127,7 @@ class AsyncFile {
 
   using byte = unsigned char;
   ndb_file m_file;
+  ndb_pmem_mapping m_pmem;  // OM_MAP_SYNC (RONDB-1150)
 
   Uint32 m_open_flags;
 

@@ -96,6 +96,8 @@ class Request {
       Uint64 file_size;
       Uint32 auto_sync_size;
       bool use_o_direct;
+      void *pmem_addr;     // OM_MAP_SYNC: the mapping, set by the open
+      bool pmem_map_sync;  // mapped with MAP_SYNC
     } open;
     struct {
       int numberOfPages;

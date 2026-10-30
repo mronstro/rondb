@@ -157,7 +157,9 @@ Ndbfs::Ndbfs(Block_context &ctx)
       m_maxOpenedFiles(0),
       m_bound_threads_cnt(0),
       m_unbounds_threads_cnt(0),
-      m_active_bound_threads_cnt(0) {
+      m_active_bound_threads_cnt(0),
+      m_pmem_map_flags(NDB_PMEM_MAP_SYNC_REQUIRED),
+      m_pmem_first_map_logged(false) {
   BLOCK_CONSTRUCTOR(Ndbfs);
 
   // Set received signals
@@ -291,6 +293,7 @@ static_assert(NDB_REDO_PMEM_COPY_CLWB == NDB_PMEM_COPY_CLWB);
  * mode, and file mode reads nothing more.
  */
 void Ndbfs::read_redo_pmem_config(const ndb_mgm_configuration_iterator *p) {
+  m_pmem_map_flags = NDB_PMEM_MAP_SYNC_REQUIRED;
   Uint32 mode = NDB_REDO_LOG_MODE_FILE;
   ndb_mgm_get_int_parameter(p, CFG_DB_REDO_LOG_MODE, &mode);
   if (mode != NDB_REDO_LOG_MODE_PMEM) return;
@@ -337,6 +340,9 @@ void Ndbfs::read_redo_pmem_config(const ndb_mgm_configuration_iterator *p) {
               "__RedoLogPmemCopyMethod");
   }
 
+  if (test_mode == NDB_REDO_PMEM_TEST_MODE_NODAX) {
+    m_pmem_map_flags = NDB_PMEM_MAP_SYNC_OPTIONAL;
+  }
   g_eventLogger->info(
       "RedoLogMode=pmem: REDO log copied to persistent memory with %s, "
       "__RedoLogPmemTestMode=%s",
@@ -353,8 +359,8 @@ void Ndbfs::read_redo_pmem_config(const ndb_mgm_configuration_iterator *p) {
         "but not a crash of the OS or a power loss");
   }
   g_eventLogger->warning(
-      "RedoLogMode=pmem: this version does not map the REDO log files "
-      "yet, they are written as in file mode, under FileSystemPath");
+      "RedoLogMode=pmem: the REDO log files are mapped, but still written "
+      "as in file mode, under FileSystemPath, in this version");
 }
 
 void Ndbfs::execREAD_CONFIG_REQ(Signal *signal) {
@@ -1577,10 +1583,29 @@ void Ndbfs::report(Request *request, Signal *signal) {
           fileInfo = FsConf::USE_O_DIRECT;
         }
         fsConf->filePointer = request->theFilePointer;
-        fsConf->fileInfo = fileInfo;
         fsConf->file_size_hi = request->m_file_size_hi;
         fsConf->file_size_lo = request->m_file_size_lo;
-        sendSignal(ref, GSN_FSOPENCONF, signal, 5, JBA);
+        Uint32 length = FsConf::OpenSignalLength;
+        if (request->par.open.pmem_addr != nullptr) {
+          jam();
+          const Uint64 addr = Uint64(UintPtr(request->par.open.pmem_addr));
+          fileInfo |= FsConf::PMEM_MAPPED;
+          if (request->par.open.pmem_map_sync) {
+            fileInfo |= FsConf::PMEM_MAP_SYNC;
+          }
+          if (!m_pmem_first_map_logged) {
+            m_pmem_first_map_logged = true;
+            g_eventLogger->info("NDBFS: REDO log file %s mapped %s MAP_SYNC",
+                                request->file->theFileName.c_str(),
+                                request->par.open.pmem_map_sync ? "with"
+                                                                : "without");
+          }
+          fsConf->pmem_addr_hi = Uint32(addr >> 32);
+          fsConf->pmem_addr_lo = Uint32(addr);
+          length = FsConf::OpenPmemSignalLength;
+        }
+        fsConf->fileInfo = fileInfo;
+        sendSignal(ref, GSN_FSOPENCONF, signal, length, JBA);
         break;
       }
       case Request::closeRemove:
