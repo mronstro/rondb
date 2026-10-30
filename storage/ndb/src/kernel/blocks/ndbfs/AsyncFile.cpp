@@ -107,13 +107,16 @@ int AsyncFile::map_pmem(Request *request, Uint64 size) {
         theFileName.c_str());
     return FsRef::fsErrNotDax;
   }
-  if (r == 0) {
-    r = ndb_pmem_prefault(m_pmem.addr, m_pmem.len);
-    if (r != 0) ndb_pmem_unmap(&m_pmem);
-  }
   if (r != 0) {
     g_eventLogger->error("NDBFS: mapping %s failed: %s", theFileName.c_str(),
                          strerror(r));
+    return FsRef::fsErrPmemMapFailed;
+  }
+  r = ndb_pmem_prefault(m_pmem.addr, m_pmem.len);
+  if (r != 0) {
+    ndb_pmem_unmap(&m_pmem);
+    g_eventLogger->error("NDBFS: faulting in the mapping of %s failed: %s",
+                         theFileName.c_str(), strerror(r));
     return FsRef::fsErrPmemMapFailed;
   }
   if (!m_pmem.map_sync) {

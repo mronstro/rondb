@@ -15,7 +15,7 @@ unchanged.
 | 1 | 2 | CPU feature detection and XXH3, with AVX2 chosen at run time | S1.1, S1.2 | `NdbHW-t`, `ndb_xxh3-t`, `rondb_hash-t` on Linux x86_64, Linux ARM64 and macOS ARM64; file-mode regression | — | **Done**: the XXH3 version passed all tests (reported 2026-10-29); the first, CRC32C version had passed on 2026-10-28 |
 | 2 | 3 | PMEM helper and platform queries | S1.3, S1.4 | `ndb_pmem-t` on a plain file on the three platforms and on `memmap=` | 1 | **In progress**: S1.3 passed `ndb_pmem-t` on macOS ARM64 and Linux x86_64 (2026-10-29); Linux ARM64 to be tested. S1.4 passed `ndb_pmem_region-t` and `NdbHW-t` on macOS ARM64 and Linux x86_64 (2026-10-29); Linux ARM64 to be tested |
 | 3 | 4 | Configuration: parameters, path parser, checks, test settings | S2.1–S2.3, S2.7 | Config unit tests, management-server refusals | — | **In progress**: `RedoLogPaths-t`, `MgmConfig-t`, `ndb.ndb_redo_pmem_config`, `ndb.ndb_config` and `ndb.ndb_basic` in PMEM mode passed on macOS ARM64 (2026-10-29); Linux to be tested |
-| 4 | 5 | NDBFS mapping and placement; PMEM mode with today's format (**M0.2**) | S3.1–S3.4, S2.4, S2.5 | MTR ndb suite and a testSystemRestart subset in `nodax` and on `memmap=` | 2, 3 | **In progress**: 4a (NDBFS maps the REDO files) passed `ndb.ndb_basic`, `ndb.ndb_restart`, `ndb.ndb_restart2` and `ndb.testNodeRestartGcpSaveAndFileChange` in `nodax`, the file-mode runs and the MAP_SYNC refusal on macOS ARM64 (2026-10-30); Linux to be tested. 4b (REDO paths, NUMA placement) written, to be tested; 4c to be written |
+| 4 | 5 | NDBFS mapping and placement; PMEM mode with today's format (**M0.2**) | S3.1–S3.4, S2.4, S2.5 | MTR ndb suite and a testSystemRestart subset in `nodax` and on `memmap=` | 2, 3 | **In progress**: 4a (NDBFS maps the REDO files) passed `ndb.ndb_basic`, `ndb.ndb_restart`, `ndb.ndb_restart2` and `ndb.testNodeRestartGcpSaveAndFileChange` in `nodax`, the file-mode runs and the MAP_SYNC refusal on macOS ARM64 (2026-10-30). On Linux x86_64 `ndb.ndb_restart` in `nodax` found a race in `ndb_pmem_map` (2026-10-30), fixed, to be retested. 4b (REDO paths, NUMA placement) written, to be tested; 4c to be written |
 | 5 | 6 | Initial start and restarts with every file mapped; ndbinfo `redo_log_pmem` | S3.5, S3.6, S2.6 | Initial start, SR and NR in PMEM mode; ndbinfo rows | 4 | Not started |
 | 6 | 7 | Record format and reader module | S4.1, S6.2 | Unit tests over synthetic logs on the three platforms | 1 | Not started |
 | 7 | 8 | Record writers | S4.2–S4.7, S5.1 | Unit tests; file-mode regression | 6 | Not started |
@@ -574,6 +574,25 @@ PMEM mode without a test mode must refuse a file system without DAX: a
 cnf file with only `[cluster_config]` and `RedoLogMode=pmem`, given to
 `--defaults-extra-file`, makes the cluster start fail with exit code 2350
 and "cannot be mapped with MAP_SYNC" in the node log.
+
+**4a on Linux x86_64 (2026-10-30): a race in `ndb_pmem_map` (phase 2a
+code), fixed.** `ndb.ndb_restart` in `nodax` stopped node 2 with 2350,
+"mapping .../D8/DBLQH/S0.FragLog failed: Cannot allocate memory", on XFS
+without DAX, kernel 6.11, with 11 GB free. `ndb_pmem_map` reserved a
+range, then mapped the file over it with `MAP_FIXED | MAP_SYNC`. XFS
+refuses MAP_SYNC without DAX in its mmap handler, after the kernel has
+unmapped the reserved range, so another IO thread could place its
+reservation in the gap; the fallback `MAP_SHARED | MAP_FIXED`, and the
+`munmap` of the whole reservation on error, then hit that thread's
+range, whose prefault failed with ENOMEM. A stand-alone program with 8
+threads failed 5 to 12 times in 240 maps, never with 1 thread or
+without the reservation. The fix: MAP_SYNC is tried on one page mapped
+where the kernel chooses, the file is mapped over the reservation once
+with flags that work, and after a failure only the head and tail of the
+reservation are released. `ndb_pmem-t` gets `test_concurrent_maps` (8
+threads, 30 files each, every page tagged and read back), and
+`AsyncFile::map_pmem` logs a failed map and a failed prefault apart.
+macOS never tries MAP_SYNC, so it did not show.
 
 **Changes in 4b.** File mode is unchanged: no REDO path slot is filled,
 no new flag is sent, and the REDO log stays under `FileSystemPath` with
