@@ -61,7 +61,9 @@ protected:
 
   // The signal processing functions
   void execREAD_CONFIG_REQ(Signal *signal);
-  void read_redo_pmem_config(const ndb_mgm_configuration_iterator *p);
+  void read_redo_pmem_config(const ndb_mgm_configuration_iterator *p,
+                             const BaseString &fs_dir);
+  void save_or_restore_fs(const BaseString &fs_path, bool save);
   void execDUMP_STATE_ORD(Signal *signal);
   void execFSOPENREQ(Signal *signal);
   void execFSCLOSEREQ(Signal *signal);
@@ -161,6 +163,11 @@ protected:
   const BaseString &get_base_path(Uint32 no) const;
   static BaseString get_base_path_param_name(Uint32 no);
   unsigned get_pmem_map_flags() const { return m_pmem_map_flags; }
+  /**
+   * The base path of REDO path no (FsOpenReq::OM_REDO_PATH): its slot,
+   * or BP_FS for REDO_PATH_FS and for a path that is FileSystemPath.
+   */
+  Uint32 get_redo_base_path(Uint32 no) const;
 };
 
 class VoidFs : public Ndbfs {

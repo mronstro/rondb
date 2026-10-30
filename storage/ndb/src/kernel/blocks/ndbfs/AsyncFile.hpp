@@ -112,7 +112,8 @@ class AsyncFile {
 
  private:
   int ndbxfrm_append(Request *request, ndbxfrm_input_iterator *in);
-  int map_pmem(Uint64 size);
+  int map_pmem(Request *request, Uint64 size);
+  bool open_redo_elsewhere(Request *request, Uint32 open_flags);
 
   bool check_odirect_request(const char *buf, size_t sz, ndb_off_t offset);
   void log_set_odirect_result(int result);

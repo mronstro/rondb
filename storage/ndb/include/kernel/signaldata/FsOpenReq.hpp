@@ -148,6 +148,24 @@ class FsOpenReq {
    * __RedoLogPmemTestMode=nodax.
    */
   static constexpr Uint32 OM_MAP_SYNC = 0x20000000;
+  /**
+   * RONDB-1150: a REDO log file (V_BLOCK name) under REDO path
+   * getRedoPathNo(secondFileFlags) of FileSystemPathRedoLog, or under
+   * FileSystemPath for REDO_PATH_FS or a path that is FileSystemPath.
+   * Not found there, it is looked for under the other paths. The flag
+   * guards secondFileFlags, which most senders leave unset.
+   */
+  static constexpr Uint32 OM_REDO_PATH = 0x40000000;
+  static constexpr Uint32 REDO_PATH_SHIFT = 8;  // secondFileFlags bits 8-11
+  static constexpr Uint32 REDO_PATH_MASK = 0xF;
+  static constexpr Uint32 REDO_PATH_FS = 0xF;
+  static Uint32 getRedoPathNo(Uint32 secondFileFlags) {
+    return (secondFileFlags >> REDO_PATH_SHIFT) & REDO_PATH_MASK;
+  }
+  static void setRedoPathNo(Uint32 &secondFileFlags, Uint32 no) {
+    secondFileFlags = (secondFileFlags & ~(REDO_PATH_MASK << REDO_PATH_SHIFT)) |
+                      ((no & REDO_PATH_MASK) << REDO_PATH_SHIFT);
+  }
 
   static constexpr Uint32 OM_ENCRYPT_KEY_MATERIAL_MASK =
       OM_ENCRYPT_PASSWORD | OM_ENCRYPT_KEY;
@@ -171,7 +189,9 @@ class FsOpenReq {
     BP_BACKUP = 1,  // BackupDataDir
     BP_DD_DF = 2,   // FileSystemPathDataFiles
     BP_DD_UF = 3,   // FileSystemPathUndoFiles
-    BP_MAX = 4
+    BP_REDO_FIRST = 4,  // FileSystemPathRedoLog, one per REDO path,
+    BP_REDO_LAST = 11,  // in PMEM mode only (RONDB-1150)
+    BP_MAX = 12
   };
 
   enum Versions {

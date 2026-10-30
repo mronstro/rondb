@@ -268,11 +268,27 @@ const BaseString &Ndbfs::get_base_path(Uint32 no) const {
   return m_base_path[FsOpenReq::BP_FS];
 }
 
+static_assert(FsOpenReq::BP_REDO_LAST - FsOpenReq::BP_REDO_FIRST + 1 ==
+              NDB_MAX_REDO_LOG_PATHS);
+static_assert(FsOpenReq::BP_REDO_LAST + 1 == FsOpenReq::BP_MAX);
+static_assert(NDB_MAX_REDO_LOG_PATHS <= FsOpenReq::REDO_PATH_FS);
+
+/* Called from the IO threads too, by AsyncFile::open_redo_elsewhere */
+Uint32 Ndbfs::get_redo_base_path(Uint32 no) const {
+  if (no < NDB_MAX_REDO_LOG_PATHS &&
+      m_base_path[FsOpenReq::BP_REDO_FIRST + no].length() > 0) {
+    return FsOpenReq::BP_REDO_FIRST + no;
+  }
+  return FsOpenReq::BP_FS;
+}
+
 BaseString Ndbfs::get_base_path_param_name(Uint32 no) {
   require(no < FsOpenReq::BP_MAX);
   static Uint32 param_id[FsOpenReq::BP_MAX] = {
       CFG_DB_FILESYSTEM_PATH, CFG_DB_BACKUP_DATADIR, CFG_DB_DD_DATAFILE_PATH,
-      CFG_DB_DD_UNDOFILE_PATH};
+      CFG_DB_DD_UNDOFILE_PATH, CFG_DB_REDO_LOG_PATH, CFG_DB_REDO_LOG_PATH,
+      CFG_DB_REDO_LOG_PATH, CFG_DB_REDO_LOG_PATH, CFG_DB_REDO_LOG_PATH,
+      CFG_DB_REDO_LOG_PATH, CFG_DB_REDO_LOG_PATH, CFG_DB_REDO_LOG_PATH};
   ndb_mgm_param_info param_info;
   size_t param_info_size = sizeof(param_info);
   if (ndb_mgm_get_db_parameter_info(param_id[no], &param_info,
@@ -287,12 +303,19 @@ static_assert(NDB_REDO_PMEM_COPY_MOVDIR64B == NDB_PMEM_COPY_MOVDIR64B);
 static_assert(NDB_REDO_PMEM_COPY_CLWB == NDB_PMEM_COPY_CLWB);
 
 /**
- * RONDB-1150: RedoLogMode=pmem (platform plan S2.3, S2.7). The copy
+ * RONDB-1150: RedoLogMode=pmem (platform plan S2.3, S2.7, S3.3). The copy
  * method is chosen before any file is opened. The management server
  * checks the path too; a configuration without RedoLogMode gives file
- * mode, and file mode reads nothing more.
+ * mode, and file mode reads nothing more: its REDO path slots stay
+ * empty, so the REDO log stays under FileSystemPath with today's names,
+ * cleanup and probes, whether FileSystemPathRedoLog is set or not.
+ *
+ * Each FileSystemPathRedoLog entry i gets the slot BP_REDO_FIRST + i,
+ * <path>/<fs_dir>, like FileSystemPathDD. An entry that is FileSystemPath
+ * keeps its slot empty and its files under FileSystemPath.
  */
-void Ndbfs::read_redo_pmem_config(const ndb_mgm_configuration_iterator *p) {
+void Ndbfs::read_redo_pmem_config(const ndb_mgm_configuration_iterator *p,
+                                  const BaseString &fs_dir) {
   m_pmem_map_flags = NDB_PMEM_MAP_SYNC_REQUIRED;
   Uint32 mode = NDB_REDO_LOG_MODE_FILE;
   ndb_mgm_get_int_parameter(p, CFG_DB_REDO_LOG_MODE, &mode);
@@ -317,8 +340,8 @@ void Ndbfs::read_redo_pmem_config(const ndb_mgm_configuration_iterator *p) {
               "RedoLogMode=pmem");
   }
 
+  RedoLogPaths paths;
   if (spec != nullptr) {
-    RedoLogPaths paths;
     BaseString err;
     if (paths.parse(spec, err) != 0) {
       BaseString msg;
@@ -343,6 +366,41 @@ void Ndbfs::read_redo_pmem_config(const ndb_mgm_configuration_iterator *p) {
   if (test_mode == NDB_REDO_PMEM_TEST_MODE_NODAX) {
     m_pmem_map_flags = NDB_PMEM_MAP_SYNC_OPTIONAL;
   }
+
+  BaseString fs_real;
+  if (paths.count > 0) {
+    do_mkdir(m_base_path[FsOpenReq::BP_FS].c_str());
+    if (!validate_path(fs_real, m_base_path[FsOpenReq::BP_FS].c_str())) {
+      ERROR_SET(fatal, NDBD_EXIT_AFS_INVALIDPATH,
+                m_base_path[FsOpenReq::BP_FS].c_str(), "FileSystemPath");
+    }
+  }
+  for (Uint32 i = 0; i < paths.count; i++) {
+    BaseString path;
+    add_path(path, paths.entry[i].path.c_str());
+    do_mkdir(path.c_str());
+    add_path(path, fs_dir.c_str());
+    do_mkdir(path.c_str());
+    BaseString &slot = m_base_path[FsOpenReq::BP_REDO_FIRST + i];
+    if (!validate_path(slot, path.c_str())) {
+      ERROR_SET(fatal, NDBD_EXIT_AFS_INVALIDPATH, path.c_str(),
+                "FileSystemPathRedoLog");
+    }
+    char node[24] = "every NUMA node";
+    if (paths.entry[i].numa_node >= 0) {
+      BaseString::snprintf(node, sizeof(node), "NUMA node %d",
+                           paths.entry[i].numa_node);
+    }
+    if (strcmp(slot.c_str(), fs_real.c_str()) == 0) {
+      slot.assign("");
+      g_eventLogger->info(
+          "RedoLogMode=pmem: REDO path %u (%s) is FileSystemPath %s", i, node,
+          fs_real.c_str());
+    } else {
+      g_eventLogger->info("RedoLogMode=pmem: REDO path %u (%s): %s", i, node,
+                          slot.c_str());
+    }
+  }
   g_eventLogger->info(
       "RedoLogMode=pmem: REDO log copied to persistent memory with %s, "
       "__RedoLogPmemTestMode=%s",
@@ -360,7 +418,7 @@ void Ndbfs::read_redo_pmem_config(const ndb_mgm_configuration_iterator *p) {
   }
   g_eventLogger->warning(
       "RedoLogMode=pmem: the REDO log files are mapped, but still written "
-      "as in file mode, under FileSystemPath, in this version");
+      "as in file mode in this version");
 }
 
 void Ndbfs::execREAD_CONFIG_REQ(Signal *signal) {
@@ -461,7 +519,7 @@ void Ndbfs::execREAD_CONFIG_REQ(Signal *signal) {
     }
   }
 
-  read_redo_pmem_config(p);
+  read_redo_pmem_config(p, tmp);
 
   m_maxFiles = 0;
   ndb_mgm_get_int_parameter(p, CFG_DB_MAX_OPEN_FILES, &m_maxFiles);
@@ -549,7 +607,8 @@ void Ndbfs::execREAD_CONFIG_REQ(Signal *signal) {
     // Probe if file in root of each base path can use ODirect
     int ok_count = 0;
     AsyncFile *file = getIdleFile(false);
-    for (unsigned bp = 0; bp < FsOpenReq::BP_MAX; bp++) {
+    // Not the REDO paths: PMEM mode never opens a REDO file with ODirect
+    for (unsigned bp = 0; bp < FsOpenReq::BP_REDO_FIRST; bp++) {
       cstrbuf<PATH_MAX> namebuf;
       namebuf.append(get_base_path(bp).c_str());
       if (namebuf.appendf("ndb_%u_prb.tmp", getOwnNodeId()) != 0) {
@@ -583,6 +642,41 @@ void Ndbfs::execREAD_CONFIG_REQ(Signal *signal) {
   sendSignalWithDelay(reference(), GSN_CONTINUEB, signal, 10, 1);
 }
 
+/* ERROR_INSERT 2000 and 2001: move fs_path to <fs_path>.saved and back */
+void Ndbfs::save_or_restore_fs(const BaseString &fs_path, bool save) {
+  unsigned i = fs_path.length() - strlen(DIR_SEPARATOR);
+  BaseString saved_path(fs_path.c_str(), i);
+  const char *ending_separator = fs_path.c_str() + i;
+  ndbrequire(strcmp(ending_separator, DIR_SEPARATOR) == 0);
+  saved_path.append(".saved");
+  saved_path.append(ending_separator);
+  const BaseString &from_dir = (save ? fs_path : saved_path);
+  const BaseString &to_dir = (save ? saved_path : fs_path);
+
+  const bool only_contents = true;
+  errno = 0;
+  if (NdbDir::remove_recursive(to_dir.c_str(), !only_contents)) {
+    g_eventLogger->info("Cleaned destination file system at %s",
+                        to_dir.c_str());
+  } else {
+    g_eventLogger->warning("Failed cleaning file system at %s",
+                           to_dir.c_str());
+  }
+  if (access(to_dir.c_str(), F_OK) == 0 || errno != ENOENT) {
+    g_eventLogger->error(
+        "Destination file system at %s should not be there (errno %d)!",
+        to_dir.c_str(), errno);
+    ndbrequire(!"Destination file system already there during file system saving or restoring");
+  }
+  if (rename(from_dir.c_str(), to_dir.c_str()) == -1) {
+    g_eventLogger->error(
+        "Failed renaming %s file system to %s while %s (errno %d)",
+        from_dir.c_str(), to_dir.c_str(), (save ? "saving" : "restoring"),
+        errno);
+    ndbrequire(!"Failed renaming file system while saving ot restoring");
+  }
+}
+
 /* Received a restart signal.
  * Answer it like any other block
  * PR0  : StartCase
@@ -601,37 +695,14 @@ void Ndbfs::execSTTOR(Signal *signal) {
 
     if (ERROR_INSERTED(2000) || ERROR_INSERTED(2001)) {
       // Save(2000) or restore(2001) FileSystemPath/ndb_XX_fs/
-      BaseString &fs_path = m_base_path[FsOpenReq::BP_FS];
-      unsigned i = fs_path.length() - strlen(DIR_SEPARATOR);
-      BaseString saved_path(fs_path.c_str(), i);
-      const char *ending_separator = fs_path.c_str() + i;
-      ndbrequire(strcmp(ending_separator, DIR_SEPARATOR) == 0);
-      saved_path.append(".saved");
-      saved_path.append(ending_separator);
-      BaseString &from_dir = (ERROR_INSERTED(2000) ? fs_path : saved_path);
-      BaseString &to_dir = (ERROR_INSERTED(2000) ? saved_path : fs_path);
-
-      const bool only_contents = true;
-      errno = 0;
-      if (NdbDir::remove_recursive(to_dir.c_str(), !only_contents)) {
-        g_eventLogger->info("Cleaned destination file system at %s",
-                            to_dir.c_str());
-      } else {
-        g_eventLogger->warning("Failed cleaning file system at %s",
-                               to_dir.c_str());
-      }
-      if (access(to_dir.c_str(), F_OK) == 0 || errno != ENOENT) {
-        g_eventLogger->error(
-            "Destination file system at %s should not be there (errno %d)!",
-            to_dir.c_str(), errno);
-        ndbrequire(!"Destination file system already there during file system saving or restoring");
-      }
-      if (rename(from_dir.c_str(), to_dir.c_str()) == -1) {
-        g_eventLogger->error(
-            "Failed renaming %s file system to %s while %s (errno %d)",
-            from_dir.c_str(), to_dir.c_str(),
-            (ERROR_INSERTED(2000) ? "saving" : "restoring"), errno);
-        ndbrequire(!"Failed renaming file system while saving ot restoring");
+      const bool save = ERROR_INSERTED(2000);
+      save_or_restore_fs(m_base_path[FsOpenReq::BP_FS], save);
+      // and the REDO log paths in PMEM mode, FileSystemPathRedoLog/ndb_XX_fs/
+      for (Uint32 i = 0; i < NDB_MAX_REDO_LOG_PATHS; i++) {
+        const BaseString &redo = m_base_path[FsOpenReq::BP_REDO_FIRST + i];
+        if (redo.length() == 0) continue;
+        save_or_restore_fs(redo, save);
+        do_mkdir(redo.c_str());
       }
       SET_ERROR_INSERT_VALUE2(ERROR_INSERT_EXTRA, 0);
     }
@@ -687,6 +758,15 @@ void Ndbfs::execFSOPENREQ(Signal *signal) {
     ndbrequire(handle.getSection(ptr, FsOpenReq::FILENAME));
   }
   file->theFileName.set(this, userRef, fsOpenReq->fileNumber, false, ptr);
+  Uint32 redo_path_no = FsOpenReq::REDO_PATH_FS;
+  if (fsOpenReq->fileFlags & FsOpenReq::OM_REDO_PATH) {
+    jam();
+    // RONDB-1150: a REDO log file under FileSystemPathRedoLog
+    ndbrequire(FsOpenReq::getVersion(fsOpenReq->fileNumber) ==
+               FsOpenReq::V_BLOCK);
+    redo_path_no = FsOpenReq::getRedoPathNo(fsOpenReq->secondFileFlags);
+    file->theFileName.set_base_path(this, get_redo_base_path(redo_path_no));
+  }
   if (handle.m_cnt > FsOpenReq::ENCRYPT_KEY_MATERIAL) {
     jam();
     SegmentedSectionPtr ptr;
@@ -786,6 +866,7 @@ void Ndbfs::execFSOPENREQ(Signal *signal) {
   request->par.open.page_size = page_size;
   request->par.open.file_size = file_size;
   request->par.open.auto_sync_size = auto_sync_size;
+  request->par.open.redo_path_no = redo_path_no;
   request->m_do_bind = bound;
   ndbrequire(forward(file, request));
 }
@@ -1582,6 +1663,10 @@ void Ndbfs::report(Request *request, Signal *signal) {
         {
           fileInfo = FsConf::USE_O_DIRECT;
         }
+        if (request->par.open.flags & FsOpenReq::OM_REDO_PATH) {
+          fileInfo |= (request->par.open.redo_path_no & FsConf::REDO_PATH_MASK)
+                      << FsConf::REDO_PATH_SHIFT;
+        }
         fsConf->filePointer = request->theFilePointer;
         fsConf->file_size_hi = request->m_file_size_hi;
         fsConf->file_size_lo = request->m_file_size_lo;
@@ -1592,6 +1677,10 @@ void Ndbfs::report(Request *request, Signal *signal) {
           fileInfo |= FsConf::PMEM_MAPPED;
           if (request->par.open.pmem_map_sync) {
             fileInfo |= FsConf::PMEM_MAP_SYNC;
+          }
+          if (request->par.open.pmem_numa_node >= 0) {
+            fileInfo |= Uint32(request->par.open.pmem_numa_node + 1)
+                        << FsConf::PMEM_NUMA_SHIFT;
           }
           if (!m_pmem_first_map_logged) {
             m_pmem_first_map_logged = true;

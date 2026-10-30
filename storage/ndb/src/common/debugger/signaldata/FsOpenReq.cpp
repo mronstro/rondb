@@ -85,6 +85,9 @@ bool printFSOPENREQ(FILE *output, const Uint32 *theData, Uint32 len,
     fprintf(output, ", with key");
   if (flags & FsOpenReq::OM_READ_FORWARD) fprintf(output, ", read forward");
   if (flags & FsOpenReq::OM_MAP_SYNC) fprintf(output, ", map sync");
+  if (flags & FsOpenReq::OM_REDO_PATH)
+    fprintf(output, ", redo path %u",
+            FsOpenReq::getRedoPathNo(sig->secondFileFlags));
 
   fprintf(output, "\n");
   return true;
