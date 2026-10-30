@@ -110,7 +110,7 @@ void VoidFs::execFSOPENREQ(Signal *signal) {
 
   Uint32 flags = fsOpenReq->fileFlags;
   // Diskless refuses RedoLogMode=pmem, so nothing asks for a mapping
-  ndbrequire(!(flags & FsOpenReq::OM_MAP_SYNC));
+  ndbrequire(!(flags & (FsOpenReq::OM_MAP_SYNC | FsOpenReq::OM_REDO_PATH)));
   if ((flags & FsOpenReq::OM_READ_WRITE_MASK) == FsOpenReq::OM_READONLY) {
     // Initialise FsRef signal
     FsRef *const fsRef = (FsRef *)&signal->theData[0];

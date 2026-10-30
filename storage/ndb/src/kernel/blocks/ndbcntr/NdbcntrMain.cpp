@@ -5920,6 +5920,11 @@ void Ndbcntr::execSTART_ORD(Signal *signal) {
 #define CLEAR_LCP (BackupFormat::NDB_MAX_LCP_FILES)
 #define CLEAR_DD 2
 // FileSystemPathDataFiles FileSystemPathUndoFiles
+#define CLEAR_REDO (FsOpenReq::BP_REDO_LAST - FsOpenReq::BP_REDO_FIRST + 1)
+// FileSystemPathRedoLog, set in PMEM mode only (RONDB-1150); NDBFS
+// answers at once for a REDO path that is not set, so file mode clears
+// the REDO log under FileSystemPath only, as before
+#define CLEAR_ALL (CLEAR_DX + CLEAR_LCP + CLEAR_DD + CLEAR_REDO)
 
 void Ndbcntr::clearFilesystem(Signal *signal) {
   jam();
@@ -5932,6 +5937,7 @@ void Ndbcntr::clearFilesystem(Signal *signal) {
   const Uint32 DX = CLEAR_DX;
   const Uint32 LCP = CLEAR_DX + CLEAR_LCP;
   const Uint32 DD = CLEAR_DX + CLEAR_LCP + CLEAR_DD;
+  const Uint32 REDO = CLEAR_ALL;
 
   if (c_fsRemoveCount < DX) {
     FsOpenReq::setVersion(req->fileNumber, FsOpenReq::V_DISK);
@@ -5949,6 +5955,12 @@ void Ndbcntr::clearFilesystem(Signal *signal) {
     FsOpenReq::setSuffix(req->fileNumber, FsOpenReq::S_DATA);
     FsOpenReq::v6_setBasePath(req->fileNumber,
                               FsOpenReq::BP_DD_DF + c_fsRemoveCount - LCP);
+  } else if (c_fsRemoveCount < REDO) {
+    req->ownDirectory = 0;
+    FsOpenReq::setVersion(req->fileNumber, FsOpenReq::V_BASEPATH);
+    FsOpenReq::setSuffix(req->fileNumber, FsOpenReq::S_DATA);
+    FsOpenReq::v6_setBasePath(req->fileNumber,
+                              FsOpenReq::BP_REDO_FIRST + c_fsRemoveCount - DD);
   } else {
     ndbabort();
   }
@@ -5960,7 +5972,7 @@ void Ndbcntr::clearFilesystem(Signal *signal) {
 
 void Ndbcntr::execFSREMOVECONF(Signal *signal) {
   jamEntry();
-  if (c_fsRemoveCount == CLEAR_DX + CLEAR_LCP + CLEAR_DD) {
+  if (c_fsRemoveCount == CLEAR_ALL) {
     jam();
     if (c_encrypted_filesystem) {
       // After initialising the data node filesystem, a new secrets file is
@@ -5971,7 +5983,7 @@ void Ndbcntr::execFSREMOVECONF(Signal *signal) {
     sendSttorry(signal);
   } else {
     jam();
-    ndbrequire(c_fsRemoveCount < CLEAR_DX + CLEAR_LCP + CLEAR_DD);
+    ndbrequire(c_fsRemoveCount < CLEAR_ALL);
     clearFilesystem(signal);
   }
 }

@@ -30,6 +30,7 @@
 #include <cstring>
 #include "Dblqh.hpp"
 #include <util/rondb_hash.hpp>
+#include <util/RedoLogPaths.hpp>
 
 #include <ndb_version.h>
 #include <signaldata/GetCpuUsage.hpp>
@@ -2671,6 +2672,46 @@ void Dblqh::execREAD_NODESREF(Signal *signal) {
 /* ****************** */
 /*  READ_CONFIG_REQ > */
 /* ****************** */
+/**
+ * RONDB-1150, PMEM mode (platform plan S2.4): the log parts of this LDM
+ * go on the REDO path of the NUMA node it runs on. Threads are bound to
+ * their CPUs before they run a signal, and an LDM worker gets
+ * READ_CONFIG_REQ in its own thread. NDBFS has checked the path list.
+ */
+void Dblqh::initRedoPathConfig(const ndb_mgm_configuration_iterator *p) {
+  c_ldm_numa_node = Ndb_GetThreadNumaNode();
+  const char *spec = nullptr;
+  ndb_mgm_get_string_parameter(p, CFG_DB_REDO_LOG_PATH, &spec);
+  if (spec == nullptr) return;
+  RedoLogPaths paths;
+  BaseString err;
+  if (paths.parse(spec, err) != 0) {
+    progError(__LINE__, NDBD_EXIT_INVALID_CONFIG, err.c_str());
+  }
+  bool found = false;
+  c_redo_path_no = Uint8(paths.index_for_node(c_ldm_numa_node, &found));
+  const char *path = paths.entry[c_redo_path_no].path.c_str();
+  if (found) {
+    char node[16] = "not known";
+    if (c_ldm_numa_node >= 0) {
+      BaseString::snprintf(node, sizeof(node), "%d", c_ldm_numa_node);
+    }
+    g_eventLogger->info(
+        "LDM(%u): NUMA node %s, its REDO log parts go on REDO path %u, %s",
+        instance(), node, c_redo_path_no, path);
+  } else if (c_ldm_numa_node < 0) {
+    g_eventLogger->warning(
+        "LDM(%u): not bound to the CPUs of one NUMA node, its REDO log parts "
+        "go on REDO path 0, %s",
+        instance(), path);
+  } else {
+    g_eventLogger->warning(
+        "LDM(%u): NUMA node %d is not in FileSystemPathRedoLog, its REDO log "
+        "parts go on REDO path 0, %s",
+        instance(), c_ldm_numa_node, path);
+  }
+}
+
 void Dblqh::execREAD_CONFIG_REQ(Signal *signal) {
   const ReadConfigReq *req = (ReadConfigReq *)signal->getDataPtr();
   Uint32 ref = req->senderRef;
@@ -2814,6 +2855,8 @@ void Dblqh::execREAD_CONFIG_REQ(Signal *signal) {
     c_redo_pmem_test_mode = NDB_REDO_PMEM_TEST_MODE_OFF;
     ndb_mgm_get_int_parameter(p, CFG_DB_REDO_PMEM_TEST_MODE,
                               &c_redo_pmem_test_mode);
+    c_ldm_numa_node = -1;
+    c_redo_path_no = FsOpenReq::REDO_PATH_FS;
   }
   if (c_redo_pmem) {
     jam();
@@ -2842,6 +2885,10 @@ void Dblqh::execREAD_CONFIG_REQ(Signal *signal) {
             "RedoLogMode=pmem: ODirect and ODirectSyncFlag are not used for "
             "the REDO log");
       }
+    }
+    if (clogPartFileSize > 0) {
+      jam();
+      initRedoPathConfig(p);
     }
   }
 
@@ -34618,6 +34665,14 @@ void Dblqh::execFSOPENREF(Signal *signal) {
               "the node log");
     return;
   }
+  if (err == FsRef::fsErrFileDoesNotExist && c_redo_pmem) {
+    /* NDBFS looked under every REDO path and FileSystemPath */
+    progError(__LINE__, NDBD_EXIT_INVALID_CONFIG,
+              "RedoLogMode=pmem: a REDO log file is not under "
+              "FileSystemPathRedoLog or FileSystemPath; was "
+              "FileSystemPathRedoLog changed without --initial?");
+    return;
+  }
 
   SimulatedBlock::execFSOPENREF(signal);
 }
@@ -34876,6 +34931,51 @@ void Dblqh::execFSWRITEREF(Signal *signal) {
   }
 }  // Dblqh::execFSWRITEREF()
 
+/**
+ * RONDB-1150, PMEM mode: a REDO log file found under another REDO path
+ * than asked for (a changed CPU binding, NUMA layout or path list) is
+ * used there; the part's next files are asked for there too. Memory on
+ * another NUMA node than the LDM thread works, more slowly. One warning
+ * each per log part.
+ */
+void Dblqh::checkRedoPmemPlacement(LogPartRecord *logPartPtrP,
+                                   Uint32 fileInfo) {
+  const Uint32 path_no =
+      (fileInfo >> FsConf::REDO_PATH_SHIFT) & FsConf::REDO_PATH_MASK;
+  if (path_no != logPartPtrP->m_redo_path_no) {
+    jam();
+    if (!logPartPtrP->m_redo_path_warned) {
+      logPartPtrP->m_redo_path_warned = true;
+      char asked[32];
+      char found[32];
+      BaseString::snprintf(asked, sizeof(asked), "REDO path %u",
+                           logPartPtrP->m_redo_path_no);
+      BaseString::snprintf(found, sizeof(found), "REDO path %u", path_no);
+      g_eventLogger->warning(
+          "LDM(%u): the REDO log files of log part %u were found under %s, "
+          "not under %s; they stay there until an initial start",
+          instance(), logPartPtrP->logPartNo,
+          path_no == FsOpenReq::REDO_PATH_FS ? "FileSystemPath" : found,
+          logPartPtrP->m_redo_path_no == FsOpenReq::REDO_PATH_FS
+              ? "FileSystemPath"
+              : asked);
+    }
+    logPartPtrP->m_redo_path_no = Uint8(path_no);
+  }
+  const Uint32 numa = fileInfo >> FsConf::PMEM_NUMA_SHIFT;
+  if (numa != 0 && !logPartPtrP->m_redo_numa_checked) {
+    jam();
+    logPartPtrP->m_redo_numa_checked = true;
+    const Int32 mem_node = Int32(numa) - 1;
+    if (c_ldm_numa_node >= 0 && mem_node != c_ldm_numa_node) {
+      g_eventLogger->warning(
+          "LDM(%u): runs on NUMA node %d, but the REDO log of log part %u is "
+          "in memory of NUMA node %d; every REDO write crosses NUMA nodes",
+          instance(), c_ldm_numa_node, logPartPtrP->logPartNo, mem_node);
+    }
+  }
+}
+
 /* ========================================================================= */
 /* =======              INITIATE WHEN RECEIVING FSOPENCONF           ======= */
 /*                                                                           */
@@ -34891,12 +34991,19 @@ void Dblqh::initFsopenconf(Signal *signal, LogFileRecordPtr &logFilePtr,
   logFilePtr.p->currentMbyte = 0;
   logFilePtr.p->filePosition = 0;
   if (c_redo_pmem) {
-    /* RONDB-1150: NDBFS maps every REDO log file in PMEM mode */
-    ndbrequire(signal->getLength() >= FsConf::OpenPmemSignalLength &&
-               (signal->theData[2] & FsConf::PMEM_MAPPED));
-    const Uint64 addr =
-        (Uint64(signal->theData[5]) << 32) | Uint64(signal->theData[6]);
-    logFilePtr.p->m_pmem_base = reinterpret_cast<Uint8 *>(UintPtr(addr));
+    if (signal->getLength() >= FsConf::OpenSignalLength) {
+      /* RONDB-1150: NDBFS maps every REDO log file in PMEM mode */
+      const Uint32 fileInfo = signal->theData[2];
+      ndbrequire(signal->getLength() >= FsConf::OpenPmemSignalLength &&
+                 (fileInfo & FsConf::PMEM_MAPPED));
+      const Uint64 addr =
+          (Uint64(signal->theData[5]) << 32) | Uint64(signal->theData[6]);
+      logFilePtr.p->m_pmem_base = reinterpret_cast<Uint8 *>(UintPtr(addr));
+      checkRedoPmemPlacement(logPartPtr.p, fileInfo);
+    } else {
+      /* openFileRw_cache: the file is still open and mapped */
+      ndbrequire(logFilePtr.p->m_pmem_base != nullptr);
+    }
   }
 
   if (logFilePtr.p->fileChangeState == LogFileRecord::WAIT_FOR_OPEN_NEXT_FILE ||
@@ -35674,6 +35781,17 @@ void Dblqh::initLogpage(LogPageRecordPtr logPagePtr, LogFileRecord *logFilePtrP,
   }  // if
 }  // Dblqh::initLogpage()
 
+/**
+ * RONDB-1150, PMEM mode: NDBFS maps the REDO log file, under the REDO
+ * path of its log part. The caller may be an LDM that shares the part,
+ * so only the part is read.
+ */
+void Dblqh::setRedoPmemOpenFlags(FsOpenReq *req,
+                                 const LogPartRecord *logPartPtrP) const {
+  req->fileFlags |= FsOpenReq::OM_MAP_SYNC | FsOpenReq::OM_REDO_PATH;
+  FsOpenReq::setRedoPathNo(req->secondFileFlags, logPartPtrP->m_redo_path_no);
+}
+
 /* ------------------------------------------------------------------------- */
 /* -------               OPEN LOG FILE FOR READ AND WRITE            ------- */
 /*                                                                           */
@@ -35693,7 +35811,10 @@ void Dblqh::openFileRw(Signal *signal, LogFileRecordPtr olfLogFilePtr,
   req->secondFileFlags = 0;
   if (c_redo_pmem) {
     jam();
-    req->fileFlags |= FsOpenReq::OM_MAP_SYNC;
+    LogPartRecordPtr logPartPtr;
+    logPartPtr.i = olfLogFilePtr.p->logPartRec;
+    ptrCheckGuard(logPartPtr, clogPartFileSize, logPartRecord);
+    setRedoPmemOpenFlags(req, logPartPtr.p);
   }
   if (c_o_direct) {
     jam();
@@ -35761,7 +35882,10 @@ void Dblqh::openLogfileInit(Signal *signal, LogFileRecordPtr logFilePtr) {
   req->secondFileFlags = 0;
   if (c_redo_pmem) {
     jam();
-    req->fileFlags |= FsOpenReq::OM_MAP_SYNC;
+    LogPartRecordPtr logPartPtr;
+    logPartPtr.i = logFilePtr.p->logPartRec;
+    ptrCheckGuard(logPartPtr, clogPartFileSize, logPartRecord);
+    setRedoPmemOpenFlags(req, logPartPtr.p);
   }
   if (c_o_direct) {
     jam();
@@ -35921,7 +36045,7 @@ void Dblqh::openNextLogfile(Signal *signal, LogFileRecord *logFilePtrP,
     req->secondFileFlags = 0;
     if (c_redo_pmem) {
       jam();
-      req->fileFlags |= FsOpenReq::OM_MAP_SYNC;
+      setRedoPmemOpenFlags(req, logPartPtrP);
     }
     if (c_o_direct) {
       jam();
@@ -42434,6 +42558,9 @@ void Dblqh::initLogpart(Signal *signal, LogPartRecordPtr logPartPtr) {
   logPartPtr.p->firstInvalidatePageFound = false;
   logPartPtr.p->m_log_problems = 0;
   logPartPtr.p->m_logged_buffer_full = 0;
+  logPartPtr.p->m_redo_path_no = c_redo_path_no;
+  logPartPtr.p->m_redo_path_warned = false;
+  logPartPtr.p->m_redo_numa_checked = false;
   NdbLogPartInfo lpinfo(instance());
   ndbrequire(lpinfo.partCount == clogPartFileSize);
   logPartPtr.p->logPartNo = lpinfo.partNo[logPartPtr.i];

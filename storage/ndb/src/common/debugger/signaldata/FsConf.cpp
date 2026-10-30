@@ -41,9 +41,14 @@ bool printFSCONF(FILE *output, const Uint32 *theData, Uint32 len,
 
   if (len >= FsConf::OpenPmemSignalLength &&
       (sig->fileInfo & FsConf::PMEM_MAPPED)) {
-    fprintf(output, " PmemAddr: 0x%08x%08x%s\n", sig->pmem_addr_hi,
-            sig->pmem_addr_lo,
-            (sig->fileInfo & FsConf::PMEM_MAP_SYNC) ? " MAP_SYNC" : "");
+    fprintf(output, " PmemAddr: 0x%08x%08x%s RedoPath: %u",
+            sig->pmem_addr_hi, sig->pmem_addr_lo,
+            (sig->fileInfo & FsConf::PMEM_MAP_SYNC) ? " MAP_SYNC" : "",
+            (sig->fileInfo >> FsConf::REDO_PATH_SHIFT) &
+                FsConf::REDO_PATH_MASK);
+    const Uint32 numa = sig->fileInfo >> FsConf::PMEM_NUMA_SHIFT;
+    if (numa != 0) fprintf(output, " NumaNode: %u", numa - 1);
+    fprintf(output, "\n");
   }
 
   return true;

@@ -15,7 +15,7 @@ unchanged.
 | 1 | 2 | CPU feature detection and XXH3, with AVX2 chosen at run time | S1.1, S1.2 | `NdbHW-t`, `ndb_xxh3-t`, `rondb_hash-t` on Linux x86_64, Linux ARM64 and macOS ARM64; file-mode regression | — | **Done**: the XXH3 version passed all tests (reported 2026-10-29); the first, CRC32C version had passed on 2026-10-28 |
 | 2 | 3 | PMEM helper and platform queries | S1.3, S1.4 | `ndb_pmem-t` on a plain file on the three platforms and on `memmap=` | 1 | **In progress**: S1.3 passed `ndb_pmem-t` on macOS ARM64 and Linux x86_64 (2026-10-29); Linux ARM64 to be tested. S1.4 passed `ndb_pmem_region-t` and `NdbHW-t` on macOS ARM64 and Linux x86_64 (2026-10-29); Linux ARM64 to be tested |
 | 3 | 4 | Configuration: parameters, path parser, checks, test settings | S2.1–S2.3, S2.7 | Config unit tests, management-server refusals | — | **In progress**: `RedoLogPaths-t`, `MgmConfig-t`, `ndb.ndb_redo_pmem_config`, `ndb.ndb_config` and `ndb.ndb_basic` in PMEM mode passed on macOS ARM64 (2026-10-29); Linux to be tested |
-| 4 | 5 | NDBFS mapping and placement; PMEM mode with today's format (**M0.2**) | S3.1–S3.4, S2.4, S2.5 | MTR ndb suite and a testSystemRestart subset in `nodax` and on `memmap=` | 2, 3 | **In progress**: 4a (NDBFS maps the REDO files) passed `ndb.ndb_basic`, `ndb.ndb_restart`, `ndb.ndb_restart2` and `ndb.testNodeRestartGcpSaveAndFileChange` in `nodax`, the file-mode runs and the MAP_SYNC refusal on macOS ARM64 (2026-10-30); Linux to be tested. 4b and 4c to be written |
+| 4 | 5 | NDBFS mapping and placement; PMEM mode with today's format (**M0.2**) | S3.1–S3.4, S2.4, S2.5 | MTR ndb suite and a testSystemRestart subset in `nodax` and on `memmap=` | 2, 3 | **In progress**: 4a (NDBFS maps the REDO files) passed `ndb.ndb_basic`, `ndb.ndb_restart`, `ndb.ndb_restart2` and `ndb.testNodeRestartGcpSaveAndFileChange` in `nodax`, the file-mode runs and the MAP_SYNC refusal on macOS ARM64 (2026-10-30); Linux to be tested. 4b (REDO paths, NUMA placement) written, to be tested; 4c to be written |
 | 5 | 6 | Initial start and restarts with every file mapped; ndbinfo `redo_log_pmem` | S3.5, S3.6, S2.6 | Initial start, SR and NR in PMEM mode; ndbinfo rows | 4 | Not started |
 | 6 | 7 | Record format and reader module | S4.1, S6.2 | Unit tests over synthetic logs on the three platforms | 1 | Not started |
 | 7 | 8 | Record writers | S4.2–S4.7, S5.1 | Unit tests; file-mode regression | 6 | Not started |
@@ -510,7 +510,7 @@ parts, tested one at a time:
 | Part | Packages | Content | State |
 |---|---|---|---|
 | 4a | S3.1, S3.2, S3.4 | `OM_MAP_SYNC`; NDBFS maps, prefaults and locks a REDO file at open and unmaps it at close; FSOPENCONF carries the address; DBLQH asks for the mapping and keeps the address | Passed on macOS ARM64 (2026-10-30); Linux to be tested |
-| 4b | S3.3, S2.4 | REDO paths under `FileSystemPathRedoLog`, cleanup at initial start, lookup across paths; each log part on the path of its LDM thread's NUMA node | Not started |
+| 4b | S3.3, S2.4 | REDO paths under `FileSystemPathRedoLog`, cleanup at initial start, lookup across paths; each log part on the path of its LDM thread's NUMA node | Written, to be tested |
 | 4c | S2.5 | Probe of each REDO path at start, verdict per test mode, bad blocks inside a file, dirty-shutdown count | Not started |
 
 **Changes in 4a.**
@@ -574,3 +574,80 @@ PMEM mode without a test mode must refuse a file system without DAX: a
 cnf file with only `[cluster_config]` and `RedoLogMode=pmem`, given to
 `--defaults-extra-file`, makes the cluster start fail with exit code 2350
 and "cannot be mapped with MAP_SYNC" in the node log.
+
+**Changes in 4b.** File mode is unchanged: no REDO path slot is filled,
+no new flag is sent, and the REDO log stays under `FileSystemPath` with
+today's names, cleanup and probes, whether `FileSystemPathRedoLog` is set
+or not (`ndb.ndb_redo_paths_file_mode`).
+
+| File | Change |
+|---|---|
+| `include/kernel/signaldata/FsOpenReq.hpp`, printer | `OM_REDO_PATH = 0x40000000`; the REDO path number in `secondFileFlags` bits 8-11 (`getRedoPathNo`, `setRedoPathNo`), `REDO_PATH_FS = 15` for `FileSystemPath`; `BP_REDO_FIRST = 4` to `BP_REDO_LAST = 11`, `BP_MAX = 12` |
+| `include/kernel/signaldata/FsConf.hpp`, printer | `fileInfo` bits 8-11: the REDO path the file was opened under; bits 16-31: NUMA node of the memory + 1, with MAP_SYNC only |
+| `src/kernel/blocks/ndbfs/Filename.hpp`, `Filename.cpp` | `set_base_path()`: the same name under another base path |
+| `src/kernel/blocks/ndbfs/Ndbfs.hpp`, `Ndbfs.cpp` | PMEM mode: one slot per `FileSystemPathRedoLog` entry, `<path>/ndb_<id>_fs/`, created and checked at READ_CONFIG and logged; an entry that is `FileSystemPath` leaves its slot empty. `get_redo_base_path()`; `OM_REDO_PATH` opens go under the slot; FSOPENCONF carries the path used and the memory's node; parameter names for the slots; the ODirect probe stops before the REDO slots; `ERROR_INSERT 2000/2001` also save and restore the REDO paths |
+| `src/kernel/blocks/ndbfs/AsyncFile.hpp`, `AsyncFile.cpp` | `open_redo_elsewhere()`: an `OM_REDO_PATH` open that finds no file looks under the other REDO paths, then `FileSystemPath`; `map_pmem()` fills the request and, with MAP_SYNC, the NUMA node of the memory (`ndb_pmem_numa_node`) |
+| `src/kernel/blocks/ndbfs/AsyncIoThread.hpp` | `par.open.pmem_numa_node`, `redo_path_no` |
+| `src/kernel/blocks/ndbfs/VoidFs.cpp` | `ndbrequire` that no open asks for a REDO path |
+| `src/kernel/blocks/ndbcntr/NdbcntrMain.cpp` | `clearFilesystem`: 8 more steps, `V_BASEPATH` `BP_REDO_FIRST + i` with `ownDirectory = 0`; NDBFS answers at once for an empty slot, without touching the disk, as for unset Disk Data paths |
+| `src/kernel/blocks/dblqh/Dblqh.hpp`, `DblqhMain.cpp` | `c_ldm_numa_node`, `c_redo_path_no`; `LogPartRecord::m_redo_path_no`, `m_redo_path_warned`, `m_redo_numa_checked`. `initRedoPathConfig()` in READ_CONFIG: the LDM's NUMA node (`Ndb_GetThreadNumaNode`), its path (`RedoLogPaths::index_for_node`), one info line, or a warning if unbound or not listed. `setRedoPmemOpenFlags()` in the three open functions. `checkRedoPmemPlacement()` in `initFsopenconf`: adopts the path a file was found under, one warning per part, and one warning if the memory is on another NUMA node. FSOPENREF "not under FileSystemPathRedoLog or FileSystemPath; was FileSystemPathRedoLog changed without --initial?" |
+| `mysql-test/suite/ndb/t/ndb_redo_pmem_paths.{test,cnf}`, `r/` | PMEM mode with `nodax`, `FileSystemPathRedoLog` = the cluster's BackupDataDir: files there and not under `FileSystemPath`; system restart, node restart, a log part moved to `FileSystemPath` found there with one warning, initial node restart puts it back |
+| `mysql-test/suite/ndb/t/ndb_redo_paths_file_mode.{test,cnf}`, `r/` | File mode with `FileSystemPathRedoLog` set: files under `FileSystemPath`, nothing created under the REDO path, and an initial node restart leaves a file there alone |
+
+**Decisions taken in 4b.**
+
+1. **File mode is unchanged.** NDBFS returns from
+   `read_redo_pmem_config` before it fills a REDO slot, DBLQH sets
+   `OM_REDO_PATH` only under `c_redo_pmem`, and the ODirect probe covers
+   the same four base paths as before. The one difference is the 8 more
+   FSREMOVEREQ steps of an initial start, answered by NDBFS for an empty
+   slot without touching the disk.
+2. **PMEM mode always sends `OM_REDO_PATH`.** Without
+   `FileSystemPathRedoLog` the path is `REDO_PATH_FS`, so there is one
+   code path; NDBFS then finds no other place to look.
+3. **The path number is 4 bits** in both `secondFileFlags` and
+   `fileInfo` (bits 8-11), so both carry `REDO_PATH_FS = 15`; the plan had
+   8 bits in `secondFileFlags`.
+4. **`Filename::set_base_path()` instead of a new argument to
+   `Filename::set`**: the lookup in the IO thread rebuilds the name too.
+5. **Lookup order**: the other REDO paths by number, then
+   `FileSystemPath`. NDBFS reports the path it opened under; DBLQH adopts
+   it for the part, so its next files are asked for there, and warns once
+   per part. NDBFS does not log each file.
+6. **The memory's NUMA node is reported with MAP_SYNC only.** With
+   `nodax` the memory is the page cache, placed by the IO thread that
+   faulted it in, so a comparison would say nothing about the hardware.
+7. **`ERROR_INSERT 2000/2001` save and restore the REDO paths too**, so
+   the testSystemRestart case that uses them works in PMEM mode.
+8. **The ODirect probe stops at `BP_REDO_FIRST`** instead of skipping
+   empty REDO slots: PMEM mode never opens a REDO file with ODirect.
+9. **Fix of 4a found while reading**: `openFileRw_cache` sends itself a
+   2-word FSOPENCONF for a REDO file it keeps open during REDO execution.
+   4a's `ndbrequire` of 7 words would have stopped the node at the first
+   cache hit. `initFsopenconf` now requires the mapping only in an
+   FSOPENCONF from NDBFS, and otherwise that the file is still mapped.
+
+**Commands for the pusher (4b).** On Linux x86_64, Linux ARM64 and macOS
+ARM64:
+
+```
+cmake --build .
+cd mysql-test
+./mtr ndb.ndb_redo_paths_file_mode
+./mtr ndb.ndb_redo_pmem_paths
+grep -h "RedoLogMode=pmem: REDO path\|REDO log parts go on\|were found under" var/mysql_cluster.1/ndbd.*/ndbd.log
+./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndb_basic ndb.ndb_restart ndb.ndb_restart2 ndb.testNodeRestartGcpSaveAndFileChange
+./mtr ndb.ndb_basic ndb.ndb_restart ndb.ndb_redo_log_reader ndb.ndb_redo_pmem_config
+```
+
+The grep shows, for each data node, "REDO path 0 (every NUMA node):
+.../mysql_cluster.1/ndb_<id>_fs/" at each start, one "REDO log parts go
+on REDO path 0" line per LDM (NUMA node "not known" on macOS, 0 on a
+one-socket Linux machine), and on node 2 one "log part 1 were found under
+FileSystemPath" line. The `pmem_redo.cnf` runs are PMEM mode without
+`FileSystemPathRedoLog`, the last run file mode.
+
+On a two-socket Linux machine, PMEM mode with
+`ThreadConfig=ldm={count=2,cpubind=<a CPU of node 0>,<a CPU of node 1>}`
+and `FileSystemPathRedoLog=0:/path/a,1:/path/b` puts log parts 0 and 2
+under `/path/a/ndb_<id>_fs/` and 1 and 3 under `/path/b/ndb_<id>_fs/`.

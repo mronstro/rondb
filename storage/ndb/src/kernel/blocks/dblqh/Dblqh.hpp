@@ -2065,6 +2065,16 @@ class Dblqh : public SimulatedBlock {
     Uint32 m_logged_buffer_full;
 
     /**
+     * RONDB-1150, PMEM mode: the REDO path its files are opened under
+     * (FsOpenReq::OM_REDO_PATH), the one of its LDM thread's NUMA node,
+     * or the one a file was found under. One warning each for a file
+     * found elsewhere and for memory on another NUMA node.
+     */
+    Uint8 m_redo_path_no;
+    bool m_redo_path_warned;
+    bool m_redo_numa_checked;
+
+    /**
      *       A timer that is set every time a log page is sent to disk.
      *       Ensures that log pages are not kept in main memory for
      *       more than a certain time.
@@ -3955,6 +3965,10 @@ private:
                    Uint32 logPartPtrI);
   void initLogpage(LogPageRecordPtr logPagePtr, LogFileRecord *logFilePtrP,
                    LogPartRecord *logPartPtrP);
+  void initRedoPathConfig(const ndb_mgm_configuration_iterator *p);
+  void setRedoPmemOpenFlags(FsOpenReq *req,
+                            const LogPartRecord *logPartPtrP) const;
+  void checkRedoPmemPlacement(LogPartRecord *logPartPtrP, Uint32 fileInfo);
   void openFileRw(Signal *signal, LogFileRecordPtr olfLogFilePtr,
                   bool writeBuffer = true);
   void openLogfileInit(Signal *signal, LogFileRecordPtr logFilePtr);
@@ -5383,6 +5397,13 @@ public:
    */
   bool c_redo_pmem;
   Uint32 c_redo_pmem_test_mode;
+  /**
+   * PMEM mode: the NUMA node of this LDM thread (-1 if its CPUs span
+   * nodes or it is not known) and the REDO path of its log parts,
+   * FsOpenReq::REDO_PATH_FS without FileSystemPathRedoLog.
+   */
+  Int32 c_ldm_numa_node;
+  Uint8 c_redo_path_no;
 
   /**
    * Variable keeping track of which GCI to keep in REDO log

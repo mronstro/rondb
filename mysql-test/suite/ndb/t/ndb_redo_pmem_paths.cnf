@@ -1,0 +1,15 @@
+!include ../my.cnf
+
+[cluster_config.1]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+NoOfFragmentLogFiles=4
+FragmentLogFileSize=16M
+
+# The REDO log of each data node under the BackupDataDir of the cluster,
+# a directory that is not FileSystemPath
+[cluster_config.ndbd.1.1]
+FileSystemPathRedoLog=@cluster_config.ndbd.1.1.BackupDataDir
+
+[cluster_config.ndbd.2.1]
+FileSystemPathRedoLog=@cluster_config.ndbd.2.1.BackupDataDir

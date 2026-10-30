@@ -1,0 +1,4 @@
+== 1 == file mode with FileSystemPathRedoLog set
+1,0 2,0
+== 2 == the REDO log files are under FileSystemPath
+== 3 == an initial node restart leaves FileSystemPathRedoLog alone

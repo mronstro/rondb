@@ -42,6 +42,7 @@
 #include "util/ndb_openssl_evp.h"
 #include "util/ndb_rand.h"
 #include "util/ndb_zlib.h"
+#include "util/RedoLogPaths.hpp"
 
 #include <NdbThread.h>
 #include <kernel_types.h>
@@ -88,9 +89,12 @@ static std::atomic<bool> pmem_lock_warned{false};
  * MAP_SYNC is required unless NDBFS allows a mapping without it
  * (__RedoLogPmemTestMode=nodax); such a mapping is the page cache of the
  * file, locked in memory if RLIMIT_MEMLOCK allows. 0 or an FsRef error.
+ * With MAP_SYNC the NUMA node of the memory goes back to DBLQH, which
+ * compares it with its own; the page cache has no fixed node.
  */
-int AsyncFile::map_pmem(Uint64 size) {
+int AsyncFile::map_pmem(Request *request, Uint64 size) {
 #ifdef _WIN32
+  (void)request;
   (void)size;
   return FsRef::fsErrInvalidParameters;
 #else
@@ -122,8 +126,41 @@ int AsyncFile::map_pmem(Uint64 size) {
           strerror(r));
     }
   }
+  request->par.open.pmem_addr = m_pmem.addr;
+  request->par.open.pmem_map_sync = m_pmem.map_sync;
+  if (m_pmem.map_sync) {
+    request->par.open.pmem_numa_node =
+        ndb_pmem_numa_node(m_file.get_os_handle(), m_pmem.addr);
+  }
   return 0;
 #endif
+}
+
+/**
+ * OM_REDO_PATH (RONDB-1150): a REDO log file that is not under its REDO
+ * path is looked for under the other REDO paths, then FileSystemPath,
+ * so that a changed CPU binding or path order does not stop the node.
+ * The path it is found under goes back to DBLQH in FSOPENCONF.
+ */
+bool AsyncFile::open_redo_elsewhere(Request *request, Uint32 open_flags) {
+  const Uint32 asked = theFileName.get_base_path_spec();
+  for (Uint32 no = 0; no <= NDB_MAX_REDO_LOG_PATHS; no++) {
+    const Uint32 path_no =
+        no < NDB_MAX_REDO_LOG_PATHS ? no : FsOpenReq::REDO_PATH_FS;
+    const Uint32 bp = m_fs.get_redo_base_path(path_no);
+    // An empty REDO path is FileSystemPath, tried last
+    if (bp == asked ||
+        (bp == FsOpenReq::BP_FS && path_no != FsOpenReq::REDO_PATH_FS))
+      continue;
+    theFileName.set_base_path(&m_fs, bp);
+    if (m_file.open(theFileName.c_str(), open_flags) != -1) {
+      request->par.open.redo_path_no = path_no;
+      return true;
+    }
+  }
+  // The error names the file under the path asked for
+  theFileName.set_base_path(&m_fs, asked);
+  return false;
 }
 
 int AsyncFile::init() { return 0; }
@@ -211,6 +248,7 @@ void AsyncFile::openReq(Request *request) {
            ndbxfrm_file::is_definite_size(data_size)));
   request->par.open.pmem_addr = nullptr;
   request->par.open.pmem_map_sync = false;
+  request->par.open.pmem_numa_node = -1;
 
   // Create file
   bool created = false;
@@ -245,8 +283,13 @@ void AsyncFile::openReq(Request *request) {
       FsOpenReq::OM_READ_WRITE_MASK | FsOpenReq::OM_APPEND;
   if (m_file.open(theFileName.c_str(), flags & open_flags) == -1) {
     // Common expected error for NDBCNTR sysfile, DBDIH sysfile, LCP ctl
-    NDBFS_SET_REQUEST_ERROR(request, get_last_os_error());
-    goto remove_if_created;
+    const int error = get_last_os_error();
+    if (!(flags & FsOpenReq::OM_REDO_PATH) || created ||
+        Ndbfs::translateErrno(error) != FsRef::fsErrFileDoesNotExist ||
+        !open_redo_elsewhere(request, flags & open_flags)) {
+      NDBFS_SET_REQUEST_ERROR(request, error);
+      goto remove_if_created;
+    }
   }
 
   // Truncate if OM_TRUNCATE
@@ -633,14 +676,12 @@ void AsyncFile::openReq(Request *request) {
 
   // Map and prefault (OM_MAP_SYNC), after the file is initialised
   if (use_pmem) {
-    const int r = map_pmem(data_size);
+    const int r = map_pmem(request, data_size);
     if (r != 0) {
       NDBFS_SET_REQUEST_ERROR(request, r);
       m_file.close();
       goto remove_if_created;
     }
-    request->par.open.pmem_addr = m_pmem.addr;
-    request->par.open.pmem_map_sync = m_pmem.map_sync;
   }
 
   // Turn on synchronous mode (OM_SYNC)
