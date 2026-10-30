@@ -39,9 +39,29 @@
 %code requires
 {
 typedef void * yyscan_t;
+#include <type_traits>
 #include "LexString.hpp"
 #include "RonSQLPreparer.hpp"
 #include "AggregationAPICompiler.hpp"
+
+// Syntax-only column reference. Register it in the enclosing action so that
+// allocation, compiler creation and authorization recording keep their order.
+struct RonSQLColumnReference
+{
+  bool qualified;
+  LexCString qualifier;
+  LexCString name;
+
+  Uint32 column_idx(RonSQLPreparer::Context* parser_context) const
+  {
+    if (qualified)
+      return parser_context->qualified_column_name_to_idx(qualifier, name);
+    return parser_context->column_name_to_idx(name);
+  }
+};
+
+static_assert(std::is_trivial<RonSQLColumnReference>::value,
+              "Bison semantic values must remain trivial.");
 
 // Let bison use RonSQLPreparer's arena allocator
 #define YYMALLOC(SIZE) context->get_allocator()->alloc_bytes(SIZE, alignof(union yyalloc))
@@ -131,6 +151,7 @@ extern void rsqlp_error(RSQLP_LTYPE* yylloc, yyscan_t yyscanner, const char* s);
   bool bval;
   LexString str;
   LexCString str_c;
+  RonSQLColumnReference column_ref_value;
   struct
   {
     Outputs* head;
@@ -235,10 +256,11 @@ extern void rsqlp_error(RSQLP_LTYPE* yylloc, yyscan_t yyscanner, const char* s);
 %token<str> T_IDENTIFIER T_STRING
 %token T_COMMA
 
-%type<bval> explain_opt
+%type<bval> explain_opt sort_direction_opt
 %type<bival> frags_per_worker_opt
 %type<str> identifier
 %type<str_c> identifier_c
+%type<column_ref_value> column_ref
 %type<groupby_cols> groupby_opt groupby_cols groupby_col
 %type<orderby_cols> orderby_opt orderby orderby_cols orderby_col
 %type<output> output nonaliased_output
@@ -256,7 +278,7 @@ extern void rsqlp_error(RSQLP_LTYPE* yylloc, yyscan_t yyscanner, const char* s);
 %type<join_condition_list> join_condition_list
 %type<join_list> join_list
 %type<from_clause_val> from_clause
-%type<subquery_stmt> subquery
+%type<subquery_stmt> subquery inner_select_body
 %type<cte_def> cte_def
 %type<cte_list> cte_list cte_opt
 
@@ -311,8 +333,7 @@ cte_opt:
  * RonSQLPreparer walks every qualified column reference in the
  * SELECT (and aggregator expressions) and synthesises a comma
  * cross-join over the matching scalar CTEs.  Mandatory in CTE
- * bodies and subqueries — those keep their original
- * `T_FROM table_ref join_list` shape directly. */
+ * bodies and subqueries, which use inner_select_body. */
 from_clause:
   T_FROM table_ref join_list           { $$.root_table = $2; $$.joins = $3.head; }
 | %empty                                { $$.root_table = NULL; $$.joins = NULL; }
@@ -324,33 +345,13 @@ cte_list:
 cte_def:
   identifier_c T_AS T_LEFT
   { context->enter_subquery(/*is_cte_body*/true); }
-  T_SELECT outputlist T_FROM table_ref join_list where_opt
-  groupby_opt having_opt orderby_opt limit_opt
-  T_RIGHT
+  inner_select_body T_RIGHT
   {
     AggregationAPICompiler* cte_agg = context->leave_subquery();
     initptr($$);
     $$->name = $1;
-    $$->stmt = context->make_select_statement();
+    $$->stmt = $5;
     $$->stmt->agg = cte_agg;
-    $$->stmt->do_explain = false;
-    $$->stmt->cte_list = NULL;
-    $$->stmt->outputs = $6.head;
-    $$->stmt->select_list_sql =
-        LexString{(@6).begin, size_t((@6).end - (@6).begin)};
-    $$->stmt->root_table = $8;
-    $$->stmt->table = $8->name;
-    $$->stmt->joins = $9.head;
-    $$->stmt->where_expression = $10;
-    $$->stmt->groupby_columns = $11;
-    $$->stmt->having_expression = $12;
-    $$->stmt->orderby_columns = $13;
-    $$->stmt->limit = $14;
-    /* FRAGS_PER_WORKER is a main-statement-only hint. */
-    $$->stmt->frags_per_worker = 0;
-    $$->stmt->is_single_row_cte = false;
-    $$->stmt->sql_begin = (@5).begin;
-    $$->stmt->sql_end = (@14).end;
     $$->next = NULL;
   }
 
@@ -404,18 +405,11 @@ output:
 | nonaliased_output T_AS identifier     { $$ = $1; $$->output_name = $3; }
 
 nonaliased_output:
-  identifier_c                          {
+  column_ref                            {
                                           initptr($$);
                                           $$->type = Outputs::Type::COLUMN;
-                                          $$->column.col_idx = context->column_name_to_idx($1);
-                                          $$->output_name = $1;
-                                          $$->next = NULL;
-                                        }
-| identifier_c T_DOT identifier_c      {
-                                          initptr($$);
-                                          $$->type = Outputs::Type::COLUMN;
-                                          $$->column.col_idx = context->qualified_column_name_to_idx($1, $3);
-                                          $$->output_name = $3;
+                                          $$->column.col_idx = $1.column_idx(context);
+                                          $$->output_name = $1.name;
                                           $$->next = NULL;
                                         }
 /* RONDB-1135: AVRO(column) prints the Avro-decoded JSON value of a binary
@@ -423,20 +417,11 @@ nonaliased_output:
  * records it so the preparer can look up the column's schema.  The
  * function name is an identifier rather than a keyword so that `avro`
  * stays usable as an unquoted column name. */
-| identifier_c T_LEFT identifier_c T_RIGHT
+| identifier_c T_LEFT column_ref T_RIGHT
                                         {
                                           initptr($$);
                                           $$->type = Outputs::Type::COLUMN;
-                                          $$->column.col_idx = context->column_name_to_idx($3);
-                                          $$->output_name = LexString{(@$).begin, size_t((@$).end - (@$).begin)};
-                                          $$->next = NULL;
-                                          if (!context->avro_output($1, @1, $$)) YYERROR;
-                                        }
-| identifier_c T_LEFT identifier_c T_DOT identifier_c T_RIGHT
-                                        {
-                                          initptr($$);
-                                          $$->type = Outputs::Type::COLUMN;
-                                          $$->column.col_idx = context->qualified_column_name_to_idx($3, $5);
+                                          $$->column.col_idx = $3.column_idx(context);
                                           $$->output_name = LexString{(@$).begin, size_t((@$).end - (@$).begin)};
                                           $$->next = NULL;
                                           if (!context->avro_output($1, @1, $$)) YYERROR;
@@ -487,8 +472,7 @@ aggfun:
 | T_SUM                                 { $$ = T_SUM; }
 
 arith_expr:
-  identifier_c                          { $$ = context->get_agg()->Load(context->column_name_to_idx($1)); }
-| identifier_c T_DOT identifier_c      { $$ = context->get_agg()->Load(context->qualified_column_name_to_idx($1, $3)); }
+  column_ref                            { $$ = context->get_agg()->Load($1.column_idx(context)); }
 | T_INT                                 { $$ = context->get_agg()->ConstantInteger($1); }
 /* A CASE is compiled only as the whole argument of an aggregate function, so
  * non_case_operand() rejects it as an operand of arithmetic or another CASE. */
@@ -525,6 +509,10 @@ identifier:
 identifier_c:
   identifier                            { $$ = $1.to_LexCString(context->get_allocator()); }
 
+column_ref:
+  identifier_c                          { $$ = {false, LexCString{NULL, 0}, $1}; }
+| identifier_c T_DOT identifier_c      { $$ = {true, $1, $3}; }
+
 /* A table reference, optionally followed by a MySQL-style index hint.
  * The hint is attached to every table ref (FROM, JOIN, CTE-body FROM)
  * but only honored on root scans; see RonSQLPreparer. */
@@ -540,31 +528,19 @@ table_ref:
 table_ref_base:
   identifier_c
   {
-    initptr($$);
-    $$->database = LexCString{NULL, 0};
-    $$->name = $1;
-    $$->alias = $1;
+    $$ = context->make_table_ref(LexCString{NULL, 0}, $1, $1);
   }
 | identifier_c T_DOT identifier_c
   {
-    initptr($$);
-    $$->database = $1;
-    $$->name = $3;
-    $$->alias = $3;
+    $$ = context->make_table_ref($1, $3, $3);
   }
 | identifier_c T_AS identifier_c
   {
-    initptr($$);
-    $$->database = LexCString{NULL, 0};
-    $$->name = $1;
-    $$->alias = $3;
+    $$ = context->make_table_ref(LexCString{NULL, 0}, $1, $3);
   }
 | identifier_c T_DOT identifier_c T_AS identifier_c
   {
-    initptr($$);
-    $$->database = $1;
-    $$->name = $3;
-    $$->alias = $5;
+    $$ = context->make_table_ref($1, $3, $5);
   }
 
 /* FORCE/USE/IGNORE INDEX (idx, ...).  INDEX and KEY are synonyms.
@@ -616,29 +592,19 @@ join_clause:
   T_JOIN table_ref T_ON join_condition_list
   {
     context->check_join_conditions(*$2, $4.head);
-    initptr($$);
-    $$->join_type = JoinClause::INNER_JOIN;
-    $$->table = *$2;
-    $$->conditions = $4.head;
-    $$->next = NULL;
+    $$ = context->make_join_clause(JoinClause::INNER_JOIN, *$2, $4.head);
   }
 | T_KW_LEFT T_JOIN table_ref T_ON join_condition_list
   {
     context->check_join_conditions(*$3, $5.head);
-    initptr($$);
-    $$->join_type = JoinClause::LEFT_OUTER_JOIN;
-    $$->table = *$3;
-    $$->conditions = $5.head;
-    $$->next = NULL;
+    $$ = context->make_join_clause(
+        JoinClause::LEFT_OUTER_JOIN, *$3, $5.head);
   }
 | T_KW_LEFT T_KW_OUTER T_JOIN table_ref T_ON join_condition_list
   {
     context->check_join_conditions(*$4, $6.head);
-    initptr($$);
-    $$->join_type = JoinClause::LEFT_OUTER_JOIN;
-    $$->table = *$4;
-    $$->conditions = $6.head;
-    $$->next = NULL;
+    $$ = context->make_join_clause(
+        JoinClause::LEFT_OUTER_JOIN, *$4, $6.head);
   }
 | T_COMMA table_ref
   {
@@ -649,11 +615,7 @@ join_clause:
      * establish the cross-join dependency.  The kernel ignores the
      * key for scalar CTEs (n_gb_cols == 0) and returns the
      * materialised single-row m_agg_results directly. */
-    initptr($$);
-    $$->join_type = JoinClause::INNER_JOIN;
-    $$->table = *$2;
-    $$->conditions = NULL;
-    $$->next = NULL;
+    $$ = context->make_join_clause(JoinClause::INNER_JOIN, *$2, NULL);
   }
 
 join_condition_list:
@@ -689,8 +651,7 @@ where_opt:
   }
 
 cond_expr:
-  identifier_c                          { initptr($$); $$->op = T_IDENTIFIER; $$->col_idx = context->column_name_to_idx($1); }
-| identifier_c T_DOT identifier_c      { initptr($$); $$->op = T_IDENTIFIER; $$->col_idx = context->qualified_column_name_to_idx($1, $3); }
+  column_ref                            { initptr($$); $$->op = T_IDENTIFIER; $$->col_idx = $1.column_idx(context); }
 | T_STRING                              { initptr($$); $$->op = T_STRING; $$->string = $1; }
 | T_INT                                 { initptr($$); $$->op = T_INT; $$->constant_integer = $1; }
 | T_FLOAT                               { initptr($$); $$->op = T_FLOAT; $$->constant_float.dbl = $1.dbl; $$->constant_float.ls = $1.ls; }
@@ -802,29 +763,36 @@ cond_expr:
 
 subquery:
   { context->enter_subquery(); }
+  inner_select_body
+  {
+    AggregationAPICompiler* subq_agg = context->leave_subquery();
+    $$ = $2;
+    $$->agg = subq_agg;
+  }
+
+inner_select_body:
   T_SELECT outputlist T_FROM table_ref join_list where_opt
   groupby_opt having_opt orderby_opt limit_opt
   {
-    AggregationAPICompiler* subq_agg = context->leave_subquery();
     $$ = context->make_select_statement();
-    $$->agg = subq_agg;
     $$->do_explain = false;
-    $$->outputs = $3.head;
+    $$->cte_list = NULL;
+    $$->outputs = $2.head;
     $$->select_list_sql =
-        LexString{(@3).begin, size_t((@3).end - (@3).begin)};
-    $$->root_table = $5;
-    $$->table = $5->name;
-    $$->joins = $6.head;
-    $$->where_expression = $7;
-    $$->groupby_columns = $8;
-    $$->having_expression = $9;
-    $$->orderby_columns = $10;
-    $$->limit = $11;
+        LexString{(@2).begin, size_t((@2).end - (@2).begin)};
+    $$->root_table = $4;
+    $$->table = $4->name;
+    $$->joins = $5.head;
+    $$->where_expression = $6;
+    $$->groupby_columns = $7;
+    $$->having_expression = $8;
+    $$->orderby_columns = $9;
+    $$->limit = $10;
     /* FRAGS_PER_WORKER is a main-statement-only hint. */
     $$->frags_per_worker = 0;
     $$->is_single_row_cte = false;
-    $$->sql_begin = (@2).begin;
-    $$->sql_end = (@11).end;
+    $$->sql_begin = (@1).begin;
+    $$->sql_end = (@10).end;
   }
 
 interval_type:
@@ -866,8 +834,7 @@ groupby_cols:
 | groupby_col T_COMMA groupby_cols      { $$ = $1; $$->next = $3; }
 
 groupby_col:
-  identifier_c                          { initptr($$); $$->col_idx = context->column_name_to_idx($1); $$->next = NULL; }
-| identifier_c T_DOT identifier_c      { initptr($$); $$->col_idx = context->qualified_column_name_to_idx($1, $3); $$->next = NULL; }
+  column_ref                            { initptr($$); $$->col_idx = $1.column_idx(context); $$->next = NULL; }
 
 orderby_opt:
   %empty                                { $$ = NULL; }
@@ -881,12 +848,19 @@ orderby_cols:
 | orderby_col T_COMMA orderby_cols      { $$ = $1; $$->next = $3; }
 
 orderby_col:
-  identifier_c                          { initptr($$); $$->kind = OrderbyColumns::Kind::TABLE_COLUMN; $$->col_idx = context->column_name_to_idx($1); $$->ascending = true; $$->next = NULL; }
-| identifier_c T_ASC                    { initptr($$); $$->kind = OrderbyColumns::Kind::TABLE_COLUMN; $$->col_idx = context->column_name_to_idx($1); $$->ascending = true; $$->next = NULL; }
-| identifier_c T_DESC                   { initptr($$); $$->kind = OrderbyColumns::Kind::TABLE_COLUMN; $$->col_idx = context->column_name_to_idx($1); $$->ascending = false; $$->next = NULL; }
-| identifier_c T_DOT identifier_c      { initptr($$); $$->kind = OrderbyColumns::Kind::TABLE_COLUMN; $$->col_idx = context->qualified_column_name_to_idx($1, $3); $$->ascending = true; $$->next = NULL; }
-| identifier_c T_DOT identifier_c T_ASC  { initptr($$); $$->kind = OrderbyColumns::Kind::TABLE_COLUMN; $$->col_idx = context->qualified_column_name_to_idx($1, $3); $$->ascending = true; $$->next = NULL; }
-| identifier_c T_DOT identifier_c T_DESC { initptr($$); $$->kind = OrderbyColumns::Kind::TABLE_COLUMN; $$->col_idx = context->qualified_column_name_to_idx($1, $3); $$->ascending = false; $$->next = NULL; }
+  column_ref sort_direction_opt
+  {
+    initptr($$);
+    $$->kind = OrderbyColumns::Kind::TABLE_COLUMN;
+    $$->col_idx = $1.column_idx(context);
+    $$->ascending = $2;
+    $$->next = NULL;
+  }
+
+sort_direction_opt:
+  %empty                                { $$ = true; }
+| T_ASC                                 { $$ = true; }
+| T_DESC                                { $$ = false; }
 
 limit_opt:
   %empty                                { $$ = -1; }

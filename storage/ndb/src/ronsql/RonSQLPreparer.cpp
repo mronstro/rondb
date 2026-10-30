@@ -722,8 +722,59 @@ static bool linked_source_is_leaf_ancestor(const JoinPlan& plan,
                                            Uint32 leaf_idx,
                                            Uint32 target_op_idx);
 
+struct BooleanTermCollection
+{
+  bool complete;
+  Uint32 count;
+};
+
 /*
- * Flatten nested AND nodes into an array of conjuncts.
+ * Flatten only the requested connective, preserving left-to-right order and
+ * the original leaf pointers. A NULL subtree contributes no terms; T_NULL is
+ * a leaf like any other expression. Capacity limits terms, not tree depth.
+ * On overflow, count is zero and output contains an incomplete prefix that
+ * must not be consumed. No AST nodes are changed or allocated.
+ */
+static BooleanTermCollection
+collect_boolean_terms(ConditionalExpression* root, TokenKind connective,
+                       ConditionalExpression** output, Uint32 capacity)
+{
+  ndbrequire(connective == T_AND || connective == T_OR);
+  Uint32 count = 0;
+  auto collect = [&](auto& self, ConditionalExpression* ce) -> bool {
+    if (ce == NULL) return true;
+    if (ce->op == connective)
+      return self(self, ce->args.left) && self(self, ce->args.right);
+    if (count == capacity) return false;
+    output[count++] = ce;
+    return true;
+  };
+  if (!collect(collect, root)) return {false, 0};
+  return {true, count};
+}
+
+/*
+ * Accumulate terms without copying or flattening existing nodes. NULL pointers
+ * mean an absent tree or term; a T_NULL expression remains an ordinary node.
+ * Preserve left association and leaf identity for consumed-predicate matching.
+ */
+static ConditionalExpression*
+append_condition(ArenaMalloc* amalloc, TokenKind connective,
+                 ConditionalExpression* tree, ConditionalExpression* term)
+{
+  ndbrequire(connective == T_AND || connective == T_OR);
+  if (term == NULL) return tree;
+  if (tree == NULL) return term;
+  ConditionalExpression* combined =
+      amalloc->alloc_exc<ConditionalExpression>(1);
+  combined->op = connective;
+  combined->args.left = tree;
+  combined->args.right = term;
+  return combined;
+}
+
+/*
+ * Append nested AND terms after any previously collected conjuncts.
  */
 static void
 flatten_and_conjuncts(struct ConditionalExpression* ce,
@@ -731,19 +782,15 @@ flatten_and_conjuncts(struct ConditionalExpression* ce,
                       Uint32* count)
 {
   if (ce == NULL) return;
-  if (ce->op == T_AND)
-  {
-    flatten_and_conjuncts(ce->args.left, conjuncts, count);
-    flatten_and_conjuncts(ce->args.right, conjuncts, count);
-    return;
-  }
-  if (*count >= MAX_WHERE_CONJUNCTS)
+  const Uint32 offset = std::min(*count, MAX_WHERE_CONJUNCTS);
+  const BooleanTermCollection terms = collect_boolean_terms(
+      ce, T_AND, conjuncts + offset, MAX_WHERE_CONJUNCTS - offset);
+  if (!terms.complete)
   {
     throw RonSQLPermanentError(
         "WHERE clause has too many top-level AND conditions.");
   }
-  conjuncts[*count] = ce;
-  (*count)++;
+  *count += terms.count;
 }
 
 /*
@@ -759,19 +806,15 @@ flatten_or_disjuncts(struct ConditionalExpression* ce,
                      Uint32* count)
 {
   if (ce == NULL) return;
-  if (ce->op == T_OR)
-  {
-    flatten_or_disjuncts(ce->args.left, disjuncts, count);
-    flatten_or_disjuncts(ce->args.right, disjuncts, count);
-    return;
-  }
-  if (*count >= MAX_WHERE_CONJUNCTS)
+  const Uint32 offset = std::min(*count, MAX_WHERE_CONJUNCTS);
+  const BooleanTermCollection terms = collect_boolean_terms(
+      ce, T_OR, disjuncts + offset, MAX_WHERE_CONJUNCTS - offset);
+  if (!terms.complete)
   {
     throw RonSQLPermanentError(
         "WHERE clause has too many top-level OR disjuncts.");
   }
-  disjuncts[*count] = ce;
-  (*count)++;
+  *count += terms.count;
 }
 
 /*
@@ -848,10 +891,403 @@ RonSQLPreparer::configure()
   m_sql = { static_cast<const char*>(sql_buffer), our_buffer_len };
 }
 
+AggregationAPICompiler*
+RonSQLPreparer::make_aggregation_compiler()
+{
+  // Return a fresh compiler in the preparer's arena. Scope ownership and
+  // lazy initialization remain with the caller.
+  std::function<const char*(uint)> column_idx_to_name =
+    [this](Uint32 idx) -> const char*
+    {
+      return this->column_idx_to_name(idx).c_str();
+    };
+  return new (m_amalloc->alloc_exc<AggregationAPICompiler>(1))
+    AggregationAPICompiler(column_idx_to_name,
+                           *m_conf.out_stream,
+                           *m_conf.err_stream,
+                           m_amalloc);
+}
+
+static Uint32
+register_simple_aggregate(AggregationAPICompiler& agg,
+                          TokenKind fun,
+                          AggregationAPICompiler::Expr* expr)
+{
+  switch (fun)
+  {
+  case T_COUNT:
+    return agg.Count(expr);
+  case T_MAX:
+    return agg.Max(expr);
+  case T_MIN:
+    return agg.Min(expr);
+  case T_SUM:
+    return agg.Sum(expr);
+  default:
+    abort();
+  }
+}
+
+bool
+RonSQLPreparer::register_main_outputs()
+{
+  /* We have already provided columns and expressions to the
+   * AggregationAPICompiler. E.g. in `SELECT Max(col1 + col2)`, m_main_scope.agg already
+   * knows about `col1`, `col2` and `col1 + col2`. Here, we let m_main_scope.agg know about
+   * the aggregate expressions themselves, e.g. `Max(col1 + col2)`, making sure
+   * they are provided in the correct order.
+   */
+  Outputs* outputs = m_context.ast_root.outputs;
+  bool has_aggregate_outputs = false;
+  bool has_subquery_agg_outputs = false;
+  while (outputs != NULL)
+  {
+    switch (outputs->type)
+    {
+    case Outputs::Type::COLUMN:
+      break;
+    case Outputs::Type::AGGREGATE:
+    {
+      has_aggregate_outputs = true;
+      ndbrequire(m_main_scope.agg != NULL);
+      outputs->aggregate.agg_index =
+          register_simple_aggregate(*m_main_scope.agg,
+                                    outputs->aggregate.fun,
+                                    outputs->aggregate.arg);
+      break;
+    }
+    case Outputs::Type::AVG:
+      has_aggregate_outputs = true;
+      outputs->avg.agg_index_sum = m_main_scope.agg->Sum(outputs->avg.arg);
+      outputs->avg.agg_index_count = m_main_scope.agg->Count(outputs->avg.arg);
+      break;
+    case Outputs::Type::SUBQUERY_AGG:
+      // Handled later in analyze_select_subqueries() and compile().
+      // Don't set has_aggregate_outputs (avoids m_main_scope.agg != NULL assert).
+      has_subquery_agg_outputs = true;
+      break;
+    default:
+      abort();
+    }
+    outputs = outputs->next;
+  }
+  bool has_having_aggregates = (m_main_scope.agg != NULL &&
+                                m_context.ast_root.having_expression != NULL);
+  if (m_main_scope.agg == NULL)
+  {
+    ndbrequire(!has_aggregate_outputs);
+  }
+  else
+  {
+    ndbrequire(has_aggregate_outputs || has_having_aggregates);
+    ndbrequire(m_main_scope.agg->getStatus() == AggregationAPICompiler::Status::PROGRAMMING);
+  }
+  return has_aggregate_outputs || has_having_aggregates ||
+         has_subquery_agg_outputs;
+}
+
+void
+RonSQLPreparer::register_cte_outputs()
+{
+  // Mirror the main-query aggregate-registration loop for each CTE body.
+  // The parser builds each AGGREGATE output's arg Expr in the CTE's own
+  // AggregationAPICompiler (stashed on cte->stmt->agg by leave_subquery),
+  // but the Sum/Count/Min/Max call that binds the aggregate to the
+  // program only happens here. Without it, compile() would reject the
+  // CTE's program because the arg Exprs have usage=0.
+  for (CteDefinition* cte = m_context.ast_root.cte_list;
+       cte != NULL; cte = cte->next) {
+    if (cte->stmt->agg == NULL) continue;
+    for (Outputs* co = cte->stmt->outputs; co != NULL; co = co->next) {
+      switch (co->type) {
+      case Outputs::Type::COLUMN:
+        break;
+      case Outputs::Type::AGGREGATE: {
+        co->aggregate.agg_index =
+            register_simple_aggregate(*cte->stmt->agg,
+                                      co->aggregate.fun,
+                                      co->aggregate.arg);
+        break;
+      }
+      case Outputs::Type::AVG:
+        // cte_avg_plan.md V4 (C2): a CTE-scope AVG compiles to ONE
+        // agg slot (SVM Avg -> NdbAggregator::Avg -> kernel kOpAvg,
+        // which adds the hidden COUNT companion and divides on the
+        // owner after the redistribute).  The old Sum+Count pair
+        // broke the one-column-per-slot virt-table mapping — that
+        // was the reason AVG in CTE outputs used to be rejected.
+        // agg_index_count is aliased: its PRINT_AVG readers are
+        // main-scope-only, where the main registration keeps the
+        // Sum+Count form.
+        co->avg.agg_index_sum = cte->stmt->agg->Avg(co->avg.arg);
+        co->avg.agg_index_count = co->avg.agg_index_sum;
+        break;
+      case Outputs::Type::SUBQUERY_AGG:
+        // Disallowed in CTE bodies (would need nested subquery orchestration).
+        throw RonSQLPermanentError(
+            "Subquery aggregation inside CTE body not yet supported.");
+      default:
+        abort();
+      }
+    }
+  }
+}
+
+void
+RonSQLPreparer::prepare_projection_only_query()
+{
+  // Phase E.3: allow the narrowly-supported projection-only main
+  // SELECT over a CTE_SCAN root (e.g. SELECT k, t FROM cte [WHERE ...]).
+  // The kernel + NDB API already support scanCte without
+  // setAggregation(); the gap was purely RonSQL's client-side
+  // delivery path.  All other non-aggregating shapes still hit the
+  // existing rejection — Phase 7 / step 45 in ronsql_join_phase7.md
+  // tracks general non-aggregate support.
+  //
+  // Plan-shape decisions (CTE_SCAN root, GROUP BY, HAVING, ORDER BY,
+  // LIMIT) are checked in execute_join() / passthrough_drain when
+  // the JoinPlan is finalised — analyze_ctes() runs before this
+  // point but the join_plan is only populated by load_join().  We
+  // do the cheap parse-time guards here (no aggregates already
+  // implies no HAVING aggregates) and require the FROM root to be
+  // a CTE alias; remaining shape rejection is deferred.
+  //
+  // Phase 6 (non_aggregate_phase_6.md, gc-P1 lift): run the
+  // I.16b/c partial-key-CTE root rewrite BEFORE the gate walk, so
+  // a partial-key INNER join to a multi-key CTE becomes the
+  // shipped CTE_SCAN-root shape instead of failing the
+  // complete-key coverage check below.  The load_join() call
+  // stays (aggregate-path timing unchanged); this earlier
+  // invocation makes that one a no-op via its root_is_cte bail.
+  maybe_rewrite_partial_key_cte_root();
+  bool from_is_cte = false;
+  for (const CteDefinition* cte = m_context.ast_root.cte_list;
+       cte != NULL; cte = cte->next) {
+    if (m_context.ast_root.table.str != NULL &&
+        cte->name.len == m_context.ast_root.table.len &&
+        strncmp(cte->name.str, m_context.ast_root.table.str,
+                m_context.ast_root.table.len) == 0) {
+      from_is_cte = true;
+      break;
+    }
+  }
+  bool has_groupby   = (m_context.ast_root.groupby_columns != NULL);
+  bool has_having    = (m_context.ast_root.having_expression != NULL);
+  bool has_joins     = (m_context.ast_root.joins != NULL);
+  // Phases 2+3 (ronsql_orderby_limit_plan.md): LIMIT and ORDER BY
+  // are accepted on every projection-only shape.  LIMIT alone
+  // streams with an early scan close; ORDER BY buffers the rows for
+  // a client-side sort in the drains (LIMIT then applies post-sort
+  // via partial_sort) — or, on the single-table path, streams in
+  // index order when an ordered index serves the ORDER BY
+  // (Phase 4b, ScanConfig::index_order).
+  // All projection-only outputs must be plain COLUMN refs.
+  bool all_column_outputs = true;
+  for (const Outputs* o = m_context.ast_root.outputs; o != NULL;
+       o = o->next) {
+    if (o->type != Outputs::Type::COLUMN) {
+      all_column_outputs = false;
+      break;
+    }
+  }
+  // Phase E.3 (already shipped): FROM <cte>, projection-only,
+  // no joins.
+  bool projection_only_cte_scan =
+      (from_is_cte && all_column_outputs && !has_groupby &&
+       !has_having && !has_joins);
+  // Phase 1 (non_aggregate_phase_1.md, W1): projection-only
+  // single-table queries over a real table — the first shape with
+  // no aggregation and no CTE.  Requires a FROM table (the Phase
+  // I.17h optional-FROM path cannot resolve COLUMN outputs) and no
+  // CTE definitions at all (a WITH prefix on a single-table
+  // projection stays rejected rather than silently ignoring the
+  // CTE).
+  bool has_from = (m_context.ast_root.table.str != NULL &&
+                   m_context.ast_root.table.len > 0);
+  bool projection_only_single_table =
+      (has_from && !from_is_cte && !has_joins && all_column_outputs &&
+       !has_groupby && !has_having &&
+       m_context.ast_root.cte_list == NULL);
+  // Projection-only join chains (Phase I.8/I.11/I.12 for
+  // CTE-involving shapes; Phase 2 of non_aggregate_pushdown_plan.md
+  // extends the same walk to pure real-table snowflake chains by
+  // dropping the previous at-least-one-CTE requirement).  Accepted:
+  // strictly left-deep INNER / LEFT_OUTER chains whose ON
+  // conditions bind the joined alias's columns to an
+  // already-visible alias, with every CTE operand a complete-key
+  // CTE_LOOKUP (ExactOrdered or ExactPermuted via
+  // cte_key_coverage); no GROUP BY / HAVING / aggregate outputs
+  // (ORDER BY buffers + sorts client-side, LIMIT streams or applies
+  // post-sort — Phases 2+3).  Phase G's defensive reject for
+  // CTE_SCAN-as-outer-join-child still fires later in
+  // validate_cte_execution_shapes() for any planner-produced shape
+  // outside this conservative class.
+  bool projection_only_join_chain = false;
+  if (all_column_outputs && !has_groupby &&
+      !has_having && has_joins) {
+    projection_only_join_chain = true;
+    LexCString visible_aliases[MAX_SPJ_TREE_NODES];
+    // Defensive dead-man's check (join_nest_semantics_plan.md): an
+    // alias is "under LEFT" when it was LEFT-joined itself or
+    // reached through one.  promote_left_joins() runs before this
+    // gate and rewrites every INNER-below-LEFT flat chain to
+    // all-INNER (equality join conditions are null-rejecting), so
+    // this check firing means a promotion bug or a future
+    // non-equality join condition — without promotion the emitted
+    // tree (no nest metadata) would deliver NULL-extended rows the
+    // INNER join must eliminate (verified wrong results, sn-15).
+    bool alias_under_left[MAX_SPJ_TREE_NODES];
+    Uint32 num_visible_aliases = 0;
+    alias_under_left[num_visible_aliases] = false;
+    visible_aliases[num_visible_aliases++] =
+        m_context.ast_root.root_table->alias;
+    for (const JoinClause* join = m_context.ast_root.joins;
+         join != NULL; join = join->next) {
+      // Phase 4 (non_aggregate_phase_4.md, W1): a conditionless
+      // join clause is acceptable only as the comma cross-join of
+      // a no-GROUP-BY CTE (the grammar's one conditionless
+      // production).  A SCALAR CTE always produces exactly one
+      // row (1-row multiplier, coverage ScalarDummy); a
+      // SINGLE-ROW CTE (cte_single_row_kernel_plan.md) produces
+      // at most one — the comma join is a zero-key existence
+      // probe (coverage SingleRowSubset) with exact MySQL
+      // empty-CTE semantics.  Real-table and grouped-CTE comma
+      // joins stay rejected.
+      const CteDefinition* join_cte =
+          find_cte_definition(join->table.name);
+      bool scalar_cte_cross_join =
+          (join->conditions == NULL && join_cte != NULL &&
+           join_cte->stmt->groupby_columns == NULL &&
+           join->join_type == JoinClause::INNER_JOIN);
+      if (num_visible_aliases >= MAX_SPJ_TREE_NODES ||
+          (join->join_type != JoinClause::INNER_JOIN &&
+           join->join_type != JoinClause::LEFT_OUTER_JOIN) ||
+          (join->conditions == NULL && !scalar_cte_cross_join)) {
+        projection_only_join_chain = false;
+        break;
+      }
+      const LexCString& join_alias = join->table.alias;
+      bool any_parent_under_left = false;
+      for (const JoinCondition* jc = join->conditions;
+           jc != NULL; jc = jc->next) {
+        if (!(jc->child_table == join_alias)) {
+          projection_only_join_chain = false;
+          break;
+        }
+        bool parent_seen = false;
+        for (Uint32 a = 0; a < num_visible_aliases; a++) {
+          if (jc->parent_table == visible_aliases[a]) {
+            parent_seen = true;
+            if (alias_under_left[a]) any_parent_under_left = true;
+            break;
+          }
+        }
+        if (!parent_seen) {
+          projection_only_join_chain = false;
+          break;
+        }
+      }
+      if (!projection_only_join_chain) break;
+      if (join->join_type == JoinClause::INNER_JOIN &&
+          any_parent_under_left) {
+        ndbrequire(m_conf.err_stream != NULL);
+        std::basic_ostream<char>& err = *m_conf.err_stream;
+        err << "INNER JOIN below a LEFT JOIN is not supported in"
+               " projection-only queries: RonSQL does not yet emit"
+               " outer-join nest metadata, and NDB would deliver"
+               " NULL-extended rows the INNER join must eliminate.\n";
+        throw RonSQLPermanentError(
+            "INNER JOIN below LEFT JOIN not supported.");
+      }
+      if (join_cte != NULL) {
+        LexCString child_names[MAX_JOIN_KEY_COLS];
+        Uint32 num_keys = 0;
+        for (const JoinCondition* jc = join->conditions;
+             jc != NULL; jc = jc->next) {
+          if (num_keys >= MAX_JOIN_KEY_COLS) {
+            projection_only_join_chain = false;
+            break;
+          }
+          child_names[num_keys++] = jc->child_column;
+        }
+        if (!projection_only_join_chain) break;
+        CteKeyCoverageResult coverage;
+        // Phase 4: ScalarDummy (scalar CTE, no keys) joins the
+        // accepted set — its producer restricts it to exactly the
+        // conditionless-scalar case admitted above.
+        if (!cte_key_coverage(join_cte, child_names, num_keys,
+                              coverage)) {
+          projection_only_join_chain = false;
+          break;
+        }
+        // Phase 6 (non_aggregate_phase_6.md): the pre-gate
+        // I.16b/c rewrite above already promoted the first
+        // eligible partial-key INNER CTE join to root, so a
+        // Partial state reaching this walk is a residual shape
+        // the rewrite cannot serve (LEFT JOIN on the partial CTE
+        // join itself, a non-root parent alias, a second partial
+        // CTE, or a CTE-on-CTE root).  Throw the emit-side I.16a
+        // wording instead of the generic gate text; same for
+        // WrongColumns (the I.20 message).
+        if (coverage.state == CteKeyCoverage::Partial) {
+          ndbrequire(m_conf.err_stream != NULL);
+          std::basic_ostream<char>& err = *m_conf.err_stream;
+          err << "Partial CTE lookup key not supported.  The virtual"
+                 " CTE primary key matches the CTE body's GROUP BY"
+                 " column list and the join must bind every key"
+                 " column.  Workaround: place the multi-key CTE on"
+                 " the joined root and join the smaller table to it"
+                 " (an INNER join from the root parent is rewritten"
+                 " that way automatically).\n";
+          throw RonSQLPermanentError(
+              "Partial CTE lookup key not supported.");
+        }
+        if (coverage.state == CteKeyCoverage::WrongColumns) {
+          ndbrequire(m_conf.err_stream != NULL);
+          std::basic_ostream<char>& err = *m_conf.err_stream;
+          if (join_cte->stmt->is_single_row_cte) {
+            err << "CTE lookup key references a column that is not"
+                   " an output of the single-row CTE.\n";
+          } else {
+            err << "CTE lookup key references a CTE output column"
+                   " that is not part of the virtual primary key."
+                   "  The virtual CTE primary key matches the CTE"
+                   " body's GROUP BY column list.\n";
+          }
+          throw RonSQLPermanentError(
+              "CTE lookup key references a non-key CTE column.");
+        }
+        if (coverage.state != CteKeyCoverage::ExactOrdered &&
+            coverage.state != CteKeyCoverage::ExactPermuted &&
+            coverage.state != CteKeyCoverage::ScalarDummy &&
+            coverage.state != CteKeyCoverage::SingleRowSubset) {
+          projection_only_join_chain = false;
+          break;
+        }
+      }
+      alias_under_left[num_visible_aliases] =
+          (join->join_type == JoinClause::LEFT_OUTER_JOIN) ||
+          any_parent_under_left;
+      visible_aliases[num_visible_aliases++] = join_alias;
+    }
+  }
+  if (!projection_only_cte_scan && !projection_only_join_chain &&
+      !projection_only_single_table) {
+    ndbrequire(m_conf.err_stream != NULL);
+    std::basic_ostream<char>& err = *m_conf.err_stream;
+    err << "This query has no aggregate expression, so it is not an aggregate query.\n"
+           "Currently, RonSQL only supports aggregate queries and projection-only\n"
+           "SELECTs: single-table, left-deep join chains over real tables and/or\n"
+           "complete-key CTE lookups (INNER / LEFT JOIN), comma cross-joins of\n"
+           "scalar CTEs, and CTE_SCAN roots — all without GROUP BY /\n"
+           "expressions (ORDER BY and LIMIT are supported).\n";
+    throw RonSQLPermanentError("Not an aggregate query.");
+  }
+}
+
 void
 RonSQLPreparer::parse()
 {
-  std::basic_ostream<char>& err = *m_conf.err_stream;
   // Scope 0 of the authorization inventory: the main SELECT, which sees
   // every CTE.
   m_access_scopes.push(AccessScope{0, false, ~Uint32(0)});
@@ -879,78 +1315,13 @@ RonSQLPreparer::parse()
     // RONDB-1124 (m3_run6_plan.md C2): MIN / MAX over one single-group CTE
     // (the fs_point form) becomes the single-table aggregate over the body.
     // It swaps the main compiler for the body's, so it must run before the
-    // loop below binds the main aggregates.
+    // main aggregates are registered.
     flatten_single_group_cte();
     // RONDB-1124 WP-J J5: aggregates over one last-N CTE become the body's
     // ORDER BY / LIMIT scan with the aggregation in RonSQL.  It gives the
-    // main aggregates a new compiler, so it too runs before the loop below.
+    // main aggregates a new compiler, so it too runs before registration.
     route_lastn_aggregate_to_api();
-    /* We have already provided columns and expressions to the
-     * AggregationAPICompiler. E.g. in `SELECT Max(col1 + col2)`, m_main_scope.agg already
-     * knows about `col1`, `col2` and `col1 + col2`. Here, we let m_main_scope.agg know about
-     * the aggregate expressions themselves, e.g. `Max(col1 + col2)`, making sure
-     * they are provided in the correct order.
-     */
-    Outputs* outputs = m_context.ast_root.outputs;
-    bool has_aggregate_outputs = false;
-    bool has_subquery_agg_outputs = false;
-    while (outputs != NULL)
-    {
-      switch (outputs->type)
-      {
-      case Outputs::Type::COLUMN:
-        break;
-      case Outputs::Type::AGGREGATE:
-      {
-        has_aggregate_outputs = true;
-        ndbrequire(m_main_scope.agg != NULL);
-        TokenKind fun = outputs->aggregate.fun;
-        AggregationAPICompiler::Expr* expr = outputs->aggregate.arg;
-        switch (fun)
-        {
-        case T_COUNT:
-          outputs->aggregate.agg_index = m_main_scope.agg->Count(expr);
-          break;
-        case T_MAX:
-          outputs->aggregate.agg_index = m_main_scope.agg->Max(expr);
-          break;
-        case T_MIN:
-          outputs->aggregate.agg_index = m_main_scope.agg->Min(expr);
-          break;
-        case T_SUM:
-          outputs->aggregate.agg_index = m_main_scope.agg->Sum(expr);
-          break;
-        default:
-          abort();
-        }
-        break;
-      }
-      case Outputs::Type::AVG:
-        has_aggregate_outputs = true;
-        outputs->avg.agg_index_sum = m_main_scope.agg->Sum(outputs->avg.arg);
-        outputs->avg.agg_index_count = m_main_scope.agg->Count(outputs->avg.arg);
-        break;
-      case Outputs::Type::SUBQUERY_AGG:
-        // Handled later in analyze_select_subqueries() and compile().
-        // Don't set has_aggregate_outputs (avoids m_main_scope.agg != NULL assert).
-        has_subquery_agg_outputs = true;
-        break;
-      default:
-        abort();
-      }
-      outputs = outputs->next;
-    }
-    bool has_having_aggregates = (m_main_scope.agg != NULL &&
-                                  m_context.ast_root.having_expression != NULL);
-    if (m_main_scope.agg == NULL)
-    {
-      ndbrequire(!has_aggregate_outputs);
-    }
-    else
-    {
-      ndbrequire(has_aggregate_outputs || has_having_aggregates);
-      ndbrequire(m_main_scope.agg->getStatus() == AggregationAPICompiler::Status::PROGRAMMING);
-    }
+    const bool uses_aggregate_execution = register_main_outputs();
     // Part B (join_nest_semantics_plan.md): LEFT->INNER promotion must
     // run before the non-aggregate gate (whose INNER-below-LEFT check
     // is thereby demoted to a defensive dead-man's check) and applies
@@ -961,8 +1332,7 @@ RonSQLPreparer::parse()
     // aggregate path (ns-1: COUNT(*) 30 vs 10) and the pass-through
     // row path (sn-15).
     promote_left_joins();
-    m_is_aggregate_query = (has_aggregate_outputs || has_having_aggregates ||
-                            has_subquery_agg_outputs);
+    m_is_aggregate_query = uses_aggregate_execution;
     // Single-row key-lookup CTE bodies (cte_single_row_kernel_plan.md):
     // mark candidate CTEs BEFORE the projection-only gate and the
     // partial-key root rewrite so cte_key_coverage can classify their
@@ -982,309 +1352,19 @@ RonSQLPreparer::parse()
     rewrite_lastn_cte_bodies();
     if (!m_is_aggregate_query)
     {
-      // Phase E.3: allow the narrowly-supported projection-only main
-      // SELECT over a CTE_SCAN root (e.g. SELECT k, t FROM cte [WHERE ...]).
-      // The kernel + NDB API already support scanCte without
-      // setAggregation(); the gap was purely RonSQL's client-side
-      // delivery path.  All other non-aggregating shapes still hit the
-      // existing rejection — Phase 7 / step 45 in ronsql_join_phase7.md
-      // tracks general non-aggregate support.
-      //
-      // Plan-shape decisions (CTE_SCAN root, GROUP BY, HAVING, ORDER BY,
-      // LIMIT) are checked in execute_join() / passthrough_drain when
-      // the JoinPlan is finalised — analyze_ctes() runs before this
-      // point but the join_plan is only populated by load_join().  We
-      // do the cheap parse-time guards here (no aggregates already
-      // implies no HAVING aggregates) and require the FROM root to be
-      // a CTE alias; remaining shape rejection is deferred.
-      //
-      // Phase 6 (non_aggregate_phase_6.md, gc-P1 lift): run the
-      // I.16b/c partial-key-CTE root rewrite BEFORE the gate walk, so
-      // a partial-key INNER join to a multi-key CTE becomes the
-      // shipped CTE_SCAN-root shape instead of failing the
-      // complete-key coverage check below.  The load_join() call
-      // stays (aggregate-path timing unchanged); this earlier
-      // invocation makes that one a no-op via its root_is_cte bail.
-      maybe_rewrite_partial_key_cte_root();
-      bool from_is_cte = false;
-      for (const CteDefinition* cte = m_context.ast_root.cte_list;
-           cte != NULL; cte = cte->next) {
-        if (m_context.ast_root.table.str != NULL &&
-            cte->name.len == m_context.ast_root.table.len &&
-            strncmp(cte->name.str, m_context.ast_root.table.str,
-                    m_context.ast_root.table.len) == 0) {
-          from_is_cte = true;
-          break;
-        }
-      }
-      bool has_groupby   = (m_context.ast_root.groupby_columns != NULL);
-      bool has_having    = (m_context.ast_root.having_expression != NULL);
-      bool has_joins     = (m_context.ast_root.joins != NULL);
-      // Phases 2+3 (ronsql_orderby_limit_plan.md): LIMIT and ORDER BY
-      // are accepted on every projection-only shape.  LIMIT alone
-      // streams with an early scan close; ORDER BY buffers the rows for
-      // a client-side sort in the drains (LIMIT then applies post-sort
-      // via partial_sort) — or, on the single-table path, streams in
-      // index order when an ordered index serves the ORDER BY
-      // (Phase 4b, ScanConfig::index_order).
-      // All projection-only outputs must be plain COLUMN refs.
-      bool all_column_outputs = true;
-      for (const Outputs* o = m_context.ast_root.outputs; o != NULL;
-           o = o->next) {
-        if (o->type != Outputs::Type::COLUMN) {
-          all_column_outputs = false;
-          break;
-        }
-      }
-      // Phase E.3 (already shipped): FROM <cte>, projection-only,
-      // no joins.
-      bool projection_only_cte_scan =
-          (from_is_cte && all_column_outputs && !has_groupby &&
-           !has_having && !has_joins);
-      // Phase 1 (non_aggregate_phase_1.md, W1): projection-only
-      // single-table queries over a real table — the first shape with
-      // no aggregation and no CTE.  Requires a FROM table (the Phase
-      // I.17h optional-FROM path cannot resolve COLUMN outputs) and no
-      // CTE definitions at all (a WITH prefix on a single-table
-      // projection stays rejected rather than silently ignoring the
-      // CTE).
-      bool has_from = (m_context.ast_root.table.str != NULL &&
-                       m_context.ast_root.table.len > 0);
-      bool projection_only_single_table =
-          (has_from && !from_is_cte && !has_joins && all_column_outputs &&
-           !has_groupby && !has_having &&
-           m_context.ast_root.cte_list == NULL);
-      // Projection-only join chains (Phase I.8/I.11/I.12 for
-      // CTE-involving shapes; Phase 2 of non_aggregate_pushdown_plan.md
-      // extends the same walk to pure real-table snowflake chains by
-      // dropping the previous at-least-one-CTE requirement).  Accepted:
-      // strictly left-deep INNER / LEFT_OUTER chains whose ON
-      // conditions bind the joined alias's columns to an
-      // already-visible alias, with every CTE operand a complete-key
-      // CTE_LOOKUP (ExactOrdered or ExactPermuted via
-      // cte_key_coverage); no GROUP BY / HAVING / aggregate outputs
-      // (ORDER BY buffers + sorts client-side, LIMIT streams or applies
-      // post-sort — Phases 2+3).  Phase G's defensive reject for
-      // CTE_SCAN-as-outer-join-child still fires later in
-      // validate_cte_execution_shapes() for any planner-produced shape
-      // outside this conservative class.
-      bool projection_only_join_chain = false;
-      if (all_column_outputs && !has_groupby &&
-          !has_having && has_joins) {
-        projection_only_join_chain = true;
-        LexCString visible_aliases[MAX_SPJ_TREE_NODES];
-        // Defensive dead-man's check (join_nest_semantics_plan.md): an
-        // alias is "under LEFT" when it was LEFT-joined itself or
-        // reached through one.  promote_left_joins() runs before this
-        // gate and rewrites every INNER-below-LEFT flat chain to
-        // all-INNER (equality join conditions are null-rejecting), so
-        // this check firing means a promotion bug or a future
-        // non-equality join condition — without promotion the emitted
-        // tree (no nest metadata) would deliver NULL-extended rows the
-        // INNER join must eliminate (verified wrong results, sn-15).
-        bool alias_under_left[MAX_SPJ_TREE_NODES];
-        Uint32 num_visible_aliases = 0;
-        alias_under_left[num_visible_aliases] = false;
-        visible_aliases[num_visible_aliases++] =
-            m_context.ast_root.root_table->alias;
-        for (const JoinClause* join = m_context.ast_root.joins;
-             join != NULL; join = join->next) {
-          // Phase 4 (non_aggregate_phase_4.md, W1): a conditionless
-          // join clause is acceptable only as the comma cross-join of
-          // a no-GROUP-BY CTE (the grammar's one conditionless
-          // production).  A SCALAR CTE always produces exactly one
-          // row (1-row multiplier, coverage ScalarDummy); a
-          // SINGLE-ROW CTE (cte_single_row_kernel_plan.md) produces
-          // at most one — the comma join is a zero-key existence
-          // probe (coverage SingleRowSubset) with exact MySQL
-          // empty-CTE semantics.  Real-table and grouped-CTE comma
-          // joins stay rejected.
-          const CteDefinition* join_cte =
-              find_cte_definition(join->table.name);
-          bool scalar_cte_cross_join =
-              (join->conditions == NULL && join_cte != NULL &&
-               join_cte->stmt->groupby_columns == NULL &&
-               join->join_type == JoinClause::INNER_JOIN);
-          if (num_visible_aliases >= MAX_SPJ_TREE_NODES ||
-              (join->join_type != JoinClause::INNER_JOIN &&
-               join->join_type != JoinClause::LEFT_OUTER_JOIN) ||
-              (join->conditions == NULL && !scalar_cte_cross_join)) {
-            projection_only_join_chain = false;
-            break;
-          }
-          const LexCString& join_alias = join->table.alias;
-          bool any_parent_under_left = false;
-          for (const JoinCondition* jc = join->conditions;
-               jc != NULL; jc = jc->next) {
-            if (!(jc->child_table == join_alias)) {
-              projection_only_join_chain = false;
-              break;
-            }
-            bool parent_seen = false;
-            for (Uint32 a = 0; a < num_visible_aliases; a++) {
-              if (jc->parent_table == visible_aliases[a]) {
-                parent_seen = true;
-                if (alias_under_left[a]) any_parent_under_left = true;
-                break;
-              }
-            }
-            if (!parent_seen) {
-              projection_only_join_chain = false;
-              break;
-            }
-          }
-          if (!projection_only_join_chain) break;
-          if (join->join_type == JoinClause::INNER_JOIN &&
-              any_parent_under_left) {
-            ndbrequire(m_conf.err_stream != NULL);
-            std::basic_ostream<char>& err = *m_conf.err_stream;
-            err << "INNER JOIN below a LEFT JOIN is not supported in"
-                   " projection-only queries: RonSQL does not yet emit"
-                   " outer-join nest metadata, and NDB would deliver"
-                   " NULL-extended rows the INNER join must eliminate.\n";
-            throw RonSQLPermanentError(
-                "INNER JOIN below LEFT JOIN not supported.");
-          }
-          if (join_cte != NULL) {
-            LexCString child_names[MAX_JOIN_KEY_COLS];
-            Uint32 num_keys = 0;
-            for (const JoinCondition* jc = join->conditions;
-                 jc != NULL; jc = jc->next) {
-              if (num_keys >= MAX_JOIN_KEY_COLS) {
-                projection_only_join_chain = false;
-                break;
-              }
-              child_names[num_keys++] = jc->child_column;
-            }
-            if (!projection_only_join_chain) break;
-            CteKeyCoverageResult coverage;
-            // Phase 4: ScalarDummy (scalar CTE, no keys) joins the
-            // accepted set — its producer restricts it to exactly the
-            // conditionless-scalar case admitted above.
-            if (!cte_key_coverage(join_cte, child_names, num_keys,
-                                  coverage)) {
-              projection_only_join_chain = false;
-              break;
-            }
-            // Phase 6 (non_aggregate_phase_6.md): the pre-gate
-            // I.16b/c rewrite above already promoted the first
-            // eligible partial-key INNER CTE join to root, so a
-            // Partial state reaching this walk is a residual shape
-            // the rewrite cannot serve (LEFT JOIN on the partial CTE
-            // join itself, a non-root parent alias, a second partial
-            // CTE, or a CTE-on-CTE root).  Throw the emit-side I.16a
-            // wording instead of the generic gate text; same for
-            // WrongColumns (the I.20 message).
-            if (coverage.state == CteKeyCoverage::Partial) {
-              ndbrequire(m_conf.err_stream != NULL);
-              std::basic_ostream<char>& err = *m_conf.err_stream;
-              err << "Partial CTE lookup key not supported.  The virtual"
-                     " CTE primary key matches the CTE body's GROUP BY"
-                     " column list and the join must bind every key"
-                     " column.  Workaround: place the multi-key CTE on"
-                     " the joined root and join the smaller table to it"
-                     " (an INNER join from the root parent is rewritten"
-                     " that way automatically).\n";
-              throw RonSQLPermanentError(
-                  "Partial CTE lookup key not supported.");
-            }
-            if (coverage.state == CteKeyCoverage::WrongColumns) {
-              ndbrequire(m_conf.err_stream != NULL);
-              std::basic_ostream<char>& err = *m_conf.err_stream;
-              if (join_cte->stmt->is_single_row_cte) {
-                err << "CTE lookup key references a column that is not"
-                       " an output of the single-row CTE.\n";
-              } else {
-                err << "CTE lookup key references a CTE output column"
-                       " that is not part of the virtual primary key."
-                       "  The virtual CTE primary key matches the CTE"
-                       " body's GROUP BY column list.\n";
-              }
-              throw RonSQLPermanentError(
-                  "CTE lookup key references a non-key CTE column.");
-            }
-            if (coverage.state != CteKeyCoverage::ExactOrdered &&
-                coverage.state != CteKeyCoverage::ExactPermuted &&
-                coverage.state != CteKeyCoverage::ScalarDummy &&
-                coverage.state != CteKeyCoverage::SingleRowSubset) {
-              projection_only_join_chain = false;
-              break;
-            }
-          }
-          alias_under_left[num_visible_aliases] =
-              (join->join_type == JoinClause::LEFT_OUTER_JOIN) ||
-              any_parent_under_left;
-          visible_aliases[num_visible_aliases++] = join_alias;
-        }
-      }
-      if (!projection_only_cte_scan && !projection_only_join_chain &&
-          !projection_only_single_table) {
-        ndbrequire(m_conf.err_stream != NULL);
-        std::basic_ostream<char>& err = *m_conf.err_stream;
-        err << "This query has no aggregate expression, so it is not an aggregate query.\n"
-               "Currently, RonSQL only supports aggregate queries and projection-only\n"
-               "SELECTs: single-table, left-deep join chains over real tables and/or\n"
-               "complete-key CTE lookups (INNER / LEFT JOIN), comma cross-joins of\n"
-               "scalar CTEs, and CTE_SCAN roots — all without GROUP BY /\n"
-               "expressions (ORDER BY and LIMIT are supported).\n";
-        throw RonSQLPermanentError("Not an aggregate query.");
-      }
+      prepare_projection_only_query();
     }
 
-    // Mirror the main-query aggregate-registration loop for each CTE body.
-    // The parser builds each AGGREGATE output's arg Expr in the CTE's own
-    // AggregationAPICompiler (stashed on cte->stmt->agg by leave_subquery),
-    // but the Sum/Count/Min/Max call that binds the aggregate to the
-    // program only happens here. Without it, compile() would reject the
-    // CTE's program because the arg Exprs have usage=0.
-    for (CteDefinition* cte = m_context.ast_root.cte_list;
-         cte != NULL; cte = cte->next) {
-      if (cte->stmt->agg == NULL) continue;
-      for (Outputs* co = cte->stmt->outputs; co != NULL; co = co->next) {
-        switch (co->type) {
-        case Outputs::Type::COLUMN:
-          break;
-        case Outputs::Type::AGGREGATE: {
-          AggregationAPICompiler::Expr* expr = co->aggregate.arg;
-          switch (co->aggregate.fun) {
-          case T_COUNT:
-            co->aggregate.agg_index = cte->stmt->agg->Count(expr); break;
-          case T_MAX:
-            co->aggregate.agg_index = cte->stmt->agg->Max(expr); break;
-          case T_MIN:
-            co->aggregate.agg_index = cte->stmt->agg->Min(expr); break;
-          case T_SUM:
-            co->aggregate.agg_index = cte->stmt->agg->Sum(expr); break;
-          default:
-            abort();
-          }
-          break;
-        }
-        case Outputs::Type::AVG:
-          // cte_avg_plan.md V4 (C2): a CTE-scope AVG compiles to ONE
-          // agg slot (SVM Avg -> NdbAggregator::Avg -> kernel kOpAvg,
-          // which adds the hidden COUNT companion and divides on the
-          // owner after the redistribute).  The old Sum+Count pair
-          // broke the one-column-per-slot virt-table mapping — that
-          // was the reason AVG in CTE outputs used to be rejected.
-          // agg_index_count is aliased: its PRINT_AVG readers are
-          // main-scope-only, where the main registration keeps the
-          // Sum+Count form.
-          co->avg.agg_index_sum = cte->stmt->agg->Avg(co->avg.arg);
-          co->avg.agg_index_count = co->avg.agg_index_sum;
-          break;
-        case Outputs::Type::SUBQUERY_AGG:
-          // Disallowed in CTE bodies (would need nested subquery orchestration).
-          throw RonSQLPermanentError(
-              "Subquery aggregation inside CTE body not yet supported.");
-        default:
-          abort();
-        }
-      }
-    }
+    register_cte_outputs();
     return;
   }
-  // The rest is error handling.
+  throw_parse_error(parse_result);
+}
+
+void
+RonSQLPreparer::throw_parse_error(int parse_result)
+{
+  std::basic_ostream<char>& err = *m_conf.err_stream;
   if (parse_result == 2)
   {
     /*
@@ -1483,6 +1563,23 @@ RonSQLPreparer::parse()
   throw RonSQLPermanentError(RonSQLErrorClass::SYNTAX, "Syntax error.");
 }
 
+// ORDER BY uses the first matching non-empty output name.
+static const Outputs*
+find_orderby_output(const Outputs* outputs, const char* name,
+                    Uint32& output_pos)
+{
+  output_pos = 0;
+  for (const Outputs* out = outputs; out != NULL;
+       out = out->next, output_pos++)
+  {
+    if (out->output_name.len > 0 && out->output_name.str != NULL &&
+        strlen(name) == out->output_name.len &&
+        strncmp(name, out->output_name.str, out->output_name.len) == 0)
+      return out;
+  }
+  return NULL;
+}
+
 void
 RonSQLPreparer::resolve_orderby_aliases()
 {
@@ -1502,42 +1599,34 @@ RonSQLPreparer::resolve_orderby_aliases()
       const char* name = m_columns[col_idx].c_str();
       // Walk SELECT outputs looking for a matching alias
       Uint32 output_pos = 0;
-      Outputs* out = m_context.ast_root.outputs;
-      while (out != NULL)
+      const Outputs* out = find_orderby_output(
+          m_context.ast_root.outputs, name, output_pos);
+      if (out != NULL)
       {
-        if (out->output_name.len > 0 && out->output_name.str != NULL &&
-            strlen(name) == out->output_name.len &&
-            strncmp(name, out->output_name.str,
-                    out->output_name.len) == 0)
+        // Match found — convert to OUTPUT_REF
+        ob->kind = OrderbyColumns::Kind::OUTPUT_REF;
+        ob->output_idx = output_pos;
+        // Mark this col_idx so load_join/load_single_table skips it —
+        // UNLESS the matched output is a plain COLUMN spelled the
+        // same way (e.g. `SELECT k ... ORDER BY k`, both bare): then
+        // the ORDER BY name and the output share ONE registry entry,
+        // which must still resolve as a real column for the output
+        // itself.  The scoped resolver treats an alias-marked entry
+        // as AliasOnly BEFORE attempting column resolution, so
+        // marking a shared entry poisons the output's resolution
+        // ("output is not a table or CTE column" in the pass-through
+        // drain; found by po-1 on first record).  The single-table
+        // resolver was already robust — it tries the real column
+        // first and falls back to AliasOnly only on lookup failure.
+        bool shares_entry_with_column_output =
+            (out->type == Outputs::Type::COLUMN &&
+             out->column.col_idx == col_idx);
+        if (!shares_entry_with_column_output)
         {
-          // Match found — convert to OUTPUT_REF
-          ob->kind = OrderbyColumns::Kind::OUTPUT_REF;
-          ob->output_idx = output_pos;
-          // Mark this col_idx so load_join/load_single_table skips it —
-          // UNLESS the matched output is a plain COLUMN spelled the
-          // same way (e.g. `SELECT k ... ORDER BY k`, both bare): then
-          // the ORDER BY name and the output share ONE registry entry,
-          // which must still resolve as a real column for the output
-          // itself.  The scoped resolver treats an alias-marked entry
-          // as AliasOnly BEFORE attempting column resolution, so
-          // marking a shared entry poisons the output's resolution
-          // ("output is not a table or CTE column" in the pass-through
-          // drain; found by po-1 on first record).  The single-table
-          // resolver was already robust — it tries the real column
-          // first and falls back to AliasOnly only on lookup failure.
-          bool shares_entry_with_column_output =
-              (out->type == Outputs::Type::COLUMN &&
-               out->column.col_idx == col_idx);
-          if (!shares_entry_with_column_output)
-          {
-            while (m_col_is_alias.size() <= col_idx)
-              m_col_is_alias.push(false);
-            m_col_is_alias[col_idx] = true;
-          }
-          break;
+          while (m_col_is_alias.size() <= col_idx)
+            m_col_is_alias.push(false);
+          m_col_is_alias[col_idx] = true;
         }
-        out = out->next;
-        output_pos++;
       }
     }
     ob = ob->next;
@@ -2781,18 +2870,7 @@ RonSQLPreparer::rewrite_lastn_cte_bodies()
       gb_tail = gb;
       last = o;
     }
-    RonSQLPreparer* _this = this;
-    std::function<const char*(uint)> column_idx_to_name =
-      [_this](Uint32 idx) -> const char*
-      {
-        return _this->column_idx_to_name(idx).c_str();
-      };
-    AggregationAPICompiler* agg =
-      new (m_amalloc->alloc_exc<AggregationAPICompiler>(1))
-        AggregationAPICompiler(column_idx_to_name,
-                               *m_conf.out_stream,
-                               *m_conf.err_stream,
-                               m_amalloc);
+    AggregationAPICompiler* agg = make_aggregation_compiler();
     static const char cnt_name[] = "ronsql$lastn_rows";
     Outputs* cnt = m_amalloc->alloc_exc<Outputs>(1);
     cnt->type = Outputs::Type::AGGREGATE;
@@ -2938,18 +3016,7 @@ RonSQLPreparer::route_lastn_aggregate_to_api()
   }
 
   // ---- Rewrite.
-  RonSQLPreparer* _this = this;
-  std::function<const char*(uint)> column_idx_to_name =
-    [_this](Uint32 idx) -> const char*
-    {
-      return _this->column_idx_to_name(idx).c_str();
-    };
-  AggregationAPICompiler* agg =
-    new (m_amalloc->alloc_exc<AggregationAPICompiler>(1))
-      AggregationAPICompiler(column_idx_to_name,
-                             *m_conf.out_stream,
-                             *m_conf.err_stream,
-                             m_amalloc);
+  AggregationAPICompiler* agg = make_aggregation_compiler();
   const Uint32 num_cols = m_columns.size();
   bool* live = m_amalloc->alloc_exc<bool>(num_cols);
   for (Uint32 i = 0; i < num_cols; i++) live[i] = false;
@@ -3226,15 +3293,7 @@ RonSQLPreparer::flatten_single_group_cte()
     if (named) continue;
     if (bo->type == Outputs::Type::AGGREGATE)
     {
-      AggregationAPICompiler::Expr* expr = bo->aggregate.arg;
-      switch (bo->aggregate.fun)
-      {
-      case T_COUNT: agg->Count(expr); break;
-      case T_MAX: agg->Max(expr); break;
-      case T_MIN: agg->Min(expr); break;
-      case T_SUM: agg->Sum(expr); break;
-      default: abort();
-      }
+      register_simple_aggregate(*agg, bo->aggregate.fun, bo->aggregate.arg);
     }
     else if (bo->type == Outputs::Type::AVG)
     {
@@ -4362,20 +4421,8 @@ RonSQLPreparer::assign_child_index_bounds(QueryScope& scope)
       ConditionalExpression* rebuilt = NULL;
       for (Uint32 ci = 0; ci < num_local; ci++)
       {
-        if (local_conjuncts[ci] == NULL) continue;
-        if (rebuilt == NULL)
-        {
-          rebuilt = local_conjuncts[ci];
-        }
-        else
-        {
-          ConditionalExpression* combined =
-              m_amalloc->alloc_exc<ConditionalExpression>(1);
-          combined->op = T_AND;
-          combined->args.left = rebuilt;
-          combined->args.right = local_conjuncts[ci];
-          rebuilt = combined;
-        }
+        rebuilt = append_condition(m_amalloc, T_AND, rebuilt,
+                                   local_conjuncts[ci]);
       }
       scope.join_where_ce[op_idx] = rebuilt;
     }
@@ -6438,19 +6485,7 @@ RonSQLPreparer::decorrelate_exists()
   ConditionalExpression* rebuilt = NULL;
   for (Uint32 i = 0; i < num_kept; i++)
   {
-    if (rebuilt == NULL)
-    {
-      rebuilt = kept[i];
-    }
-    else
-    {
-      ConditionalExpression* combined =
-          m_amalloc->alloc_exc<ConditionalExpression>(1);
-      combined->op = T_AND;
-      combined->args.left = rebuilt;
-      combined->args.right = kept[i];
-      rebuilt = combined;
-    }
+    rebuilt = append_condition(m_amalloc, T_AND, rebuilt, kept[i]);
   }
   ast.where_expression = rebuilt;
 
@@ -6899,19 +6934,7 @@ RonSQLPreparer::decorrelate_scalar()
   ConditionalExpression* rebuilt = NULL;
   for (Uint32 i = 0; i < num_kept; i++)
   {
-    if (rebuilt == NULL)
-    {
-      rebuilt = kept[i];
-    }
-    else
-    {
-      ConditionalExpression* combined =
-          m_amalloc->alloc_exc<ConditionalExpression>(1);
-      combined->op = T_AND;
-      combined->args.left = rebuilt;
-      combined->args.right = kept[i];
-      rebuilt = combined;
-    }
+    rebuilt = append_condition(m_amalloc, T_AND, rebuilt, kept[i]);
   }
   ast.where_expression = rebuilt;
 }
@@ -7040,17 +7063,10 @@ RonSQLPreparer::resolve_cte_body_orderby_aliases(SelectStatement* stmt)
       continue;
     const char* name = m_columns[col_idx].c_str();
     Uint32 output_pos = 0;
-    for (Outputs* out = stmt->outputs; out != NULL;
-         out = out->next, output_pos++)
+    if (find_orderby_output(stmt->outputs, name, output_pos) != NULL)
     {
-      if (out->output_name.len > 0 && out->output_name.str != NULL &&
-          strlen(name) == out->output_name.len &&
-          strncmp(name, out->output_name.str, out->output_name.len) == 0)
-      {
-        ob->kind = OrderbyColumns::Kind::OUTPUT_REF;
-        ob->output_idx = output_pos;
-        break;
-      }
+      ob->kind = OrderbyColumns::Kind::OUTPUT_REF;
+      ob->output_idx = output_pos;
     }
   }
 }
@@ -7621,6 +7637,42 @@ RonSQLPreparer::collect_scope_column_refs(const SelectStatement& stmt)
   return refs;
 }
 
+// Look up a column in one relation. Callers choose the visible relations
+// and report missing or ambiguous names.
+RonSQLPreparer::QueryScope::ResolvedColumnRef
+RonSQLPreparer::lookup_relation_column(
+    const JoinOp& op, Uint32 join_op_idx, const char* col_name)
+{
+  QueryScope::ResolvedColumnRef result;
+  if (op.type == JoinOp::CTE_LOOKUP || op.type == JoinOp::CTE_SCAN) {
+    const CteDefinition* cte = op.cte_def;
+    require_prm(cte != NULL, "CTE op has no CTE definition.");
+    Uint32 cte_col_idx = 0;
+    for (const Outputs* o = cte->stmt->outputs; o;
+         o = o->next, cte_col_idx++) {
+      if (o->output_name.len == strlen(col_name) &&
+          strncmp(o->output_name.str, col_name, o->output_name.len) == 0) {
+        result.kind = QueryScope::ResolvedColumnRef::Kind::CteResultColumn;
+        result.join_op_idx = join_op_idx;
+        result.attr_id = (NdbAttrId)cte_col_idx;
+        result.cte_def_idx = op.cte_def_idx;
+        result.cte_result_idx = cte_col_idx;
+        result.cte_output = o;
+        return result;
+      }
+    }
+  } else if (op.table != NULL) {
+    const NdbDictionary::Column* col = op.table->getColumn(col_name);
+    if (col != NULL) {
+      result.kind = QueryScope::ResolvedColumnRef::Kind::StoredColumn;
+      result.join_op_idx = join_op_idx;
+      result.attr_id = col->getAttrId();
+      result.dict_column = col;
+    }
+  }
+  return result;
+}
+
 // Populate resolved descriptors for column references that belong to `stmt`.
 // The parser keeps a single global column namespace (m_columns /
 // m_column_qualifiers), so I.23 resolves only the col_idx values reachable
@@ -7702,35 +7754,7 @@ RonSQLPreparer::resolve_columns_for_scope(QueryScope& scope,
       for (Uint32 t = 0; t < plan.num_ops; t++) {
         if (strcmp(plan.ops[t].alias.c_str(), qualifier) != 0) continue;
         found_qualifier = true;
-        JoinOp& op = plan.ops[t];
-        if (op.type == JoinOp::CTE_LOOKUP || op.type == JoinOp::CTE_SCAN) {
-          const CteDefinition* cte = op.cte_def;
-          require_prm(cte != NULL, "CTE op has no CTE definition.");
-          Uint32 cte_col_idx = 0;
-          for (const Outputs* o = cte->stmt->outputs; o;
-               o = o->next, cte_col_idx++) {
-            if (o->output_name.len == strlen(col_name) &&
-                strncmp(o->output_name.str, col_name, o->output_name.len) == 0) {
-              resolved[col_idx].kind =
-                  QueryScope::ResolvedColumnRef::Kind::CteResultColumn;
-              resolved[col_idx].join_op_idx = t;
-              resolved[col_idx].attr_id = (NdbAttrId)cte_col_idx;
-              resolved[col_idx].cte_def_idx = op.cte_def_idx;
-              resolved[col_idx].cte_result_idx = cte_col_idx;
-              resolved[col_idx].cte_output = o;
-              break;
-            }
-          }
-        } else if (op.table != NULL) {
-          const NdbDictionary::Column* col = op.table->getColumn(col_name);
-          if (col != NULL) {
-            resolved[col_idx].kind =
-                QueryScope::ResolvedColumnRef::Kind::StoredColumn;
-            resolved[col_idx].join_op_idx = t;
-            resolved[col_idx].attr_id = col->getAttrId();
-            resolved[col_idx].dict_column = col;
-          }
-        }
+        resolved[col_idx] = lookup_relation_column(plan.ops[t], t, col_name);
         break;
       }
       if (resolved[col_idx].kind ==
@@ -7748,62 +7772,17 @@ RonSQLPreparer::resolve_columns_for_scope(QueryScope& scope,
       }
     } else {
       Uint32 match_count = 0;
-      Uint32 match_table = 0;
-      const NdbDictionary::Column* match_col = NULL;
-      NdbAttrId match_attr_id = -1;
-      const Outputs* match_cte_output = NULL;
-      Uint32 match_cte_def_idx = 0;
-      Uint32 match_cte_result_idx = 0;
-      bool match_is_cte = false;
+      QueryScope::ResolvedColumnRef match;
       for (Uint32 t = 0; t < plan.num_ops; t++) {
-        JoinOp& op = plan.ops[t];
-        if (op.type == JoinOp::CTE_LOOKUP || op.type == JoinOp::CTE_SCAN) {
-          const CteDefinition* cte = op.cte_def;
-          require_prm(cte != NULL, "CTE op has no CTE definition.");
-          Uint32 cte_col_idx = 0;
-          for (const Outputs* o = cte->stmt->outputs; o;
-               o = o->next, cte_col_idx++) {
-            if (o->output_name.len == strlen(col_name) &&
-                strncmp(o->output_name.str, col_name, o->output_name.len) == 0) {
-              match_count++;
-              match_table = t;
-              match_col = NULL;
-              match_attr_id = (NdbAttrId)cte_col_idx;
-              match_cte_output = o;
-              match_cte_def_idx = op.cte_def_idx;
-              match_cte_result_idx = cte_col_idx;
-              match_is_cte = true;
-              break;
-            }
-          }
-        } else if (op.table != NULL) {
-          const NdbDictionary::Column* col = op.table->getColumn(col_name);
-          if (col != NULL) {
-            match_count++;
-            match_table = t;
-            match_col = col;
-            match_attr_id = col->getAttrId();
-            match_cte_output = NULL;
-            match_cte_def_idx = 0;
-            match_cte_result_idx = 0;
-            match_is_cte = false;
-          }
+        const QueryScope::ResolvedColumnRef candidate =
+            lookup_relation_column(plan.ops[t], t, col_name);
+        if (candidate.kind != QueryScope::ResolvedColumnRef::Kind::Unresolved) {
+          match_count++;
+          match = candidate;
         }
       }
       if (match_count == 1) {
-        if (match_is_cte) {
-          resolved[col_idx].kind =
-              QueryScope::ResolvedColumnRef::Kind::CteResultColumn;
-          resolved[col_idx].cte_def_idx = match_cte_def_idx;
-          resolved[col_idx].cte_result_idx = match_cte_result_idx;
-          resolved[col_idx].cte_output = match_cte_output;
-        } else {
-          resolved[col_idx].kind =
-              QueryScope::ResolvedColumnRef::Kind::StoredColumn;
-          resolved[col_idx].dict_column = match_col;
-        }
-        resolved[col_idx].join_op_idx = match_table;
-        resolved[col_idx].attr_id = match_attr_id;
+        resolved[col_idx] = match;
       } else if (match_count == 0) {
         err << "Column '" << col_name << "' not found in any visible "
             << "table or CTE." << endl;
@@ -8042,20 +8021,12 @@ RonSQLPreparer::analyze_select_subqueries()
       // Flatten AND and find correlation predicate
       // We support: correlation AND filter (any nesting depth)
       ConditionalExpression *conjuncts[32];
-      Uint32 num_conjuncts = 0;
-      auto flatten =
-          [&](auto& self, ConditionalExpression* ce) -> void {
-        if (ce->op == T_AND) {
-          self(self, ce->args.left);
-          self(self, ce->args.right);
-        } else {
-          require_prm(num_conjuncts < 32,
-                      "Too many conditions in the WHERE clause of a"
-                      " SELECT-list subquery.");
-          conjuncts[num_conjuncts++] = ce;
-        }
-      };
-      flatten(flatten, inner_where);
+      const BooleanTermCollection terms = collect_boolean_terms(
+          inner_where, T_AND, conjuncts, ARRAY_LEN(conjuncts));
+      require_prm(terms.complete,
+                  "Too many conditions in the WHERE clause of a"
+                  " SELECT-list subquery.");
+      const Uint32 num_conjuncts = terms.count;
 
       // Find the correlation predicate (equality between inner and outer col)
       LexCString inner_table_name = inner->root_table->alias;
@@ -8186,20 +8157,12 @@ RonSQLPreparer::analyze_select_subqueries()
     if (inner_filter != NULL) {
       // Flatten the inner_filter and classify each conjunct
       ConditionalExpression *filter_conjuncts[32];
-      Uint32 num_filter_conjuncts = 0;
-      auto flatten_filter =
-          [&](auto& self, ConditionalExpression* ce) -> void {
-        if (ce->op == T_AND) {
-          self(self, ce->args.left);
-          self(self, ce->args.right);
-        } else {
-          require_prm(num_filter_conjuncts < 32,
-                      "Too many conditions in the WHERE clause of a"
-                      " SELECT-list subquery.");
-          filter_conjuncts[num_filter_conjuncts++] = ce;
-        }
-      };
-      flatten_filter(flatten_filter, inner_filter);
+      const BooleanTermCollection terms = collect_boolean_terms(
+          inner_filter, T_AND, filter_conjuncts, ARRAY_LEN(filter_conjuncts));
+      require_prm(terms.complete,
+                  "Too many conditions in the WHERE clause of a"
+                  " SELECT-list subquery.");
+      const Uint32 num_filter_conjuncts = terms.count;
 
       LexCString itbl = inner->root_table->alias;
       for (Uint32 fi = 0; fi < num_filter_conjuncts; fi++) {
@@ -11191,30 +11154,6 @@ RonSQLPreparer::collect_pk_equalities(
   }
 }
 
-// Phase 0a helper: AND-flatten a simplified WHERE tree into its
-// top-level conjuncts.  Sets *overflow instead of throwing so callers
-// can fall back to the whole-tree filter path, which never flattens.
-static void
-flatten_and_conjuncts(ConditionalExpression* ce,
-                      ConditionalExpression* out[],
-                      Uint32* num,
-                      bool* overflow)
-{
-  if (ce == NULL || *overflow) return;
-  if (ce->op == T_AND)
-  {
-    flatten_and_conjuncts(ce->args.left, out, num, overflow);
-    flatten_and_conjuncts(ce->args.right, out, num, overflow);
-    return;
-  }
-  if (*num >= MAX_WHERE_CONJUNCTS)
-  {
-    *overflow = true;
-    return;
-  }
-  out[(*num)++] = ce;
-}
-
 bool
 RonSQLPreparer::build_root_residual(
     struct ConditionalExpression* where_ce,
@@ -11224,12 +11163,13 @@ RonSQLPreparer::build_root_residual(
 {
   *residual_out = NULL;
   ConditionalExpression* conjuncts[MAX_WHERE_CONJUNCTS];
-  Uint32 num = 0;
-  bool overflow = false;
-  flatten_and_conjuncts(where_ce, conjuncts, &num, &overflow);
-  if (overflow) return false;
+  const BooleanTermCollection terms = collect_boolean_terms(
+      where_ce, T_AND, conjuncts, ARRAY_LEN(conjuncts));
+  // A partial collection cannot be used to remove consumed predicates.
+  // The caller falls back to filtering the original whole tree.
+  if (!terms.complete) return false;
   ConditionalExpression* residual = NULL;
-  for (Uint32 i = 0; i < num; i++)
+  for (Uint32 i = 0; i < terms.count; i++)
   {
     bool used = false;
     for (int k = 0; k < nkeys; k++)
@@ -11237,19 +11177,7 @@ RonSQLPreparer::build_root_residual(
       if (consumed[k] == conjuncts[i]) { used = true; break; }
     }
     if (used) continue;
-    if (residual == NULL)
-    {
-      residual = conjuncts[i];
-    }
-    else
-    {
-      ConditionalExpression* combined =
-          m_amalloc->alloc_exc<ConditionalExpression>(1);
-      combined->op = T_AND;
-      combined->args.left = residual;
-      combined->args.right = conjuncts[i];
-      residual = combined;
-    }
+    residual = append_condition(m_amalloc, T_AND, residual, conjuncts[i]);
   }
   *residual_out = residual;
   return true;
@@ -20021,22 +19949,7 @@ Uint32
 RonSQLPreparer::Context::column_name_to_idx(LexCString col_name)
 {
   note_column_ref(LexCString{NULL, 0}, col_name);
-  DynamicArray<LexCString>& columns = m_parser.m_columns;
-  DynamicArray<LexCString>& qualifiers = m_parser.m_column_qualifiers;
-  DynamicArray<bool>& is_inner = m_parser.m_col_is_inner;
-  bool in_subquery = (m_subquery_depth > 0);
-  Uint32 sz = columns.size();
-  for (Uint32 i=0; i < sz; i++)
-  {
-    if (columns[i] == col_name && qualifiers[i].c_str() == NULL)
-    {
-      return i;
-    }
-  }
-  columns.push(col_name);
-  qualifiers.push(LexCString{NULL, 0});
-  is_inner.push(in_subquery);
-  return sz;
+  return intern_column(LexCString{NULL, 0}, col_name, /*qualified*/false);
 }
 
 Uint32
@@ -20044,6 +19957,13 @@ RonSQLPreparer::Context::qualified_column_name_to_idx(
     LexCString table_qualifier, LexCString col_name)
 {
   note_column_ref(table_qualifier, col_name);
+  return intern_column(table_qualifier, col_name, /*qualified*/true);
+}
+
+Uint32
+RonSQLPreparer::Context::intern_column(
+    LexCString table_qualifier, LexCString col_name, bool qualified)
+{
   DynamicArray<LexCString>& columns = m_parser.m_columns;
   DynamicArray<LexCString>& qualifiers = m_parser.m_column_qualifiers;
   DynamicArray<bool>& is_inner = m_parser.m_col_is_inner;
@@ -20051,7 +19971,9 @@ RonSQLPreparer::Context::qualified_column_name_to_idx(
   Uint32 sz = columns.size();
   for (Uint32 i = 0; i < sz; i++)
   {
-    if (columns[i] == col_name && qualifiers[i] == table_qualifier)
+    if (columns[i] == col_name &&
+        (qualified ? qualifiers[i] == table_qualifier
+                   : qualifiers[i].c_str() == NULL))
     {
       return i;
     }
@@ -20195,17 +20117,7 @@ RonSQLPreparer::Context::get_agg()
   {
     if (m_inner_agg == NULL)
     {
-      RonSQLPreparer* _this = &m_parser;
-      std::function<const char*(uint)> column_idx_to_name =
-        [_this](Uint32 idx) -> const char*
-        {
-          return _this->column_idx_to_name(idx).c_str();
-        };
-      m_inner_agg = new (get_allocator()->alloc_exc<AggregationAPICompiler>(1))
-        AggregationAPICompiler(column_idx_to_name,
-                               *m_parser.m_conf.out_stream,
-                               *m_parser.m_conf.err_stream,
-                               m_parser.m_amalloc);
+      m_inner_agg = m_parser.make_aggregation_compiler();
     }
     return m_inner_agg;
   }
@@ -20213,24 +20125,7 @@ RonSQLPreparer::Context::get_agg()
   {
     return m_parser.m_main_scope.agg;
   }
-  RonSQLPreparer* _this = &m_parser;
-  std::function<const char*(uint)> column_idx_to_name =
-    [_this](Uint32 idx) -> const char*
-    {
-      return _this->column_idx_to_name(idx).c_str();
-    };
-
-  /*
-   * The aggregator uses the same arena allocator as the RonSQLPreparer object
-   * because they are both working in the prepare phase. After loading and
-   * compilation, a new object will be crafted that holds the information
-   * necessary for execution and post-processing.
-   */
-  m_parser.m_main_scope.agg = new (get_allocator()->alloc_exc<AggregationAPICompiler>(1))
-    AggregationAPICompiler(column_idx_to_name,
-                           *m_parser.m_conf.out_stream,
-                           *m_parser.m_conf.err_stream,
-                           m_parser.m_amalloc);
+  m_parser.m_main_scope.agg = m_parser.make_aggregation_compiler();
   return m_parser.m_main_scope.agg;
 }
 
@@ -20295,6 +20190,31 @@ SelectStatement*
 RonSQLPreparer::Context::make_select_statement()
 {
   return new (get_allocator()->alloc_exc<SelectStatement>(1)) SelectStatement();
+}
+
+TableRef*
+RonSQLPreparer::Context::make_table_ref(
+    LexCString database, LexCString name, LexCString alias)
+{
+  TableRef* table = new (get_allocator()->alloc_exc<TableRef>(1)) TableRef();
+  table->database = database;
+  table->name = name;
+  table->alias = alias;
+  return table;
+}
+
+JoinClause*
+RonSQLPreparer::Context::make_join_clause(
+    JoinClause::JoinType join_type, const TableRef& table,
+    JoinCondition* conditions)
+{
+  JoinClause* join =
+      new (get_allocator()->alloc_exc<JoinClause>(1)) JoinClause();
+  join->join_type = join_type;
+  join->table = table;
+  join->conditions = conditions;
+  join->next = NULL;
+  return join;
 }
 
 // Phase I.5 v2b — n-ary GREATEST / LEAST.

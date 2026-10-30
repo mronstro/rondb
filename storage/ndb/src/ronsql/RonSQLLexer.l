@@ -116,6 +116,26 @@
 } while (0)
 #define context yyextra
 
+// word must be an uppercase, NUL-terminated string.
+static bool is_normalized_mysql_keyword(const char* word)
+{
+  // Signed indices allow high = mid - 1 to reach -1.
+  Int32 low = 0;
+  Int32 high = (Int32)number_of_keywords_defined_in_mysql - 1;
+  while (low <= high)
+  {
+    Int32 mid = (low + high) / 2;
+    int cmp = strcmp(word, keywords_defined_in_mysql[mid]);
+    if (cmp < 0)
+      high = mid - 1;
+    else if (cmp > 0)
+      low = mid + 1;
+    else
+      return true;
+  }
+  return false;
+}
+
 /*
  * RONSQL-46: whether an unquoted word is in keywords_defined_in_mysql. The
  * [a-z_]{1,18} rule checks the shorter keywords itself; this is for the
@@ -139,20 +159,7 @@ static bool is_mysql_keyword(const char* text, size_t len)
     word[i] = c;
   }
   word[len] = char(0);
-  Int32 low = 0;
-  Int32 high = (Int32)number_of_keywords_defined_in_mysql - 1;
-  while (low <= high)
-  {
-    Int32 mid = (low + high) / 2;
-    int cmp = strcmp(word, keywords_defined_in_mysql[mid]);
-    if (cmp < 0)
-      high = mid - 1;
-    else if (cmp > 0)
-      low = mid + 1;
-    else
-      return true;
-  }
-  return false;
+  return is_normalized_mysql_keyword(word);
 }
 %}
 
@@ -401,24 +408,9 @@ SINGLE_QUOTED_STRING_CHARACTER_EXCEPT_APOSTROPHE_AND_BACKSLASH         [^\0\047\
    * keywords - both reserved and not, both implemented and not - as unquoted
    * identifiers.
    */
-  low = 0;
-  high = number_of_keywords_defined_in_mysql - 1;
-  while (low <= high)
+  if (is_normalized_mysql_keyword(cword))
   {
-    Uint32 mid = (low + high) / 2;
-    int cmp = strcmp(cword, keywords_defined_in_mysql[mid]);
-    if (cmp < 0)
-    {
-      high = mid - 1;
-    }
-    else if (cmp > 0)
-    {
-      low = mid + 1;
-    }
-    else
-    {
-      return_err(UNIMPLEMENTED_KEYWORD);
-    }
+    return_err(UNIMPLEMENTED_KEYWORD);
   }
   // cword is not a keyword, therefore it is an unquoted identifier.
   // todo: Decide whether to disallow unquoted identifiers altogether.

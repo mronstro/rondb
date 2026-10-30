@@ -1,0 +1,666 @@
+# RonSQL parser review and cleanup plan
+
+Review started: 2026-10-27
+Updated: 2026-10-30
+Original baseline: 7128c75dca405f5e0fff6be19ae2b584beb1566d
+Cleanup review baseline: 45a7568faed6fe58aca99170be3a50c03a4495c9
+
+## Scope and working agreement
+
+Review the lexer, grammar, AST, semantic analysis and preparation passes.
+Read executor interfaces where needed to understand frontend contracts.
+Data-node implementation changes are outside this review.
+
+Three parallel source investigations covered grammar and AST construction,
+condition traversal and collection, and preparation phases and registration.
+Open investigations below remain source-review findings. Completed items include
+the approved implementations and user-reported validation recorded below.
+
+Present one normal diff at a time and obtain explicit approval before editing.
+The user owns building and testing. Keep behavior corrections separate from
+mechanical cleanup, and preserve existing uncommitted work.
+
+Source references below are relative to storage/ndb/src/ronsql/. Numbered
+references describe the original baseline, not the current line positions.
+Function names identify the durable locations.
+
+## Progress
+
+| Items | Status | Commit |
+| --- | --- | --- |
+| I1, I2, I3 | Completed, tested by the user, committed and pushed | 09176e0a3ed |
+| I4 | OOM handling findings recorded; fixes and validation pending | - |
+| C1 | Completed for statement construction and synthetic table defaults | 45a7568faed |
+| C3 | Completed for index names, ON conditions and arithmetic arguments | 45a7568faed |
+| C4 | Completed for the shared child helper and three read-only walkers | 45a7568faed |
+| C2 | C2a-C2e approved and applied; validation is user-owned | This cleanup commit |
+| C5 | C5a-C5d approved and applied; validation is user-owned | This cleanup commit |
+| C6 | C6a-C6b approved and applied; validation is user-owned | This cleanup commit |
+| C7 | C7a-C7d approved and applied; validation is user-owned | This cleanup commit |
+| C8 | C8a-C8c approved and applied; validation is user-owned | This cleanup commit |
+| C9 | C9a approved and applied; validation is user-owned | This cleanup commit |
+| Feature candidates | Pending individual evaluation and approval | - |
+| Training module | Pending; original draft has not been saved | - |
+
+Both commits are pushed to origin/RONDB-1124-fixes:
+
+- 09176e0a3ed: RONDB-1124: Fix RonSQL subquery parsing and COUNT semantics.
+
+- 45a7568faed: RONDB-1124: Simplify RonSQL AST construction and traversal.
+
+The user reported all tests passed before each commit. The assistant did not
+build or run tests; git diff --check passed for both changesets. No new test
+cases were added for C1/C3/C4. Further cleanup described below remains open.
+
+### Cleanup batch: C2 and C5-C9
+
+The user selected these six items on 2026-10-29. Independent investigations
+ran in parallel, with each source patch reviewed and approved before application.
+C2a-C2e, C5a-C5d, C6a-C6b, C7a-C7d, C8a-C8c and C9a are approved and applied
+and are included in the cleanup commit containing this plan. The user requested
+commit and push on 2026-10-30. No test result was reported for this batch in the
+conversation. The assistant did not build, test or regenerate lexer/parser
+files; git diff --check passed.
+
+| Track | First patch and sequence | Dependencies |
+| --- | --- | --- |
+| C2 | Shared inner SELECT body, then small grammar/construction helpers | C1 complete; preserve the public column-registration methods for C8 |
+| C5 | Shared Boolean collector, then checked 32-term and fallback callers, then reconstruction | Independent of grammar and compiler factories |
+| C6 then C7 | Compiler factory and aggregate registration, then preparation-phase extraction | Keep aggregate and output-phase changes in the same sequential track |
+| C8 | Shared column interning, then ORDER BY name matching and relation-local lookup | Independent of C2 while its existing public interfaces remain stable |
+| C9 | Shared normalized MySQL-keyword lookup | Independent lexer change |
+
+C7's parse-error extraction is independent of C6, but remains in the same
+track for review. Output-registration extraction follows the C6 helpers.
+Worker capacity determined when independent drafts started; it did not create
+a source-code dependency between them. All patches in this selected cleanup
+sequence are included in this cleanup commit; validation remains user-owned.
+I4 OOM corrections, deferred review items and the training module remain
+separately planned.
+
+## Correctness investigations
+
+### I1 Preserve residual predicates during subquery decorrelation
+
+Status: completed in 09176e0a3ed.
+
+The original append_non_correlation_where() removed SQL text by matching
+correlation column names and an equals sign. With identical column names it
+could also remove a residual predicate. It recognized only a literal space
+after WHERE.
+
+Implemented:
+
+- Retain source spans for original WHERE conjuncts and inner SELECT lists.
+
+- Build residual SQL from the AST-selected non-correlation conjuncts.
+
+- Share source-span validation and identifier quoting for EXISTS and scalar
+  decorrelation, preserving quoted names and original expression text.
+
+Regression coverage in mysql-test/suite/ronsql/t/ronsql_subquery.test includes
+same-name residual predicates, EXISTS/NOT EXISTS and scalar subqueries,
+parenthesized conditions, SQL whitespace, strings containing SQL keywords,
+and escaped identifiers. Corresponding normal and JIT results were updated.
+
+The spans are for original parser nodes at the documented rewrite phase.
+conjunct_sql is not a general source location valid on every synthetic node;
+future rewrites must preserve that distinction.
+
+### I2 Check silent truncation of SELECT-list subquery predicates
+
+Status: completed in 09176e0a3ed.
+
+analyze_select_subqueries() previously stopped collecting after 32 WHERE
+conjuncts and could execute a query with later predicates omitted. Both
+SELECT-list subquery collection paths now reject overflow explicitly.
+The limit remains 32 conjuncts, including the correlation predicate.
+
+Regression coverage in ronsql_subquery_agg_ext.test verifies:
+
+- 32 conjuncts retain the final restrictive filter.
+
+- 33 conjuncts reject instead of dropping the final filter.
+
+- A correlation at position 33 in a nested AND tree also rejects.
+
+- Rejections return HTTP 400 with the expected limit diagnostic.
+
+Supporting more than 32 conjuncts is a separate change. Sharing collection
+mechanics with other Boolean collectors remains C5 work.
+
+### I3 Check COUNT expression classification in SELECT-list subqueries
+
+Status: completed in 09176e0a3ed, including an executor correction exposed by
+the new regression cases.
+
+The parser now recognizes COUNT-star semantics only for COUNT arguments
+represented as integer constants by AggregationAPICompiler. Direct column
+loads retain COUNT(column) semantics. Other expression shapes are rejected;
+a non-column expression is no longer assumed to mean COUNT(*).
+
+Regression coverage in ronsql_subquery_agg.test compares COUNT(*), COUNT(0),
+COUNT(-1), folded COUNT(1 + 2), and COUNT(nullable_column), including unmatched
+inner rows. COUNT(column + 1), COUNT(CASE ...), and COUNT(1 / 2) are rejected.
+
+The first test run exposed COUNT(*) returning 1 for an unmatched parent.
+execute_join() now distinguishes real inner rows from synthetic NULL rows
+before updating COUNT. The associated instruction-skip accounting was adjusted,
+and COUNT-star processing avoids looking up its placeholder aggregate column.
+A merged filtered/unfiltered COUNT query covers these paths together.
+
+The user reported all tests passed after this correction. General aggregate
+expression support remains a separate feature, not part of this fix.
+
+### I4 Make frontend out-of-memory handling consistent
+
+Status: added on 2026-10-29 following review of the proposed C2d factory.
+The findings below were checked against the current source. No OOM fixes or
+tests have been applied. Review each correction as a separate source patch.
+
+The C2d placement construction itself uses the existing protected path:
+ArenaMalloc::alloc_exc() returns valid storage or throws std::bad_alloc before
+the constructor runs. The grammar's initptr macro uses the same allocator.
+Both RonSQLPreparer constructors catch exceptions from parsing/preparation and
+route them through handle_ronsql_exception(), which catches std::bad_alloc,
+cleans up the transaction and throws a RESOURCE-class RonSQLPermanentError
+with "Out of memory while processing the query." The REST boundary maps that
+class to HTTP 503. This does not protect unchecked nonthrowing allocations:
+a null-pointer fault is not a C++ exception caught by catch (...).
+
+#### I4a Check the DECIMAL constant buffer allocation
+
+Finding: RonSQLPreparer::encode_constant() allocates its DECIMAL output buffer
+with alloc_bytes(bin_len, 4) and does not check for NULL. The integer-literal
+branch passes that pointer to decimal2bin(), which writes through it. This is
+a potential process crash when allocation fails, in frontend preparation.
+
+Proposed correction: check the allocation and throw std::bad_alloc before
+either integer or floating-literal conversion. Preserve the buffer size and
+four-byte alignment, and use the existing RESOURCE error handler.
+
+#### I4b Distinguish Bison allocation failure from parser depth exhaustion
+
+Finding: RonSQLParser.y defines YYMALLOC using nonthrowing alloc_bytes(). Bison
+returns status 2 both when stack allocation fails and when YYMAXDEPTH is
+exceeded. The handling now in RonSQLPreparer::throw_parse_error() treats every
+status 2 as a depth limit and incorrectly comments that its allocator cannot
+return NULL. C7a extracted that handling without changing its behavior.
+
+Proposed correction: make the Bison allocation wrapper throw std::bad_alloc
+on allocation failure while preserving its alignment and arena ownership.
+Verify the generated parser's status-2 paths, retain the depth-limit diagnostic
+for actual depth exhaustion, and correct the explanatory comment. Keep this
+behavior change separate from C7's mechanical parse-error extraction; whichever
+lands second must be rebased against the first.
+
+#### I4c Align lexer allocation failures and audit remaining raw allocations
+
+Finding: RonSQLLexer.l's rsqlp_alloc() checks alloc_bytes() but throws
+RonSQLRetryableError on failure, unlike the AST's RESOURCE-class failure.
+
+Proposed correction: throw std::bad_alloc here as well so the common handler
+reports a nonretryable RESOURCE failure consistently. Check both normal
+preparation and ParseOnly callers, including their cleanup and retry behavior.
+
+Audit remaining alloc_bytes(), alloc(), calloc() and realloc() uses in the
+lexer, parser, AST helpers and preparation code for checks before use. Inspect
+the lexer's unconditional abort() in rsqlp_realloc() separately: its comment
+says reallocation is unnecessary, but reachability must be established before
+classifying it as an OOM crash. Keep data-node implementation outside scope.
+
+Proposed validation, to be reviewed separately and run by the user:
+
+- Use deterministic allocation-failure injection, not machine-wide exhaustion.
+- Fail AST allocation in normal and ParseOnly parsing; expect the RESOURCE
+  diagnostic and safe cleanup.
+- Fail the DECIMAL buffer allocation for integer and floating literals; expect
+  the same error without entering conversion with a NULL destination.
+- Fail Bison stack growth allocation; expect an OOM error. Separately exceed
+  the parser depth limit with successful allocations; retain the depth error.
+- Fail lexer allocation; verify RESOURCE classification and no automatic
+  retry at the request boundary, including the HTTP 503 mapping.
+- Retain successful-query coverage for each affected path and verify arena
+  and transaction cleanup after an injected failure.
+
+## Cleanup investigations and proposed boundaries
+
+### C1 Initialize AST nodes through typed factories
+
+Status: completed for the agreed scope in 45a7568faed.
+
+Context::make_select_statement() placement-constructs SelectStatement() in
+the existing arena. All four fresh statement sites use it: CTE and subquery
+grammar actions, plus EXISTS and scalar decorrelation. Existing explicit
+grammar assignments and intentional statement copy construction are retained.
+
+This initializes fields previously omitted by raw arena allocation, including
+cte_list and sentinel_agg_slot, and preserves nonzero defaults such as
+limit = -1 and sentinel_agg_slot = -1.
+
+synthesize_from_for_scalar_ctes() now value-initializes its synthetic TableRef
+and JoinClause, including the embedded table's hint_kind and hint_indexes.
+The allocation helper does not record authorization references or validate ON
+conditions.
+
+General table/join construction helpers are now applied locally in C2d/C2e.
+Existing ronsql_cte_scalar Test 8 exercises the synthesized-FROM shape.
+
+### C2 Share inner SELECT construction and grammar components
+
+Status: implementation complete and included in this cleanup commit.
+C2a-C2e are approved and applied. CTE and subquery
+wrappers now share inner_select_body while retaining their scope transitions
+and compiler ownership. Source spans and required inner FROM are preserved.
+ORDER BY now shares sort_direction_opt, preserving default ascending order and
+explicit ASC/DESC. A syntax-only column_ref now serves plain and AVRO outputs,
+arithmetic/condition expressions, GROUP BY and ORDER BY. Enclosing actions still
+perform column registration at their original points; ON remains separate.
+The four table_ref_base actions now share Context::make_table_ref(), which
+value-initializes TableRef in the arena and sets its database, name and alias.
+Index hints and authorization recording remain in the enclosing table_ref
+action. Allocation retains the existing alloc_exc() exception handling.
+The four join_clause actions now share Context::make_join_clause(), which
+value-initializes JoinClause and copies the complete TableRef, including hints.
+Explicit joins retain ON validation before construction; comma joins retain
+NULL conditions. Each new node starts with next = NULL.
+git diff --check passed and the source matches the approved C2a-C2e patches.
+Bison generation, building and tests remain user-owned and have not been run
+by the assistant. C1 is complete.
+
+Keep enter_subquery()/leave_subquery() in their wrappers in further refactoring,
+preserving CTE visibility, compiler ownership and SQL source spans.
+
+Preserved boundaries for validation and future changes:
+
+- Preserve plain-column and AVRO output naming.
+
+- Keep ON references separate: they record access without entering the same
+  column registry as ordinary expression references.
+
+- Keep FROM mandatory inside CTEs/subqueries and optional only in the existing
+  top-level scalar-CTE form. Do not widen accepted syntax during cleanup.
+
+### C3 Make list construction consistent
+
+Status: completed for the three agreed list families in 45a7568faed.
+
+RonSQLListBuilder stores head/tail pointers and provides constant-time append.
+Separate approved patches converted index-name lists, ON-condition lists and
+arithmetic GREATEST/LEAST argument lists. All consumers unwrap the list head.
+
+Arena ownership, source order, validation and authorization recording remain
+unchanged. The builder has no constructor or default member initializers;
+std::is_trivial checks protect Bison's existing semantic-value copying.
+
+Deferred:
+
+- GROUP BY and ORDER BY already construct lists in linear time. Their right
+  recursion can be reviewed separately for parser stack usage.
+
+- Preserve source order, column-registration order, empty-list rules and sort
+  defaults in any such change.
+
+- Leave the reversed T_COMMA representation used by IN lists unchanged until
+  its lowering is reviewed.
+
+### C4 Centralize conditional-expression child access
+
+Status: completed for the helper and three agreed walkers in 45a7568faed.
+
+A local, read-only condition_children() returns at most two children in the
+current SELECT scope. Explicit token cases select the active union members.
+Unknown operators raise an INTERNAL error rather than guessing a layout.
+
+The following walkers now share the helper:
+
+- mark_scope_column_refs_ce().
+
+- ce_has_subquery(), retaining immediate detection of all four subquery forms.
+
+- classify_ce_table_resolved(), retaining identifier resolution and table-result
+  combination rules and accepting a const expression pointer.
+
+Layout and scope contracts:
+
+- Binary operators expose args.left/right; unary minus exposes its right child.
+
+- NOT and ! expose only args.left. Synthetic NOT nodes can leave the right
+  pointer uninitialized, so the helper never reads it.
+
+- IS, INTERVAL and EXTRACT expose their dedicated arg field.
+
+- GREATEST/LEAST expose their T_COMMA list; list nodes expose item and remainder.
+
+- IN subqueries expose only the outer expression; correlated scalar nodes
+  expose the outer comparison and key expressions.
+
+- EXISTS/scalar bodies are separate SelectStatements. Literals, identifiers
+  and aggregate-register nodes have no condition children.
+
+- A childless node is not necessarily a constant.
+
+Further migrations are separate proposals. Keep check_no_nested_exists(),
+polarity-aware result substitution, simplify_ce(), pairwise comparison and
+aggregate-expression traversal specialized until their contracts are reviewed.
+HAVING identifiers change from column indices to aggregate registers after
+resolution; preserve the existing collection phase. Add mutable traversal only
+for a concrete later need.
+
+### C5 Share checked Boolean collection and reconstruction
+
+Status: agreed C5a-C5d implementation complete and included in this cleanup
+commit. All eight throwing AND callers and the single OR caller now
+use the shared collector through their existing wrappers. Their 64-term limits,
+messages, source order and original leaf pointers are preserved. git diff
+--check passed and the source matches the approved patches; building and tests
+remain user-owned and have not been run by the assistant. Deferred collector
+audits below remain open.
+
+The original review found these different contracts:
+
+- AND/OR collectors at RonSQLPreparer.cpp:709 and :737: 64 terms, throw.
+
+- Residual collector at :11348: 64 terms, report overflow for optimization
+  fallback to the original whole-tree filter.
+
+- SELECT-subquery collectors at :8205 and :8342: 32 terms; I2 has now made
+  overflow rejection consistent.
+
+- Main scan planning at :4671: dynamic collection.
+
+- CTE index planning at :5826: limits pending stack entries, not term count.
+
+Implemented collect_boolean_terms(root, connective, output, capacity), returning
+complete/overflow and count. It flattens only the requested AND or OR connective,
+preserves left-to-right order and original leaf pointers, and returns count zero
+on overflow; any partial output must be discarded. Caller-specific rejection
+wrappers retain their limits and error text.
+
+C5b replaced the two checked 32-term SELECT-subquery collectors with the shared
+helper. Each capacity comes from its existing 32-element array. Both callers
+reject overflow before consuming output, retaining the exact I2 diagnostic and
+including correlation in the first 32-term limit.
+
+C5c removed the duplicate nonthrowing collector. build_root_residual() now uses
+the shared collector with its existing 64-element array and returns false on
+overflow before consuming any partial output; residual_out remains NULL.
+Both callers retain the complete WHERE; the CTE caller's existing single-group
+lookup alternative also keeps the complete WHERE as its residual. Downstream
+filter limits still apply.
+
+C5d added append_condition() and migrated four AND reconstruction loops for
+child residuals, EXISTS decorrelation, scalar-subquery decorrelation and root
+residuals. A NULL pointer means no tree or term, not a SQL NULL node. Left
+association, original leaf pointers and allocation order are preserved;
+synthetic connective nodes retain the existing source-span contract.
+
+Further investigation: the 32-term OR validation prefix at :3533 retains the
+original expression, so predicate loss is not established there. Audit later
+validation before changing it. Review left-spine collectors at :4490, :17590
+and :18707 and CTE stack-overflow behavior as separate semantic questions.
+
+### C6 Share aggregate construction and registration
+
+Status: agreed C6a-C6b implementation complete and included in this cleanup
+commit. The source matches the approved patches and git diff --check
+passed. Building and tests remain user-owned and have not been run by the
+assistant. C7 output-phase extraction can now use the aggregate helpers.
+
+C6a extracted make_aggregation_compiler() from the four constructions originally
+at RonSQLPreparer.cpp:2778, :2935, :20338 and :20356. It returns a fresh compiler
+in the same arena, retaining the column callback and streams. Callers retain
+scope assignment, replacement and lazy caching.
+The compiler stores its callback by value, and the factory captures the same
+preparer pointer as the existing constructors. Each factory call creates a fresh
+compiler; it does not choose or update a scope's cached compiler.
+
+C6b added register_simple_aggregate() for the COUNT/MIN/MAX/SUM dispatch
+originally at :889, :1229 and :3224. The main and CTE callers retain their
+output indices, while unselected flattened-CTE expressions still register usage
+even though their returned index is discarded. Registration order, compiler
+ownership, existing guards and AVG cases remain unchanged in the callers.
+
+Additional follow-up candidate: EXPLAIN parse-tree rendering also repeats the
+COUNT/MIN/MAX/SUM dispatch. Review a separate migration after the helper exists;
+it is outside the three preparation paths in C6b.
+
+AVG needs an explicit representation:
+
+- Main query: Sum() followed by Count().
+
+- Materialized CTE: one Avg() index stored in both output fields.
+
+- Flattened CTE expressions: the main-query representation.
+
+Separate main and CTE output-registration wrappers remain useful: main
+SUBQUERY_AGG is deferred, whereas the CTE path rejects it. Preserve the existing
+NULL-compiler guard and aggregate-limit accounting.
+
+### C7 Extract preparation phases without reordering them
+
+Status: C7a-C7d approved and applied locally. Both source files
+match the approved patches and git diff --check passed. Building and tests
+remain user-owned and have not been run by the assistant. Included in this
+cleanup commit.
+
+C7a extracted throw_parse_error(parse_result), moving the error rendering
+originally at RonSQLPreparer.cpp:1267 unchanged. All four diagnostic blocks in
+the successful parse path keep their local err bindings; the function-wide
+binding moved into the new error helper. Classifications, messages, parser
+depth handling, empty input, UTF-8 caret alignment and source locations are
+preserved. The private declaration is marked [[noreturn]].
+The Bison OOM diagnostic correction is tracked separately in I4b; do not fold
+that behavior change into this mechanical extraction.
+
+C7b extracted register_main_outputs(), moving the main-output loop and compiler
+checks intact and returning the combined aggregate/HAVING/subquery flag.
+Registration remains before promote_left_joins(), and m_is_aggregate_query is
+assigned afterward. Promotion changes only join types, so the captured flags
+remain valid. AVG registration order and deferred subquery handling are retained.
+
+C7c extracted register_cte_outputs(), moving the existing loop intact apart
+from indentation. Its call remains after projection-only preparation.
+The NULL-compiler skip, CTE/output ordering, returned indices, single-slot CTE
+AVG representation and subquery rejection remain unchanged.
+
+C7d extracted prepare_projection_only_query(). It includes a root rewrite,
+so naming the entire block validate_* would hide its mutation. Its call remains
+under the existing nonaggregate guard, after rewrite_lastn_cte_bodies() and
+before register_cte_outputs().
+The complete 247-line body moved with only indentation changes. It uses
+members, class constants and its own locals; all eleven
+break statements remain in their original loops. The first executable statement
+remains maybe_rewrite_partial_key_cte_root(), and the four local error-stream
+bindings and all diagnostics move intact. ParseOnly protections are preserved.
+
+Preserve successful-parse order:
+
+1. Record original references while Bison runs, then disable recording.
+2. Capture WITH names and check qualified/subquery CTE references.
+3. Flatten single-group CTEs and route last-N aggregation.
+4. Register main aggregates and check compiler state.
+5. Promote LEFT joins and determine aggregate-query status.
+6. Detect single-row CTEs, collapse collect CTEs, rewrite other last-N bodies.
+7. Rewrite/validate projection-only shapes.
+8. Register CTE aggregates.
+
+Keep later alias resolution, CTE/subquery analysis, schema loading and compilation
+in their existing constructor phases.
+
+ParseOnly uses the same parse() before authorization and must remain schema
+independent. rewrite_lastn_cte_bodies() explicitly skips ParseOnly/disconnected
+operation. Moving its schema-dependent work is a separate design change.
+
+### C8 Share name lookup while preserving scope policies
+
+Status: C8a-C8c approved and applied locally. Both source files match the approved
+patches and git diff --check passed. Builds and tests remain user-owned and have
+not been run by the assistant. Included in this cleanup commit. Public Context interfaces
+remain stable, preserving the applied C2 grammar changes.
+
+Unify column interning behind the existing Context methods
+(RonSQLPreparer.cpp:20161). Record every syntactic occurrence for authorization,
+including references that reuse a registry entry. Preserve insertion order and
+the current qualifier/name key and inner-reference flags.
+
+C8a introduced a private intern_column() helper behind both existing public
+registration methods. Each wrapper still records every reference before lookup.
+Bare lookup retains its NULL-qualifier-pointer check; qualified lookup retains
+LexCString equality, including its empty-string semantics. First-match behavior,
+first-seen inner flags and insertion order (column, qualifier, inner flag) remain
+unchanged. This patch does not change scope policy or allocation failure handling.
+
+Share ORDER BY output-name matching (:1467 and :7159), but preserve:
+
+- First matching output for ORDER BY.
+
+- Main-query alias bookkeeping and its shared-column exception.
+
+- No global alias marking for CTE-body ORDER BY.
+
+- HAVING's different, last-matching-output policy.
+
+C8b introduced find_orderby_output(), returning the first matching output and
+its zero-based position. Both callers keep their TABLE_COLUMN and unqualified
+name guards. The helper retains the existing predicate and evaluation order;
+main-query alias marking and its shared-column exception remain in that caller,
+and the CTE caller still does not mark global aliases. HAVING's separate
+find_output_alias() remains unchanged.
+
+Extract relation-local stored/CTE column lookup from :7866 and :7920.
+Leave visibility, ambiguity and error choice in callers. Do not initially merge
+single-table resolution with the scoped resolver: their alias precedence differs.
+
+C8c introduced lookup_relation_column(), returning a default-initialized resolved
+descriptor for one stored table or CTE. CTE matching retains the exact predicate
+and first matching output, including empty-name behavior. Qualified resolution
+still uses the first matching relation alias; unqualified resolution still scans
+all visible operations and counts one match per relation before diagnosing
+ambiguity. Missing-name diagnostics, scope filtering and alias precedence remain
+in the caller; the single-table resolver remains unchanged.
+
+Longer term: investigate per-reference scope identities and a parse-scope stack.
+The current single m_inner_agg pointer is a barrier to general nesting.
+Retain QueryScope and the pre-rewrite authorization inventory as foundations.
+
+### C9 Deduplicate lexer lookup and improve current contracts
+
+Status: C9a approved and applied locally. The lexer source matches the approved
+patch and git diff --check passed. Generated files, builds and tests remain
+user-owned and have not been run by the assistant. Included in this cleanup commit.
+
+Extract the normalized MySQL-keyword binary search shared by RonSQLLexer.l:127
+and :404. Keep normalization at callers and leave the implemented-keyword table
+lookup unchanged. Preserve longest match, case handling, quoted identifiers,
+digit-containing keywords, length limits and error locations.
+
+C9a introduced is_normalized_mysql_keyword(), requiring an uppercase,
+NUL-terminated string. It reuses the existing signed binary search from
+is_mysql_keyword(); the short-word rule calls it after the implemented-keyword
+search. The short-word search previously used an unsigned midpoint with signed
+bounds; the shared helper uses signed indices throughout, allowing high = -1
+directly. Both normalization paths and their char(0) terminators stay unchanged,
+as do Flex patterns, rule order, identifier checks and error reporting. No
+generated files, builds or tests are part of the assistant's changes.
+
+Replace historical phase commentary with concise current invariants when
+touching those sections. Consider retaining source locations in semantic nodes
+after factory construction is centralized.
+
+## Proposed implementation order and user validation
+
+Completed sequence:
+
+1. Investigate and fix I1-I3 in separate approved patches.
+2. Add regression cases in parallel, then review and apply them separately.
+3. Fix the unmatched-row COUNT(*) issue exposed by those tests.
+4. Commit and push 09176e0a3ed after the user reported all tests passed.
+5. Investigate C1/C3/C4 in parallel; review and apply one patch at a time.
+6. Commit and push 45a7568faed after the user reported all tests passed.
+7. Investigate C2 and C5-C9 in parallel and apply the selected cleanup patches
+   one at a time after approval; include them and this plan in the cleanup
+   commit at the user's request. Validation remains user-owned.
+
+The user has selected C2 and C5-C9 for parallel work. Implementation proceeds
+one approved patch at a time within these boundaries:
+
+- C2: factor inner SELECT construction, then column/sort and table/join actions.
+
+- C5: share bounded collectors while retaining each limit and overflow policy.
+
+- C6: extract the compiler factory, then simple registration and explicit AVG.
+
+- C7: extract parse-error reporting before broader preparation orchestration.
+
+- C8: share name lookup only after scope and alias invariants are explicit.
+
+- C9: share keyword lookup and improve current contracts.
+
+- I4: review the DECIMAL allocation check first, then Bison OOM classification,
+  then lexer consistency and the remaining raw-allocation audit. Keep these
+  corrections separate from cleanup patches and coordinate I4b with C7.
+
+- Review deferred C3/C4 work separately; avoid treating it as already applied.
+
+- Recover and refresh the training-module draft as a separate documentation
+  change.
+
+Validation for future patches should cover the relevant existing suites and
+contracts below; this is proposed coverage, not a claim that new cases exist:
+
+- Parsing, keywords, ordering, CTEs, CASE, subqueries and NULL handling.
+
+- 31/32/33 and 63/64/65 terms; balanced, left/right-associated trees.
+
+- Correlation and restrictive predicates at different list positions.
+
+- Original-filter fallback, leaf pointer identity and scope isolation.
+
+- Main/CTE/flattened AVG register layouts, NULLs and empty inputs.
+
+- Output names, EXPLAIN, diagnostics and authorization inventories.
+
+- Bison generation with the repository's warning-as-error configuration.
+
+Dedicated ParseOnly inventory coverage was not established during the review.
+Check that coverage before relying on execution tests for authorization safety.
+The user continues to own all building and testing.
+
+## Feature candidates after cleanup
+
+Status: pending evaluation and separate approval. No feature candidate below
+was implemented by the I1-I3 or C1/C3/C4 patches.
+
+Small frontend candidates: explicit INNER JOIN, optional AS, unary plus,
+ordinary SQL comments and broader floating-literal spellings.
+ORDER BY ordinals can reuse OUTPUT_REF with range validation.
+Ordinary aggregate aliases in HAVING need explicit register and AVG handling.
+
+NOT LIKE and BETWEEN need lowering, precedence and NULL-semantics review.
+Do not classify general NOT IN subqueries as a syntax-only addition.
+
+Before changing unary syntax, investigate the missing unary-minus precedence
+override in RonSQLParser.y:490 and :693. This is a grammar finding, not an
+established executable wrong-result case.
+
+General SELECT expressions, richer CASE, nested subqueries, DISTINCT, UNION,
+window functions and OFFSET require broader semantic/execution design.
+Long-term direction: syntax AST, scoped resolution, validation, explicit
+lowering, compilation. Avoid undertaking that redesign as one cleanup patch.
+
+## Training module deliverable
+
+Target: /Users/mikael/github/hops_slideware/2026-10/ronsql_parser_training/index.html
+
+Status: pending. A 24-slide HTML draft was prepared during the original review
+for the repository's existing engine and RonDB theme. It has not been written
+to disk, rendered or published.
+
+Recover and refresh that draft against the current parser before proposing it
+as a separate patch. Cover syntax, expression restrictions, joins, CTE families,
+subqueries, grouping/order/limits, hints, ASTs, scopes, rewrites and executor
+interfaces, including the completed corrections and helper extractions.
+
+Distinguish grammar acceptance from semantic and execution support.
+Pin examples and source references to the commit used for the refreshed module.
