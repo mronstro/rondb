@@ -84,6 +84,7 @@ bool printFSOPENREQ(FILE *output, const Uint32 *theData, Uint32 len,
       FsOpenReq::OM_ENCRYPT_KEY)
     fprintf(output, ", with key");
   if (flags & FsOpenReq::OM_READ_FORWARD) fprintf(output, ", read forward");
+  if (flags & FsOpenReq::OM_MAP_SYNC) fprintf(output, ", map sync");
 
   fprintf(output, "\n");
   return true;

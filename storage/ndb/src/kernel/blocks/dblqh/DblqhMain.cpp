@@ -91,6 +91,7 @@
 #include <signaldata/BackupImpl.hpp>
 #include <signaldata/DbinfoScan.hpp>
 #include <signaldata/FireTrigOrd.hpp>
+#include <signaldata/FsConf.hpp>
 #include <signaldata/FsReadWriteReq.hpp>
 #include <signaldata/FsRef.hpp>
 #include <signaldata/IsolateOrd.hpp>
@@ -1723,7 +1724,8 @@ void Dblqh::execCONTINUEB(Signal *signal) {
         // Remove ZDELAY_FS_OPEN from compacted theData[0] and
         // restore logFilePtr.i as it was in the original FSOPENCONF signal
         signal->theData[0] = (Uint16)compact;
-        sendSignalWithDelay(cownref, GSN_FSOPENCONF, signal, 10, 2);
+        sendSignalWithDelay(cownref, GSN_FSOPENCONF, signal, 10,
+                            signal->getLength());
         return;
       }
 #endif
@@ -34373,6 +34375,7 @@ void Dblqh::execFSCLOSECONF(Signal *signal) {
    */
   lock_log_part(logPartPtr.p);
   logFilePtr.p->fileRef = RNIL;
+  logFilePtr.p->m_pmem_base = nullptr;
 
   if (DEBUG_REDO_EXEC || DEBUG_REDO_REC) {
     g_eventLogger->info("(%u)part: %u file: %u CLOSE CONF", instance(),
@@ -34476,7 +34479,8 @@ void Dblqh::execFSOPENCONF(Signal *signal) {
      */
     Uint32 compact = signal->theData[0];
     signal->theData[0] = compact | (Uint32)ZDELAY_FS_OPEN << 16;
-    sendSignal(cownref, GSN_CONTINUEB, signal, 2, JBB);
+    /* All words: in PMEM mode words 5 and 6 hold the mapping */
+    sendSignal(cownref, GSN_CONTINUEB, signal, signal->getLength(), JBB);
     return;
   }
 #endif
@@ -34598,6 +34602,20 @@ void Dblqh::execFSOPENREF(Signal *signal) {
                          "Invalid file size for redo logfile, "
                          " size only changable with --initial");
     progError(__LINE__, NDBD_EXIT_INVALID_CONFIG, buf);
+    return;
+  }
+  if (err == FsRef::fsErrNotDax) {
+    /* RONDB-1150: the node log names the file (NDBFS) */
+    progError(__LINE__, NDBD_EXIT_INVALID_CONFIG,
+              "RedoLogMode=pmem: a REDO log file cannot be mapped with "
+              "MAP_SYNC, FileSystemPath is not on a DAX file system "
+              "(__RedoLogPmemTestMode=nodax runs without persistent memory)");
+    return;
+  }
+  if (err == FsRef::fsErrPmemMapFailed) {
+    progError(__LINE__, NDBD_EXIT_INVALID_CONFIG,
+              "RedoLogMode=pmem: a REDO log file could not be mapped, see "
+              "the node log");
     return;
   }
 
@@ -34872,6 +34890,14 @@ void Dblqh::initFsopenconf(Signal *signal, LogFileRecordPtr &logFilePtr,
   logFilePtr.p->fileRef = signal->theData[1];
   logFilePtr.p->currentMbyte = 0;
   logFilePtr.p->filePosition = 0;
+  if (c_redo_pmem) {
+    /* RONDB-1150: NDBFS maps every REDO log file in PMEM mode */
+    ndbrequire(signal->getLength() >= FsConf::OpenPmemSignalLength &&
+               (signal->theData[2] & FsConf::PMEM_MAPPED));
+    const Uint64 addr =
+        (Uint64(signal->theData[5]) << 32) | Uint64(signal->theData[6]);
+    logFilePtr.p->m_pmem_base = reinterpret_cast<Uint8 *>(UintPtr(addr));
+  }
 
   if (logFilePtr.p->fileChangeState == LogFileRecord::WAIT_FOR_OPEN_NEXT_FILE ||
       logFilePtr.p->fileChangeState == LogFileRecord::LAST_FILEWRITE_WAITS ||
@@ -35596,6 +35622,7 @@ void Dblqh::initLogfile(LogFileRecordPtr logFilePtr, Uint32 partNo,
    */
   logFilePtr.p->fileNo = fileNo;
   logFilePtr.p->filePosition = 0;
+  logFilePtr.p->m_pmem_base = nullptr;
   logFilePtr.p->firstLfo = RNIL;
   logFilePtr.p->lastLfo = RNIL;
   logFilePtr.p->logFileStatus = LogFileRecord::CLOSED;
@@ -35663,6 +35690,11 @@ void Dblqh::openFileRw(Signal *signal, LogFileRecordPtr olfLogFilePtr,
   req->fileNumber[3] = olfLogFilePtr.p->fileName[3];
   req->fileFlags = FsOpenReq::OM_READWRITE | FsOpenReq::OM_AUTOSYNC |
                    FsOpenReq::OM_CHECK_SIZE | FsOpenReq::OM_ZEROS_ARE_SPARSE;
+  req->secondFileFlags = 0;
+  if (c_redo_pmem) {
+    jam();
+    req->fileFlags |= FsOpenReq::OM_MAP_SYNC;
+  }
   if (c_o_direct) {
     jam();
     req->fileFlags |= FsOpenReq::OM_DIRECT;
@@ -35726,6 +35758,11 @@ void Dblqh::openLogfileInit(Signal *signal, LogFileRecordPtr logFilePtr) {
   req->fileFlags = FsOpenReq::OM_READWRITE | FsOpenReq::OM_TRUNCATE |
                    FsOpenReq::OM_CREATE | FsOpenReq::OM_AUTOSYNC |
                    FsOpenReq::OM_WRITE_BUFFER | FsOpenReq::OM_ZEROS_ARE_SPARSE;
+  req->secondFileFlags = 0;
+  if (c_redo_pmem) {
+    jam();
+    req->fileFlags |= FsOpenReq::OM_MAP_SYNC;
+  }
   if (c_o_direct) {
     jam();
     req->fileFlags |= FsOpenReq::OM_DIRECT;
@@ -35881,6 +35918,11 @@ void Dblqh::openNextLogfile(Signal *signal, LogFileRecord *logFilePtrP,
     req->fileFlags = FsOpenReq::OM_READWRITE | FsOpenReq::OM_AUTOSYNC |
                      FsOpenReq::OM_CHECK_SIZE | FsOpenReq::OM_WRITE_BUFFER |
                      FsOpenReq::OM_ZEROS_ARE_SPARSE;
+    req->secondFileFlags = 0;
+    if (c_redo_pmem) {
+      jam();
+      req->fileFlags |= FsOpenReq::OM_MAP_SYNC;
+    }
     if (c_o_direct) {
       jam();
       req->fileFlags |= FsOpenReq::OM_DIRECT;

@@ -15,7 +15,7 @@ unchanged.
 | 1 | 2 | CPU feature detection and XXH3, with AVX2 chosen at run time | S1.1, S1.2 | `NdbHW-t`, `ndb_xxh3-t`, `rondb_hash-t` on Linux x86_64, Linux ARM64 and macOS ARM64; file-mode regression | — | **Done**: the XXH3 version passed all tests (reported 2026-10-29); the first, CRC32C version had passed on 2026-10-28 |
 | 2 | 3 | PMEM helper and platform queries | S1.3, S1.4 | `ndb_pmem-t` on a plain file on the three platforms and on `memmap=` | 1 | **In progress**: S1.3 passed `ndb_pmem-t` on macOS ARM64 and Linux x86_64 (2026-10-29); Linux ARM64 to be tested. S1.4 passed `ndb_pmem_region-t` and `NdbHW-t` on macOS ARM64 and Linux x86_64 (2026-10-29); Linux ARM64 to be tested |
 | 3 | 4 | Configuration: parameters, path parser, checks, test settings | S2.1–S2.3, S2.7 | Config unit tests, management-server refusals | — | **In progress**: `RedoLogPaths-t`, `MgmConfig-t`, `ndb.ndb_redo_pmem_config`, `ndb.ndb_config` and `ndb.ndb_basic` in PMEM mode passed on macOS ARM64 (2026-10-29); Linux to be tested |
-| 4 | 5 | NDBFS mapping and placement; PMEM mode with today's format (**M0.2**) | S3.1–S3.4, S2.4, S2.5 | MTR ndb suite and a testSystemRestart subset in `nodax` and on `memmap=` | 2, 3 | Not started |
+| 4 | 5 | NDBFS mapping and placement; PMEM mode with today's format (**M0.2**) | S3.1–S3.4, S2.4, S2.5 | MTR ndb suite and a testSystemRestart subset in `nodax` and on `memmap=` | 2, 3 | **In progress**: 4a (NDBFS maps the REDO files) passed `ndb.ndb_basic`, `ndb.ndb_restart`, `ndb.ndb_restart2` and `ndb.testNodeRestartGcpSaveAndFileChange` in `nodax`, the file-mode runs and the MAP_SYNC refusal on macOS ARM64 (2026-10-30); Linux to be tested. 4b and 4c to be written |
 | 5 | 6 | Initial start and restarts with every file mapped; ndbinfo `redo_log_pmem` | S3.5, S3.6, S2.6 | Initial start, SR and NR in PMEM mode; ndbinfo rows | 4 | Not started |
 | 6 | 7 | Record format and reader module | S4.1, S6.2 | Unit tests over synthetic logs on the three platforms | 1 | Not started |
 | 7 | 8 | Record writers | S4.2–S4.7, S5.1 | Unit tests; file-mode regression | 6 | Not started |
@@ -495,3 +495,82 @@ error, and the result was kept as written. The last run starts the cluster in PM
 and that the files are not mapped yet. The initial start writes every
 REDO log file in full (4 files of 64 MB per log part in the MTR
 configuration), so it takes longer than in file mode.
+
+---
+
+## Phase 4: NDBFS mapping, placement and start checks
+
+**Scope.** `implementation_plan.md` pull request 5; platform plan S3.1–S3.4,
+S2.4 and S2.5. In PMEM mode NDBFS maps every REDO log file it opens,
+places it on the NUMA node of its log part and checks the platform at
+start. The REDO is still written through FSWRITEREQ in today's format, and
+files are opened and closed as today (milestone M0.2). Written in three
+parts, tested one at a time:
+
+| Part | Packages | Content | State |
+|---|---|---|---|
+| 4a | S3.1, S3.2, S3.4 | `OM_MAP_SYNC`; NDBFS maps, prefaults and locks a REDO file at open and unmaps it at close; FSOPENCONF carries the address; DBLQH asks for the mapping and keeps the address | Passed on macOS ARM64 (2026-10-30); Linux to be tested |
+| 4b | S3.3, S2.4 | REDO paths under `FileSystemPathRedoLog`, cleanup at initial start, lookup across paths; each log part on the path of its LDM thread's NUMA node | Not started |
+| 4c | S2.5 | Probe of each REDO path at start, verdict per test mode, bad blocks inside a file, dirty-shutdown count | Not started |
+
+**Changes in 4a.**
+
+| File | Change |
+|---|---|
+| `include/kernel/signaldata/FsOpenReq.hpp`, printer | `OM_MAP_SYNC = 0x20000000` |
+| `include/kernel/signaldata/FsConf.hpp`, printer | FSOPENCONF of a mapped file: `PMEM_MAPPED`, `PMEM_MAP_SYNC` in `fileInfo`, 7 words with the address in words 5 and 6 |
+| `include/kernel/signaldata/FsRef.hpp` | `fsErrNotDax`, `fsErrPmemMapFailed` |
+| `src/kernel/blocks/ndbfs/AsyncFile.hpp`, `AsyncFile.cpp` | `m_pmem`; `openReq` checks the flags, and after the initialisation maps the file (`map_pmem()`): `ndb_pmem_map` with MAP_SYNC required or optional, `ndb_pmem_prefault`, and without MAP_SYNC `ndb_pmem_lock`, with one warning if refused. Every failure path and `closeReq` unmap |
+| `src/kernel/blocks/ndbfs/AsyncIoThread.hpp` | `par.open.pmem_addr`, `pmem_map_sync` |
+| `src/kernel/blocks/ndbfs/Ndbfs.hpp`, `Ndbfs.cpp` | `m_pmem_map_flags`, optional with `nodax`, read by the IO threads; the 7-word FSOPENCONF; one info line for the first mapped file |
+| `src/kernel/blocks/ndbfs/VoidFs.cpp` | `ndbrequire` that no open asks for a mapping |
+| `src/kernel/blocks/dblqh/Dblqh.hpp`, `DblqhMain.cpp` | `LogFileRecord::m_pmem_base`. The three REDO open functions zero `secondFileFlags` and add `OM_MAP_SYNC` in PMEM mode; `initFsopenconf` requires the mapping and keeps its address; FSCLOSECONF clears it; FSOPENREF messages for the two new codes; the delayed FSOPENCONF of `ERROR_INSERT 5090` keeps all its words |
+
+**Decisions taken in 4a.**
+
+1. **Phase 4 in three parts**, as phase 2 was: mapping first, then
+   placement, then the checks, each testable alone.
+2. **Today's open flags plus `OM_MAP_SYNC`.** The plan drops
+   `OM_AUTOSYNC`, `OM_WRITE_BUFFER` and `OM_ZEROS_ARE_SPARSE` in PMEM mode,
+   but until phase 8 the REDO is written through FSWRITEREQ, which uses
+   them. They go with the PMEM write path. `OM_DIRECT` is already off in
+   PMEM mode (phase 3).
+3. **No `OM_THREAD_POOL` yet.** Files are opened and closed as today, so a
+   bound IO thread per open file is as today. Phase 5 keeps every file
+   open and needs the pool; FSWRITEREQ on unbound threads may then be
+   reordered, which phase 5 must check before it sets the flag.
+4. **Only what 4a fills is defined.** `fsErrPmemBadBlocks` and the domain,
+   REDO path and NUMA bits of `fileInfo` come with 4b and 4c.
+5. **A failed map other than "no MAP_SYNC" is `fsErrPmemMapFailed`**, and
+   NDBFS logs the file name and `errno`, since FsRef has room for one code.
+6. **DBLQH requires the mapping in PMEM mode** (`ndbrequire` in
+   `initFsopenconf`): an unmapped REDO file in PMEM mode is a bug.
+
+**Commands for the pusher.** On Linux x86_64, Linux ARM64 and macOS ARM64:
+
+```
+cmake --build .
+cd mysql-test
+./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndb_basic
+grep -h "REDO log file .* mapped\|cannot be locked" var/mysql_cluster.1/ndbd.*/ndbd.log
+./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndb_restart ndb.ndb_restart2 ndb.testNodeRestartGcpSaveAndFileChange
+./mtr ndb.ndb_basic ndb.ndb_restart ndb.ndb_redo_log_reader
+```
+
+The first three runs are PMEM mode with `nodax`: every REDO file is
+mapped, prefaulted and locked if the memory limit allows; the data node
+logs say "mapped without MAP_SYNC", and "cannot be locked" once if the
+limit is too low. The grep follows a run of one test, since MTR clears
+`var/mysql_cluster.1` when a later test restarts the cluster with another
+configuration. The last run is file mode, which must be unchanged.
+
+`ndb.ndb_redo_log_reader` runs in file mode only: its nodes 3 and 4 have
+`EncryptedFileSystem=1`, which the management server refuses with
+`RedoLogMode=pmem` (phase 3), so the cluster does not start. The same
+holds for the tests using `encrypted_filesystem.cnf` and the
+`ndb_secretsfile*` tests.
+
+PMEM mode without a test mode must refuse a file system without DAX: a
+cnf file with only `[cluster_config]` and `RedoLogMode=pmem`, given to
+`--defaults-extra-file`, makes the cluster start fail with exit code 2350
+and "cannot be mapped with MAP_SYNC" in the node log.

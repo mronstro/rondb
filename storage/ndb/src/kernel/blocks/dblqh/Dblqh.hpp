@@ -2430,6 +2430,11 @@ class Dblqh : public SimulatedBlock {
      */
     UintR fileRef;
     /**
+     *       RONDB-1150: the mapping of the open file in PMEM mode, from
+     *       FSOPENCONF; nullptr when the file is closed.
+     */
+    Uint8 *m_pmem_base;
+    /**
      *       The head of the pages waiting for shipment to disk.
      *       They are filled with log info.
      */
