@@ -63,6 +63,7 @@ protected:
   void execREAD_CONFIG_REQ(Signal *signal);
   void read_redo_pmem_config(const ndb_mgm_configuration_iterator *p,
                              const BaseString &fs_dir);
+  void probe_redo_path_pmem(Uint32 bp, const char *what, Uint32 test_mode);
   void save_or_restore_fs(const BaseString &fs_path, bool save);
   void execDUMP_STATE_ORD(Signal *signal);
   void execFSOPENREQ(Signal *signal);
