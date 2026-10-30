@@ -75,6 +75,8 @@ class Filename {
 
   void set(class Ndbfs *, BlockReference, const Uint32 fileno[4],
            bool directory, SegmentedSectionPtr ptr);
+  // The same name under base path bp (REDO log paths, RONDB-1150)
+  void set_base_path(const class Ndbfs *, Uint32 bp);
 
   const char *c_str() const;          // Complete name including dirname
   const char *get_base_name() const;  // Exclude fs (or backup) path

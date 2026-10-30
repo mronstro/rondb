@@ -1,0 +1,12 @@
+!include ../my.cnf
+
+[cluster_config.1]
+NoOfFragmentLogFiles=3
+FragmentLogFileSize=4M
+
+# FileSystemPathRedoLog without RedoLogMode=pmem: no effect
+[cluster_config.ndbd.1.1]
+FileSystemPathRedoLog=@cluster_config.ndbd.1.1.BackupDataDir
+
+[cluster_config.ndbd.2.1]
+FileSystemPathRedoLog=@cluster_config.ndbd.2.1.BackupDataDir

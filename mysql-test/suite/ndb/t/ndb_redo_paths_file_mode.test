@@ -1,0 +1,37 @@
+--source include/have_ndb.inc
+
+# RONDB-1150: in file mode (RedoLogMode=file, the default) the REDO log
+# stays under FileSystemPath with today's names and cleanup, whether
+# FileSystemPathRedoLog is set or not. The management server warns that
+# it has no effect (ndb.ndb_redo_pmem_config).
+
+let $cluster = $MYSQLTEST_VARDIR/mysql_cluster.1;
+
+--echo == 1 == file mode with FileSystemPathRedoLog set
+--exec $NDB_CONFIG --nodes --type=DB --query=NodeId,RedoLogMode
+
+--echo == 2 == the REDO log files are under FileSystemPath
+--file_exists $cluster/ndbd.1/ndb_1_fs/D8/DBLQH/S0.FragLog
+--file_exists $cluster/ndbd.2/ndb_2_fs/D8/DBLQH/S0.FragLog
+--error 1
+--file_exists $cluster/ndb_1_fs
+--error 1
+--file_exists $cluster/ndb_2_fs
+
+--echo == 3 == an initial node restart leaves FileSystemPathRedoLog alone
+--mkdir $cluster/ndb_1_fs
+--write_file $cluster/ndb_1_fs/canary
+canary
+EOF
+--exec $NDB_MGM -e "1 restart -n -i" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --wait-nodes=1 --not-started >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "1 start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+--file_exists $cluster/ndb_1_fs/canary
+--file_exists $cluster/ndbd.1/ndb_1_fs/D8/DBLQH/S0.FragLog
+--error 1
+--file_exists $cluster/ndb_1_fs/D8
+
+--remove_file $cluster/ndb_1_fs/canary
+--rmdir $cluster/ndb_1_fs
+--remove_file $NDB_TOOLS_OUTPUT

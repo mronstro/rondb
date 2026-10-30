@@ -247,3 +247,18 @@ void Filename::set(Ndbfs *fs, BlockReference blockReference,
     }
   }
 }
+
+void Filename::set_base_path(const Ndbfs *fs, Uint32 bp) {
+  char name[PATH_MAX];
+  BaseString::snprintf(name, sizeof(name), "%s", m_base_name);
+  const BaseString &base = fs->get_base_path(bp);
+  const size_t sz = BaseString::snprintf(theName, sizeof(theName), "%s%s",
+                                         base.c_str(), name);
+  if (sz >= sizeof(theName)) {
+    ERROR_SET(ecError, NDBD_EXIT_AFS_PARAMETER, "",
+              "File path name is too long");
+    return;
+  }
+  m_base_name = theName + base.length();
+  m_base_path_spec = bp;
+}

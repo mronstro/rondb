@@ -87,6 +87,17 @@ class FsConf {
   static constexpr Uint32 OpenPmemSignalLength = 7;
   static constexpr Uint32 PMEM_MAPPED = 2;
   static constexpr Uint32 PMEM_MAP_SYNC = 4;
+  /**
+   * OM_REDO_PATH: the REDO path the file was opened under, numbered as
+   * in FsOpenReq; another than asked for if the file was found elsewhere.
+   */
+  static constexpr Uint32 REDO_PATH_SHIFT = 8;  // fileInfo bits 8-11
+  static constexpr Uint32 REDO_PATH_MASK = 0xF;
+  /**
+   * PMEM_MAP_SYNC: the NUMA node of the mapped memory + 1, 0 if unknown.
+   * Not given without MAP_SYNC, where the memory is the page cache.
+   */
+  static constexpr Uint32 PMEM_NUMA_SHIFT = 16;  // fileInfo bits 16-31
 
  private:
   /**

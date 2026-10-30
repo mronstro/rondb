@@ -98,6 +98,8 @@ class Request {
       bool use_o_direct;
       void *pmem_addr;     // OM_MAP_SYNC: the mapping, set by the open
       bool pmem_map_sync;  // mapped with MAP_SYNC
+      int pmem_numa_node;  // NUMA node of the mapped memory, -1 unknown
+      Uint32 redo_path_no;  // OM_REDO_PATH: as asked, then the one used
     } open;
     struct {
       int numberOfPages;

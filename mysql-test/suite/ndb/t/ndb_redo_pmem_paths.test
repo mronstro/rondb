@@ -1,0 +1,63 @@
+--source include/have_ndb.inc
+
+# RONDB-1150: with RedoLogMode=pmem the REDO log files go under
+# FileSystemPathRedoLog/ndb_<id>_fs/ (platform plan S3.3), here the
+# BackupDataDir of the cluster. __RedoLogPmemTestMode=nodax maps them
+# without MAP_SYNC. The other files stay under FileSystemPath.
+
+let $cluster = $MYSQLTEST_VARDIR/mysql_cluster.1;
+
+--echo == 1 == the REDO log files are under FileSystemPathRedoLog
+--file_exists $cluster/ndb_1_fs/D8/DBLQH/S0.FragLog
+--file_exists $cluster/ndb_1_fs/D8/DBLQH/S3.FragLog
+--file_exists $cluster/ndb_2_fs/D8/DBLQH/S0.FragLog
+--file_exists $cluster/ndb_2_fs/D9/DBLQH/S0.FragLog
+--file_exists $cluster/ndbd.1/ndb_1_fs/D1
+--error 1
+--file_exists $cluster/ndbd.1/ndb_1_fs/D8
+--error 1
+--file_exists $cluster/ndbd.2/ndb_2_fs/D8
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b VARCHAR(255)) ENGINE=NDB;
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+                            WHERE n < 1000)
+  SELECT n, REPEAT('x', 200) FROM seq;
+
+--echo == 2 == system restart, the REDO log is read there
+--exec $NDB_MGM -e "all restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "all start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+--source include/ndb_not_readonly.inc
+SELECT COUNT(*), SUM(LENGTH(b)) FROM t1;
+INSERT INTO t1 VALUES (1001, 'after system restart');
+
+--echo == 3 == node restart
+--exec $NDB_MGM -e "1 restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --wait-nodes=1 --not-started >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "1 start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+SELECT COUNT(*), SUM(LENGTH(b)) FROM t1;
+
+--echo == 4 == log part 1 of node 2 moved to FileSystemPath is found there
+--exec $NDB_MGM -e "2 restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --wait-nodes=2 --not-started >> $NDB_TOOLS_OUTPUT
+--exec mv $cluster/ndb_2_fs/D9 $cluster/ndbd.2/ndb_2_fs/D9
+--exec $NDB_MGM -e "2 start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+--exec grep -c "log part 1 were found under FileSystemPath, not under REDO path 0" $cluster/ndbd.2/ndbd.log
+SELECT COUNT(*), SUM(LENGTH(b)) FROM t1;
+
+--echo == 5 == initial node restart puts it back under FileSystemPathRedoLog
+--exec $NDB_MGM -e "2 restart -n -i" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --wait-nodes=2 --not-started >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "2 start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+--file_exists $cluster/ndb_2_fs/D9/DBLQH/S0.FragLog
+--error 1
+--file_exists $cluster/ndbd.2/ndb_2_fs/D9
+SELECT COUNT(*), SUM(LENGTH(b)) FROM t1;
+
+DROP TABLE t1;
+--remove_file $NDB_TOOLS_OUTPUT

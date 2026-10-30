@@ -1,0 +1,25 @@
+== 1 == the REDO log files are under FileSystemPathRedoLog
+CREATE TABLE t1 (a INT PRIMARY KEY, b VARCHAR(255)) ENGINE=NDB;
+INSERT INTO t1
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+WHERE n < 1000)
+SELECT n, REPEAT('x', 200) FROM seq;
+== 2 == system restart, the REDO log is read there
+SELECT COUNT(*), SUM(LENGTH(b)) FROM t1;
+COUNT(*)	SUM(LENGTH(b))
+1000	200000
+INSERT INTO t1 VALUES (1001, 'after system restart');
+== 3 == node restart
+SELECT COUNT(*), SUM(LENGTH(b)) FROM t1;
+COUNT(*)	SUM(LENGTH(b))
+1001	200020
+== 4 == log part 1 of node 2 moved to FileSystemPath is found there
+1
+SELECT COUNT(*), SUM(LENGTH(b)) FROM t1;
+COUNT(*)	SUM(LENGTH(b))
+1001	200020
+== 5 == initial node restart puts it back under FileSystemPathRedoLog
+SELECT COUNT(*), SUM(LENGTH(b)) FROM t1;
+COUNT(*)	SUM(LENGTH(b))
+1001	200020
+DROP TABLE t1;
