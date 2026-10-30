@@ -26,6 +26,7 @@
 #define REDO_LOG_PATHS_HPP
 
 #include <ndb_types.h>
+#include <portlib/ndb_pmem.h>
 #include <util/BaseString.hpp>
 
 /**
@@ -61,5 +62,39 @@ struct RedoLogPaths {
    */
   Uint32 index_for_node(int numa_node, bool *found = nullptr) const;
 };
+
+/**
+ * What the data node's start-up probe of a REDO path found in PMEM mode
+ * (platform plan S2.5): a small file there, mapped with MAP_SYNC
+ * required, and what lies behind its file system.
+ */
+struct RedoPmemProbe {
+  int map_err = 0;     // 0: mapped with MAP_SYNC; EOPNOTSUPP: no DAX
+  int region_err = 0;  // errno of ndb_pmem_get_region_info()
+  ndb_pmem_region_info region{};
+};
+
+/**
+ * The verdict on a probed REDO path (pmem_redo_design.md E17): refused,
+ * or accepted with warnings, and an info line for the node log.
+ */
+struct RedoPmemVerdict {
+  static constexpr Uint32 MAX_WARNINGS = 2;
+  bool refused = false;
+  BaseString refusal;
+  Uint32 warning_count = 0;
+  BaseString warning[MAX_WARNINGS];
+  BaseString info;
+};
+
+/**
+ * A pure function of the probe and __RedoLogPmemTestMode
+ * (NDB_REDO_PMEM_TEST_MODE_*); what names the path in the messages, e.g.
+ * "FileSystemPathRedoLog /mnt/pmem0". Production mode needs MAP_SYNC and
+ * a region with a persistence domain; emulated accepts a region without
+ * one (memmap=); nodax checks nothing.
+ */
+void redo_pmem_path_verdict(const char *what, const RedoPmemProbe &probe,
+                            Uint32 test_mode, RedoPmemVerdict *verdict);
 
 #endif

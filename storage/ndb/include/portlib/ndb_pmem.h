@@ -82,6 +82,14 @@ int ndb_pmem_init(ndb_pmem_copy_method method);
 const char *ndb_pmem_method_name();
 
 /**
+ * Whether this CPU can write a cache line back to persistent memory:
+ * x86-64 always, aarch64 with DC CVAP (FEAT_DPB) but not with DC CVAC
+ * alone, other platforms never. Copies still work without it, but they
+ * do not persist.
+ */
+bool ndb_pmem_cpu_persists();
+
+/**
  * Map len bytes of fd from offset 0, read and write, at an address
  * aligned to 2 MB so that large pages can be used. 0 or an errno:
  * EOPNOTSUPP means MAP_SYNC is not possible (no DAX, old kernel, not

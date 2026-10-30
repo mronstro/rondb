@@ -27,7 +27,9 @@
 #include <util/RedoLogPaths.hpp>
 
 #include <ctype.h>
+#include <errno.h>
 #include <string.h>
+#include <mgmapi_config_parameters.h>
 
 namespace {
 
@@ -134,9 +136,108 @@ Uint32 RedoLogPaths::index_for_node(int numa_node, bool *found) const {
   return 0;
 }
 
+namespace {
+
+const char *domain_name(ndb_pmem_domain domain) {
+  switch (domain) {
+    case NDB_PMEM_DOMAIN_NONE:
+      return "none";
+    case NDB_PMEM_DOMAIN_MEMCTRL:
+      return "memory_controller";
+    case NDB_PMEM_DOMAIN_CPU_CACHE:
+      return "cpu_cache";
+    default:
+      return "unknown";
+  }
+}
+
+void add_warning(RedoPmemVerdict *v, const BaseString &warning) {
+  if (v->warning_count < RedoPmemVerdict::MAX_WARNINGS) {
+    v->warning[v->warning_count++] = warning;
+  }
+}
+
+}  // namespace
+
+void redo_pmem_path_verdict(const char *what, const RedoPmemProbe &probe,
+                            Uint32 test_mode, RedoPmemVerdict *v) {
+  *v = RedoPmemVerdict();
+  if (test_mode == NDB_REDO_PMEM_TEST_MODE_NODAX) {
+    v->info.assfmt("%s: not checked with __RedoLogPmemTestMode=nodax", what);
+    return;
+  }
+  if (probe.map_err == EOPNOTSUPP) {
+    v->refused = true;
+    v->refusal.assfmt(
+        "%s is not on a DAX file system (mmap MAP_SYNC: %s); "
+        "__RedoLogPmemTestMode=nodax runs without persistent memory",
+        what, strerror(probe.map_err));
+    return;
+  }
+  if (probe.map_err != 0) {
+    v->refused = true;
+    v->refusal.assfmt("%s: a file there cannot be mapped (%s)", what,
+                      strerror(probe.map_err));
+    return;
+  }
+  const ndb_pmem_region_info &r = probe.region;
+  const char *device = r.device[0] != 0 ? r.device : "not found";
+  const char *region = r.region[0] != 0 ? r.region : "not found";
+  const ndb_pmem_domain domain =
+      probe.region_err == 0 ? r.domain : NDB_PMEM_DOMAIN_UNKNOWN;
+  if (domain == NDB_PMEM_DOMAIN_UNKNOWN) {
+    v->refused = true;
+    v->refusal.assfmt(
+        "%s is on a DAX file system, but no persistent memory region was "
+        "found behind it (device %s, region %s%s%s), so its persistence "
+        "domain is not known",
+        what, device, region, probe.region_err != 0 ? ", " : "",
+        probe.region_err != 0 ? strerror(probe.region_err) : "");
+    return;
+  }
+  if (domain == NDB_PMEM_DOMAIN_NONE) {
+    if (test_mode != NDB_REDO_PMEM_TEST_MODE_EMULATED) {
+      v->refused = true;
+      v->refusal.assfmt(
+          "%s: region %s reports no persistence domain (memmap= emulation?), "
+          "a REDO log there is lost at a power failure; "
+          "__RedoLogPmemTestMode=emulated accepts it for tests",
+          what, region);
+      return;
+    }
+    BaseString w;
+    w.assfmt(
+        "%s: region %s reports no persistence domain, accepted with "
+        "__RedoLogPmemTestMode=emulated; the REDO log there is lost at a "
+        "power failure",
+        what, region);
+    add_warning(v, w);
+  }
+  if (r.badblock_ranges > 0) {
+    BaseString w;
+    w.assfmt(
+        "%s: device %s has %u bad-block ranges; a REDO log file on one of "
+        "them is refused when it is opened (clear them with ndctl "
+        "clear-errors)",
+        what, device, r.badblock_ranges);
+    add_warning(v, w);
+  }
+  char dirty[24] = "not exposed";
+  if (r.dirty_shutdown != ~Uint64(0)) {
+    BaseString::snprintf(dirty, sizeof(dirty), "%llu",
+                         (unsigned long long)r.dirty_shutdown);
+  }
+  v->info.assfmt(
+      "%s: device %s%s, region %s, persistence domain %s, NUMA node %d, "
+      "dirty-shutdown count %s, %u bad-block ranges",
+      what, device, r.stacked ? " (stacked)" : "", region, domain_name(domain),
+      r.numa_node, dirty, r.badblock_ranges);
+}
+
 #ifdef TEST_REDOLOGPATHS
 
 #include <NdbTap.hpp>
+#include <initializer_list>
 
 namespace {
 
@@ -157,6 +258,92 @@ bool fails(const char *spec) {
   }
   printf("'%s': %s\n", shown, err.c_str());
   return paths.count == 0 && err.length() > 0;
+}
+
+const char *mode_name(Uint32 test_mode) {
+  static const char *const name[] = {"off", "emulated", "nodax"};
+  return test_mode < 3 ? name[test_mode] : "?";
+}
+
+/* The verdict, printed; true if refused */
+bool refused(const RedoPmemProbe &probe, Uint32 test_mode,
+             RedoPmemVerdict *v) {
+  redo_pmem_path_verdict("FileSystemPathRedoLog /p", probe, test_mode, v);
+  printf("verdict %s: %s\n", mode_name(test_mode),
+         v->refused ? v->refusal.c_str() : v->info.c_str());
+  for (Uint32 i = 0; i < v->warning_count; i++) {
+    printf("  warning: %s\n", v->warning[i].c_str());
+  }
+  return v->refused;
+}
+
+RedoPmemProbe probe_of(ndb_pmem_domain domain) {
+  RedoPmemProbe p;
+  p.region.domain = domain;
+  p.region.numa_node = 1;
+  p.region.target_node = 1;
+  p.region.dirty_shutdown = 3;
+  strcpy(p.region.device, "pmem0");
+  strcpy(p.region.region, "/sys/devices/ndbus0/region0");
+  return p;
+}
+
+bool has(const BaseString &s, const char *text) {
+  return strstr(s.c_str(), text) != nullptr;
+}
+
+void test_verdicts() {
+  const Uint32 OFF = NDB_REDO_PMEM_TEST_MODE_OFF;
+  const Uint32 EMULATED = NDB_REDO_PMEM_TEST_MODE_EMULATED;
+  const Uint32 NODAX = NDB_REDO_PMEM_TEST_MODE_NODAX;
+  RedoPmemVerdict v;
+
+  /* DAX on a region with ADR or eADR: accepted */
+  const RedoPmemProbe adr = probe_of(NDB_PMEM_DOMAIN_MEMCTRL);
+  for (Uint32 mode : {OFF, EMULATED, NODAX}) {
+    OK(!refused(adr, mode, &v) && v.warning_count == 0);
+  }
+  OK(refused(adr, OFF, &v) == false);
+  OK(has(v.info, "memory_controller") && has(v.info, "count 3") &&
+     has(v.info, "pmem0") && has(v.info, "NUMA node 1"));
+  OK(!refused(probe_of(NDB_PMEM_DOMAIN_CPU_CACHE), OFF, &v));
+  OK(has(v.info, "cpu_cache"));
+
+  /* No DAX: refused, except with nodax */
+  RedoPmemProbe no_dax;
+  no_dax.map_err = EOPNOTSUPP;
+  OK(refused(no_dax, OFF, &v) && has(v.refusal, "not on a DAX file system"));
+  OK(has(v.refusal, "FileSystemPathRedoLog /p"));
+  OK(refused(no_dax, EMULATED, &v));
+  OK(!refused(no_dax, NODAX, &v));
+  RedoPmemProbe no_map;
+  no_map.map_err = EACCES;
+  OK(refused(no_map, OFF, &v) && has(v.refusal, "cannot be mapped"));
+
+  /* memmap=: no persistence domain, accepted with emulated only */
+  RedoPmemProbe memmap = probe_of(NDB_PMEM_DOMAIN_NONE);
+  memmap.region.dirty_shutdown = ~Uint64(0);
+  OK(refused(memmap, OFF, &v) && has(v.refusal, "no persistence domain"));
+  OK(!refused(memmap, EMULATED, &v) && v.warning_count == 1);
+  OK(has(v.warning[0], "no persistence domain"));
+  OK(has(v.info, "persistence domain none") && has(v.info, "not exposed"));
+
+  /* No region found, or not read: refused, except with nodax */
+  const RedoPmemProbe unknown = probe_of(NDB_PMEM_DOMAIN_UNKNOWN);
+  OK(refused(unknown, OFF, &v) && has(v.refusal, "not known"));
+  OK(refused(unknown, EMULATED, &v));
+  OK(!refused(unknown, NODAX, &v));
+  RedoPmemProbe unread = adr;
+  unread.region_err = ENOENT;
+  OK(refused(unread, OFF, &v) && has(v.refusal, strerror(ENOENT)));
+
+  /* Bad blocks on the device: a warning */
+  RedoPmemProbe bad = probe_of(NDB_PMEM_DOMAIN_CPU_CACHE);
+  bad.region.badblock_ranges = 2;
+  OK(!refused(bad, OFF, &v) && v.warning_count == 1);
+  OK(has(v.warning[0], "2 bad-block ranges"));
+  memmap.region.badblock_ranges = 1;
+  OK(!refused(memmap, EMULATED, &v) && v.warning_count == 2);
 }
 
 }  // namespace
@@ -234,6 +421,8 @@ TAPTEST(RedoLogPaths) {
   OK(paths.parse("0:/a,0:/b", err) != 0);
   OK(paths.count == 0);
   OK(paths.index_for_node(0, &found) == 0 && !found);
+
+  test_verdicts();
   return 1;
 }
 

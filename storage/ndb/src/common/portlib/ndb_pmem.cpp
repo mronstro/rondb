@@ -356,6 +356,16 @@ int ndb_pmem_init(ndb_pmem_copy_method m) {
 
 const char *ndb_pmem_method_name() { return method()->name; }
 
+bool ndb_pmem_cpu_persists() {
+#if defined(NDB_PMEM_X86_64)
+  return true;
+#elif defined(NDB_PMEM_ARM64)
+  return Ndb_GetCpuFeatures()->arm_dcpop;
+#else
+  return false;
+#endif
+}
+
 int ndb_pmem_map(int fd, size_t len, unsigned flags, ndb_pmem_mapping *out) {
   out->addr = nullptr;
   out->len = 0;
@@ -621,6 +631,13 @@ void use_variant(const TestVariant &v) {
 void test_init() {
   OK(ndb_pmem_init(NDB_PMEM_COPY_AUTO) == 0);
   printf("ndb_pmem: auto chooses %s\n", ndb_pmem_method_name());
+  printf("ndb_pmem: this CPU %s write lines back to persistent memory\n",
+         ndb_pmem_cpu_persists() ? "can" : "cannot");
+#if defined(NDB_PMEM_X86_64)
+  OK(ndb_pmem_cpu_persists());
+#elif defined(NDB_PMEM_ARM64)
+  OK(ndb_pmem_cpu_persists() == Ndb_GetCpuFeatures()->arm_dcpop);
+#endif
   const ndb_pmem_copy_method methods[] = {NDB_PMEM_COPY_NTSTORE,
                                           NDB_PMEM_COPY_MOVDIR64B,
                                           NDB_PMEM_COPY_CLWB};

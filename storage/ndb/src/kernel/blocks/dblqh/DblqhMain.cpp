@@ -34655,8 +34655,15 @@ void Dblqh::execFSOPENREF(Signal *signal) {
     /* RONDB-1150: the node log names the file (NDBFS) */
     progError(__LINE__, NDBD_EXIT_INVALID_CONFIG,
               "RedoLogMode=pmem: a REDO log file cannot be mapped with "
-              "MAP_SYNC, FileSystemPath is not on a DAX file system "
+              "MAP_SYNC, it is not on a DAX file system, see the node log "
               "(__RedoLogPmemTestMode=nodax runs without persistent memory)");
+    return;
+  }
+  if (err == FsRef::fsErrPmemBadBlocks) {
+    progError(__LINE__, NDBD_EXIT_INVALID_CONFIG,
+              "RedoLogMode=pmem: a REDO log file lies on bad blocks of the "
+              "persistent memory, see the node log; clear them with ndctl "
+              "clear-errors and restart the node with --initial");
     return;
   }
   if (err == FsRef::fsErrPmemMapFailed) {
