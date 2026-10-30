@@ -14,8 +14,8 @@ unchanged.
 |---|---|---|---|---|---|---|
 | 1 | 2 | CPU feature detection and XXH3, with AVX2 chosen at run time | S1.1, S1.2 | `NdbHW-t`, `ndb_xxh3-t`, `rondb_hash-t` on Linux x86_64, Linux ARM64 and macOS ARM64; file-mode regression | — | **Done**: the XXH3 version passed all tests (reported 2026-10-29); the first, CRC32C version had passed on 2026-10-28 |
 | 2 | 3 | PMEM helper and platform queries | S1.3, S1.4 | `ndb_pmem-t` on a plain file on the three platforms and on `memmap=` | 1 | **In progress**: S1.3 passed `ndb_pmem-t` on macOS ARM64 and Linux x86_64 (2026-10-29); Linux ARM64 to be tested. S1.4 passed `ndb_pmem_region-t` and `NdbHW-t` on macOS ARM64 and Linux x86_64 (2026-10-29); Linux ARM64 to be tested |
-| 3 | 4 | Configuration: parameters, path parser, checks, test settings | S2.1–S2.3, S2.7 | Config unit tests, management-server refusals | — | **In progress**: `RedoLogPaths-t`, `MgmConfig-t`, `ndb.ndb_redo_pmem_config`, `ndb.ndb_config` and `ndb.ndb_basic` in PMEM mode passed on macOS ARM64 (2026-10-29); Linux to be tested |
-| 4 | 5 | NDBFS mapping and placement; PMEM mode with today's format (**M0.2**) | S3.1–S3.4, S2.4, S2.5 | MTR ndb suite and a testSystemRestart subset in `nodax` and on `memmap=` | 2, 3 | **In progress**: 4a (NDBFS maps the REDO files) passed `ndb.ndb_basic`, `ndb.ndb_restart`, `ndb.ndb_restart2` and `ndb.testNodeRestartGcpSaveAndFileChange` in `nodax`, the file-mode runs and the MAP_SYNC refusal on macOS ARM64 (2026-10-30). On Linux x86_64 `ndb.ndb_restart` in `nodax` found a race in `ndb_pmem_map` (2026-10-30), fixed, to be retested. 4b (REDO paths, NUMA placement) written, to be tested; 4c to be written |
+| 3 | 4 | Configuration: parameters, path parser, checks, test settings | S2.1–S2.3, S2.7 | Config unit tests, management-server refusals | — | **In progress**: `RedoLogPaths-t`, `MgmConfig-t`, `ndb.ndb_redo_pmem_config`, `ndb.ndb_config` and `ndb.ndb_basic` in PMEM mode passed on macOS ARM64 (2026-10-29); `ndb.ndb_redo_pmem_config` passed on Linux x86_64 with phase 4 (2026-10-30); the unit tests to be run on Linux |
+| 4 | 5 | NDBFS mapping and placement; PMEM mode with today's format (**M0.2**) | S3.1–S3.4, S2.4, S2.5 | MTR ndb suite and a testSystemRestart subset in `nodax` and on `memmap=` | 2, 3 | **In progress**: 4a (NDBFS maps the REDO files) and 4b (REDO paths, NUMA placement) passed on macOS ARM64 and Linux x86_64 (2026-10-30), after the fix of a race in `ndb_pmem_map` that 4a found on Linux; Linux ARM64 postponed. 4c to be written |
 | 5 | 6 | Initial start and restarts with every file mapped; ndbinfo `redo_log_pmem` | S3.5, S3.6, S2.6 | Initial start, SR and NR in PMEM mode; ndbinfo rows | 4 | Not started |
 | 6 | 7 | Record format and reader module | S4.1, S6.2 | Unit tests over synthetic logs on the three platforms | 1 | Not started |
 | 7 | 8 | Record writers | S4.2–S4.7, S5.1 | Unit tests; file-mode regression | 6 | Not started |
@@ -509,8 +509,8 @@ parts, tested one at a time:
 
 | Part | Packages | Content | State |
 |---|---|---|---|
-| 4a | S3.1, S3.2, S3.4 | `OM_MAP_SYNC`; NDBFS maps, prefaults and locks a REDO file at open and unmaps it at close; FSOPENCONF carries the address; DBLQH asks for the mapping and keeps the address | Passed on macOS ARM64 (2026-10-30); Linux to be tested |
-| 4b | S3.3, S2.4 | REDO paths under `FileSystemPathRedoLog`, cleanup at initial start, lookup across paths; each log part on the path of its LDM thread's NUMA node | Written, to be tested |
+| 4a | S3.1, S3.2, S3.4 | `OM_MAP_SYNC`; NDBFS maps, prefaults and locks a REDO file at open and unmaps it at close; FSOPENCONF carries the address; DBLQH asks for the mapping and keeps the address | Passed on macOS ARM64 and Linux x86_64 (2026-10-30); Linux ARM64 postponed |
+| 4b | S3.3, S2.4 | REDO paths under `FileSystemPathRedoLog`, cleanup at initial start, lookup across paths; each log part on the path of its LDM thread's NUMA node | Passed on macOS ARM64 and Linux x86_64 (2026-10-30); Linux ARM64 postponed; the placement on two NUMA nodes needs a two-socket Linux machine |
 | 4c | S2.5 | Probe of each REDO path at start, verdict per test mode, bad blocks inside a file, dirty-shutdown count | Not started |
 
 **Changes in 4a.**
@@ -592,7 +592,16 @@ with flags that work, and after a failure only the head and tail of the
 reservation are released. `ndb_pmem-t` gets `test_concurrent_maps` (8
 threads, 30 files each, every page tagged and read back), and
 `AsyncFile::map_pmem` logs a failed map and a failed prefault apart.
-macOS never tries MAP_SYNC, so it did not show.
+macOS never tries MAP_SYNC, so it did not show. With the fix (commit
+8e1334e8060) `ndb_pmem-t` and ten repeats of `ndb.ndb_restart`,
+`ndb.ndb_restart2` and `ndb.ndb_basic` in `nodax` passed on Linux x86_64.
+
+Two failures seen while testing phase 4 were not in the REDO code and
+are fixed in their own commits: `ndb.ndb_restart2` dropped its table
+before the second mysqld had reconnected after the system restart
+(edaae483475), and on macOS (`lower_case_table_names=2`) the mysqld
+metadata change monitor failed an MDL assertion for `TEST_DB`, a
+database the NDBT tests create through the NDB API (544bdc0e830).
 
 **Changes in 4b.** File mode is unchanged: no REDO path slot is filled,
 no new flag is sent, and the REDO log stays under `FileSystemPath` with
