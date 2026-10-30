@@ -39,5 +39,12 @@ bool printFSCONF(FILE *output, const Uint32 *theData, Uint32 len,
     fprintf(output, " FileInfo: %08x\n", sig->fileInfo);
   }
 
+  if (len >= FsConf::OpenPmemSignalLength &&
+      (sig->fileInfo & FsConf::PMEM_MAPPED)) {
+    fprintf(output, " PmemAddr: 0x%08x%08x%s\n", sig->pmem_addr_hi,
+            sig->pmem_addr_lo,
+            (sig->fileInfo & FsConf::PMEM_MAP_SYNC) ? " MAP_SYNC" : "");
+  }
+
   return true;
 }

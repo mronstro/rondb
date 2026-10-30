@@ -75,9 +75,56 @@ AsyncFile::AsyncFile(Ndbfs &fs)
   m_page_ptr.setNull();
   theWriteBuffer = 0;
   theWriteBufferSize = 0;
+  m_pmem = {nullptr, 0, false};
 }
 
 AsyncFile::~AsyncFile() {}
+
+/* One warning for all files that cannot be locked */
+static std::atomic<bool> pmem_lock_warned{false};
+
+/**
+ * OM_MAP_SYNC (RONDB-1150): map the whole file and fault every page in.
+ * MAP_SYNC is required unless NDBFS allows a mapping without it
+ * (__RedoLogPmemTestMode=nodax); such a mapping is the page cache of the
+ * file, locked in memory if RLIMIT_MEMLOCK allows. 0 or an FsRef error.
+ */
+int AsyncFile::map_pmem(Uint64 size) {
+#ifdef _WIN32
+  (void)size;
+  return FsRef::fsErrInvalidParameters;
+#else
+  int r = ndb_pmem_map(m_file.get_os_handle(), size_t(size),
+                       m_fs.get_pmem_map_flags(), &m_pmem);
+  if (r == EOPNOTSUPP) {
+    g_eventLogger->error(
+        "NDBFS: %s cannot be mapped with MAP_SYNC, it is not on a DAX file "
+        "system",
+        theFileName.c_str());
+    return FsRef::fsErrNotDax;
+  }
+  if (r == 0) {
+    r = ndb_pmem_prefault(m_pmem.addr, m_pmem.len);
+    if (r != 0) ndb_pmem_unmap(&m_pmem);
+  }
+  if (r != 0) {
+    g_eventLogger->error("NDBFS: mapping %s failed: %s", theFileName.c_str(),
+                         strerror(r));
+    return FsRef::fsErrPmemMapFailed;
+  }
+  if (!m_pmem.map_sync) {
+    r = ndb_pmem_lock(m_pmem.addr, m_pmem.len);
+    if (r != 0 && !pmem_lock_warned.exchange(true)) {
+      g_eventLogger->warning(
+          "NDBFS: REDO log files mapped without MAP_SYNC cannot be locked in "
+          "memory (%s), continuing without; raise RLIMIT_MEMLOCK (ulimit -l) "
+          "to lock them",
+          strerror(r));
+    }
+  }
+  return 0;
+#endif
+}
 
 int AsyncFile::init() { return 0; }
 
@@ -152,6 +199,18 @@ void AsyncFile::openReq(Request *request) {
   // OM_DIRECT_SYNC is not valid without OM_DIRECT
   require(!(flags & FsOpenReq::OM_DIRECT_SYNC) ||
           (flags & FsOpenReq::OM_DIRECT));
+
+  // OM_MAP_SYNC: a plain read-write file of a definite size
+  const bool use_pmem = (flags & FsOpenReq::OM_MAP_SYNC);
+  require(!use_pmem ||
+          ((flags & FsOpenReq::OM_READ_WRITE_MASK) ==
+               FsOpenReq::OM_READWRITE &&
+           !(flags & (FsOpenReq::OM_APPEND | FsOpenReq::OM_GZ |
+                      FsOpenReq::OM_DIRECT |
+                      FsOpenReq::OM_ENCRYPT_CIPHER_MASK)) &&
+           ndbxfrm_file::is_definite_size(data_size)));
+  request->par.open.pmem_addr = nullptr;
+  request->par.open.pmem_map_sync = false;
 
   // Create file
   bool created = false;
@@ -572,6 +631,18 @@ void AsyncFile::openReq(Request *request) {
     request->par.open.use_o_direct = false;
   }
 
+  // Map and prefault (OM_MAP_SYNC), after the file is initialised
+  if (use_pmem) {
+    const int r = map_pmem(data_size);
+    if (r != 0) {
+      NDBFS_SET_REQUEST_ERROR(request, r);
+      m_file.close();
+      goto remove_if_created;
+    }
+    request->par.open.pmem_addr = m_pmem.addr;
+    request->par.open.pmem_map_sync = m_pmem.map_sync;
+  }
+
   // Turn on synchronous mode (OM_SYNC)
   if (flags & FsOpenReq::OM_SYNC) {
     errno = 0;
@@ -662,6 +733,7 @@ void AsyncFile::openReq(Request *request) {
   return;
 
 remove_if_created:
+  if (m_pmem.addr != nullptr) ndb_pmem_unmap(&m_pmem);
   errno = 0;
   //  require(!created);
 #if TEST_UNRELIABLE_DISTRIBUTED_FILESYSTEM
@@ -692,6 +764,7 @@ void AsyncFile::closeReq(Request *request) {
     ::abort();
   }
 #endif
+  if (m_pmem.addr != nullptr) ndb_pmem_unmap(&m_pmem);
   if (m_xfile.is_open()) {
     int r = m_xfile.close(abort);
     if (r == -1) {

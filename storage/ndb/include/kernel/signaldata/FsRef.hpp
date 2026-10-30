@@ -66,6 +66,8 @@ struct FsRef {
     fsErrInvalidFileSize = FS_ERR_BIT | 13,
     fsErrOutOfMemory = FS_ERR_BIT | 14,
     fsErrSync = FS_ERR_BIT | 15,
+    fsErrNotDax = FS_ERR_BIT | 16,         // OM_MAP_SYNC: no MAP_SYNC
+    fsErrPmemMapFailed = FS_ERR_BIT | 17,  // OM_MAP_SYNC: map or prefault
     fsErrMax
   };
   /**
