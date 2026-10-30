@@ -89,8 +89,10 @@ static std::atomic<bool> pmem_lock_warned{false};
  * MAP_SYNC is required unless NDBFS allows a mapping without it
  * (__RedoLogPmemTestMode=nodax); such a mapping is the page cache of the
  * file, locked in memory if RLIMIT_MEMLOCK allows. 0 or an FsRef error.
- * With MAP_SYNC the NUMA node of the memory goes back to DBLQH, which
- * compares it with its own; the page cache has no fixed node.
+ * With MAP_SYNC a file on bad blocks is refused before the prefault
+ * touches them, which would kill the process with SIGBUS, and the NUMA
+ * node of the memory goes back to DBLQH, which compares it with its own;
+ * the page cache has no fixed node.
  */
 int AsyncFile::map_pmem(Request *request, Uint64 size) {
 #ifdef _WIN32
@@ -111,6 +113,21 @@ int AsyncFile::map_pmem(Request *request, Uint64 size) {
     g_eventLogger->error("NDBFS: mapping %s failed: %s", theFileName.c_str(),
                          strerror(r));
     return FsRef::fsErrPmemMapFailed;
+  }
+  if (m_pmem.map_sync) {
+    Uint32 bad = 0;
+    bool exact = false;
+    if (ndb_pmem_badblocks_overlap(m_file.get_os_handle(), 0, m_pmem.len,
+                                   &bad, &exact) == 0 &&
+        bad > 0) {
+      ndb_pmem_unmap(&m_pmem);
+      g_eventLogger->error(
+          "NDBFS: %s lies on %u bad-block ranges of its device%s",
+          theFileName.c_str(), bad,
+          exact ? "" : " (where the file lies is not known, so every range "
+                       "on the device counts)");
+      return FsRef::fsErrPmemBadBlocks;
+    }
   }
   r = ndb_pmem_prefault(m_pmem.addr, m_pmem.len);
   if (r != 0) {

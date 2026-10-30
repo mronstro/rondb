@@ -14,8 +14,8 @@ unchanged.
 |---|---|---|---|---|---|---|
 | 1 | 2 | CPU feature detection and XXH3, with AVX2 chosen at run time | S1.1, S1.2 | `NdbHW-t`, `ndb_xxh3-t`, `rondb_hash-t` on Linux x86_64, Linux ARM64 and macOS ARM64; file-mode regression | — | **Done**: the XXH3 version passed all tests (reported 2026-10-29); the first, CRC32C version had passed on 2026-10-28 |
 | 2 | 3 | PMEM helper and platform queries | S1.3, S1.4 | `ndb_pmem-t` on a plain file on the three platforms and on `memmap=` | 1 | **In progress**: S1.3 passed `ndb_pmem-t` on macOS ARM64 and Linux x86_64 (2026-10-29); Linux ARM64 to be tested. S1.4 passed `ndb_pmem_region-t` and `NdbHW-t` on macOS ARM64 and Linux x86_64 (2026-10-29); Linux ARM64 to be tested |
-| 3 | 4 | Configuration: parameters, path parser, checks, test settings | S2.1–S2.3, S2.7 | Config unit tests, management-server refusals | — | **In progress**: `RedoLogPaths-t`, `MgmConfig-t`, `ndb.ndb_redo_pmem_config`, `ndb.ndb_config` and `ndb.ndb_basic` in PMEM mode passed on macOS ARM64 (2026-10-29); `ndb.ndb_redo_pmem_config` passed on Linux x86_64 with phase 4 (2026-10-30); the unit tests to be run on Linux |
-| 4 | 5 | NDBFS mapping and placement; PMEM mode with today's format (**M0.2**) | S3.1–S3.4, S2.4, S2.5 | MTR ndb suite and a testSystemRestart subset in `nodax` and on `memmap=` | 2, 3 | **In progress**: 4a (NDBFS maps the REDO files) and 4b (REDO paths, NUMA placement) passed on macOS ARM64 and Linux x86_64 (2026-10-30), after the fix of a race in `ndb_pmem_map` that 4a found on Linux; Linux ARM64 postponed. 4c to be written |
+| 3 | 4 | Configuration: parameters, path parser, checks, test settings | S2.1–S2.3, S2.7 | Config unit tests, management-server refusals | — | **In progress**: `RedoLogPaths-t`, `MgmConfig-t`, `ndb.ndb_redo_pmem_config`, `ndb.ndb_config` and `ndb.ndb_basic` in PMEM mode passed on macOS ARM64 (2026-10-29); `ndb.ndb_redo_pmem_config`, `RedoLogPaths-t` and `MgmConfig-t` passed on Linux x86_64 (2026-10-30); Linux ARM64 postponed |
+| 4 | 5 | NDBFS mapping and placement; PMEM mode with today's format (**M0.2**) | S3.1–S3.4, S2.4, S2.5 | MTR ndb suite and a testSystemRestart subset in `nodax` and on `memmap=` | 2, 3 | **In progress**: 4a (NDBFS maps the REDO files) and 4b (REDO paths, NUMA placement) passed on macOS ARM64 and Linux x86_64 (2026-10-30), after the fix of a race in `ndb_pmem_map` that 4a found on Linux; Linux ARM64 postponed. 4c (start-time platform checks) written, to be tested |
 | 5 | 6 | Initial start and restarts with every file mapped; ndbinfo `redo_log_pmem` | S3.5, S3.6, S2.6 | Initial start, SR and NR in PMEM mode; ndbinfo rows | 4 | Not started |
 | 6 | 7 | Record format and reader module | S4.1, S6.2 | Unit tests over synthetic logs on the three platforms | 1 | Not started |
 | 7 | 8 | Record writers | S4.2–S4.7, S5.1 | Unit tests; file-mode regression | 6 | Not started |
@@ -511,7 +511,7 @@ parts, tested one at a time:
 |---|---|---|---|
 | 4a | S3.1, S3.2, S3.4 | `OM_MAP_SYNC`; NDBFS maps, prefaults and locks a REDO file at open and unmaps it at close; FSOPENCONF carries the address; DBLQH asks for the mapping and keeps the address | Passed on macOS ARM64 and Linux x86_64 (2026-10-30); Linux ARM64 postponed |
 | 4b | S3.3, S2.4 | REDO paths under `FileSystemPathRedoLog`, cleanup at initial start, lookup across paths; each log part on the path of its LDM thread's NUMA node | Passed on macOS ARM64 and Linux x86_64 (2026-10-30); Linux ARM64 postponed; the placement on two NUMA nodes needs a two-socket Linux machine |
-| 4c | S2.5 | Probe of each REDO path at start, verdict per test mode, bad blocks inside a file, dirty-shutdown count | Not started |
+| 4c | S2.5 | Probe of each REDO path at start, verdict per test mode, bad blocks inside a file, dirty-shutdown count | Written, to be tested |
 
 **Changes in 4a.**
 
@@ -679,3 +679,74 @@ On a two-socket Linux machine, PMEM mode with
 `ThreadConfig=ldm={count=2,cpubind=<a CPU of node 0>,<a CPU of node 1>}`
 and `FileSystemPathRedoLog=0:/path/a,1:/path/b` puts log parts 0 and 2
 under `/path/a/ndb_<id>_fs/` and 1 and 3 under `/path/b/ndb_<id>_fs/`.
+
+**Changes in 4c.** File mode and `nodax` are unchanged: neither probes
+anything.
+
+| File | Change |
+|---|---|
+| `include/util/RedoLogPaths.hpp`, `src/common/util/RedoLogPaths.cpp` | `RedoPmemProbe`, `RedoPmemVerdict` and the pure function `redo_pmem_path_verdict()`; `RedoLogPaths-t` tests it on probe fixtures in all three test modes |
+| `include/portlib/ndb_pmem.h`, `src/common/portlib/ndb_pmem.cpp` | `ndb_pmem_cpu_persists()`: x86-64 always, aarch64 with DC CVAP; `ndb_pmem-t` prints and checks it |
+| `src/kernel/blocks/ndbfs/Ndbfs.hpp`, `Ndbfs.cpp` | `probe_redo_path_pmem()`, from `read_redo_pmem_config` in production and `emulated` mode: `ndb_<id>_pmem_probe.tmp` of 2 MB under each REDO path in use, mapped with MAP_SYNC required, `ndb_pmem_get_region_info()`, removed; the verdict refuses the start (2350) or logs warnings and one info line. Production mode refuses a CPU that cannot persist, `emulated` warns |
+| `include/kernel/signaldata/FsRef.hpp` | `fsErrPmemBadBlocks = FS_ERR_BIT \| 18` |
+| `src/kernel/blocks/ndbfs/AsyncFile.cpp` | `map_pmem()` with MAP_SYNC: a file on bad blocks (`ndb_pmem_badblocks_overlap`) is unmapped and refused before the prefault |
+| `src/kernel/blocks/dblqh/DblqhMain.cpp` | FSOPENREF message for `fsErrPmemBadBlocks`; the `fsErrNotDax` message no longer names `FileSystemPath` |
+
+What the verdict does (E17, platform plan S2.5):
+
+| Probe | `off` (production) | `emulated` | `nodax` |
+|---|---|---|---|
+| MAP_SYNC refused | refuse: "... is not on a DAX file system (mmap MAP_SYNC: ...)" | refuse | not probed |
+| No region found, or not read | refuse: "... its persistence domain is not known" | refuse | not probed |
+| Region without a persistence domain (`memmap=`) | refuse: "... reports no persistence domain (memmap= emulation?)" | warning | not probed |
+| `memory_controller`, `cpu_cache` | info line | info line | not probed |
+| Bad-block ranges on the device | warning with the count | warning | not probed |
+| Dirty-shutdown count | in the info line, or "not exposed" | same | not probed |
+
+**Decisions taken in 4c.**
+
+1. **`nodax` probes nothing**, as the plan's table skips every check
+   there, so macOS and Linux without DAX start as in 4b.
+2. **The paths probed** are each REDO path in use and `FileSystemPath`
+   when some REDO log goes there (no `FileSystemPathRedoLog`, or an entry
+   that is `FileSystemPath`). A file found elsewhere by the 4b lookup is
+   still checked at its open, for MAP_SYNC and bad blocks.
+3. **The verdict lives in `util/RedoLogPaths`**, not in NDBFS, so that
+   `RedoLogPaths-t` tests it without a data node.
+4. **A DAX file system without a region found is refused** in production
+   and `emulated` mode, as in the plan: MAP_SYNC works but nothing says
+   whether the memory persists.
+5. **Bad blocks inside a file are refused, outside a warning.** When the
+   extents of the file cannot be known (no FIEMAP, a stacked device),
+   every range of the device counts, as `ndb_pmem_badblocks_overlap`
+   says; refusing such a node is better than a SIGBUS.
+6. **The dirty-shutdown count is only logged.** "Not exposed" means
+   unknown, not clean (design issue 9). Recording it in the control area
+   and warning when it grew is S6 (R10).
+7. **No `get_redo_path_info()` table and no domain bits in `fileInfo`
+   yet.** Their readers are ndbinfo (S2.6) and S6, so they come with them.
+8. **ARM without DC CVAP** is refused in production mode, a warning with
+   `emulated`, nothing with `nodax`.
+
+**Commands for the pusher (4c).** On Linux x86_64, Linux ARM64 and macOS
+ARM64:
+
+```
+cmake --build .
+ctest -R "RedoLogPaths-t|ndb_pmem-t" --output-on-failure
+cd mysql-test
+./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndb_basic ndb.ndb_restart ndb.ndb_restart2 ndb.testNodeRestartGcpSaveAndFileChange
+./mtr ndb.ndb_redo_pmem_paths ndb.ndb_redo_paths_file_mode ndb.ndb_basic ndb.ndb_redo_pmem_config
+```
+
+`RedoLogPaths-t` prints a "verdict" line per case. The refusal now comes
+from the probe, before the initial start writes the REDO log: a cnf file
+with only `[cluster_config]` and `RedoLogMode=pmem`, given to
+`--defaults-extra-file`, makes the start fail with exit code 2350 and
+"RedoLogMode=pmem: FileSystemPath ... is not on a DAX file system (mmap
+MAP_SYNC: Operation not supported)" in the node log. The same with
+`__RedoLogPmemTestMode=emulated` added.
+
+On Linux with `memmap=` (optional): production mode refuses with
+"reports no persistence domain", and `emulated` starts with a warning and
+an info line naming the region.

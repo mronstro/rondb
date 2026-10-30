@@ -60,6 +60,10 @@
 #include "util/cstrbuf.h"
 #include "util/RedoLogPaths.hpp"
 #include "portlib/ndb_pmem.h"
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #include <EventLogger.hpp>
 
@@ -362,12 +366,28 @@ void Ndbfs::read_redo_pmem_config(const ndb_mgm_configuration_iterator *p,
     ERROR_SET(fatal, NDBD_EXIT_INVALID_CONFIG, msg.c_str(),
               "__RedoLogPmemCopyMethod");
   }
+  if (!ndb_pmem_cpu_persists()) {
+    // ARM without DC CVAP (platform plan S2.5)
+    if (test_mode == NDB_REDO_PMEM_TEST_MODE_OFF) {
+      ERROR_SET(fatal, NDBD_EXIT_INVALID_CONFIG,
+                "RedoLogMode=pmem: this CPU cannot write cache lines back to "
+                "persistent memory (DC CVAP on ARM)",
+                "RedoLogMode=pmem");
+    }
+    if (test_mode == NDB_REDO_PMEM_TEST_MODE_EMULATED) {
+      g_eventLogger->warning(
+          "RedoLogMode=pmem: this CPU cannot write cache lines back to "
+          "persistent memory (DC CVAP on ARM), accepted with "
+          "__RedoLogPmemTestMode=emulated");
+    }
+  }
 
   if (test_mode == NDB_REDO_PMEM_TEST_MODE_NODAX) {
     m_pmem_map_flags = NDB_PMEM_MAP_SYNC_OPTIONAL;
   }
 
   BaseString fs_real;
+  bool fs_used = (paths.count == 0);  // some REDO log under FileSystemPath
   if (paths.count > 0) {
     do_mkdir(m_base_path[FsOpenReq::BP_FS].c_str());
     if (!validate_path(fs_real, m_base_path[FsOpenReq::BP_FS].c_str())) {
@@ -393,6 +413,7 @@ void Ndbfs::read_redo_pmem_config(const ndb_mgm_configuration_iterator *p,
     }
     if (strcmp(slot.c_str(), fs_real.c_str()) == 0) {
       slot.assign("");
+      fs_used = true;
       g_eventLogger->info(
           "RedoLogMode=pmem: REDO path %u (%s) is FileSystemPath %s", i, node,
           fs_real.c_str());
@@ -416,9 +437,74 @@ void Ndbfs::read_redo_pmem_config(const ndb_mgm_configuration_iterator *p,
         "are mapped without MAP_SYNC and survive a crash of the data node, "
         "but not a crash of the OS or a power loss");
   }
+  if (test_mode != NDB_REDO_PMEM_TEST_MODE_NODAX) {
+    BaseString what;
+    if (fs_used) {
+      what.assfmt("FileSystemPath %s", m_ctx.m_config.fileSystemPath());
+      probe_redo_path_pmem(FsOpenReq::BP_FS, what.c_str(), test_mode);
+    }
+    for (Uint32 i = 0; i < paths.count; i++) {
+      if (m_base_path[FsOpenReq::BP_REDO_FIRST + i].length() == 0) continue;
+      what.assfmt("FileSystemPathRedoLog %s", paths.entry[i].path.c_str());
+      probe_redo_path_pmem(FsOpenReq::BP_REDO_FIRST + i, what.c_str(),
+                           test_mode);
+    }
+  }
   g_eventLogger->warning(
       "RedoLogMode=pmem: the REDO log files are mapped, but still written "
       "as in file mode in this version");
+}
+
+/**
+ * RONDB-1150, PMEM mode without nodax (platform plan S2.5): before an
+ * initial start writes gigabytes there, map a small file under REDO base
+ * path bp with MAP_SYNC required and look at what lies behind its file
+ * system. The node refuses to start, or warns, as redo_pmem_path_verdict
+ * says for the test mode.
+ */
+void Ndbfs::probe_redo_path_pmem(Uint32 bp, const char *what,
+                                 Uint32 test_mode) {
+  RedoPmemProbe probe;
+#ifdef _WIN32
+  probe.map_err = EOPNOTSUPP;
+#else
+  do_mkdir(get_base_path(bp).c_str());
+  BaseString name;
+  name.assfmt("%sndb_%u_pmem_probe.tmp", get_base_path(bp).c_str(),
+              getOwnNodeId());
+  const int fd = ::open(name.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0600);
+  if (fd < 0) {
+    BaseString msg;
+    msg.assfmt("%s: cannot create %s: %s", what, name.c_str(),
+               strerror(errno));
+    ERROR_SET(fatal, NDBD_EXIT_AFS_INVALIDPATH, msg.c_str(),
+              "RedoLogMode=pmem");
+  }
+  const size_t size = size_t(2) << 20;
+  if (ftruncate(fd, size) != 0) {
+    probe.map_err = errno;
+  } else {
+    ndb_pmem_mapping m;
+    probe.map_err = ndb_pmem_map(fd, size, NDB_PMEM_MAP_SYNC_REQUIRED, &m);
+    if (probe.map_err == 0) ndb_pmem_unmap(&m);
+  }
+  probe.region_err = ndb_pmem_get_region_info(fd, &probe.region);
+  ::close(fd);
+  ::unlink(name.c_str());
+#endif
+  RedoPmemVerdict verdict;
+  redo_pmem_path_verdict(what, probe, test_mode, &verdict);
+  if (verdict.refused) {
+    BaseString msg;
+    msg.assfmt("RedoLogMode=pmem: %s", verdict.refusal.c_str());
+    ERROR_SET(fatal, NDBD_EXIT_INVALID_CONFIG, msg.c_str(),
+              "RedoLogMode=pmem");
+  }
+  for (Uint32 i = 0; i < verdict.warning_count; i++) {
+    g_eventLogger->warning("RedoLogMode=pmem: %s",
+                           verdict.warning[i].c_str());
+  }
+  g_eventLogger->info("RedoLogMode=pmem: %s", verdict.info.c_str());
 }
 
 void Ndbfs::execREAD_CONFIG_REQ(Signal *signal) {
