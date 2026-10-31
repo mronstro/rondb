@@ -1367,18 +1367,10 @@ RonSQLPreparer::throw_parse_error(int parse_result)
   std::basic_ostream<char>& err = *m_conf.err_stream;
   if (parse_result == 2)
   {
-    /*
-     * Bison parser reports OOM. Generally, this can happen in three situations:
-     * 1) Stack depth would exceed YYINITDEPTH but bison doesn't know how to
-     *    expand the stack. Since RSQLP_LTYPE_IS_TRIVIAL and
-     *    RSQLP_STYPE_IS_TRIVIAL are defined in RonSQLParser.y, this case does
-     *    not apply to us.
-     * 2) Stack depth would exceed YYMAXDEPTH.
-     * 3) The allocator used by the parser returns NULL, indicating OOM. Since
-     *    the allocation function we use will never return NULL but rather throw
-     *    an exception on OOM, this case does not apply to us.
-     * Therefore, we know that if we end up here, we are in case 2).
-     */
+    // Stack relocation is enabled by the trivial semantic/location types.
+    // YYMALLOC throws std::bad_alloc on allocation failure; that exception
+    // reaches handle_ronsql_exception(). With this parser configuration,
+    // status 2 therefore means the YYMAXDEPTH limit was reached.
     throw RonSQLPermanentError("Parser stack exceeded its maximum depth.");
   }
   ndbrequire(parse_result == 1);
@@ -16372,6 +16364,8 @@ RonSQLPreparer::encode_constant(struct ConditionalExpression *ce,
     int scale = col->getScale();
     size_t bin_len = decimal_bin_size(prec, scale);
     void* bin = m_amalloc->alloc_bytes(bin_len, 4);
+    if (unlikely(bin == NULL))
+      throw std::bad_alloc();
     int err;
     if (op == T_INT) {
       decimal_t dec;

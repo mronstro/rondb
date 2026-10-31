@@ -1,7 +1,7 @@
 # RonSQL parser review and cleanup plan
 
 Review started: 2026-10-27
-Updated: 2026-10-30
+Updated: 2026-10-31
 Original baseline: 7128c75dca405f5e0fff6be19ae2b584beb1566d
 Cleanup review baseline: 45a7568faed6fe58aca99170be3a50c03a4495c9
 
@@ -29,16 +29,16 @@ Function names identify the durable locations.
 | Items | Status | Commit |
 | --- | --- | --- |
 | I1, I2, I3 | Completed, tested by the user, committed and pushed | 09176e0a3ed |
-| I4 | OOM handling findings recorded; fixes and validation pending | - |
+| I4 | I4a-I4c approved and applied; validation is user-owned | This OOM commit |
 | C1 | Completed for statement construction and synthetic table defaults | 45a7568faed |
 | C3 | Completed for index names, ON conditions and arithmetic arguments | 45a7568faed |
 | C4 | Completed for the shared child helper and three read-only walkers | 45a7568faed |
-| C2 | C2a-C2e approved and applied; validation is user-owned | This cleanup commit |
-| C5 | C5a-C5d approved and applied; validation is user-owned | This cleanup commit |
-| C6 | C6a-C6b approved and applied; validation is user-owned | This cleanup commit |
-| C7 | C7a-C7d approved and applied; validation is user-owned | This cleanup commit |
-| C8 | C8a-C8c approved and applied; validation is user-owned | This cleanup commit |
-| C9 | C9a approved and applied; validation is user-owned | This cleanup commit |
+| C2 | C2a-C2e approved and applied; validation is user-owned | cfcc91bc44e |
+| C5 | C5a-C5d approved and applied; validation is user-owned | cfcc91bc44e |
+| C6 | C6a-C6b approved and applied; validation is user-owned | cfcc91bc44e |
+| C7 | C7a-C7d approved and applied; validation is user-owned | cfcc91bc44e |
+| C8 | C8a-C8c approved and applied; validation is user-owned | cfcc91bc44e |
+| C9 | C9a approved and applied; validation is user-owned | cfcc91bc44e |
 | Feature candidates | Pending individual evaluation and approval | - |
 | Training module | Pending; original draft has not been saved | - |
 
@@ -57,7 +57,7 @@ cases were added for C1/C3/C4. Further cleanup described below remains open.
 The user selected these six items on 2026-10-29. Independent investigations
 ran in parallel, with each source patch reviewed and approved before application.
 C2a-C2e, C5a-C5d, C6a-C6b, C7a-C7d, C8a-C8c and C9a are approved and applied
-and are included in the cleanup commit containing this plan. The user requested
+and were committed and pushed in cfcc91bc44e. The user requested
 commit and push on 2026-10-30. No test result was reported for this batch in the
 conversation. The assistant did not build, test or regenerate lexer/parser
 files; git diff --check passed.
@@ -74,9 +74,9 @@ C7's parse-error extraction is independent of C6, but remains in the same
 track for review. Output-registration extraction follows the C6 helpers.
 Worker capacity determined when independent drafts started; it did not create
 a source-code dependency between them. All patches in this selected cleanup
-sequence are included in this cleanup commit; validation remains user-owned.
-I4 OOM corrections, deferred review items and the training module remain
-separately planned.
+sequence are included in cfcc91bc44e; validation remains user-owned.
+I4 OOM corrections are recorded below. Deferred review items and the training
+module remain separately planned.
 
 ## Correctness investigations
 
@@ -154,9 +154,15 @@ expression support remains a separate feature, not part of this fix.
 
 ### I4 Make frontend out-of-memory handling consistent
 
-Status: added on 2026-10-29 following review of the proposed C2d factory.
-The findings below were checked against the current source. No OOM fixes or
-tests have been applied. Review each correction as a separate source patch.
+Status: added on 2026-10-29 following review of the proposed C2d factory;
+selected for implementation on 2026-10-30 after cleanup commit cfcc91bc44e.
+I4a-I4c were approved and applied on 2026-10-31; the source matches the approved
+patches, including the requested ronsql_parser_alloc name, and git diff --check
+passed. The allocation audit below is recorded. No OOM tests have been added or
+run; building, testing and parser/lexer generation remain user-owned. The user
+requested commit and push on 2026-10-31. These fixes and the audit are included
+in the OOM commit containing this plan; no test result was reported for this
+batch in the conversation.
 
 The C2d placement construction itself uses the existing protected path:
 ArenaMalloc::alloc_exc() returns valid storage or throws std::bad_alloc before
@@ -170,44 +176,101 @@ a null-pointer fault is not a C++ exception caught by catch (...).
 
 #### I4a Check the DECIMAL constant buffer allocation
 
-Finding: RonSQLPreparer::encode_constant() allocates its DECIMAL output buffer
-with alloc_bytes(bin_len, 4) and does not check for NULL. The integer-literal
+Finding: RonSQLPreparer::encode_constant() allocated its DECIMAL output buffer
+with alloc_bytes(bin_len, 4) without checking for NULL. The integer-literal
 branch passes that pointer to decimal2bin(), which writes through it. This is
 a potential process crash when allocation fails, in frontend preparation.
+The floating-literal branch passes the same pointer to decimal_str2bin(),
+which asserts bin != nullptr and then calls decimal2bin(). Both branches
+therefore need the check before conversion. encode_constant() is also used
+during execution, whose outer catch routes failures through the same handler.
 
-Proposed correction: check the allocation and throw std::bad_alloc before
-either integer or floating-literal conversion. Preserve the buffer size and
-four-byte alignment, and use the existing RESOURCE error handler.
+Applied correction: check the allocation and throw std::bad_alloc before
+either integer or floating-literal conversion. The buffer size and four-byte
+alignment are preserved, and failure uses the existing RESOURCE error handler.
+
+I4a checks bin == NULL immediately after alloc_bytes() and throws
+std::bad_alloc(). The existing <new> include is sufficient. The
+successful conversion paths and existing conversion-error classification are
+unchanged. The helper's E_DEC_OOM code denotes an undersized output buffer;
+it is separate from failure to allocate this buffer.
 
 #### I4b Distinguish Bison allocation failure from parser depth exhaustion
 
-Finding: RonSQLParser.y defines YYMALLOC using nonthrowing alloc_bytes(). Bison
-returns status 2 both when stack allocation fails and when YYMAXDEPTH is
-exceeded. The handling now in RonSQLPreparer::throw_parse_error() treats every
-status 2 as a depth limit and incorrectly comments that its allocator cannot
-return NULL. C7a extracted that handling without changing its behavior.
+Finding: RonSQLParser.y defined YYMALLOC using nonthrowing alloc_bytes(). Bison
+returned status 2 both when stack allocation failed and when YYMAXDEPTH was
+exceeded. RonSQLPreparer::throw_parse_error() treated every status 2 as a depth
+limit and incorrectly commented that its allocator could not return NULL.
+C7a extracted that handling without changing its behavior.
 
-Proposed correction: make the Bison allocation wrapper throw std::bad_alloc
-on allocation failure while preserving its alignment and arena ownership.
-Verify the generated parser's status-2 paths, retain the depth-limit diagnostic
-for actual depth exhaustion, and correct the explanatory comment. Keep this
-behavior change separate from C7's mechanical parse-error extraction; whichever
-lands second must be rebased against the first.
+Applied correction: the Bison allocation wrapper throws std::bad_alloc on
+allocation failure while preserving alignment and arena ownership. The
+depth-limit diagnostic is retained and its explanatory comment is corrected.
+This behavior change follows the committed C7 extraction.
+
+I4b routes YYMALLOC through a parser-private ronsql_parser_alloc() helper in
+the grammar's %code top section, using the name requested at approval. It preserves
+the requested byte count and alignof(union yyalloc), checks for NULL and throws
+std::bad_alloc(). YYFREE remains a no-op because the query arena owns storage.
+The existing normal and ParseOnly constructor handlers classify the exception
+as RESOURCE; the depth-limit message remains unchanged.
+
+Read-only audit of the existing generated Bison 3.8.2 yacc.c parser found three
+YYNOMEM sites: unavailable stack relocation, reaching YYMAXDEPTH, and a NULL
+stack allocation. The configured trivial-type flags enable relocation. There
+is no generated exception catch or semantic-symbol cleanup beyond tracing, so
+the exception propagates to the constructor handler and arena ownership is
+preserved. The generated grammar predates the latest cleanup; this establishes
+the existing skeleton paths, not validation of regenerated output. No parser
+generation, build or tests were run; those remain user-owned.
 
 #### I4c Align lexer allocation failures and audit remaining raw allocations
 
-Finding: RonSQLLexer.l's rsqlp_alloc() checks alloc_bytes() but throws
+Finding: RonSQLLexer.l's rsqlp_alloc() checked alloc_bytes() but threw
 RonSQLRetryableError on failure, unlike the AST's RESOURCE-class failure.
 
-Proposed correction: throw std::bad_alloc here as well so the common handler
-reports a nonretryable RESOURCE failure consistently. Check both normal
-preparation and ParseOnly callers, including their cleanup and retry behavior.
+Applied correction: throw std::bad_alloc here as well so the common handler
+reports a nonretryable RESOURCE failure consistently. Source review covered
+normal preparation and ParseOnly callers, including cleanup and retry behavior.
+
+I4c adds an explicit <new> include to the lexer's C++ section and replaces
+the retryable exception with std::bad_alloc(). Allocation
+size, alignment, successful returns and arena-owned cleanup remain unchanged.
+Both constructor modes call configure() inside their try blocks. The generated
+lex_init_extra() passes a temporary scanner with the Context installed before
+allocating scanner state; later buffer and stack allocations use that scanner.
+The allocation hook throws before Flex's NULL-result fatal-error paths run.
+
+The REST execution wrapper otherwise retries RonSQLRetryableError up to ten
+times, but immediately returns HTTP 503 for a RESOURCE-class permanent error.
+The authorization ParseOnly path previously mapped the retryable lexer exception
+through its generic std::exception catch to HTTP 500; I4c instead reaches its
+classified-error catch and returns HTTP 503. Request-owned arena destruction
+reclaims scanner allocations after constructor failure, when the preparer's
+destructor does not run.
 
 Audit remaining alloc_bytes(), alloc(), calloc() and realloc() uses in the
 lexer, parser, AST helpers and preparation code for checks before use. Inspect
 the lexer's unconditional abort() in rsqlp_realloc() separately: its comment
 says reallocation is unnecessary, but reachability must be established before
 classifying it as an OOM crash. Keep data-node implementation outside scope.
+
+Source audit on 2026-10-31 found that the remaining explicit nonthrowing arena
+allocations in RonSQL source are guarded: the two CTE execution arrays check
+for NULL and throw std::bad_alloc(), as does PassthroughValue::copy(). The
+DECIMAL and Bison sites are now covered by I4a-I4b. DynamicArray and LexString
+use alloc_exc()/realloc_exc(); AST actions and compiler helpers use alloc_exc().
+
+The existing generated scanner's realloc paths are not reached by RonSQL's
+current one-buffer setup: configure() initializes a fresh scanner and calls
+scan_buffer() once; the buffer has yy_fill_buffer = 0, initial lexing sees an
+existing buffer, and noyywrap terminates at EOF. No RonSQL caller switches or
+pushes another buffer. Input-buffer growth is bypassed and buffer-stack growth
+is never requested after initial allocation. The aborting realloc hook remains
+unchanged; additional buffer operations would require revisiting this invariant.
+This is a source audit of existing generated code, not a regenerated-build or
+fault-injection result. CLI input/option allocation before construction and
+other request-boundary allocations remain outside these parser corrections.
 
 Proposed validation, to be reviewed separately and run by the user:
 
@@ -248,7 +311,7 @@ Existing ronsql_cte_scalar Test 8 exercises the synthesized-FROM shape.
 
 ### C2 Share inner SELECT construction and grammar components
 
-Status: implementation complete and included in this cleanup commit.
+Status: implementation complete in cfcc91bc44e.
 C2a-C2e are approved and applied. CTE and subquery
 wrappers now share inner_select_body while retaining their scope transitions
 and compiler ownership. Source spans and required inner FROM are preserved.
@@ -349,8 +412,8 @@ for a concrete later need.
 
 ### C5 Share checked Boolean collection and reconstruction
 
-Status: agreed C5a-C5d implementation complete and included in this cleanup
-commit. All eight throwing AND callers and the single OR caller now
+Status: agreed C5a-C5d implementation complete in cfcc91bc44e.
+All eight throwing AND callers and the single OR caller now
 use the shared collector through their existing wrappers. Their 64-term limits,
 messages, source order and original leaf pointers are preserved. git diff
 --check passed and the source matches the approved patches; building and tests
@@ -402,8 +465,8 @@ and :18707 and CTE stack-overflow behavior as separate semantic questions.
 
 ### C6 Share aggregate construction and registration
 
-Status: agreed C6a-C6b implementation complete and included in this cleanup
-commit. The source matches the approved patches and git diff --check
+Status: agreed C6a-C6b implementation complete in cfcc91bc44e.
+The source matches the approved patches and git diff --check
 passed. Building and tests remain user-owned and have not been run by the
 assistant. C7 output-phase extraction can now use the aggregate helpers.
 
@@ -441,8 +504,7 @@ NULL-compiler guard and aggregate-limit accounting.
 
 Status: C7a-C7d approved and applied locally. Both source files
 match the approved patches and git diff --check passed. Building and tests
-remain user-owned and have not been run by the assistant. Included in this
-cleanup commit.
+remain user-owned and have not been run by the assistant. Included in cfcc91bc44e.
 
 C7a extracted throw_parse_error(parse_result), moving the error rendering
 originally at RonSQLPreparer.cpp:1267 unchanged. All four diagnostic blocks in
@@ -496,7 +558,7 @@ operation. Moving its schema-dependent work is a separate design change.
 
 Status: C8a-C8c approved and applied locally. Both source files match the approved
 patches and git diff --check passed. Builds and tests remain user-owned and have
-not been run by the assistant. Included in this cleanup commit. Public Context interfaces
+not been run by the assistant. Included in cfcc91bc44e. Public Context interfaces
 remain stable, preserving the applied C2 grammar changes.
 
 Unify column interning behind the existing Context methods
@@ -548,7 +610,7 @@ Retain QueryScope and the pre-rewrite authorization inventory as foundations.
 
 Status: C9a approved and applied locally. The lexer source matches the approved
 patch and git diff --check passed. Generated files, builds and tests remain
-user-owned and have not been run by the assistant. Included in this cleanup commit.
+user-owned and have not been run by the assistant. Included in cfcc91bc44e.
 
 Extract the normalized MySQL-keyword binary search shared by RonSQLLexer.l:127
 and :404. Keep normalization at callers and leave the implemented-keyword table
@@ -579,8 +641,11 @@ Completed sequence:
 5. Investigate C1/C3/C4 in parallel; review and apply one patch at a time.
 6. Commit and push 45a7568faed after the user reported all tests passed.
 7. Investigate C2 and C5-C9 in parallel and apply the selected cleanup patches
-   one at a time after approval; include them and this plan in the cleanup
-   commit at the user's request. Validation remains user-owned.
+   one at a time after approval; commit and push them and this plan in
+   cfcc91bc44e at the user's request. Validation remains user-owned.
+8. Review and apply I4a-I4c individually, record the allocation audit, and
+   include them in this OOM commit at the user's request. Validation remains
+   user-owned.
 
 The user has selected C2 and C5-C9 for parallel work. Implementation proceeds
 one approved patch at a time within these boundaries:

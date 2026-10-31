@@ -63,8 +63,9 @@ struct RonSQLColumnReference
 static_assert(std::is_trivial<RonSQLColumnReference>::value,
               "Bison semantic values must remain trivial.");
 
-// Let bison use RonSQLPreparer's arena allocator
-#define YYMALLOC(SIZE) context->get_allocator()->alloc_bytes(SIZE, alignof(union yyalloc))
+// Let Bison use the arena and throw std::bad_alloc on allocation failure.
+#define YYMALLOC(SIZE) \
+  ronsql_parser_alloc(context->get_allocator(), (SIZE), alignof(union yyalloc))
 #define YYFREE(PTR) void()
 
 // Let bison know it's okay to move the stack using memcpy. This could otherwise
@@ -103,10 +104,21 @@ while (0)
 /* This section will go into RonSQLParser.y.cpp, near the top. */
 %code top
 {
+#include <new>
 #include <stdio.h>
 #include <stdlib.h>
 #include "RonSQLParser.y.hpp"
 #include "RonSQLLexer.l.hpp"
+
+static void*
+ronsql_parser_alloc(ArenaMalloc* allocator, size_t bytes, size_t alignment)
+{
+  void* ptr = allocator->alloc_bytes(bytes, alignment);
+  if (unlikely(ptr == NULL))
+    throw std::bad_alloc();
+  return ptr;
+}
+
 extern void rsqlp_error(RSQLP_LTYPE* yylloc, yyscan_t yyscanner, const char* s);
 #define context (rsqlp_get_extra(scanner))
 /* Unfortunately initptr got a little complex. It just means that we assume THIS

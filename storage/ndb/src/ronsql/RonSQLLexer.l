@@ -90,6 +90,7 @@
  * This section will go into RonSQLLexer.l.cpp only, somewhere in the middle.
  */
 %{
+#include <new>
 #include <stdio.h>
 #include "RonSQLParser.y.hpp"
 #include "Keywords.hpp"
@@ -592,7 +593,7 @@ rsqlp_alloc(size_t bytes, void * scanner)
   if(likely(ret)) {
     return ret;
   }
-  throw RonSQLRetryableError("rsqlp_alloc: Cannot allocate");
+  throw std::bad_alloc();
 }
 
 void*
