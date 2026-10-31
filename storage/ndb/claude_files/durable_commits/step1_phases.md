@@ -16,7 +16,7 @@ unchanged.
 | 2 | 3 | PMEM helper and platform queries | S1.3, S1.4 | `ndb_pmem-t` on a plain file on the three platforms and on `memmap=` | 1 | **In progress**: S1.3 passed `ndb_pmem-t` on macOS ARM64 and Linux x86_64 (2026-10-29); Linux ARM64 to be tested. S1.4 passed `ndb_pmem_region-t` and `NdbHW-t` on macOS ARM64 and Linux x86_64 (2026-10-29); Linux ARM64 to be tested |
 | 3 | 4 | Configuration: parameters, path parser, checks, test settings | S2.1–S2.3, S2.7 | Config unit tests, management-server refusals | — | **In progress**: `RedoLogPaths-t`, `MgmConfig-t`, `ndb.ndb_redo_pmem_config`, `ndb.ndb_config` and `ndb.ndb_basic` in PMEM mode passed on macOS ARM64 (2026-10-29); `ndb.ndb_redo_pmem_config`, `RedoLogPaths-t` and `MgmConfig-t` passed on Linux x86_64 (2026-10-30); Linux ARM64 postponed |
 | 4 | 5 | NDBFS mapping and placement; PMEM mode with today's format (**M0.2**) | S3.1–S3.4, S2.4, S2.5 | MTR ndb suite and a testSystemRestart subset in `nodax` and on `memmap=` | 2, 3 | **In progress**: 4a (NDBFS maps the REDO files), 4b (REDO paths, NUMA placement) and 4c (start-time platform checks) passed on macOS ARM64 and Linux x86_64 (2026-10-30), after the fix of a race in `ndb_pmem_map` that 4a found on Linux. Still to run for the gate: Linux ARM64 (postponed), the testSystemRestart subset, and `memmap=` |
-| 5 | 6 | Initial start and restarts with every file mapped; ndbinfo `redo_log_pmem` | S3.5, S3.6, S2.6 | Initial start, SR and NR in PMEM mode; ndbinfo rows | 4 | Not started |
+| 5 | 6 | Initial start and restarts with every file mapped; ndbinfo `redo_log_pmem` | S3.5, S3.6, S2.6 | Initial start, SR and NR in PMEM mode; ndbinfo rows | 4 | **In progress**: 5a (every REDO file kept open and mapped, by a close that keeps the file in NDBFS) written (2026-10-31); `ndb_redo_pmem_restarts` passed on macOS ARM64 (2026-10-31), the other runs and Linux x86_64 to be tested; 5b (ndbinfo) next |
 | 6 | 7 | Record format and reader module | S4.1, S6.2 | Unit tests over synthetic logs on the three platforms | 1 | Not started |
 | 7 | 8 | Record writers | S4.2–S4.7, S5.1 | Unit tests; file-mode regression | 6 | Not started |
 | 8 | 9 | PMEM REDO end to end: write path and recovery together (**M0.3**) | S4.8, S5.2–S5.5, S6.1, S6.3–S6.6 | Initial start, traffic, SR and NR in PMEM mode; the ledger in PMEM mode | 5, 7, ledger | Not started |
@@ -750,3 +750,99 @@ MAP_SYNC: Operation not supported)" in the node log. The same with
 On Linux with `memmap=` (optional): production mode refuses with
 "reports no persistence domain", and `emulated` starts with a warning and
 an info line naming the region.
+
+---
+
+## Phase 5: every REDO log file kept open and mapped; ndbinfo
+
+**Scope.** `implementation_plan.md` pull request 6; platform plan S3.5,
+S3.6 and S2.6. In PMEM mode every REDO log file is mapped from its first
+open until the node stops, so that phase 8 can write and read the whole
+log through the mappings. The REDO is still written through FSWRITEREQ
+in today's format. Written in two parts:
+
+| Part | Packages | Content | State |
+|---|---|---|---|
+| 5a | S3.5, S3.6 | NDBFS keeps a REDO log file open and mapped when DBLQH closes it; DBLQH's later opens of the file are answered without NDBFS; the initial start keeps the files it writes; a system or node restart opens every file of each log part before it reads the log | Written (2026-10-31). `ndb_redo_pmem_restarts` passed on macOS ARM64 (2026-10-31), every log part of both nodes mapped at each of the 11 system restarts and at the node's own restart; the other runs and Linux x86_64 to be tested |
+| 5b | S2.6 | ndbinfo `redo_log_pmem` | Not started |
+
+**Changes in 5a.** File mode is unchanged: the new flag and state are
+used under `c_redo_pmem` only.
+
+| File | Change |
+|---|---|
+| `include/kernel/signaldata/FsCloseReq.hpp`, printer | Keep-open flag (`fileFlag = 2`, `getKeepOpenFlag`, `setKeepOpenFlag`); DBLQH is a friend |
+| `src/kernel/blocks/ndbfs/AsyncIoThread.hpp`, `AsyncIoThread.cpp` | `Request::closeKeepOpen`: the IO thread of the file syncs it and does not close or unbind it |
+| `src/kernel/blocks/ndbfs/Ndbfs.cpp` | FSCLOSEREQ with the keep-open flag becomes `closeKeepOpen`; its FSCLOSECONF leaves the file open, mapped and bound to its thread; an error gives FSCLOSEREF as for a close. In PMEM mode the bound threads created at start cover `NoOfFragmentLogFiles` files per log part instead of 4, which also raises `MaxNoOfOpenFiles` when it is set too low |
+| `src/kernel/blocks/ndbfs/VoidFs.cpp` | `ndbrequire` that no close keeps the file open |
+| `src/kernel/blocks/dblqh/Dblqh.hpp`, `DblqhMain.cpp` | `LogFileRecord::m_pmem_fileRef`: the NDBFS file from the first open on, while `fileRef` stays RNIL whenever the file is closed for DBLQH; `m_pmem_base` is no longer cleared at FSCLOSECONF. `closeFile()` sets the keep-open flag in PMEM mode, and `release()` of the open-file cache uses `closeFile()`. `openKeptRedoFile()`: an FSOPENCONF of 2 words to the log part's owner, as from `openFileRw_cache()`, used by `openFileRw()` and `openNextLogfile()` for a kept file. `initFsopenconf` keeps `m_pmem_fileRef` from NDBFS's FSOPENCONF and requires that NDBFS opens a file once. SR and NR: `openAllRedoFilesPmem()` from `startphase3Lab`, state `OPENING_PMEM_MAP_ALL`, counter `LogPartRecord::m_pmem_files_to_map`, one info line per log part, then file 0 as before. `setRedoPmemOpenFlags()` drops `OM_WRITE_BUFFER`. The start log counts `OPENING_PMEM_MAP_ALL` as opening |
+| `mysql-test/suite/ndb/t/ndb_redo_pmem_restarts.{test,cnf}`, `r/` | PMEM mode with `nodax`: `testSystemRestart -n SR1` and `-n SR2`, `testNodeRestart -n NoLoad`, one loop each, and the info line of the restarts in both node logs. Both mysqlds are stopped while NDBT runs, as in `ndb_scan_start_restart`: NDBT creates `TEST_DB.T1` from the NDB API, and on a case-insensitive file system (macOS) the mysqld metadata sync retries `CREATE DATABASE TEST_DB` after each system restart and fails the warning check |
+
+**Decisions taken in 5a.**
+
+1. **The close keeps the file in NDBFS but syncs it as a close does.**
+   The plan's virtual close, an FSCLOSECONF that DBLQH sends itself,
+   would skip the `fsync` that NDBFS does at every close, and today's
+   REDO log relies on it: `checkGcpCompleted` takes a file in
+   `CLOSING_WRITE_LOG` or `CLOSED` as synced and sends FSSYNCREQ only for
+   open files, and the invalidation at a system restart syncs at MByte
+   boundaries only and leaves the rest to the close. So `closeFile()`
+   sends FSCLOSEREQ with the keep-open flag; NDBFS syncs the file on its
+   own IO thread, after the writes queued before, and answers
+   FSCLOSECONF. PMEM mode keeps the durability of file mode until phase 8.
+2. **The open is the plan's virtual open**, an FSOPENCONF without the
+   mapping words to the owner of the log part. `execFSOPENCONF` runs
+   unchanged, with the `ERROR_INSERT 5090` delay. `openNextLogfile()`
+   may run in an LDM that shares the part; it reads `m_pmem_fileRef`
+   under the part's lock, and `initFsopenconf` sets it under the lock.
+3. **The initial start needs no change of its own.** The close at the
+   end of each file's initialisation keeps the file, so `initFourth` and
+   normal operation find every file open. The plan's
+   `initNextLogfile()` is not needed.
+4. **No `OM_THREAD_POOL`; each kept file keeps its bound IO thread.**
+   `checkGcpCompleted` takes a GCP as written when a write at or after
+   its last word completes, which holds only if the writes of one file
+   complete in order. Pool threads take requests from a shared queue, so
+   two writes of a file could complete out of order, and two writes of
+   page 0 could land in the wrong order. A node thus has
+   `NoOfFragmentLogFiles` × log parts bound threads for the REDO log
+   (16 × 4 = 64 by default, 16 in MTR). When phase 8 stops sending
+   FSWRITEREQ in PMEM mode, the pool becomes safe.
+5. **No `OM_WRITE_BUFFER` in PMEM mode.** The buffer, 256 kB of
+   `RG_FILE_BUFFERS` per open file, which `ndbd.cpp` sizes for 4 open
+   files per log part, only joins the pages of a write into one
+   `pwrite`. With every file open the resource would run out. Without it
+   NDBFS writes page by page. Phase 4 decision 2 is corrected here: the
+   flag does not change what FSWRITEREQ writes.
+6. **SR and NR open all files of a part at once** and wait for all
+   before file 0 is read, so that the whole log is mapped before the
+   search for its end. A file found under another REDO path is adopted
+   as in 4b, with one warning per log part.
+
+**Commands for the pusher (5a).** On Linux x86_64, Linux ARM64 and macOS
+ARM64:
+
+```
+cmake --build .
+cd mysql-test
+./mtr ndb.ndb_redo_pmem_restarts
+for n in 1 2; do grep -ho "log part [0-9]* are open and mapped, [0-9]* MB" var/mysql_cluster.1/ndbd.$n/ndbd.log | sort | uniq -c; done
+./mtr ndb.ndb_redo_pmem_paths
+./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndb_basic ndb.ndb_restart ndb.ndb_restart2 ndb.testNodeRestartGcpSaveAndFileChange
+./mtr ndb.ndb_basic ndb.ndb_restart ndb.ndb_redo_log_reader ndb.ndb_redo_paths_file_mode ndb.testNodeRestartGcpSaveAndFileChange
+```
+
+`ndb.ndb_redo_pmem_restarts` needs an error-insert build and runs for
+several minutes; add `--testcase-timeout=30` if it times out. The grep
+counts, per data node, the lines "the 4 REDO log files of log part N
+are open and mapped, 64 MB": one per log part at every system restart
+and at the node's own restart, 12 for each of parts 0-3 on both nodes
+(11 system restarts in SR1 and SR2, one node restart in NoLoad). The
+last run is file mode, which must be unchanged:
+`closeFile()`, `openFileRw()` and the open-file cache were touched.
+
+The `ndb.ndb_redo_pmem_restarts` run also covers the testSystemRestart
+subset of phase 4's gate in `nodax`. `testRedo -n RestartOK`,
+`-n RestartFDSR` and `-n CheckNextRedoFileOpened` change the REDO
+configuration and restart with `--initial`, so they stay with the
+autotest run of phase 8.

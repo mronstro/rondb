@@ -187,6 +187,9 @@ void AsyncIoThread::run() {
       file->removeReq(request);
       detach(file);
       break;
+    case Request::closeKeepOpen:
+      file->syncReq(request);
+      break;
     case Request::readPartial:
     case Request::read:
       file->readReq(request);
@@ -336,6 +339,8 @@ const char *Request::actionName(Request::Action action) {
     return "buildindx";
   case Request::suspend:
     return "suspend";
+  case Request::closeKeepOpen:
+    return "closeKeepOpen";
   default:
     return "Unknown action";
   }

@@ -1,0 +1,19 @@
+# Shutting down mysqld 1
+# Shutting down mysqld 2
+== 1 == system restarts from the REDO log
+Running command
+Result of command: 0
+Test program success!
+== 2 == system restarts from local checkpoints
+Running command
+Result of command: 0
+Test program success!
+== 3 == a node restart of each node
+Running command
+Result of command: 0
+Test program success!
+== 4 == the restarts mapped every file of a log part at once
+# Starting mysqld 1
+# restart
+# Starting mysqld 2
+# restart

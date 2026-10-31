@@ -84,7 +84,8 @@ class Request {
     readPartial,
     allocmem,
     buildindx,
-    suspend
+    suspend,
+    closeKeepOpen  // RONDB-1150: sync, reply FSCLOSECONF, keep the file open
   };
   Action action;
   static const char *actionName(Action);

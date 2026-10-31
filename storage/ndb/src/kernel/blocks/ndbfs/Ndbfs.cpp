@@ -633,6 +633,21 @@ void Ndbfs::execREAD_CONFIG_REQ(Signal *signal) {
     Uint32 logParts = NDB_DEFAULT_LOG_PARTS;
     ndb_mgm_get_int_parameter(p, CFG_DB_NO_REDOLOG_PARTS, &logParts);
     Uint32 logfiles = 4 * logParts;
+    {
+      /**
+       * RONDB-1150: in PMEM mode DBLQH keeps every REDO log file open
+       * and mapped from its first open until the node stops, each with
+       * a bound thread, see Dblqh::closeFile().
+       */
+      Uint32 mode = NDB_REDO_LOG_MODE_FILE;
+      Uint32 files = 16;
+      ndb_mgm_get_int_parameter(p, CFG_DB_REDO_LOG_MODE, &mode);
+      ndb_mgm_get_int_parameter(p, CFG_DB_NO_REDOLOG_FILES, &files);
+      if (mode == NDB_REDO_LOG_MODE_PMEM && files > 4) {
+        jam();
+        logfiles = files * logParts;
+      }
+    }
     Uint32 numLDMthreads = getLqhWorkers();
     if (numLDMthreads == 0) {
       jam();
@@ -1044,6 +1059,9 @@ void Ndbfs::execFSCLOSEREQ(Signal *signal) {
   if (fsCloseReq->getRemoveFileFlag(fsCloseReq->fileFlag) == true) {
     jam();
     request->action = Request::closeRemove;
+  } else if (fsCloseReq->getKeepOpenFlag(fsCloseReq->fileFlag)) {
+    jam();
+    request->action = Request::closeKeepOpen;
   } else {
     jam();
     request->action = Request::close;
@@ -1649,7 +1667,8 @@ void Ndbfs::report(Request *request, Signal *signal) {
         break;
       }
       case Request::closeRemove:
-      case Request::close: {
+      case Request::close:
+      case Request::closeKeepOpen: {
         jam();
         log_file_error(GSN_FSCLOSEREF, nullptr, request, fsRef);
         sendSignal(ref, GSN_FSCLOSEREF, signal, FsRef::SignalLength, JBB);
@@ -1657,6 +1676,8 @@ void Ndbfs::report(Request *request, Signal *signal) {
         g_eventLogger->warning("%s %s %u/%u",
                                (request->action == Request::close
                                     ? "Error closing file:"
+                                : request->action == Request::closeKeepOpen
+                                    ? "Error syncing file kept open:"
                                     : "Error closing and removing file:"),
                                request->file->theFileName.c_str(),
                                fsRef->errorCode, fsRef->osErrorCode);
@@ -1790,6 +1811,12 @@ void Ndbfs::report(Request *request, Signal *signal) {
         theOpenFiles.erase(request->theFilePointer);
         // Put the file in idle files list
         pushIdleFile(request->file);
+        sendSignal(ref, GSN_FSCLOSECONF, signal, 1, JBA);
+        break;
+      }
+      case Request::closeKeepOpen: {
+        jam();
+        // The file stays open, mapped and bound to its thread
         sendSignal(ref, GSN_FSCLOSECONF, signal, 1, JBA);
         break;
       }
