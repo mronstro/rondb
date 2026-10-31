@@ -1,0 +1,64 @@
+--source include/have_ndb.inc
+--source have_ndb_error_insert.inc
+
+# RONDB-1150: with RedoLogMode=pmem every REDO log file stays open and
+# mapped from its first open until the node stops (platform plan S3.5,
+# S3.6). The initial start keeps the files it writes, a system or node
+# restart opens every file of each log part before it reads the log,
+# and the later opens and closes of DBLQH leave the file open in NDBFS.
+# __RedoLogPmemTestMode=nodax maps them without MAP_SYNC. The NDBT
+# restart tests check that the REDO log is still written and read right.
+
+# NDBT creates TEST_DB.T1 directly through the NDB API. Keep both
+# mysqlds stopped so metadata discovery cannot import the API table;
+# on a case-insensitive file system it retries CREATE DATABASE TEST_DB
+# after each system restart and fails.
+--connect(s2,127.0.0.1,root,,test,$MASTER_MYPORT1,)
+--connection default
+--echo # Shutting down mysqld 1
+--let $mysqld_name=mysqld.1.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld1_file_name= $_expect_file_name
+
+--connection s2
+--echo # Shutting down mysqld 2
+--let $mysqld_name=mysqld.2.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld2_file_name= $_expect_file_name
+
+let NDBAPITEST_CLEANUP_QUERY=;
+
+--echo == 1 == system restarts from the REDO log
+let NDBAPITEST_NAME=testSystemRestart;
+let NDBAPITEST_ARGS=-n SR1 -l 1 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+--echo == 2 == system restarts from local checkpoints
+let NDBAPITEST_ARGS=-n SR2 -l 1 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+--echo == 3 == a node restart of each node
+let NDBAPITEST_NAME=testNodeRestart;
+let NDBAPITEST_ARGS=-n NoLoad -l 1 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+--echo == 4 == the restarts mapped every file of a log part at once
+--exec grep -q "the 4 REDO log files of log part 0 are open and mapped, 64 MB" $MYSQLTEST_VARDIR/mysql_cluster.1/ndbd.1/ndbd.log
+--exec grep -q "the 4 REDO log files of log part 1 are open and mapped, 64 MB" $MYSQLTEST_VARDIR/mysql_cluster.1/ndbd.2/ndbd.log
+
+# NDBT drops T1 before reporting success. With no metadata discovery
+# during the test, there is no SQL TEST_DB schema to clean up.
+--connection default
+--echo # Starting mysqld 1
+--let $_expect_file_name= $expect_mysqld1_file_name
+--let $mysqld_name=mysqld.1.1
+--source include/start_mysqld.inc
+
+--connection s2
+--echo # Starting mysqld 2
+--let $_expect_file_name= $expect_mysqld2_file_name
+--let $mysqld_name=mysqld.2.1
+--source include/start_mysqld.inc
+
+--connection default
+--disconnect s2

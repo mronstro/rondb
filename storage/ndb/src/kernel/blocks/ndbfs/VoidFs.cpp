@@ -148,6 +148,8 @@ void VoidFs::execFSCLOSEREQ(Signal *signal) {
   const FsCloseReq *const req = (FsCloseReq *)signal->getDataPtr();
   const Uint32 userRef = req->userReference;
   const Uint32 userPointer = req->userPointer;
+  // Only the REDO log in PMEM mode keeps files open, see execFSOPENREQ
+  ndbrequire(!FsCloseReq::getKeepOpenFlag(req->fileFlag));
 
   signal->theData[0] = userPointer;
   sendSignal(userRef, GSN_FSCLOSECONF, signal, 1, JBB);

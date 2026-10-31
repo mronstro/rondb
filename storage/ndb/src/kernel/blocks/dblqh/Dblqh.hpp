@@ -2073,6 +2073,11 @@ class Dblqh : public SimulatedBlock {
     Uint8 m_redo_path_no;
     bool m_redo_path_warned;
     bool m_redo_numa_checked;
+    /**
+     * RONDB-1150, PMEM mode: the files that SR or NR still waits for in
+     * OPENING_PMEM_MAP_ALL (openAllRedoFilesPmem()).
+     */
+    Uint32 m_pmem_files_to_map;
 
     /**
      *       A timer that is set every time a log page is sent to disk.
@@ -2378,7 +2383,10 @@ class Dblqh : public SimulatedBlock {
       CLOSING_EXEC_LOG_CACHED = 29
 #endif
       ,
-      CLOSING_SR_FRONTPAGE = 30
+      CLOSING_SR_FRONTPAGE = 30,
+      OPENING_PMEM_MAP_ALL = 31  ///< RONDB-1150, PMEM mode: SR or NR
+                                 ///< opens every file of the part
+                                 ///< before file 0 is read
     };
 
     /**
@@ -2440,10 +2448,14 @@ class Dblqh : public SimulatedBlock {
      */
     UintR fileRef;
     /**
-     *       RONDB-1150: the mapping of the open file in PMEM mode, from
-     *       FSOPENCONF; nullptr when the file is closed.
+     *       RONDB-1150, PMEM mode: the mapping of the file, from its first
+     *       FSOPENCONF; nullptr before. NDBFS keeps the file open and
+     *       mapped from the first open until the node stops, as
+     *       m_pmem_fileRef (RNIL before); fileRef is RNIL while the file
+     *       is closed for DBLQH. See closeFile() and openKeptRedoFile().
      */
     Uint8 *m_pmem_base;
+    UintR m_pmem_fileRef;
     /**
      *       The head of the pages waiting for shipment to disk.
      *       They are filled with log info.
@@ -3971,6 +3983,9 @@ private:
   void checkRedoPmemPlacement(LogPartRecord *logPartPtrP, Uint32 fileInfo);
   void openFileRw(Signal *signal, LogFileRecordPtr olfLogFilePtr,
                   bool writeBuffer = true);
+  void openKeptRedoFile(Signal *signal, LogFileRecordPtr filePtr,
+                        BlockReference ownerRef);
+  void openAllRedoFilesPmem(Signal *signal, LogPartRecord *logPartPtrP);
   void openLogfileInit(Signal *signal, LogFileRecordPtr logFilePtr);
   void openNextLogfile(Signal *signal, LogFileRecord *logFilePtrP,
                        LogPartRecord *logPartPtrP);

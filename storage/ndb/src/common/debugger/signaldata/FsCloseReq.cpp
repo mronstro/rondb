@@ -37,6 +37,8 @@ bool printFSCLOSEREQ(FILE *output, const Uint32 *theData, Uint32 len,
   fprintf(output, " Flags: H\'%.8x, ", sig->fileFlag);
   if (sig->getRemoveFileFlag(sig->fileFlag))
     fprintf(output, "Remove file");
+  else if (sig->getKeepOpenFlag(sig->fileFlag))
+    fprintf(output, "Keep open");
   else
     fprintf(output, "Don't remove file");
   fprintf(output, "\n");

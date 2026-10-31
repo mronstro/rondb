@@ -92,6 +92,7 @@
 #include <signaldata/BackupImpl.hpp>
 #include <signaldata/DbinfoScan.hpp>
 #include <signaldata/FireTrigOrd.hpp>
+#include <signaldata/FsCloseReq.hpp>
 #include <signaldata/FsConf.hpp>
 #include <signaldata/FsReadWriteReq.hpp>
 #include <signaldata/FsRef.hpp>
@@ -2489,6 +2490,11 @@ void Dblqh::startphase3Lab(Signal *signal) {
         jam();
         LogFileRecordPtr locLogFilePtr;
         ptrAss(logPartPtr, logPartRecord);
+        if (c_redo_pmem) {
+          jam();
+          openAllRedoFilesPmem(signal, logPartPtr.p);
+          continue;
+        }
         locLogFilePtr.i = logPartPtr.p->firstLogfile;
         ptrCheckGuard(locLogFilePtr, clogFileFileSize, logFileRecord);
         locLogFilePtr.p->logFileStatus = LogFileRecord::OPEN_SR_FRONTPAGE;
@@ -2518,6 +2524,30 @@ void Dblqh::startphase3Lab(Signal *signal) {
   sendSignal(NDBCNTR_REF, GSN_READ_NODESREQ, signal, 1, JBB);
   return;
 }  // Dblqh::startphase3Lab()
+
+/**
+ * RONDB-1150, PMEM mode: SR and NR open and map every file of the log
+ * part before reading file 0, so that the whole REDO log is mapped from
+ * the start and every later open is openKeptRedoFile(). The opens run in
+ * parallel, one IO thread each. When the last is open, file 0 is opened
+ * as without PMEM, through openKeptRedoFile().
+ */
+void Dblqh::openAllRedoFilesPmem(Signal *signal, LogPartRecord *logPartPtrP) {
+  ndbrequire(logPartPtrP->m_pmem_files_to_map == 0);
+  logPartPtrP->m_pmem_files_to_map = logPartPtrP->noLogFiles;
+  LogFileRecordPtr filePtr;
+  filePtr.i = logPartPtrP->firstLogfile;
+  for (Uint32 f = 0; f < logPartPtrP->noLogFiles; f++) {
+    jam();
+    ptrCheckGuard(filePtr, clogFileFileSize, logFileRecord);
+    ndbrequire(filePtr.p->logFileStatus == LogFileRecord::CLOSED &&
+               filePtr.p->m_pmem_fileRef == RNIL);
+    filePtr.p->logFileStatus = LogFileRecord::OPENING_PMEM_MAP_ALL;
+    openFileRw(signal, filePtr, false); /* No write buffering */
+    filePtr.i = filePtr.p->nextLogFile;
+  }
+  ndbrequire(filePtr.i == logPartPtrP->firstLogfile);
+}
 
 /* ****************** */
 /*  READ_NODESCONF  > */
@@ -34421,8 +34451,8 @@ void Dblqh::execFSCLOSECONF(Signal *signal) {
    * state CLOSING_WRITE_LOG.
    */
   lock_log_part(logPartPtr.p);
+  /* In PMEM mode NDBFS keeps the file open and mapped, see closeFile() */
   logFilePtr.p->fileRef = RNIL;
-  logFilePtr.p->m_pmem_base = nullptr;
 
   if (DEBUG_REDO_EXEC || DEBUG_REDO_REC) {
     g_eventLogger->info("(%u)part: %u file: %u CLOSE CONF", instance(),
@@ -34618,6 +34648,27 @@ void Dblqh::execFSOPENCONF(Signal *signal) {
       jam();
       logFilePtr.p->logFileStatus = LogFileRecord::OPEN;
       unlock_log_part(logPartPtr.p);
+      return;
+    case LogFileRecord::OPENING_PMEM_MAP_ALL:
+      jam();
+      /* Kept open by NDBFS (m_pmem_fileRef), closed for DBLQH */
+      logFilePtr.p->logFileStatus = LogFileRecord::CLOSED;
+      logFilePtr.p->fileRef = RNIL;
+      unlock_log_part(logPartPtr.p);
+      ndbrequire(logPartPtr.p->m_pmem_files_to_map > 0);
+      logPartPtr.p->m_pmem_files_to_map--;
+      if (logPartPtr.p->m_pmem_files_to_map == 0) {
+        jam();
+        g_eventLogger->info(
+            "LDM(%u): the %u REDO log files of log part %u are open and "
+            "mapped, %u MB",
+            instance(), logPartPtr.p->noLogFiles, logPartPtr.p->logPartNo,
+            logPartPtr.p->noLogFiles * clogFileSize);
+        logFilePtr.i = logPartPtr.p->firstLogfile;
+        ptrCheckGuard(logFilePtr, clogFileFileSize, logFileRecord);
+        logFilePtr.p->logFileStatus = LogFileRecord::OPEN_SR_FRONTPAGE;
+        openFileRw(signal, logFilePtr, false); /* No write buffering */
+      }
       return;
     case LogFileRecord::OPEN_EXEC_LOG:
       jam();
@@ -34999,17 +35050,20 @@ void Dblqh::initFsopenconf(Signal *signal, LogFileRecordPtr &logFilePtr,
   logFilePtr.p->filePosition = 0;
   if (c_redo_pmem) {
     if (signal->getLength() >= FsConf::OpenSignalLength) {
-      /* RONDB-1150: NDBFS maps every REDO log file in PMEM mode */
+      /* RONDB-1150: NDBFS maps every REDO log file in PMEM mode, once */
       const Uint32 fileInfo = signal->theData[2];
       ndbrequire(signal->getLength() >= FsConf::OpenPmemSignalLength &&
                  (fileInfo & FsConf::PMEM_MAPPED));
+      ndbrequire(logFilePtr.p->m_pmem_fileRef == RNIL);
       const Uint64 addr =
           (Uint64(signal->theData[5]) << 32) | Uint64(signal->theData[6]);
       logFilePtr.p->m_pmem_base = reinterpret_cast<Uint8 *>(UintPtr(addr));
+      logFilePtr.p->m_pmem_fileRef = signal->theData[1];
       checkRedoPmemPlacement(logPartPtr.p, fileInfo);
     } else {
-      /* openFileRw_cache: the file is still open and mapped */
-      ndbrequire(logFilePtr.p->m_pmem_base != nullptr);
+      /* openKeptRedoFile() or openFileRw_cache(): NDBFS has the file */
+      ndbrequire(logFilePtr.p->m_pmem_base != nullptr &&
+                 logFilePtr.p->m_pmem_fileRef == signal->theData[1]);
     }
   }
 
@@ -35737,6 +35791,7 @@ void Dblqh::initLogfile(LogFileRecordPtr logFilePtr, Uint32 partNo,
   logFilePtr.p->fileNo = fileNo;
   logFilePtr.p->filePosition = 0;
   logFilePtr.p->m_pmem_base = nullptr;
+  logFilePtr.p->m_pmem_fileRef = RNIL;
   logFilePtr.p->firstLfo = RNIL;
   logFilePtr.p->lastLfo = RNIL;
   logFilePtr.p->logFileStatus = LogFileRecord::CLOSED;
@@ -35791,12 +35846,32 @@ void Dblqh::initLogpage(LogPageRecordPtr logPagePtr, LogFileRecord *logFilePtrP,
 /**
  * RONDB-1150, PMEM mode: NDBFS maps the REDO log file, under the REDO
  * path of its log part. The caller may be an LDM that shares the part,
- * so only the part is read.
+ * so only the part is read. No write buffer, which only joins the pages
+ * of a write: NDBFS keeps every file open (closeFile()), and
+ * RG_FILE_BUFFERS has room for 4 of them per log part (ndbd.cpp).
  */
 void Dblqh::setRedoPmemOpenFlags(FsOpenReq *req,
                                  const LogPartRecord *logPartPtrP) const {
+  req->fileFlags &= ~FsOpenReq::OM_WRITE_BUFFER;
   req->fileFlags |= FsOpenReq::OM_MAP_SYNC | FsOpenReq::OM_REDO_PATH;
   FsOpenReq::setRedoPathNo(req->secondFileFlags, logPartPtrP->m_redo_path_no);
+}
+
+/**
+ * RONDB-1150, PMEM mode: open a REDO log file that NDBFS keeps open
+ * since its first open (closeFile()). The owner of the log part gets an
+ * FSOPENCONF without the mapping words, as from openFileRw_cache(), and
+ * execFSOPENCONF() continues as after an open by NDBFS. The caller may
+ * be an LDM that shares the part; the file's fields it reads are set
+ * under the part's lock.
+ */
+void Dblqh::openKeptRedoFile(Signal *signal, LogFileRecordPtr filePtr,
+                             BlockReference ownerRef) {
+  ndbrequire(filePtr.p->fileRef == RNIL &&
+             filePtr.p->m_pmem_fileRef != RNIL);
+  signal->theData[0] = filePtr.i;
+  signal->theData[1] = filePtr.p->m_pmem_fileRef;
+  sendSignal(ownerRef, GSN_FSOPENCONF, signal, 2, JBB);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -35806,6 +35881,11 @@ void Dblqh::setRedoPmemOpenFlags(FsOpenReq *req,
 /* ------------------------------------------------------------------------- */
 void Dblqh::openFileRw(Signal *signal, LogFileRecordPtr olfLogFilePtr,
                        bool writeBuffer) {
+  if (c_redo_pmem && olfLogFilePtr.p->m_pmem_fileRef != RNIL) {
+    jam();
+    openKeptRedoFile(signal, olfLogFilePtr, cownref);
+    return;
+  }
   FsOpenReq *req = (FsOpenReq *)signal->getDataPtrSend();
   req->userReference = cownref;
   req->userPointer = olfLogFilePtr.i;
@@ -35816,6 +35896,9 @@ void Dblqh::openFileRw(Signal *signal, LogFileRecordPtr olfLogFilePtr,
   req->fileFlags = FsOpenReq::OM_READWRITE | FsOpenReq::OM_AUTOSYNC |
                    FsOpenReq::OM_CHECK_SIZE | FsOpenReq::OM_ZEROS_ARE_SPARSE;
   req->secondFileFlags = 0;
+  if (writeBuffer) {
+    req->fileFlags |= FsOpenReq::OM_WRITE_BUFFER;
+  }
   if (c_redo_pmem) {
     jam();
     LogPartRecordPtr logPartPtr;
@@ -35830,9 +35913,6 @@ void Dblqh::openFileRw(Signal *signal, LogFileRecordPtr olfLogFilePtr,
       jam();
       req->fileFlags |= FsOpenReq::OM_DIRECT_SYNC;
     }
-  }
-  if (writeBuffer) {
-    req->fileFlags |= FsOpenReq::OM_WRITE_BUFFER;
   }
   if (c_encrypted_filesystem) {
     jam();
@@ -36039,6 +36119,11 @@ void Dblqh::openNextLogfile(Signal *signal, LogFileRecord *logFilePtrP,
       return;
     }  // if
     onlLogFilePtr.p->logFileStatus = LogFileRecord::OPENING_WRITE_LOG;
+    if (c_redo_pmem && onlLogFilePtr.p->m_pmem_fileRef != RNIL) {
+      jam();
+      openKeptRedoFile(signal, onlLogFilePtr, logPartPtrP->myRef);
+      return;
+    }
     FsOpenReq *req = (FsOpenReq *)signal->getDataPtrSend();
     req->userReference = logPartPtrP->myRef;
     req->userPointer = onlLogFilePtr.i;
@@ -41230,10 +41315,20 @@ void Dblqh::checkScanTcCompleted(Signal *signal,
 /* ------------------------------------------------------------------------- */
 void Dblqh::closeFile(Signal *signal, LogFileRecordPtr clfLogFilePtr,
                       Uint32 line) {
+  Uint32 fileFlag = ZCLOSE_NO_DELETE;
+  if (c_redo_pmem) {
+    /**
+     * RONDB-1150, PMEM mode: NDBFS syncs the file as at a close and
+     * sends FSCLOSECONF, but keeps it open and mapped until the node
+     * stops; the next open of the file is openKeptRedoFile().
+     */
+    jam();
+    FsCloseReq::setKeepOpenFlag(fileFlag);
+  }
   signal->theData[0] = clfLogFilePtr.p->fileRef;
   signal->theData[1] = cownref;
   signal->theData[2] = clfLogFilePtr.i;
-  signal->theData[3] = ZCLOSE_NO_DELETE;
+  signal->theData[3] = fileFlag;
   signal->theData[4] = line;
   sendSignal(NDBFS_REF, GSN_FSCLOSEREQ, signal, 5, JBA);
 }  // Dblqh::closeFile()
@@ -42568,6 +42663,7 @@ void Dblqh::initLogpart(Signal *signal, LogPartRecordPtr logPartPtr) {
   logPartPtr.p->m_redo_path_no = c_redo_path_no;
   logPartPtr.p->m_redo_path_warned = false;
   logPartPtr.p->m_redo_numa_checked = false;
+  logPartPtr.p->m_pmem_files_to_map = 0;
   NdbLogPartInfo lpinfo(instance());
   ndbrequire(lpinfo.partCount == clogPartFileSize);
   logPartPtr.p->logPartNo = lpinfo.partNo[logPartPtr.i];
@@ -47058,6 +47154,7 @@ void Dblqh::nsl_report_redo_prepare(Signal *signal) {
         case LogFileRecord::OPEN_SR_FRONTPAGE:
         case LogFileRecord::OPEN_SR_LAST_FILE:
         case LogFileRecord::OPEN_SR_NEXT_FILE:
+        case LogFileRecord::OPENING_PMEM_MAP_ALL:
           if (opening == RNIL) opening = filePtr.i;
           break;
         case LogFileRecord::CLOSING_SR:
@@ -47619,12 +47716,7 @@ void Dblqh::release(Signal *signal, RedoOpenFileCache &cache) {
       jam();
       closePtr.p->logFileStatus = LogFileRecord::CLOSING_EXEC_LOG_CACHED;
       m_redo_open_file_cache.m_close_cnt++;
-      signal->theData[0] = closePtr.p->fileRef;
-      signal->theData[1] = reference();
-      signal->theData[2] = closePtr.i;
-      signal->theData[3] = ZCLOSE_NO_DELETE;
-      signal->theData[4] = __LINE__;
-      sendSignal(NDBFS_REF, GSN_FSCLOSEREQ, signal, 5, JBA);
+      closeFile(signal, closePtr, __LINE__);
       return;
     } else {
       g_eventLogger->info("Found file with state: %u",
