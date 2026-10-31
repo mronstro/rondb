@@ -53,6 +53,7 @@ class FsCloseReq {
   friend class Restore;
   friend class Dbtup;
   friend class Ndbcntr;
+  friend class Dblqh;
 
   /**
    * For printing
@@ -78,6 +79,15 @@ class FsCloseReq {
 
   static bool getRemoveFileFlag(const UintR &fileflag);
   static void setRemoveFileFlag(UintR &fileflag, bool removefile);
+
+  /**
+   * RONDB-1150: close for the user, but keep the file open in NDBFS. The
+   * file is synced as at a close and FSCLOSECONF follows, but the file
+   * and its mapping stay until the node stops, for the user's next open
+   * to take without asking NDBFS. Used for the REDO log in PMEM mode.
+   */
+  static bool getKeepOpenFlag(const UintR &fileflag);
+  static void setKeepOpenFlag(UintR &fileflag);
 };
 
 
@@ -92,6 +102,12 @@ inline void FsCloseReq::setRemoveFileFlag(UintR &fileflag, bool removefile) {
   else
     fileflag = 0;
 }
+
+inline bool FsCloseReq::getKeepOpenFlag(const UintR &fileflag) {
+  return (fileflag == 2);
+}
+
+inline void FsCloseReq::setKeepOpenFlag(UintR &fileflag) { fileflag = 2; }
 
 #undef JAM_FILE_ID
 

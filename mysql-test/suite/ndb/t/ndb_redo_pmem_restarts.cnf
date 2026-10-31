@@ -1,0 +1,7 @@
+!include ../my.cnf
+
+[cluster_config.1]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+NoOfFragmentLogFiles=4
+FragmentLogFileSize=16M
