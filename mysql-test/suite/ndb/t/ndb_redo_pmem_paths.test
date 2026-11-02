@@ -18,6 +18,18 @@ let $cluster = $MYSQLTEST_VARDIR/mysql_cluster.1;
 --error 1
 --file_exists $cluster/ndbd.2/ndb_2_fs/D8
 
+# ndbinfo.redo_log_pmem: one row per log part with all of its files mapped.
+# nodax maps without MAP_SYNC and probes nothing, so the memory NUMA node,
+# the persistence domain and the dirty-shutdown count are unknown. The
+# NUMA node of the LDM and the copy method depend on the host.
+--echo == 1b == ndbinfo shows every log part mapped
+SELECT node_id, log_part, ldm_instance, redo_path, files, mapped_bytes,
+       mem_numa_node, persistence_domain, copy_method <> '' AS copy_method,
+       test_mode,
+       barriers + bytes_copied + filler_bytes + lat_samples AS counters,
+       dirty_shutdown_count
+  FROM ndbinfo.redo_log_pmem ORDER BY node_id, log_part;
+
 CREATE TABLE t1 (a INT PRIMARY KEY, b VARCHAR(255)) ENGINE=NDB;
 INSERT INTO t1
   WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
@@ -48,6 +60,8 @@ SELECT COUNT(*), SUM(LENGTH(b)) FROM t1;
 --exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
 --exec grep -c "log part 1 were found under FileSystemPath, not under REDO path 0" $cluster/ndbd.2/ndbd.log
 SELECT COUNT(*), SUM(LENGTH(b)) FROM t1;
+SELECT node_id, log_part, redo_path FROM ndbinfo.redo_log_pmem
+  WHERE node_id = 2 ORDER BY log_part;
 
 --echo == 5 == initial node restart puts it back under FileSystemPathRedoLog
 --exec $NDB_MGM -e "2 restart -n -i" >> $NDB_TOOLS_OUTPUT
@@ -58,6 +72,8 @@ SELECT COUNT(*), SUM(LENGTH(b)) FROM t1;
 --error 1
 --file_exists $cluster/ndbd.2/ndb_2_fs/D9
 SELECT COUNT(*), SUM(LENGTH(b)) FROM t1;
+SELECT node_id, log_part, redo_path FROM ndbinfo.redo_log_pmem
+  WHERE node_id = 2 ORDER BY log_part;
 
 DROP TABLE t1;
 --remove_file $NDB_TOOLS_OUTPUT

@@ -589,6 +589,31 @@ static struct view {
      "ORDER BY node_id"},
     {"ndbinfo", "rdma_transporters",
      "SELECT * FROM `ndbinfo`.`ndb$rdma_transporters`"},
+    /* RONDB-1150: the REDO log on persistent memory, one row per log part */
+    {"ndbinfo", "redo_log_pmem",
+     "SELECT node_id, log_part, ldm_instance, "
+     "NULLIF(redo_path, 15) AS redo_path, files, mapped_bytes, "
+     "NULLIF(ldm_numa_node, 4294967295) AS ldm_numa_node, "
+     "NULLIF(mem_numa_node, 4294967295) AS mem_numa_node, "
+     "CASE persistence_domain"
+     "  WHEN 1 THEN \"none\""
+     "  WHEN 2 THEN \"memory_controller\""
+     "  WHEN 3 THEN \"cpu_cache\""
+     "  ELSE NULL "
+     " END AS persistence_domain, "
+     "copy_method, "
+     "CASE test_mode"
+     "  WHEN 0 THEN \"off\""
+     "  WHEN 1 THEN \"emulated\""
+     "  WHEN 2 THEN \"nodax\""
+     "  ELSE NULL "
+     " END AS test_mode, "
+     "barriers, bytes_copied, filler_bytes, lat_samples, "
+     "lat_le_250ns, lat_le_500ns, lat_le_1us, lat_le_2us, lat_le_4us, "
+     "lat_le_8us, lat_le_16us, lat_gt_16us, "
+     "NULLIF(dirty_shutdown_count, 18446744073709551615) "
+     "AS dirty_shutdown_count "
+     "FROM `ndbinfo`.`ndb$redo_log_pmem`"},
     {"ndbinfo", "resources",
      "SELECT node_id, "
      " CASE resource_id"

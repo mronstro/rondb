@@ -35208,10 +35208,10 @@ void Dblqh::checkRedoPmemPlacement(LogPartRecord *logPartPtrP,
     logPartPtrP->m_redo_path_no = Uint8(path_no);
   }
   const Uint32 numa = fileInfo >> FsConf::PMEM_NUMA_SHIFT;
-  if (numa != 0 && !logPartPtrP->m_redo_numa_checked) {
+  if (numa != 0 && logPartPtrP->m_pmem_mem_numa_node < 0) {
     jam();
-    logPartPtrP->m_redo_numa_checked = true;
     const Int32 mem_node = Int32(numa) - 1;
+    logPartPtrP->m_pmem_mem_numa_node = mem_node;
     if (c_ldm_numa_node >= 0 && mem_node != c_ldm_numa_node) {
       g_eventLogger->warning(
           "LDM(%u): runs on NUMA node %d, but the REDO log of log part %u is "
@@ -42849,8 +42849,10 @@ void Dblqh::initLogpart(Signal *signal, LogPartRecordPtr logPartPtr) {
   logPartPtr.p->m_logged_buffer_full = 0;
   logPartPtr.p->m_redo_path_no = c_redo_path_no;
   logPartPtr.p->m_redo_path_warned = false;
-  logPartPtr.p->m_redo_numa_checked = false;
+  logPartPtr.p->m_pmem_mem_numa_node = -1;
   logPartPtr.p->m_pmem_files_to_map = 0;
+  std::memset(&logPartPtr.p->m_pmem_stats, 0,
+              sizeof(logPartPtr.p->m_pmem_stats));
   NdbLogPartInfo lpinfo(instance());
   ndbrequire(lpinfo.partCount == clogPartFileSize);
   logPartPtr.p->logPartNo = lpinfo.partNo[logPartPtr.i];
@@ -46197,6 +46199,68 @@ void Dblqh::execDBINFO_SCANREQ(Signal *signal) {
         row.write_uint64((total - free) * entry_size);  // currently in use
         row.write_uint64(high * entry_size);  // in use high water mark
         ndbinfo_send_row(signal, req, row, rl);
+      }
+      break;
+    }
+
+    case Ndbinfo::REDO_LOG_PMEM_TABLEID: {
+      /* RONDB-1150: one row per log part in PMEM mode, none in file mode */
+      if (!c_redo_pmem) {
+        jam();
+        break;
+      }
+      Uint32 logpart = cursor->data[0];
+      while (logpart < clogPartFileSize) {
+        jam();
+        LogPartRecordPtr logPartPtr;
+        logPartPtr.i = logpart;
+        ptrCheckGuard(logPartPtr, clogPartFileSize, logPartRecord);
+        const LogPartRecord *const lp = logPartPtr.p;
+
+        // A mapping is kept from the first open until the node stops
+        Uint32 mapped = 0;
+        LogFileRecordPtr filePtr;
+        filePtr.i = lp->firstLogfile;
+        for (Uint32 f = 0; f < lp->noLogFiles; f++) {
+          ptrCheckGuard(filePtr, clogFileFileSize, logFileRecord);
+          if (filePtr.p->m_pmem_base != nullptr) mapped++;
+          filePtr.i = filePtr.p->nextLogFile;
+        }
+        ndbrequire(lp->m_redo_path_no < GlobalData::REDO_PMEM_PATHS);
+        const GlobalData::RedoPmemPathInfo &path =
+            globalData.theRedoPmemPath[lp->m_redo_path_no];
+        const LogPartRecord::RedoPmemStats &stats = lp->m_pmem_stats;
+
+        Ndbinfo::Row row(signal, req);
+        row.write_uint32(getOwnNodeId());
+        row.write_uint32(lp->logPartNo);
+        row.write_uint32(instance());
+        row.write_uint32(lp->m_redo_path_no);
+        row.write_uint32(lp->noLogFiles);
+        row.write_uint64(Uint64(mapped) * clogFileSize * 1024 * 1024);
+        row.write_uint32(c_ldm_numa_node < 0 ? ~Uint32(0)
+                                             : Uint32(c_ldm_numa_node));
+        row.write_uint32(lp->m_pmem_mem_numa_node < 0
+                             ? ~Uint32(0)
+                             : Uint32(lp->m_pmem_mem_numa_node));
+        row.write_uint32(path.domain);
+        row.write_string(ndb_pmem_method_name());
+        row.write_uint32(c_redo_pmem_test_mode);
+        row.write_uint64(stats.barriers);
+        row.write_uint64(stats.bytes_copied);
+        row.write_uint64(stats.filler_bytes);
+        row.write_uint64(stats.lat_samples);
+        for (Uint32 i = 0; i < NDB_ARRAY_SIZE(stats.lat_hist); i++) {
+          row.write_uint64(stats.lat_hist[i]);
+        }
+        row.write_uint64(path.dirty_shutdown);
+        ndbinfo_send_row(signal, req, row, rl);
+        logpart++;
+        if (rl.need_break(req)) {
+          jam();
+          ndbinfo_send_scan_break(signal, req, rl, logpart);
+          return;
+        }
       }
       break;
     }

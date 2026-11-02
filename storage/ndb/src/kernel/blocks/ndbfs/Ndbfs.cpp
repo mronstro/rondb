@@ -276,6 +276,7 @@ static_assert(FsOpenReq::BP_REDO_LAST - FsOpenReq::BP_REDO_FIRST + 1 ==
               NDB_MAX_REDO_LOG_PATHS);
 static_assert(FsOpenReq::BP_REDO_LAST + 1 == FsOpenReq::BP_MAX);
 static_assert(NDB_MAX_REDO_LOG_PATHS <= FsOpenReq::REDO_PATH_FS);
+static_assert(FsOpenReq::REDO_PATH_FS < GlobalData::REDO_PMEM_PATHS);
 
 /* Called from the IO threads too, by AsyncFile::open_redo_elsewhere */
 Uint32 Ndbfs::get_redo_base_path(Uint32 no) const {
@@ -449,6 +450,12 @@ void Ndbfs::read_redo_pmem_config(const ndb_mgm_configuration_iterator *p,
       probe_redo_path_pmem(FsOpenReq::BP_REDO_FIRST + i, what.c_str(),
                            test_mode);
     }
+    // A REDO path that is FileSystemPath was probed as FileSystemPath
+    for (Uint32 i = 0; i < paths.count; i++) {
+      if (m_base_path[FsOpenReq::BP_REDO_FIRST + i].length() > 0) continue;
+      globalData.theRedoPmemPath[i] =
+          globalData.theRedoPmemPath[FsOpenReq::REDO_PATH_FS];
+    }
   }
   g_eventLogger->warning(
       "RedoLogMode=pmem: the REDO log files are mapped, but still written "
@@ -492,6 +499,15 @@ void Ndbfs::probe_redo_path_pmem(Uint32 bp, const char *what,
   ::close(fd);
   ::unlink(name.c_str());
 #endif
+  if (probe.region_err == 0) {
+    // For ndbinfo redo_log_pmem, see GlobalData::theRedoPmemPath
+    const Uint32 path_no = bp == FsOpenReq::BP_FS
+                               ? FsOpenReq::REDO_PATH_FS
+                               : bp - FsOpenReq::BP_REDO_FIRST;
+    globalData.theRedoPmemPath[path_no].domain = probe.region.domain;
+    globalData.theRedoPmemPath[path_no].dirty_shutdown =
+        probe.region.dirty_shutdown;
+  }
   RedoPmemVerdict verdict;
   redo_pmem_path_verdict(what, probe, test_mode, &verdict);
   if (verdict.refused) {

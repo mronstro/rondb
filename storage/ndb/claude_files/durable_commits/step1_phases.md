@@ -16,7 +16,7 @@ unchanged.
 | 2 | 3 | PMEM helper and platform queries | S1.3, S1.4 | `ndb_pmem-t` on a plain file on the three platforms and on `memmap=` | 1 | **In progress**: S1.3 passed `ndb_pmem-t` on macOS ARM64 and Linux x86_64 (2026-10-29); Linux ARM64 to be tested. S1.4 passed `ndb_pmem_region-t` and `NdbHW-t` on macOS ARM64 and Linux x86_64 (2026-10-29); Linux ARM64 to be tested |
 | 3 | 4 | Configuration: parameters, path parser, checks, test settings | S2.1–S2.3, S2.7 | Config unit tests, management-server refusals | — | **In progress**: `RedoLogPaths-t`, `MgmConfig-t`, `ndb.ndb_redo_pmem_config`, `ndb.ndb_config` and `ndb.ndb_basic` in PMEM mode passed on macOS ARM64 (2026-10-29); `ndb.ndb_redo_pmem_config`, `RedoLogPaths-t` and `MgmConfig-t` passed on Linux x86_64 (2026-10-30); Linux ARM64 postponed |
 | 4 | 5 | NDBFS mapping and placement; PMEM mode with today's format (**M0.2**) | S3.1–S3.4, S2.4, S2.5 | MTR ndb suite and a testSystemRestart subset in `nodax` and on `memmap=` | 2, 3 | **In progress**: 4a (NDBFS maps the REDO files), 4b (REDO paths, NUMA placement) and 4c (start-time platform checks) passed on macOS ARM64 and Linux x86_64 (2026-10-30), after the fix of a race in `ndb_pmem_map` that 4a found on Linux. Still to run for the gate: Linux ARM64 (postponed), the testSystemRestart subset, and `memmap=` |
-| 5 | 6 | Initial start and restarts with every file mapped; ndbinfo `redo_log_pmem` | S3.5, S3.6, S2.6 | Initial start, SR and NR in PMEM mode; ndbinfo rows | 4 | **In progress**: 5a (every REDO file kept open and mapped, by a close that keeps the file in NDBFS) passed on macOS ARM64 (2026-10-31), Linux x86_64 to be tested; 5b (ndbinfo) next |
+| 5 | 6 | Initial start and restarts with every file mapped; ndbinfo `redo_log_pmem` | S3.5, S3.6, S2.6 | Initial start, SR and NR in PMEM mode; ndbinfo rows | 4 | **In progress**: 5a (every REDO file kept open and mapped, by a close that keeps the file in NDBFS) passed on macOS ARM64 (2026-10-31), Linux x86_64 to be tested; 5b (ndbinfo `redo_log_pmem`) passed on macOS ARM64 (2026-11-02), Linux x86_64 to be tested |
 | 6 | 7 | Record format and reader module | S4.1, S6.2 | Unit tests over synthetic logs on the three platforms | 1 | Not started |
 | 7 | 8 | Record writers | S4.2–S4.7, S5.1 | Unit tests; file-mode regression | 6 | Not started |
 | 8 | 9 | PMEM REDO end to end: write path and recovery together (**M0.3**) | S4.8, S5.2–S5.5, S6.1, S6.3–S6.6 | Initial start, traffic, SR and NR in PMEM mode; the ledger in PMEM mode | 5, 7, ledger | Not started |
@@ -764,7 +764,7 @@ in today's format. Written in two parts:
 | Part | Packages | Content | State |
 |---|---|---|---|
 | 5a | S3.5, S3.6 | NDBFS keeps a REDO log file open and mapped when DBLQH closes it; DBLQH's later opens of the file are answered without NDBFS; the initial start keeps the files it writes; a system or node restart opens every file of each log part before it reads the log | Passed on macOS ARM64 (2026-10-31): `ndb_redo_pmem_restarts` with every log part of both nodes mapped at each of the 11 system restarts and at the node's own restart, `ndb_redo_pmem_paths`, the `pmem_redo.cnf` run and the file-mode run. Linux x86_64 to be tested |
-| 5b | S2.6 | ndbinfo `redo_log_pmem` | Not started |
+| 5b | S2.6 | ndbinfo `redo_log_pmem`: one row per log part in PMEM mode, with its files, mappings, NUMA nodes, persistence domain, copy method, test mode, the write counters of phase 8 and the dirty-shutdown count | Passed on macOS ARM64 (2026-11-02): `ndbinfo`, `ndbinfo_plans`, `ndb_redo_pmem_paths` with the 8 rows and the log part under FileSystemPath, `ndb_redo_paths_file_mode` with no rows, the `pmem_redo.cnf` run and `ndb_redo_pmem_restarts`. Linux x86_64 to be tested |
 
 **Changes in 5a.** File mode is unchanged: the new flag and state are
 used under `c_redo_pmem` only.
@@ -846,3 +846,76 @@ subset of phase 4's gate in `nodax`. `testRedo -n RestartOK`,
 `-n RestartFDSR` and `-n CheckNextRedoFileOpened` change the REDO
 configuration and restart with `--initial`, so they stay with the
 autotest run of phase 8.
+
+**Changes in 5b.** File mode has no rows in the new table and is
+otherwise unchanged.
+
+| File | Change |
+|---|---|
+| `include/debugger/Ndbinfo.hpp`, `src/common/debugger/NdbinfoTables.cpp` | `REDO_LOG_PMEM_TABLEID = 61`, table `ndb$redo_log_pmem` of 24 columns, estimate data nodes × log parts |
+| `plugin/ha_ndbinfo_sql.cc` | View `redo_log_pmem`: `redo_path` NULL for FileSystemPath, the NUMA nodes and the dirty-shutdown count NULL when unknown, the persistence domain (`none`, `memory_controller`, `cpu_cache`) and the test mode (`off`, `emulated`, `nodax`) as names |
+| `src/kernel/vm/GlobalData.hpp` | `theRedoPmemPath[16]`: the persistence domain and the dirty-shutdown count of each REDO path, indexed by the REDO path number of FsOpenReq; unknown until probed |
+| `src/kernel/blocks/ndbfs/Ndbfs.cpp` | `probe_redo_path_pmem()` records what it found in `theRedoPmemPath`; a REDO path that is FileSystemPath gets the probe of FileSystemPath |
+| `src/kernel/blocks/dblqh/Dblqh.hpp`, `DblqhMain.cpp` | `LogPartRecord::m_pmem_stats` (`RedoPmemStats`: barriers, bytes copied, filler bytes, timed persists and their 8-bucket histogram), zeroed in `initLogpart`; `m_pmem_mem_numa_node` replaces `m_redo_numa_checked` and keeps the node that `checkRedoPmemPlacement()` checked. `execDBINFO_SCANREQ`: one row per log part of the LDM in PMEM mode, `mapped_bytes` from the files whose `m_pmem_base` is set |
+| `mysql-test/suite/ndb/r/ndbinfo.result`, `ndbinfo_plans.result` | The new table: 62 tables, 656 columns, `ndb$redo_log_pmem` with 8 estimated rows of 164 bytes |
+| `mysql-test/suite/ndb/t/ndb_redo_pmem_paths.test`, `r/` | The 8 rows after the initial start, 4 files and 64 MB mapped per log part; `redo_path` NULL for log part 1 of node 2 while its files are under FileSystemPath, 0 again after the initial node restart |
+| `mysql-test/suite/ndb/t/ndb_redo_paths_file_mode.test`, `r/` | No rows in file mode |
+
+**Decisions taken in 5b.**
+
+1. **The persistence domain and the dirty-shutdown count come from the
+   start-time probe of each REDO path**, kept in `GlobalData`, which
+   NDBFS writes in its READ_CONFIG_REQ before DBLQH starts. They are
+   properties of the device behind a path, not of a file, so the
+   `fileInfo` domain bits and the per-file fields of the plan are not
+   needed. With `nodax` nothing is probed and both are unknown (NULL).
+   This settles 4c decision 7: no `get_redo_path_info()`, no domain
+   bits in `fileInfo`.
+2. **The memory NUMA node is the one of the first file mapped with
+   MAP_SYNC**, as checked in 4b; the files of a log part lie under one
+   path. Without MAP_SYNC the memory is the page cache and the node is
+   unknown (NULL).
+3. **One more column than planned, `redo_path`**: which
+   `FileSystemPathRedoLog` entry holds the files of the log part, NULL
+   for FileSystemPath. It shows where 4b put each log part and when a
+   file was found under another path.
+4. **The write counters and the latency histogram are in place and stay
+   0** until phase 8 writes the REDO log through the mapping; its persist
+   updates them under the log part lock and times one persist in 16.
+   The buckets are at most 250 ns, 500 ns, 1, 2, 4, 8 and 16 us, and more.
+5. **The view decodes the enumerations and the unknown values**; the
+   base table keeps the numbers (`~0` for an unknown NUMA node or
+   dirty-shutdown count, 15 for FileSystemPath), as `logspaces` does.
+
+**Commands for the pusher (5b).** On Linux x86_64, Linux ARM64 and macOS
+ARM64:
+
+```
+cmake --build .
+cd mysql-test
+./mtr ndb.ndbinfo ndb.ndbinfo_plans ndb.ndb_redo_pmem_paths ndb.ndb_redo_paths_file_mode
+./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndb_basic ndb.ndb_restart
+./mtr ndb.ndb_redo_pmem_restarts
+```
+
+`ndb.ndbinfo` and `ndb.ndbinfo_plans` were edited by hand for the new
+table; if they differ only there, `./mtr --record ndb.ndbinfo
+ndb.ndbinfo_plans` and a look at the diff settle it.
+
+`ndb.ndbinfo_plans` also failed on two things that are not 5b, fixed in
+separate commits:
+
+- `ndb$config_values` was more than 10 rows from its estimate of 394.
+  Phase 3 added four data node parameters that have defaults
+  (`RedoLogMode`, `__RedoLogPmemTestMode`,
+  `__RedoLogPmemPowerLossEmulation`, `__RedoLogPmemCopyMethod`), 8 rows
+  for 2 data nodes; `FileSystemPathRedoLog` has no default and is unset
+  in MTR. The constant in `NdbinfoTables.cpp` goes from 197 to 201
+  parameters per data node, the estimate to 402.
+- `ndb$error_messages` has 942 rows, not 941: error 947 came into
+  26.10 with the merge of 26.05-main. 26.10-main fixed the result in
+  575c5782b3c after this branch was made; the same line is taken here.
+
+On Linux with
+`memmap=` and `emulated`, `SELECT * FROM ndbinfo.redo_log_pmem` should
+show `persistence_domain` `none` and the memory NUMA node of the region.
