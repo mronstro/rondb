@@ -61,6 +61,7 @@
 #include <signaldata/LqhTransConf.hpp>
 #include <signaldata/NodeRecoveryStatusRep.hpp>
 #include "NdbAggregationCommon.hpp"
+#include "PmemRedoFormat.hpp"
 #include "kernel/DblqhState.hpp"
 
 // primary key is stored in TUP
@@ -2096,6 +2097,13 @@ class Dblqh : public SimulatedBlock {
       Uint64 lat_hist[8];
     };
     RedoPmemStats m_pmem_stats;
+    /**
+     * RONDB-1150, PMEM format: every byte of the log below this LSN
+     * (Dblqh::redoLsn()) is persistent; a multiple of W. Changed under
+     * the log part lock, by the copy-out of phase 8 and by
+     * redoInitWritePosition() at a restart.
+     */
+    Uint64 m_pmem_persisted_lsn;
 
     /**
      *       A timer that is set every time a log page is sent to disk.
@@ -3118,6 +3126,7 @@ class Dblqh : public SimulatedBlock {
       m_restore_op(0)
     {
       m_dealloc_data.m_unused = RNIL;
+      m_redo_end_lsn = 0;
 #ifdef DEBUG_USAGE_COUNT
       m_prev_usage = RNIL;
       m_next_usage = RNIL;
@@ -3131,6 +3140,12 @@ class Dblqh : public SimulatedBlock {
     }
     Uint64 fragmentptr;
     Uint64 m_user_ptr_i;
+    /**
+     * RONDB-1150, PMEM format: the end LSN of the operation's newest
+     * record that must be persistent before a dependent signal is sent:
+     * its COMMIT, and from X4 its COMPLETE or rule-F ABORT. 0 if none.
+     */
+    Uint64 m_redo_end_lsn;
     Dbacc::Operationrec *accConnectPtrP;
     Dbtup::Operationrec *tupConnectPtrP;
 #ifdef DEBUG_USAGE_COUNT
@@ -4246,6 +4261,57 @@ private:
   void writeCompletedGciLog(Signal *signal, LogPageRecordPtr &logPagePtr,
                             LogFileRecordPtr &logFilePtr,
                             LogPartRecord *logPartPtrP);
+  /**
+   * RONDB-1150, PMEM format (PmemRedoFormat.hpp): the record writers,
+   * entered from today's writers when c_redo_pmem_format is set, and the
+   * positions in the log (impl_step1_lqh_write.md S4.2-S4.7, S5.1).
+   */
+  PmemRedo::Suffix redoSuffix(const LogPartRecord *logPartPtrP,
+                              const LogFileRecord *logFilePtrP,
+                              const LogPageRecord *logPagePtrP) const;
+  void redoAppendFixed(Signal *signal, LogPartRecord *logPartPtrP,
+                       LogPageRecordPtr &logPagePtr,
+                       LogFileRecordPtr &logFilePtr, Uint32 *rec, Uint32 len);
+  void writePrepareLogPmem(Signal *signal, const TcConnectionrec *regTcPtr,
+                           LogPageRecordPtr &logPagePtr,
+                           LogFileRecordPtr &logFilePtr,
+                           LogPartRecord *logPartPtrP);
+  void writeCommitLogPmem(Signal *signal, TcConnectionrec *regTcPtr,
+                          LogPartRecord *logPartPtrP, bool durable);
+  void writeAbortLogPmem(Signal *signal, TcConnectionrec *regTcPtr,
+                         LogPageRecordPtr &logPagePtr,
+                         LogFileRecordPtr &logFilePtr,
+                         LogPartRecord *logPartPtrP, Uint32 flags);
+  void writeCompletedGciLogPmem(Signal *signal, LogPageRecordPtr &logPagePtr,
+                                LogFileRecordPtr &logFilePtr,
+                                LogPartRecord *logPartPtrP);
+  void writeCompleteLog(Signal *signal, TcConnectionrec *regTcPtr,
+                        LogPartRecord *logPartPtrP);
+  void writeFillerPmem(Signal *signal, LogPartRecord *logPartPtrP,
+                       LogPageRecordPtr &logPagePtr,
+                       LogFileRecordPtr &logFilePtr, Uint32 len);
+  void writeNextMbytePmem(LogPartRecord *logPartPtrP,
+                          LogFileRecord *logFilePtrP,
+                          LogPageRecord *logPagePtrP);
+  void redoBuildPageZero(LogPageRecordPtr logPagePtr,
+                         LogFileRecordPtr logFilePtr,
+                         LogPartRecord *logPartPtrP);
+  void redoPmemHeaderImage(Uint32 *img, const LogPageRecord *logPagePtrP,
+                           Uint32 fileNo, Uint32 pageNo,
+                           const LogPartRecord *logPartPtrP) const;
+  void release_committed_words(LogPartRecord *logPartPtrP,
+                               TcConnectionrec *regTcPtr,
+                               PmemRedo::RedoRelease what, bool durable);
+  Uint64 redoLsn(const LogPartRecord *logPartPtrP, Uint32 fileNo,
+                 Uint32 pageNo, Uint32 word) const;
+  Uint64 redoPosLsn(const LogPartRecord *logPartPtrP,
+                    const LogFileRecord *logFilePtrP,
+                    const LogPageRecord *logPagePtrP) const;
+  Uint64 redoAppendLsn(LogPartRecord *logPartPtrP);
+  Uint8 *redoPmemAddr(const LogFileRecord *logFilePtrP, Uint32 pageNo,
+                      Uint32 word) const;
+  bool redoHasUnpersisted(LogPartRecord *logPartPtrP);
+  void redoInitWritePosition(LogPartRecord *logPartPtrP);
   void writeDbgInfoPageHeader(LogPageRecordPtr logPagePtr,
                               LogFileRecord *logFilePtrP,
                               LogPartRecord *logPartPtrP, Uint32 place,
@@ -5469,6 +5535,13 @@ public:
    */
   bool c_redo_pmem;
   Uint32 c_redo_pmem_test_mode;
+  /**
+   * RONDB-1150: the REDO records are written in the PMEM format
+   * (PmemRedoFormat.hpp) by the writers that dispatch on it. False until
+   * phase 8, which adds the copy to the mapping and the restart that
+   * reads the format: until then PMEM mode writes today's format.
+   */
+  bool c_redo_pmem_format;
   /**
    * PMEM mode: the NUMA node of this LDM thread (-1 if its CPUs span
    * nodes or it is not known) and the REDO path of its log parts,

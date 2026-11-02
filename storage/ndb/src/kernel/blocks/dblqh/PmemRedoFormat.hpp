@@ -122,6 +122,11 @@ constexpr Uint32 FD_MAX_FILES = 40;  // as cmaxLogFilesInPageZero
 constexpr Uint32 PREPARE_MAX =
     (PREPARE_HEAD + 2 + MAX_KEY_SIZE_IN_WORDS + MAX_LOG_RECORD_SIZE_WORDS + 1) &
     ~1u;
+/* The pages a PREPARE can span: w0 and w1 in the last 2 words of one */
+constexpr Uint32 PREPARE_MAX_PAGES = 4;
+static_assert(1 + (PREPARE_MAX - 2 + PAGE_DATA_WORDS - 1) / PAGE_DATA_WORDS <=
+                  PREPARE_MAX_PAGES,
+              "a PREPARE spans at most PREPARE_MAX_PAGES pages");
 
 /**
  * Words an operation reserves in its log part: the COMMIT and the
@@ -265,6 +270,145 @@ inline Uint32 recordChecksum(const Uint32 *rec, const Suffix &s) {
   RecChecksum c;
   c.piece(rec + 2, hashedLen(rec[0]) - 2);
   return c.finish(rec[0], s);
+}
+
+/**
+ * The checksum of a record built in one buffer, of which the first inFirst
+ * words (at least w0 and w1) fit in the page and the rest goes on at word
+ * 32 of the next page; the rest fits in that page.
+ */
+inline Uint32 splitChecksum(const Uint32 *rec, Uint32 inFirst,
+                            const Suffix &s) {
+  const Uint32 len = hashedLen(rec[0]);
+  const Uint32 k = len < inFirst ? len : inFirst;
+  RecChecksum c;
+  c.piece(rec + 2, k - 2);
+  c.piece(rec + k, len - k);
+  return c.finish(rec[0], s);
+}
+
+/* The pages that a record of len words at word pageIndex lies in */
+inline Uint32 pagesSpanned(Uint32 pageIndex, Uint32 len) {
+  const Uint32 inFirst = PAGE_WORDS - pageIndex;
+  if (len <= inFirst) return 1;
+  return 1 + (len - inFirst + PAGE_DATA_WORDS - 1) / PAGE_DATA_WORDS;
+}
+
+/**
+ * The checksum of a record as it lies in the log pages: w0 at word
+ * pageIndex of pages[0], the rest going on at word 32 of pages[1],
+ * pages[2], ..., one piece per page. pages holds pagesSpanned() pages.
+ */
+inline Uint32 pagedChecksum(const Uint32 *const *pages, Uint32 pageIndex,
+                            const Suffix &s) {
+  const Uint32 w0 = pages[0][pageIndex];
+  const Uint32 len = hashedLen(w0);
+  const Uint32 inFirst = PAGE_WORDS - pageIndex;
+  const Uint32 n1 = len < inFirst ? len : inFirst;
+  RecChecksum c;
+  c.piece(pages[0] + pageIndex + 2, n1 - 2);
+  Uint32 left = len - n1;
+  for (Uint32 i = 1; left > 0; i++) {
+    const Uint32 n = left < PAGE_DATA_WORDS ? left : PAGE_DATA_WORDS;
+    c.piece(pages[i] + HEADER_WORDS, n);
+    left -= n;
+  }
+  return c.finish(w0, s);
+}
+
+/**
+ * The records as the DBLQH writers build them (format §5), w1 left 0 for
+ * the checksum at the place the record is written.
+ */
+inline void prepareHead(Uint32 *hdr, Uint32 flags, Uint32 len,
+                        Uint32 hashValue, Uint32 operation, Uint32 aiLen,
+                        Uint32 keyLen, Uint32 rowidPage, Uint32 rowidIdx) {
+  hdr[0] = makeW0(TYPE_PREPARE, flags, len);
+  hdr[1] = 0;
+  hdr[PREP_HASH_VALUE] = hashValue;
+  hdr[PREP_OPERATION] = operation;
+  hdr[PREP_AI_LEN] = aiLen;
+  hdr[PREP_KEY_LEN] = keyLen;
+  hdr[PREP_ROWID_PAGE] = rowidPage;
+  hdr[PREP_ROWID_IDX] = rowidIdx;
+}
+
+/* The PREPARE is at (prepFileNo, prepStartPageNo, prepStartPageIndex) */
+inline void commitRecord(Uint32 *rec, Uint32 flags, Uint32 tableId,
+                         Uint32 schemaVersion, Uint32 fragId,
+                         Uint32 prepFileNo, Uint32 prepStartPageNo,
+                         Uint32 prepStartPageIndex, Uint32 prepStopPageNo,
+                         Uint32 gciHi, Uint32 gciLo, Uint32 transid1,
+                         Uint32 transid2, Uint32 opCount) {
+  rec[0] = makeW0(TYPE_COMMIT, flags, COMMIT_LEN);
+  rec[1] = 0;
+  rec[COMMIT_TABLE_ID] = tableId;
+  rec[COMMIT_SCHEMA_VERSION] = schemaVersion;
+  rec[COMMIT_FRAG_ID] = fragId;
+  rec[COMMIT_PREP_FILE_INDEX] = (prepFileNo << 16) | prepStartPageIndex;
+  rec[COMMIT_PREP_PAGES] = (prepStartPageNo << 16) | prepStopPageNo;
+  rec[COMMIT_GCI_HI] = gciHi;
+  rec[COMMIT_GCI_LO] = gciLo;
+  rec[COMMIT_TRANSID1] = transid1;
+  rec[COMMIT_TRANSID2] = transid2;
+  rec[COMMIT_OP_COUNT] = opCount;
+}
+
+inline void abortRecord(Uint32 *rec, Uint32 flags, Uint32 transid1,
+                        Uint32 transid2) {
+  rec[0] = makeW0(TYPE_ABORT, flags, ABORT_LEN);
+  rec[1] = 0;
+  rec[ABORT_TRANSID1] = transid1;
+  rec[ABORT_TRANSID2] = transid2;
+}
+
+inline void completeRecord(Uint32 *rec, Uint32 transid1, Uint32 transid2) {
+  rec[0] = makeW0(TYPE_COMPLETE, 0, COMPLETE_LEN);
+  rec[1] = 0;
+  rec[ABORT_TRANSID1] = transid1;
+  rec[ABORT_TRANSID2] = transid2;
+}
+
+inline void completedGciRecord(Uint32 *rec, Uint32 gci) {
+  rec[0] = makeW0(TYPE_COMPLETED_GCI, 0, COMPLETED_GCI_LEN);
+  rec[1] = 0;
+  rec[COMPLETED_GCI_GCI] = gci;
+  rec[3] = 0;
+}
+
+/**
+ * The words an operation keeps reserved in its log part
+ * (TcConnectionrec::m_committed_log_space), and the records that release
+ * them (S4.7, E13): RESERVE at the PREPARE; all of it at a COMMIT outside
+ * durable commits (all of step 1) or at a normal ABORT; at a durable
+ * COMMIT all but the COMPLETE's part, which its COMPLETE or rule-F ABORT
+ * releases.
+ */
+enum Reservation : Uint32 {
+  RESERVED_NONE = 0,
+  RESERVED_FULL = 1,
+  RESERVED_TAIL = 2
+};
+enum RedoRelease : Uint32 { AT_COMMIT, AT_COMPLETE, AT_ABORT };
+
+/* The words released and the state after; 0 if the record cannot come */
+inline Uint32 releasedWords(Uint32 state, RedoRelease what, bool durable,
+                            Uint32 *after) {
+  constexpr Uint32 tail = RESERVE - RESERVE_AT_COMMIT;
+  *after = RESERVED_NONE;
+  switch (what) {
+    case AT_COMMIT:
+      if (state != RESERVED_FULL) return 0;
+      if (!durable) return RESERVE;
+      *after = RESERVED_TAIL;
+      return RESERVE_AT_COMMIT;
+    case AT_COMPLETE:
+      return state == RESERVED_TAIL ? tail : 0;
+    case AT_ABORT:
+      if (state == RESERVED_FULL) return RESERVE;
+      return state == RESERVED_TAIL ? tail : 0;
+  }
+  return 0;
 }
 
 /* Low 32 bits of XXH3_64 of header words 1-31 (E5) */
