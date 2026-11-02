@@ -1389,6 +1389,42 @@ DECLARE_NDBINFO_TABLE(JIT, 10) = {
      {"compile_ns_total", Ndbinfo::Number64,
       "Total nanoseconds spent JIT-compiling since node start"}}};
 
+/* RONDB-1150: the REDO log on persistent memory, RedoLogMode=pmem */
+DECLARE_NDBINFO_TABLE(REDO_LOG_PMEM, 24) = {
+    {"redo_log_pmem", 24, 0,
+     [](const Ndbinfo::Counts &c) { return c.data_nodes * c.log_parts; },
+     "REDO log on persistent memory (rows only with RedoLogMode=pmem)"},
+    {{"node_id", Ndbinfo::Number, ""},
+     {"log_part", Ndbinfo::Number, ""},
+     {"ldm_instance", Ndbinfo::Number, "LDM that owns the log part"},
+     {"redo_path", Ndbinfo::Number,
+      "FileSystemPathRedoLog entry of the files, 15 = FileSystemPath"},
+     {"files", Ndbinfo::Number, "REDO log files of the log part"},
+     {"mapped_bytes", Ndbinfo::Number64, "Bytes of its files mapped"},
+     {"ldm_numa_node", Ndbinfo::Number,
+      "NUMA node of the LDM thread, 4294967295 = unknown"},
+     {"mem_numa_node", Ndbinfo::Number,
+      "NUMA node of the mapped memory, 4294967295 = unknown"},
+     {"persistence_domain", Ndbinfo::Number,
+      "0 = unknown, 1 = none, 2 = memory controller, 3 = CPU cache"},
+     {"copy_method", Ndbinfo::String, "Copy to persistent memory"},
+     {"test_mode", Ndbinfo::Number,
+      "__RedoLogPmemTestMode: 0 = off, 1 = emulated, 2 = nodax"},
+     {"barriers", Ndbinfo::Number64, "Persist barriers"},
+     {"bytes_copied", Ndbinfo::Number64, "Bytes copied to the mapping"},
+     {"filler_bytes", Ndbinfo::Number64, "Bytes of FILLER records"},
+     {"lat_samples", Ndbinfo::Number64, "Persists timed, one in 16"},
+     {"lat_le_250ns", Ndbinfo::Number64, "Timed persists of at most 250 ns"},
+     {"lat_le_500ns", Ndbinfo::Number64, "250 ns < persist <= 500 ns"},
+     {"lat_le_1us", Ndbinfo::Number64, "500 ns < persist <= 1 us"},
+     {"lat_le_2us", Ndbinfo::Number64, "1 us < persist <= 2 us"},
+     {"lat_le_4us", Ndbinfo::Number64, "2 us < persist <= 4 us"},
+     {"lat_le_8us", Ndbinfo::Number64, "4 us < persist <= 8 us"},
+     {"lat_le_16us", Ndbinfo::Number64, "8 us < persist <= 16 us"},
+     {"lat_gt_16us", Ndbinfo::Number64, "Timed persists of more than 16 us"},
+     {"dirty_shutdown_count", Ndbinfo::Number64,
+      "Dirty shutdowns of the devices, 18446744073709551615 = unknown"}}};
+
 #define DBINFOTBL(x) \
   { Ndbinfo::x##_TABLEID, (const Ndbinfo::Table *)&ndbinfo_##x }
 
@@ -1461,7 +1497,8 @@ static struct ndbinfo_table_list_entry {
     DBINFOTBL(SECURITY_VIOLATIONS),
     DBINFOTBL(SECURITY_VIOLATION_COUNTS),
     DBINFOTBL(JIT),
-    DBINFOTBL(TRUSTED_CERTS)};
+    DBINFOTBL(TRUSTED_CERTS),
+    DBINFOTBL(REDO_LOG_PMEM)};
 
 static int no_ndbinfo_tables =
     sizeof(ndbinfo_tables) / sizeof(ndbinfo_tables[0]);

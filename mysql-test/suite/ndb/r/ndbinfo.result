@@ -106,9 +106,10 @@ table_id	table_name	comment
 58	security_violation_counts	Per-violation-type strike counters (data node security)
 59	jit	RONDB-1056 JIT code-memory and program-reuse statistics (one row per data node)
 60	trusted_certs	Contents of in-memory TLS trust store
+61	redo_log_pmem	REDO log on persistent memory (rows only with RedoLogMode=pmem)
 SELECT COUNT(*) FROM ndb$tables;
 COUNT(*)
-61
+62
 SELECT * FROM ndb$tables WHERE table_id = 2;
 table_id	table_name	comment	rows_estimate
 2	test	for testing	8000
@@ -169,6 +170,7 @@ table_id	table_name	comment
 58	security_violation_counts	Per-violation-type strike counters (data node security)
 59	jit	RONDB-1056 JIT code-memory and program-reuse statistics (one row per data node)
 60	trusted_certs	Contents of in-memory TLS trust store
+61	redo_log_pmem	REDO log on persistent memory (rows only with RedoLogMode=pmem)
 SELECT * FROM ndb$tables WHERE table_name = 'LOGDESTINATION';
 table_id	table_name	comment	rows_estimate
 SELECT COUNT(*) FROM ndb$tables t, ndb$columns c
@@ -223,6 +225,7 @@ table_id	table_name
 3	pools
 38	processes
 56	rdma_transporters
+61	redo_log_pmem
 7	resources
 21	restart_info
 57	security_violations
@@ -345,6 +348,7 @@ table_id
 58
 59
 60
+61
 
 TRUNCATE ndb$tables;
 ERROR HY000: Table 'ndb$tables' is read only

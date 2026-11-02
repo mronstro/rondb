@@ -2067,17 +2067,35 @@ class Dblqh : public SimulatedBlock {
     /**
      * RONDB-1150, PMEM mode: the REDO path its files are opened under
      * (FsOpenReq::OM_REDO_PATH), the one of its LDM thread's NUMA node,
-     * or the one a file was found under. One warning each for a file
-     * found elsewhere and for memory on another NUMA node.
+     * or the one a file was found under. One warning for a file found
+     * elsewhere. m_pmem_mem_numa_node: the NUMA node of the memory of
+     * its first file mapped with MAP_SYNC, -1 before; one warning when it
+     * is not the LDM thread's.
      */
     Uint8 m_redo_path_no;
     bool m_redo_path_warned;
-    bool m_redo_numa_checked;
+    Int32 m_pmem_mem_numa_node;
     /**
      * RONDB-1150, PMEM mode: the files that SR or NR still waits for in
      * OPENING_PMEM_MAP_ALL (openAllRedoFilesPmem()).
      */
     Uint32 m_pmem_files_to_map;
+    /**
+     * RONDB-1150, PMEM mode: counters of the writes to persistent memory
+     * for ndbinfo redo_log_pmem. The writer updates them under the log
+     * part lock and times one persist in 16; the owner LDM reads them
+     * without the lock, as 64-bit loads do not tear. They stay 0 until
+     * the REDO log is written through the mapping (phase 8).
+     * lat_hist: at most 250 ns, 500 ns, 1, 2, 4, 8, 16 us, more.
+     */
+    struct RedoPmemStats {
+      Uint64 barriers;
+      Uint64 bytes_copied;
+      Uint64 filler_bytes;
+      Uint64 lat_samples;
+      Uint64 lat_hist[8];
+    };
+    RedoPmemStats m_pmem_stats;
 
     /**
      *       A timer that is set every time a log page is sent to disk.
