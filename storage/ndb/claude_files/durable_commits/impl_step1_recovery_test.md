@@ -152,7 +152,7 @@ struct PartView {                     // DBLQH: m_pmem_base of every file
   const Uint8 *const *fileBase;       // fileBase[fileNo]
   const Uint32 *page(Uint32 f, Uint32 p) const;
 };
-enum Reason { R_OK, R_HDR_MAGIC, R_HDR_CHECKSUM, R_HDR_IDENTITY, R_HDR_LAP,
+enum Reason { R_VALID, R_HDR_MAGIC, R_HDR_CHECKSUM, R_HDR_IDENTITY, R_HDR_LAP,
   R_TYPE_ZERO, R_TYPE_UNKNOWN, R_LEN, R_CROSSES_MBYTE, R_SPAN_HDR, R_CHECKSUM,
   R_FD_POS, R_FILLER_ALIGN, R_AFTER_NEXT_MBYTE, R_NEXT_MBYTE_HDR };
 struct RecInfo { Uint32 type, flags, len; Pos end; };

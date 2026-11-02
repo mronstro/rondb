@@ -17,7 +17,7 @@ unchanged.
 | 3 | 4 | Configuration: parameters, path parser, checks, test settings | S2.1–S2.3, S2.7 | Config unit tests, management-server refusals | — | **In progress**: `RedoLogPaths-t`, `MgmConfig-t`, `ndb.ndb_redo_pmem_config`, `ndb.ndb_config` and `ndb.ndb_basic` in PMEM mode passed on macOS ARM64 (2026-10-29); `ndb.ndb_redo_pmem_config`, `RedoLogPaths-t` and `MgmConfig-t` passed on Linux x86_64 (2026-10-30); Linux ARM64 postponed |
 | 4 | 5 | NDBFS mapping and placement; PMEM mode with today's format (**M0.2**) | S3.1–S3.4, S2.4, S2.5 | MTR ndb suite and a testSystemRestart subset in `nodax` and on `memmap=` | 2, 3 | **In progress**: 4a (NDBFS maps the REDO files), 4b (REDO paths, NUMA placement) and 4c (start-time platform checks) passed on macOS ARM64 and Linux x86_64 (2026-10-30), after the fix of a race in `ndb_pmem_map` that 4a found on Linux. Still to run for the gate: Linux ARM64 (postponed), the testSystemRestart subset, and `memmap=` |
 | 5 | 6 | Initial start and restarts with every file mapped; ndbinfo `redo_log_pmem` | S3.5, S3.6, S2.6 | Initial start, SR and NR in PMEM mode; ndbinfo rows | 4 | **In progress**: 5a (every REDO file kept open and mapped, by a close that keeps the file in NDBFS) passed on macOS ARM64 (2026-10-31), Linux x86_64 to be tested; 5b (ndbinfo `redo_log_pmem`) passed on macOS ARM64 (2026-11-02), Linux x86_64 to be tested |
-| 6 | 7 | Record format and reader module | S4.1, S6.2 | Unit tests over synthetic logs on the three platforms | 1 | Not started |
+| 6 | 7 | Record format and reader module | S4.1, S6.2 | Unit tests over synthetic logs on the three platforms | 1 | **In progress**: `pmem_redo_format-t` and `pmem_redo_scan-t` (300 random logs from seed 1, then 10000 from a time-based seed) passed on macOS ARM64 (2026-11-02); Linux x86_64 and Linux ARM64 to be tested |
 | 7 | 8 | Record writers | S4.2–S4.7, S5.1 | Unit tests; file-mode regression | 6 | Not started |
 | 8 | 9 | PMEM REDO end to end: write path and recovery together (**M0.3**) | S4.8, S5.2–S5.5, S6.1, S6.3–S6.6 | Initial start, traffic, SR and NR in PMEM mode; the ledger in PMEM mode | 5, 7, ledger | Not started |
 | 9 | 10 | Checks, benchmark switch, persist delay | S5.6–S5.9, Q-A11 | Shared log parts; debug send checks; `DUMP 2368` latency numbers | 8 | Not started |
@@ -919,3 +919,103 @@ separate commits:
 On Linux with
 `memmap=` and `emulated`, `SELECT * FROM ndbinfo.redo_log_pmem` should
 show `persistence_domain` `none` and the memory NUMA node of the region.
+
+---
+
+## Phase 6: record format and reader module
+
+**Scope.** `implementation_plan.md` pull request 7; write plan S4.1 and
+recovery plan S6.2, tests U2-U4 (`impl_step1_recovery_test.md` §4.1).
+The bytes of the PMEM format and the restart scan over them, tested on
+synthetic logs. Nothing in the data node calls them yet: the writers
+come in phase 7, the restart in phase 8. File mode is unchanged.
+
+**Changes.**
+
+| File | Change |
+|---|---|
+| `src/kernel/blocks/dblqh/PmemRedoFormat.hpp` | New, header-only, namespace `PmemRedo`: geometry, W = 64, record types and flags, record and page-header word numbers, sizes (`PREPARE_MAX` 23130 from `ndb_limits.h`, `RESERVE` 46), `makeW0`/`w0Type`/`w0Flags`/`w0Len`, `padWords`, `prepareLen`, `fdLen`, `maxFdFiles`, `lsn`, the suffix S, `RecChecksum` (one piece per page, chained through the seed), `recordChecksum`, `headerChecksum`, `buildPageHeader` (no mask, R2), the `Reason` codes with `reasonName`, `checkPageHeader` (V1 without the lap), `checkFraming` (V2 on w0), `prepareLenOk`, `fdLenOk`, `checkRecordWords`/`recordOk` for a record inside one page |
+| `src/kernel/blocks/dblqh/PmemRedoScan.hpp`, `.cpp` | New: `Pos`, `Geom`, `PartView` (the mapped files of a part), `checkPage` (V1), `checkRecord` (V1-V5 with records over up to 4 pages), `findEnd` (E), `findLastMbyte` (phase 1 step 3), `mbyteStart`, `nextMbyteStart`, `ceilUnit`, `expectedLap`, `posLsn` |
+| `src/kernel/blocks/CMakeLists.txt` | `dblqh/PmemRedoScan.cpp` in `ndbblocks` |
+| `src/kernel/blocks/dblqh/CMakeLists.txt` | `pmem_redo_format-t`, and `pmem_redo_scan-t` built with `PmemRedoScan.cpp` |
+| `src/kernel/blocks/dblqh/pmem_redo_format-t.cpp` | U2, writer side (S4.1): the checksum against xxhash's own `XXH3_64bits` and `XXH3_64bits_withSeed`, `EMPTY_HASH`, two pieces against one; every record type accepted, rejected after a change of any body word or of any word of S, `RF_INVALIDATED` kept by a COMMIT only, a FILLER's body not covered; the framing bounds; the header image and a change of any of its 32 words; `padWords`, `prepareLen`, `fdLen` for every file size, `RESERVE` |
+| `src/kernel/blocks/dblqh/pmem_redo_scan-t.cpp` | U2 reader side, U3 and U4. `TestLog` writes a part as the PMEM writer will (format §7) and keeps the old content of every 64-byte line stored since the last fence, so that a crash leaves each line old, new or torn at 8 bytes (crash model A2). Crafted records for every reason code. The cases of recovery §3.3: clean end with a FILLER, the previous lap's record at E (mid-page and at a page start), torn last record, unwritten and torn page header, a PREPARE over 4 pages and a torn spanned header, torn and old mbyte header, zeroed region, the next file's FD torn and the slot lagging, orphans after a hole. Random logs: lap 1-3 over the previous lap (half the time the same records), crash after a random event, E checked against what was written, a restart at E or at an earlier record end, a second crash and the check again; the same with no zeroing must fail |
+
+**Decisions taken while implementing.**
+
+1. **The split of recovery plan Q4:** `PmemRedoFormat.hpp` holds what
+   the writers need and what checks one record or one header;
+   `PmemRedoScan` holds what reads the mapped files of a part. The
+   control area and the last-file slots (S6.3) and their test U5
+   (`pmem_redo_slot-t`) come with S6.3 in phase 8, as the S6.2
+   signatures say.
+2. **The type and flag names live in `PmemRedoFormat.hpp`** for now.
+   The `Dblqh.hpp` macros of the write plan (`ZFILLER_TYPE` and the
+   others) come with the writers in phase 7, so phase 6 changes no DBLQH
+   file.
+3. **A record other than NEXT_MBYTE must leave 2 words for a
+   NEXT_MBYTE** before the end of its mbyte; a NEXT_MBYTE may end at it.
+   This is the placement rule of format §7.1 (`size + 2 ≤ remaining`)
+   checked by the reader, and the meaning of "ends before the end of the
+   mbyte" in format §3.4.
+4. **V5 is strict.** Page 0 holds the FD at word 32 and the FILLER to the
+   page end right after it, nothing else. Every other FILLER is at most
+   14 words (shorter than W) and ends on a W boundary. The format allowed
+   a FILLER of up to 8160 words anywhere, but no writer makes one.
+5. **The page header check includes W and the restart generation:** a
+   header with another write unit or a restart generation other than 0
+   is not this format (`R_HDR_FORMAT`), like a wrong magic.
+6. **The FD length is checked against its count of descriptors,**
+   1 ≤ nFD ≤ min(files, `maxFdFiles`), since DUMP 2396 can lower
+   `cmaxLogFilesInPageZero` below the maximum.
+7. **`findEnd` follows a valid NEXT_MBYTE into the next mbyte of the same
+   file too**, not only into the next file. In phase 1 that header is
+   invalid anyway, since it is how the last mbyte was chosen; the scan
+   stays a plain walk of the chain.
+8. **`findLastMbyte` is here**, from S6.4: the case "mbyte header torn or
+   old" of recovery §3.3 needs it. It reports a valid header after the
+   drop, which the caller treats as corruption.
+9. **A NEXT_MBYTE at the first record position of an mbyte is valid.**
+   The writer never places one there, but nothing in the format forbids
+   it, and the test uses it to skip mbytes.
+10. **Found for S6.6, the restart that moves the head back across a file
+    switch.** The later file keeps page 0, with an FD of the abandoned log
+    in the same lap. If writing then crosses into that file and a crash
+    leaves the new FD unwritten, the scan accepts the old FD and FILLER.
+    The test's restart therefore, after the slot names the head's file,
+    zeroes page 0 of every later file up to E's file. The order is: zero,
+    slot, page 0 of those files, close the unit; each fenced. Closing the
+    unit goes after the slot because it can be a file switch itself (the
+    unit ends the last mbyte of the file), which writes the next slot.
+    The recovery plan said "zero, then close, then slot"; S6.6 should take
+    this order.
+11. **The valid reason is `R_VALID`, not `R_OK`:** `R_OK` is a macro of
+    `<unistd.h>` (`access()`), which the NDB headers pull in. The first
+    build on macOS failed on it.
+
+**Commands for the pusher.** `cmake .` first, because there are new
+source files. Then, on Linux x86_64, Linux ARM64 and macOS ARM64:
+
+```
+cmake --build .
+ctest -R pmem_redo --output-on-failure
+./runtime_output_directory/pmem_redo_scan-t --random --loops=10000
+```
+
+`ctest` runs `pmem_redo_format-t` and `pmem_redo_scan-t` with 300 random
+logs from seed 1; the second run takes 10000 from a time-based seed and
+prints it. A failure prints the seed that replays it with
+`--random --seed=<seed> --loops=1`. The whole build is needed because
+`PmemRedoScan.cpp` is now compiled into `ndbblocks`; no data node code
+calls it, so no MTR run is needed for this phase.
+
+**First runs on macOS ARM64 (2026-11-02).** The build failed on `R_OK`
+(decision 11). Then random log 0 failed: E before the last fence. The
+test writer was wrong, not the scan: `startFile` built the FD in `m_buf`,
+which still held the body of the record whose `append()` switched file,
+so that record was stored with FD words in its body; for a PREPARE the
+key and attrinfo lengths no longer matched and the scan rejected it
+(`R_LEN`) correctly. The FD now has its own buffer. The zeroing control
+had passed on that same failure, before the restart; it now counts a
+log only if it passes with the zeroing and fails without it. After
+these fixes all tests passed.
