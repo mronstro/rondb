@@ -2882,6 +2882,7 @@ void Dblqh::execREAD_CONFIG_REQ(Signal *signal) {
     Uint32 redo_log_mode = NDB_REDO_LOG_MODE_FILE;
     ndb_mgm_get_int_parameter(p, CFG_DB_REDO_LOG_MODE, &redo_log_mode);
     c_redo_pmem = (redo_log_mode == NDB_REDO_LOG_MODE_PMEM);
+    c_redo_pmem_format = false;  // phase 8: in PMEM mode
     c_redo_pmem_test_mode = NDB_REDO_PMEM_TEST_MODE_OFF;
     ndb_mgm_get_int_parameter(p, CFG_DB_REDO_PMEM_TEST_MODE,
                               &c_redo_pmem_test_mode);
@@ -7639,6 +7640,7 @@ void Dblqh::seizeTcrec(TcConnectionrecPtr& tcConnectptr,
   locTcConnectptr.p->nextSeqNoReplica = 0;
   locTcConnectptr.p->seqNoReplica = 0;
   locTcConnectptr.p->m_committed_log_space = 0;
+  locTcConnectptr.p->m_redo_end_lsn = 0;
   locTcConnectptr.p->m_dealloc_state = TcConnectionrec::DA_IDLE;
   locTcConnectptr.p->m_dealloc_data.m_unused = RNIL;
   locTcConnectptr.p->tcScanRec = RNIL;
@@ -10160,6 +10162,7 @@ void Dblqh::execLQHKEYREQ(Signal *signal) {
   regTcPtr->readlenAi = 0;
   regTcPtr->currTupAiLen = 0;
   regTcPtr->logWriteState = TcConnectionrec::NOT_STARTED;
+  regTcPtr->m_redo_end_lsn = 0;
   regTcPtr->fragmentptr = RNIL64;
   regTcPtr->m_user_ptr_i = RNIL64;
 
@@ -13645,19 +13648,26 @@ void Dblqh::doWritePrepareLog(Signal *signal,
   regTcPtr->logStartFileNo = fileNo;
   regTcPtr->logStartPageNo = tcurrentFilepage;
   regTcPtr->logStartPageIndex = pageIndex;
-  /* -------------------------------------------------- */
-  /*       WRITE THE LOG HEADER OF THIS OPERATION.      */
-  /* -------------------------------------------------- */
-  writeLogHeader(signal, tcConnectptr.p, logPagePtr, logFilePtr, regLogPartPtr);
-  /* -------------------------------------------------- */
-  /*       WRITE THE TUPLE KEY OF THIS OPERATION.       */
-  /* -------------------------------------------------- */
-  writeKey(signal, tcConnectptr.p, logPagePtr, logFilePtr, regLogPartPtr);
-  /* -------------------------------------------------- */
-  /*       WRITE THE ATTRIBUTE INFO OF THIS OPERATION.  */
-  /* -------------------------------------------------- */
-  writeAttrinfoLab(signal, tcConnectptr.p, logPagePtr, logFilePtr,
+  if (unlikely(c_redo_pmem_format)) {
+    jam();
+    writePrepareLogPmem(signal, regTcPtr, logPagePtr, logFilePtr,
+                        regLogPartPtr);
+  } else {
+    /* -------------------------------------------------- */
+    /*       WRITE THE LOG HEADER OF THIS OPERATION.      */
+    /* -------------------------------------------------- */
+    writeLogHeader(signal, tcConnectptr.p, logPagePtr, logFilePtr,
                    regLogPartPtr);
+    /* -------------------------------------------------- */
+    /*       WRITE THE TUPLE KEY OF THIS OPERATION.       */
+    /* -------------------------------------------------- */
+    writeKey(signal, tcConnectptr.p, logPagePtr, logFilePtr, regLogPartPtr);
+    /* -------------------------------------------------- */
+    /*       WRITE THE ATTRIBUTE INFO OF THIS OPERATION.  */
+    /* -------------------------------------------------- */
+    writeAttrinfoLab(signal, tcConnectptr.p, logPagePtr, logFilePtr,
+                     regLogPartPtr);
+  }
 
   /* -------------------------------------------------- */
   /*       RESET THE STATE OF THE LOG PART. IF ANY      */
@@ -14307,8 +14317,13 @@ void Dblqh::checkNewMbyte(Signal *signal, const TcConnectionrec *regTcPtr,
   /*               LOG_FILE_PTR    THE LOG FILE         */
   /*       OUTPUT: LOG_FILE_PTR    THE NEW LOG FILE     */
   /* -------------------------------------------------- */
-  ttotalLogSize = ZLOG_HEAD_SIZE + regTcPtr->currTupAiLen;
-  ttotalLogSize = ttotalLogSize + regTcPtr->primKeyLen;
+  if (unlikely(c_redo_pmem_format)) {
+    ttotalLogSize = PmemRedo::prepareLen(regTcPtr->primKeyLen,
+                                         regTcPtr->currTupAiLen, false);
+  } else {
+    ttotalLogSize = ZLOG_HEAD_SIZE + regTcPtr->currTupAiLen;
+    ttotalLogSize = ttotalLogSize + regTcPtr->primKeyLen;
+  }
   tcnmTmp = logFilePtr.p->remainingWordsInMbyte;
   if ((ttotalLogSize + ZNEXT_LOG_SIZE) <= tcnmTmp) {
     ndbrequire(tcnmTmp >= ttotalLogSize);
@@ -42666,6 +42681,7 @@ void Dblqh::initLogpart(Signal *signal, LogPartRecordPtr logPartPtr) {
   logPartPtr.p->m_pmem_files_to_map = 0;
   std::memset(&logPartPtr.p->m_pmem_stats, 0,
               sizeof(logPartPtr.p->m_pmem_stats));
+  logPartPtr.p->m_pmem_persisted_lsn = 0;
   NdbLogPartInfo lpinfo(instance());
   ndbrequire(lpinfo.partCount == clogPartFileSize);
   logPartPtr.p->logPartNo = lpinfo.partNo[logPartPtr.i];
@@ -43860,6 +43876,11 @@ void Dblqh::writeAbortLog(Signal *signal, TcConnectionrec *regTcPtr,
                           LogPageRecordPtr &logPagePtr,
                           LogFileRecordPtr &logFilePtr,
                           LogPartRecord *logPartPtrP) {
+  if (unlikely(c_redo_pmem_format)) {
+    writeAbortLogPmem(signal, regTcPtr, logPagePtr, logFilePtr, logPartPtrP,
+                      0);
+    return;
+  }
   if ((ZABORT_LOG_SIZE + ZNEXT_LOG_SIZE) >
       logFilePtr.p->remainingWordsInMbyte) {
     jam();
@@ -43882,6 +43903,10 @@ void Dblqh::writeAbortLog(Signal *signal, TcConnectionrec *regTcPtr,
  * ------------------------------------------------------------------------- */
 void Dblqh::writeCommitLog(Signal *signal, TcConnectionrec *regTcPtr,
                            LogPartRecord *logPartPtrP) {
+  if (unlikely(c_redo_pmem_format)) {
+    writeCommitLogPmem(signal, regTcPtr, logPartPtrP, false);
+    return;
+  }
   LogPageRecordPtr logPagePtr;
   LogFileRecordPtr logFilePtr;
 
@@ -43948,6 +43973,10 @@ void Dblqh::writeCommitLog(Signal *signal, TcConnectionrec *regTcPtr,
 void Dblqh::writeCompletedGciLog(Signal *signal, LogPageRecordPtr &logPagePtr,
                                  LogFileRecordPtr &logFilePtr,
                                  LogPartRecord *logPartPtrP) {
+  if (unlikely(c_redo_pmem_format)) {
+    writeCompletedGciLogPmem(signal, logPagePtr, logFilePtr, logPartPtrP);
+    return;
+  }
   if ((ZCOMPLETED_GCI_LOG_SIZE + ZNEXT_LOG_SIZE) >
       logFilePtr.p->remainingWordsInMbyte) {
     jam();
@@ -44318,6 +44347,411 @@ void Dblqh::writeNextLog(Signal *signal, LogPageRecordPtr &logPagePtr,
     sendSignal(CMVMI_REF, GSN_NDB_TAMPER, signal, 1, JBA);
   }
 }  // Dblqh::writeNextLog()
+
+/* ==========================================================================
+ * RONDB-1150: the REDO records in the PMEM format (PmemRedoFormat.hpp,
+ * impl_step1_lqh_write.md S4, S5.1)
+ *
+ * Entered from today's writers when c_redo_pmem_format is set. The
+ * records go into the log pages as today: writeLogWords() completes a
+ * page and goes on in the next one inside a record. A record's checksum
+ * is taken for the place of its w0, one piece per page. Phase 8 copies
+ * the pages to the mapping and persists them (S5.2, S5.3).
+ * ========================================================================== */
+
+static_assert(PmemRedo::PAGE_WORDS == ZPAGE_SIZE &&
+                  PmemRedo::HEADER_WORDS == ZPAGE_HEADER_SIZE &&
+                  PmemRedo::PAGES_IN_MBYTE == ZPAGES_IN_MBYTE,
+              "the PMEM format has the geometry of the log pages");
+static_assert(PmemRedo::TYPE_PREPARE == ZPREP_OP_TYPE &&
+                  PmemRedo::TYPE_COMMIT == ZCOMMIT_TYPE &&
+                  PmemRedo::TYPE_ABORT == ZABORT_TYPE &&
+                  PmemRedo::TYPE_FD == ZFD_TYPE &&
+                  PmemRedo::TYPE_NEXT_MBYTE == ZNEXT_MBYTE_TYPE &&
+                  PmemRedo::TYPE_COMPLETED_GCI == ZCOMPLETED_GCI_TYPE,
+              "the PMEM record types keep today's numbers");
+static_assert(PmemRedo::NEXT_MBYTE_LEN == ZNEXT_LOG_SIZE,
+              "every record leaves room for a NEXT_MBYTE");
+static_assert(PmemRedo::HDR_LAP == ZPOS_LOG_LAP &&
+                  PmemRedo::HDR_MAX_GCI_COMPLETED == ZPOS_MAX_GCI_COMPLETED &&
+                  PmemRedo::HDR_MAX_GCI_STARTED == ZPOS_MAX_GCI_STARTED &&
+                  PmemRedo::HDR_VERSION == ZPOS_VERSION &&
+                  PmemRedo::HDR_NO_LOG_FILES == ZPOS_NO_LOG_FILES &&
+                  PmemRedo::HDR_LAST_PREP_REF == ZLAST_LOG_PREP_REF &&
+                  PmemRedo::HDR_PAGE_NO == ZPOS_PAGE_NO &&
+                  PmemRedo::HDR_FILE_NO == ZPOS_PAGE_FILE_NO &&
+                  PmemRedo::HDR_NO_LOG_PARTS == ZPOS_NO_LOG_PARTS,
+              "the PMEM page header words keep the ZPOS_* numbers");
+
+/* S of a record whose w0 goes at the current position (F10: the lap of
+   the page header) */
+PmemRedo::Suffix Dblqh::redoSuffix(const LogPartRecord *logPartPtrP,
+                                   const LogFileRecord *logFilePtrP,
+                                   const LogPageRecord *logPagePtrP) const {
+  return PmemRedo::suffix(logPagePtrP->logPageWord[ZPOS_LOG_LAP],
+                          logPartPtrP->logPartNo, logFilePtrP->fileNo,
+                          logFilePtrP->currentFilepage,
+                          logPagePtrP->logPageWord[ZCURR_PAGE_INDEX]);
+}
+
+/**
+ * S4.2: a record of at most 12 words built in rec, w1 left 0. A new
+ * mbyte first if the record would not leave room for a NEXT_MBYTE, as
+ * today; then the checksum for its place, split where the page ends, and
+ * the words into the log pages.
+ */
+void Dblqh::redoAppendFixed(Signal *signal, LogPartRecord *logPartPtrP,
+                            LogPageRecordPtr &logPagePtr,
+                            LogFileRecordPtr &logFilePtr, Uint32 *rec,
+                            Uint32 len) {
+  ndbassert(len == PmemRedo::w0Len(rec[0]) && len <= PmemRedo::COMMIT_LEN);
+  if (len + ZNEXT_LOG_SIZE > logFilePtr.p->remainingWordsInMbyte) {
+    jam();
+    changeMbyte(signal, logPagePtr, logFilePtr, logPartPtrP);
+  }
+  const Uint32 index = logPagePtr.p->logPageWord[ZCURR_PAGE_INDEX];
+  ndbassert((index & 1) == 0);
+  rec[1] = PmemRedo::splitChecksum(
+      rec, ZPAGE_SIZE - index,
+      redoSuffix(logPartPtrP, logFilePtr.p, logPagePtr.p));
+  logFilePtr.p->remainingWordsInMbyte -= len;
+  logPartPtrP->m_total_written_words += len;
+  writeLogWords(signal, rec, len, logPagePtr, logFilePtr, logPartPtrP);
+}
+
+/**
+ * S4.3: a PREPARE (format §5.1). The header goes in from the stack, the
+ * key and the attrinfo from their sections as today, then a pad word if
+ * needed; checkNewMbyte() made room for all of it in the mbyte. The
+ * checksum is taken where the record lies, one piece per page (E4), over
+ * the start page, the pages after it on the file's filled list
+ * (completedLogPage() links them in order) and the current page; w1 is
+ * stored last. The walk needs the filled pages linked until the record
+ * ends: in the PMEM format completedLogPage() only links them, and the
+ * copy-out after the record releases them (phase 8, S5.2).
+ */
+void Dblqh::writePrepareLogPmem(Signal *signal,
+                                const TcConnectionrec *regTcPtr,
+                                LogPageRecordPtr &logPagePtr,
+                                LogFileRecordPtr &logFilePtr,
+                                LogPartRecord *logPartPtrP) {
+  const Uint32 keyLen = regTcPtr->primKeyLen;
+  const Uint32 aiLen = regTcPtr->currTupAiLen;
+  const Uint32 len = PmemRedo::prepareLen(keyLen, aiLen, false);
+  const LogPageRecordPtr startPagePtr = logPagePtr;
+  const Uint32 startIndex = logPagePtr.p->logPageWord[ZCURR_PAGE_INDEX];
+  ndbassert((startIndex & 1) == 0);
+  const PmemRedo::Suffix s =
+      redoSuffix(logPartPtrP, logFilePtr.p, logPagePtr.p);
+
+  Uint32 hdr[PmemRedo::PREPARE_HEAD];
+  PmemRedo::prepareHead(hdr, 0, len, regTcPtr->hashValue,
+                        regTcPtr->operation, aiLen, keyLen,
+                        regTcPtr->m_row_id.m_page_no,
+                        regTcPtr->m_row_id.m_page_idx);
+  writeLogWords(signal, hdr, PmemRedo::PREPARE_HEAD, logPagePtr, logFilePtr,
+                logPartPtrP);
+  writeKey(signal, regTcPtr, logPagePtr, logFilePtr, logPartPtrP);
+  writeAttrinfoLab(signal, regTcPtr, logPagePtr, logFilePtr, logPartPtrP);
+  if ((keyLen + aiLen) & 1) {
+    const Uint32 pad = 0;
+    writeLogWords(signal, &pad, 1, logPagePtr, logFilePtr, logPartPtrP);
+  }
+  logPartPtrP->m_total_written_words += len;
+
+  const Uint32 noPages = PmemRedo::pagesSpanned(startIndex, len);
+  ndbrequire(noPages <= PmemRedo::PREPARE_MAX_PAGES);
+  const Uint32 *pages[PmemRedo::PREPARE_MAX_PAGES];
+  LogPageRecordPtr pagePtr = startPagePtr;
+  pages[0] = pagePtr.p->logPageWord;
+  for (Uint32 i = 1; i < noPages; i++) {
+    pagePtr.i = pagePtr.p->logPageWord[ZNEXT_PAGE];
+    if (pagePtr.i == RNIL) pagePtr.i = logFilePtr.p->currentLogpage;
+    ptrCheckGuard(pagePtr, logPartPtrP->logPageFileSize,
+                  logPartPtrP->logPageRecord);
+    pages[i] = pagePtr.p->logPageWord;
+  }
+  startPagePtr.p->logPageWord[startIndex + 1] =
+      PmemRedo::pagedChecksum(pages, startIndex, s);
+}
+
+/**
+ * S4.4: a COMMIT (format §5.2): where its PREPARE is, the GCI and the
+ * transid; opCount 0 until X4. A dependent signal waits for its end
+ * (m_redo_end_lsn). It gives back the operation's reservation; durable
+ * is false in step 1.
+ */
+void Dblqh::writeCommitLogPmem(Signal *signal, TcConnectionrec *regTcPtr,
+                               LogPartRecord *logPartPtrP, bool durable) {
+  LogPageRecordPtr logPagePtr;
+  LogFileRecordPtr logFilePtr;
+  logFilePtr.i = logPartPtrP->currentLogfile;
+  ptrCheckGuard(logFilePtr, logPartPtrP->my_block->clogFileFileSize,
+                logPartPtrP->my_block->logFileRecord);
+  logPagePtr.i = logFilePtr.p->currentLogpage;
+  ptrCheckGuard(logPagePtr, logPartPtrP->logPageFileSize,
+                logPartPtrP->logPageRecord);
+  ndbassert(!m_is_in_query_thread);
+  Uint32 rec[PmemRedo::COMMIT_LEN];
+  PmemRedo::commitRecord(
+      rec, durable ? PmemRedo::CF_DURABLE : 0, regTcPtr->tableref,
+      regTcPtr->schemaVersion, regTcPtr->fragmentid, regTcPtr->logStartFileNo,
+      regTcPtr->logStartPageNo, regTcPtr->logStartPageIndex,
+      regTcPtr->logStopPageNo, regTcPtr->gci_hi, regTcPtr->gci_lo,
+      regTcPtr->transid[0], regTcPtr->transid[1], 0);
+  redoAppendFixed(signal, logPartPtrP, logPagePtr, logFilePtr, rec,
+                  PmemRedo::COMMIT_LEN);
+  regTcPtr->m_redo_end_lsn =
+      redoPosLsn(logPartPtrP, logFilePtr.p, logPagePtr.p);
+  release_committed_words(logPartPtrP, regTcPtr, PmemRedo::AT_COMMIT,
+                          durable);
+}
+
+/**
+ * S4.4: an ABORT (format §5.3). flags is 0 from today's callers; with
+ * AF_AFTER_COMMIT (rule F, X4) a dependent signal waits for it.
+ */
+void Dblqh::writeAbortLogPmem(Signal *signal, TcConnectionrec *regTcPtr,
+                              LogPageRecordPtr &logPagePtr,
+                              LogFileRecordPtr &logFilePtr,
+                              LogPartRecord *logPartPtrP, Uint32 flags) {
+  Uint32 rec[PmemRedo::ABORT_LEN];
+  PmemRedo::abortRecord(rec, flags, regTcPtr->transid[0],
+                        regTcPtr->transid[1]);
+  redoAppendFixed(signal, logPartPtrP, logPagePtr, logFilePtr, rec,
+                  PmemRedo::ABORT_LEN);
+  if (flags & PmemRedo::AF_AFTER_COMMIT) {
+    regTcPtr->m_redo_end_lsn =
+        redoPosLsn(logPartPtrP, logFilePtr.p, logPagePtr.p);
+  }
+  release_committed_words(logPartPtrP, regTcPtr, PmemRedo::AT_ABORT, false);
+}
+
+/* S4.4: a COMPLETED_GCI (format §5.4), with today's error insert 5051 */
+void Dblqh::writeCompletedGciLogPmem(Signal *signal,
+                                     LogPageRecordPtr &logPagePtr,
+                                     LogFileRecordPtr &logFilePtr,
+                                     LogPartRecord *logPartPtrP) {
+  if ((PmemRedo::COMPLETED_GCI_LEN + ZNEXT_LOG_SIZE) >
+      logFilePtr.p->remainingWordsInMbyte) {
+    jam();
+    changeMbyte(signal, logPagePtr, logFilePtr, logPartPtrP);
+  }
+
+  if (ERROR_INSERTED(5051) && (logFilePtr.p->currentFilepage > 0) &&
+      (logFilePtr.p->currentFilepage % 32) == 0) {
+    SET_ERROR_INSERT_VALUE(5000);
+  }
+
+  if (DEBUG_REDO_EXEC) {
+    g_eventLogger->info(
+        "(%u)writeCompletedGciLogPmem gci: %u part: %u"
+        " file: %u page: %u (mb: %u)",
+        instance(), cnewestCompletedGci, logPartPtrP->logPartNo,
+        logFilePtr.p->fileNo, logFilePtr.p->currentFilepage,
+        logFilePtr.p->currentFilepage >> ZTWOLOG_NO_PAGES_IN_MBYTE);
+  }
+
+  Uint32 rec[PmemRedo::COMPLETED_GCI_LEN];
+  PmemRedo::completedGciRecord(rec, cnewestCompletedGci);
+  redoAppendFixed(signal, logPartPtrP, logPagePtr, logFilePtr, rec,
+                  PmemRedo::COMPLETED_GCI_LEN);
+  logPartPtrP->logPartNewestCompletedGCI = cnewestCompletedGci;
+}
+
+/**
+ * S4.4: a COMPLETE (format §5.5), after a durable COMMIT; a dependent
+ * signal waits for it, and it gives back the rest of the reservation.
+ * Format only in step 1: X4 calls it from execCOMPLETE and
+ * execCOMPLETEREQ.
+ */
+void Dblqh::writeCompleteLog(Signal *signal, TcConnectionrec *regTcPtr,
+                             LogPartRecord *logPartPtrP) {
+  ndbrequire(c_redo_pmem_format);
+  LogPageRecordPtr logPagePtr;
+  LogFileRecordPtr logFilePtr;
+  logFilePtr.i = logPartPtrP->currentLogfile;
+  ptrCheckGuard(logFilePtr, logPartPtrP->my_block->clogFileFileSize,
+                logPartPtrP->my_block->logFileRecord);
+  logPagePtr.i = logFilePtr.p->currentLogpage;
+  ptrCheckGuard(logPagePtr, logPartPtrP->logPageFileSize,
+                logPartPtrP->logPageRecord);
+  Uint32 rec[PmemRedo::COMPLETE_LEN];
+  PmemRedo::completeRecord(rec, regTcPtr->transid[0], regTcPtr->transid[1]);
+  redoAppendFixed(signal, logPartPtrP, logPagePtr, logFilePtr, rec,
+                  PmemRedo::COMPLETE_LEN);
+  regTcPtr->m_redo_end_lsn =
+      redoPosLsn(logPartPtrP, logFilePtr.p, logPagePtr.p);
+  release_committed_words(logPartPtrP, regTcPtr, PmemRedo::AT_COMPLETE, true);
+}
+
+/**
+ * S4.5: a FILLER of len words that closes a write unit (format §5.6). Its
+ * body is zeroed, so that the copied unit is the same every time, and is
+ * not in the checksum. It never crosses a page end, and is not counted as
+ * written log.
+ */
+void Dblqh::writeFillerPmem(Signal *signal, LogPartRecord *logPartPtrP,
+                            LogPageRecordPtr &logPagePtr,
+                            LogFileRecordPtr &logFilePtr, Uint32 len) {
+  const Uint32 index = logPagePtr.p->logPageWord[ZCURR_PAGE_INDEX];
+  ndbrequire(len >= PmemRedo::FILLER_MIN && len <= PmemRedo::FILLER_MAX &&
+             (len & 1) == 0 && index + len <= ZPAGE_SIZE);
+  ndbrequire(logFilePtr.p->remainingWordsInMbyte >= len);
+  Uint32 rec[PmemRedo::FILLER_MAX] = {0};
+  rec[0] = PmemRedo::makeW0(PmemRedo::TYPE_FILLER, 0, len);
+  rec[1] = PmemRedo::recordChecksum(
+      rec, redoSuffix(logPartPtrP, logFilePtr.p, logPagePtr.p));
+  logFilePtr.p->remainingWordsInMbyte -= len;
+  logPartPtrP->m_pmem_stats.filler_bytes += 4 * len;
+  writeLogWords(signal, rec, len, logPagePtr, logFilePtr, logPartPtrP);
+}
+
+/**
+ * S4.5: the NEXT_MBYTE at the current position (format §5.7), and the
+ * rest of its write unit zeroed. The page index moves to the end of the
+ * unit, so that the copy of the page (F6) takes the whole unit. Every
+ * record left room for it (ZNEXT_LOG_SIZE). Phase 8 calls it from
+ * writeNextLog() and fences it before the next mbyte is touched (W2).
+ */
+void Dblqh::writeNextMbytePmem(LogPartRecord *logPartPtrP,
+                               LogFileRecord *logFilePtrP,
+                               LogPageRecord *logPagePtrP) {
+  Uint32 *const page = logPagePtrP->logPageWord;
+  const Uint32 index = page[ZCURR_PAGE_INDEX];
+  ndbrequire((index & 1) == 0 &&
+             index + PmemRedo::NEXT_MBYTE_LEN <= ZPAGE_SIZE);
+  page[index] = PmemRedo::makeW0(PmemRedo::TYPE_NEXT_MBYTE, 0,
+                                 PmemRedo::NEXT_MBYTE_LEN);
+  page[index + 1] = PmemRedo::recordChecksum(
+      &page[index], redoSuffix(logPartPtrP, logFilePtrP, logPagePtrP));
+  const Uint32 end = index + PmemRedo::NEXT_MBYTE_LEN;
+  const Uint32 unitEnd = end + PmemRedo::padWords(end);
+  std::memset(&page[end], 0, sizeof(Uint32) * (unitEnd - end));
+  page[ZCURR_PAGE_INDEX] = unitEnd;
+}
+
+/**
+ * S4.6: page 0 of a file in its log page, after initLogpage(): the FD at
+ * word 32 (format §5.8) with the descriptors of writeFileHeaderOpen(), and
+ * a FILLER to the page end of which only w0 and w1 are set. The FILLER's
+ * body, where file 0 keeps the control area (E10), is never copied (D4).
+ * Phase 8 copies the page (S5.3, S4.8).
+ */
+void Dblqh::redoBuildPageZero(LogPageRecordPtr logPagePtr,
+                              LogFileRecordPtr logFilePtr,
+                              LogPartRecord *logPartPtrP) {
+  Uint32 *const page = logPagePtr.p->logPageWord;
+  Dblqh *const owner = logPartPtrP->my_block;
+  const Uint32 noFd =
+      std::min(Uint32(logPartPtrP->noLogFiles), owner->cmaxLogFilesInPageZero);
+  const Uint32 len = PmemRedo::fdLen(noFd, clogFileSize);
+  const Uint32 fillerIndex = ZPAGE_HEADER_SIZE + len;
+  ndbrequire(fillerIndex + 2 <= PmemRedo::CONTROL_AREA_WORD);
+
+  Uint32 *const fd = &page[ZPAGE_HEADER_SIZE];
+  fd[0] = PmemRedo::makeW0(PmemRedo::TYPE_FD, 0, len);
+  fd[1] = 0;
+  fd[PmemRedo::FD_NO_FD] = noFd;
+  fd[PmemRedo::FD_FILE_NO] = logFilePtr.p->fileNo;
+  LogFileRecordPtr filePtr = logFilePtr;
+  for (Uint32 f = 0; f < noFd; f++) {
+    jam();
+    ptrCheckGuard(filePtr, owner->clogFileFileSize, owner->logFileRecord);
+    Uint32 *const arrays =
+        &fd[PmemRedo::FD_ARRAYS + f * ZFD_MBYTE_SIZE * clogFileSize];
+    for (Uint32 mb = 0; mb < clogFileSize; mb++) {
+      arrays[mb] = filePtr.p->logMaxGciCompleted[mb];
+      arrays[clogFileSize + mb] = filePtr.p->logMaxGciStarted[mb];
+      arrays[2 * clogFileSize + mb] = filePtr.p->logLastPrepRef[mb];
+    }
+    filePtr.i = filePtr.p->prevLogFile;
+  }
+  const Uint32 used =
+      PmemRedo::FD_ARRAYS + noFd * ZFD_MBYTE_SIZE * clogFileSize;
+  if (used < len) fd[used] = 0;  // the pad word
+
+  const Uint32 lap = page[ZPOS_LOG_LAP];
+  const Uint32 fileNo = logFilePtr.p->fileNo;
+  fd[1] = PmemRedo::recordChecksum(
+      fd, PmemRedo::suffix(lap, logPartPtrP->logPartNo, fileNo, 0,
+                           ZPAGE_HEADER_SIZE));
+  page[fillerIndex] = PmemRedo::makeW0(PmemRedo::TYPE_FILLER, 0,
+                                       ZPAGE_SIZE - fillerIndex);
+  page[fillerIndex + 1] = PmemRedo::recordChecksum(
+      &page[fillerIndex],
+      PmemRedo::suffix(lap, logPartPtrP->logPartNo, fileNo, 0, fillerIndex));
+  page[ZCURR_PAGE_INDEX] = ZPAGE_SIZE;
+}
+
+/* The page header as stored on PMEM, from the page's DRAM header */
+void Dblqh::redoPmemHeaderImage(Uint32 *img, const LogPageRecord *logPagePtrP,
+                                Uint32 fileNo, Uint32 pageNo,
+                                const LogPartRecord *logPartPtrP) const {
+  PmemRedo::buildPageHeader(img, logPagePtrP->logPageWord, fileNo, pageNo,
+                            logPartPtrP->logPartNo, getOwnNodeId());
+}
+
+/* S5.1: the byte position of a word in the log of the part, its lap's */
+Uint64 Dblqh::redoLsn(const LogPartRecord *logPartPtrP, Uint32 fileNo,
+                      Uint32 pageNo, Uint32 word) const {
+  return PmemRedo::lsn(logPartPtrP->logLap, logPartPtrP->noLogFiles,
+                       logPartPtrP->my_block->clogFileSize, fileNo, pageNo,
+                       word);
+}
+
+/**
+ * The end of what the writers have put in the log pages: the current
+ * position, or the start of the current page while it holds only its
+ * header. So a record that ends at a page end ends at the next page's
+ * start, and nothing of a page is counted before its first record.
+ */
+Uint64 Dblqh::redoPosLsn(const LogPartRecord *logPartPtrP,
+                         const LogFileRecord *logFilePtrP,
+                         const LogPageRecord *logPagePtrP) const {
+  const Uint32 index = logPagePtrP->logPageWord[ZCURR_PAGE_INDEX];
+  return redoLsn(logPartPtrP, logFilePtrP->fileNo,
+                 logFilePtrP->currentFilepage,
+                 index == ZPAGE_HEADER_SIZE ? 0 : index);
+}
+
+Uint64 Dblqh::redoAppendLsn(LogPartRecord *logPartPtrP) {
+  LogFileRecordPtr logFilePtr;
+  logFilePtr.i = logPartPtrP->currentLogfile;
+  ptrCheckGuard(logFilePtr, logPartPtrP->my_block->clogFileFileSize,
+                logPartPtrP->my_block->logFileRecord);
+  LogPageRecordPtr logPagePtr;
+  logPagePtr.i = logFilePtr.p->currentLogpage;
+  ptrCheckGuard(logPagePtr, logPartPtrP->logPageFileSize,
+                logPartPtrP->logPageRecord);
+  return redoPosLsn(logPartPtrP, logFilePtr.p, logPagePtr.p);
+}
+
+Uint8 *Dblqh::redoPmemAddr(const LogFileRecord *logFilePtrP, Uint32 pageNo,
+                           Uint32 word) const {
+  return logFilePtrP->m_pmem_base + Uint64(pageNo) * PmemRedo::PAGE_BYTES +
+         4 * word;
+}
+
+bool Dblqh::redoHasUnpersisted(LogPartRecord *logPartPtrP) {
+  return redoAppendLsn(logPartPtrP) > logPartPtrP->m_pmem_persisted_lsn;
+}
+
+/**
+ * The write position after a restart (impl_step1_lqh_write.md §7.2):
+ * recovery has set the head and closed its write unit, so the log is
+ * persistent up to it and no page waits for a copy.
+ */
+void Dblqh::redoInitWritePosition(LogPartRecord *logPartPtrP) {
+  LogFileRecordPtr logFilePtr;
+  logFilePtr.i = logPartPtrP->currentLogfile;
+  ptrCheckGuard(logFilePtr, logPartPtrP->my_block->clogFileFileSize,
+                logPartPtrP->my_block->logFileRecord);
+  ndbrequire(logFilePtr.p->firstFilledPage == RNIL);
+  const Uint64 lsn = redoAppendLsn(logPartPtrP);
+  ndbrequire(lsn % PmemRedo::W_BYTES == 0);
+  logPartPtrP->m_pmem_persisted_lsn = lsn;
+}
 
 bool Dblqh::validate_filter(Signal *signal) {
   Uint32 *start = signal->theData + 1;
@@ -48262,6 +48696,17 @@ Uint32 Dblqh::get_committed_mbytes(LogPartRecord *logPartPtrP) {
 
 void Dblqh::increment_committed_mbytes(LogPartRecord *logPartPtrP,
                                        TcConnectionrec *regTcPtr) {
+  if (unlikely(c_redo_pmem_format)) {
+    /**
+     * RONDB-1150, PMEM format: the COMMIT and the COMPLETE or rule-F
+     * ABORT, each with the FILLER that closes its write unit, and the
+     * NEXT_MBYTE (S4.7). release_committed_words() gives them back.
+     */
+    ndbassert(regTcPtr->m_committed_log_space == PmemRedo::RESERVED_NONE);
+    logPartPtrP->m_committed_words += PmemRedo::RESERVE;
+    regTcPtr->m_committed_log_space = PmemRedo::RESERVED_FULL;
+    return;
+  }
   logPartPtrP->m_committed_words += (ZCOMMIT_LOG_SIZE + 1);
   regTcPtr->m_committed_log_space = 1;
   DEB_COMMITTED_WORDS(
@@ -48282,6 +48727,23 @@ void Dblqh::decrement_committed_mbytes(LogPartRecord *logPartPtrP,
   logPartPtrP->m_committed_words -= (ZCOMMIT_LOG_SIZE + 1);
   ndbassert(regTcPtr->m_committed_log_space == 1);
   regTcPtr->m_committed_log_space = 0;
+}
+
+/**
+ * RONDB-1150, PMEM format: the words that a COMMIT, COMPLETE or ABORT
+ * record of the operation gives back (PmemRedo::releasedWords()). In
+ * step 1 every COMMIT is non-durable and gives back all of them.
+ */
+void Dblqh::release_committed_words(LogPartRecord *logPartPtrP,
+                                    TcConnectionrec *regTcPtr,
+                                    PmemRedo::RedoRelease what, bool durable) {
+  Uint32 after;
+  const Uint32 words = PmemRedo::releasedWords(
+      regTcPtr->m_committed_log_space, what, durable, &after);
+  ndbrequire(words != 0);
+  ndbassert(logPartPtrP->m_committed_words >= words);
+  logPartPtrP->m_committed_words -= words;
+  regTcPtr->m_committed_log_space = Uint8(after);
 }
 
 void Dblqh::execLOCAL_LATEST_LCP_ID_REP(Signal *signal) {
