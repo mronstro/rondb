@@ -18,7 +18,7 @@ unchanged.
 | 4 | 5 | NDBFS mapping and placement; PMEM mode with today's format (**M0.2**) | S3.1–S3.4, S2.4, S2.5 | MTR ndb suite and a testSystemRestart subset in `nodax` and on `memmap=` | 2, 3 | **In progress**: 4a (NDBFS maps the REDO files), 4b (REDO paths, NUMA placement) and 4c (start-time platform checks) passed on macOS ARM64 and Linux x86_64 (2026-10-30), after the fix of a race in `ndb_pmem_map` that 4a found on Linux. Still to run for the gate: Linux ARM64 (postponed), the testSystemRestart subset, and `memmap=` |
 | 5 | 6 | Initial start and restarts with every file mapped; ndbinfo `redo_log_pmem` | S3.5, S3.6, S2.6 | Initial start, SR and NR in PMEM mode; ndbinfo rows | 4 | **In progress**: 5a (every REDO file kept open and mapped, by a close that keeps the file in NDBFS) passed on macOS ARM64 (2026-10-31), Linux x86_64 to be tested; 5b (ndbinfo `redo_log_pmem`) passed on macOS ARM64 (2026-11-02), Linux x86_64 to be tested |
 | 6 | 7 | Record format and reader module | S4.1, S6.2 | Unit tests over synthetic logs on the three platforms | 1 | **In progress**: `pmem_redo_format-t` and `pmem_redo_scan-t` (300 random logs from seed 1, then 10000 from a time-based seed) passed on macOS ARM64 (2026-11-02); Linux x86_64 and Linux ARM64 to be tested |
-| 7 | 8 | Record writers | S4.2–S4.7, S5.1 | Unit tests; file-mode regression | 6 | Not started |
+| 7 | 8 | Record writers | S4.2–S4.7, S5.1 | Unit tests; file-mode regression | 6 | **Written** (2026-11-02), to be tested: the PMEM record writers behind `c_redo_pmem_format` (false until phase 8), the reservation, the LSN helpers, `pmem_redo_writer-t` |
 | 8 | 9 | PMEM REDO end to end: write path and recovery together (**M0.3**) | S4.8, S5.2–S5.5, S6.1, S6.3–S6.6 | Initial start, traffic, SR and NR in PMEM mode; the ledger in PMEM mode | 5, 7, ledger | Not started |
 | 9 | 10 | Checks, benchmark switch, persist delay | S5.6–S5.9, Q-A11 | Shared log parts; debug send checks; `DUMP 2368` latency numbers | 8 | Not started |
 | 10 | 11 | Node restart and `redoLogReader` | S6.7, S6.8 | testNodeRestart subset; reader on files from crash tests | 8 | Not started |
@@ -1019,3 +1019,87 @@ key and attrinfo lengths no longer matched and the scan rejected it
 had passed on that same failure, before the restart; it now counts a
 log only if it passes with the zeroing and fails without it. After
 these fixes all tests passed.
+
+---
+
+## Phase 7: record writers
+
+**Scope.** `implementation_plan.md` pull request 8; write plan S4.2-S4.7
+and S5.1. The DBLQH writers of every record in the PMEM format, the
+reservation of S4.7, and the LSN helpers and fields of S5.1. They build
+the records in the DRAM log pages; moving the pages to the mapping is
+phase 8 (S5.2-S5.5), together with the restart that reads them, so that
+PMEM mode never writes a log it cannot read. Until then the writers are
+not entered: PMEM mode still writes today's format, and file mode is
+unchanged.
+
+**Changes.**
+
+| File | Change |
+|---|---|
+| `src/kernel/blocks/dblqh/PmemRedoFormat.hpp` | `PREPARE_MAX_PAGES` (4); `splitChecksum` (a record built in one buffer, split by a page end), `pagesSpanned`, `pagedChecksum` (a record where it lies in the log pages, one piece per page); the builders `prepareHead`, `commitRecord`, `abortRecord`, `completeRecord`, `completedGciRecord`; the reservation states `RESERVED_NONE/FULL/TAIL`, `RedoRelease { AT_COMMIT, AT_COMPLETE, AT_ABORT }` and `releasedWords` (the table of S4.7) |
+| `src/kernel/blocks/dblqh/Dblqh.hpp` | Includes `PmemRedoFormat.hpp`. `LogPartRecord::m_pmem_persisted_lsn`; `TcConnectionrec::m_redo_end_lsn` (0 in the constructor, `seizeTcrec`, `execLQHKEYREQ`); `c_redo_pmem_format`; the declarations below |
+| `src/kernel/blocks/dblqh/DblqhMain.cpp` | `c_redo_pmem_format = false` at READ_CONFIG. Dispatch on it in `doWritePrepareLog`, `checkNewMbyte` (the PMEM length), `writeAbortLog`, `writeCommitLog`, `writeCompletedGciLog`, `increment_committed_mbytes` (46 words). A "PMEM format" section after `writeNextLog`: static asserts that the format keeps today's geometry, type numbers and header words; `redoSuffix`, `redoAppendFixed` (S4.2); `writePrepareLogPmem` (S4.3); `writeCommitLogPmem`, `writeAbortLogPmem`, `writeCompletedGciLogPmem` (with error insert 5051), `writeCompleteLog` (no caller until X4) (S4.4); `writeFillerPmem`, `writeNextMbytePmem` (S4.5); `redoBuildPageZero`, `redoPmemHeaderImage` (S4.6); `release_committed_words` (S4.7); `redoLsn`, `redoPosLsn`, `redoAppendLsn`, `redoPmemAddr`, `redoHasUnpersisted`, `redoInitWritePosition` (S5.1) |
+| `src/kernel/blocks/dblqh/CMakeLists.txt` | `pmem_redo_writer-t`, built with `PmemRedoScan.cpp` |
+| `src/kernel/blocks/dblqh/pmem_redo_writer-t.cpp` | The words of every builder, each record accepted in one page; COMMIT, ABORT, COMPLETE, COMPLETED_GCI and SR_HEAD at every place from inside a page to its last word pair, with `splitChecksum`, accepted by the scan's `checkRecord` with the right next position, and the unsplit checksum rejected where both pieces hold words; PREPAREs of 1 to 4 pages (up to the largest key and log record) from 5 places, with `pagedChecksum` over the pages, accepted, and the checksum of the body in one piece rejected where the pages cut it; the FILLER that closes a unit at every word; the reservation table and the states where a record cannot come |
+
+**Decisions taken while implementing.**
+
+1. **A switch of its own, `c_redo_pmem_format`.** The plan dispatches on
+   `c_redo_pmem`, but PMEM mode runs today's format since phase 4 and its
+   MTR tests must keep passing until phase 8 brings the copy-out and the
+   restart. Phase 8 sets the switch from `c_redo_pmem` (or replaces it by
+   `c_redo_pmem`).
+2. **The writers build bytes; phase 8 moves them.** `redoEndOfRecord`,
+   `redoCopyOut`, `redoPadToUnit`, `redoPersist` and the copy of page 0
+   are S5.2-S5.3 and come in phase 8, which adds the end-of-record copy at
+   the end of `redoAppendFixed` and `writePrepareLogPmem`, calls
+   `writeNextMbytePmem` from `writeNextLog`, and calls `redoBuildPageZero`
+   from a `writeFileHeaderOpenPmem` that also copies the page. So phase 7
+   adds no dispatch to `writeFileHeaderOpen`, `writeNextLog` or
+   `completedLogPage`. The PREPARE's checksum walks the filled list from
+   its start page, so it needs phase 8's `completedLogPage`, which only
+   links pages: today's writes the list at 8 pages and starts a new one,
+   which would cut the walk.
+3. **The FD content is `redoBuildPageZero`**, not
+   `writeFileHeaderOpenPmem`: the plan's function mixes the bytes (S4.6)
+   with the copy (S5.3); the split keeps each phase whole.
+4. **No `ZFILLER_TYPE`/`RF_INVALIDATED` macros in `Dblqh.hpp`.** The
+   writers use the `PmemRedo::` names, and static asserts check that the
+   format keeps today's type numbers, geometry and header word numbers. A
+   macro named like a constant of the header would break the header
+   wherever it is included after the macro.
+5. **The writer and the reader take the checksum independently.** The
+   writers use `splitChecksum` and `pagedChecksum` of the format header;
+   the scan keeps its own loop in `checkRecord`, so `pmem_redo_writer-t`
+   checks one against the other.
+6. **The end of what is written (`redoPosLsn`) is the start of the
+   current page while that page holds only its header.** So a record
+   that ends at a page end ends at the next page's start, as the copy
+   will store it, and after a NEXT_MBYTE or page 0 the end is the next
+   page's start, which is where phase 8 sets the persisted LSN. The plan's
+   "nothing new to persist" then needs only `appendLsn > persisted`.
+7. **The reservation states are named `RESERVED_*`, not `RES_*`**, the
+   prefix of the `<resolv.h>` macros.
+8. **The COMMIT logs `gci_lo`** (format §5.2), which today's COMMIT does
+   not; it is set before every COMMIT is written (review point of S4.4).
+9. **`release_committed_words` refuses a record in a state where it
+   cannot come** (`ndbrequire`): a COMMIT without a reservation, a
+   COMPLETE without a durable COMMIT.
+
+**Commands for the pusher.** `cmake .` first, because there is a new
+test. Then, on Linux x86_64, Linux ARM64 and macOS ARM64:
+
+```
+cmake --build .
+ctest -R pmem_redo --output-on-failure
+```
+
+File-mode regression (the PMEM writers are not entered, so PMEM mode is
+unchanged too; the operation record is 8 bytes larger):
+
+```
+cd mysql-test
+./mtr --suite=ndb --parallel=auto
+./mtr ndb.ndb_redo_pmem_restarts ndb.ndb_redo_pmem_paths
+```

@@ -40,3 +40,6 @@ NDB_ADD_TEST(pmem_redo_format-t pmem_redo_format-t.cpp
   LIBS ndbgeneral ndbportlib)
 NDB_ADD_TEST(pmem_redo_scan-t pmem_redo_scan-t.cpp PmemRedoScan.cpp
   LIBS ndbgeneral ndbportlib)
+# The records as the DBLQH writers build them, checked by the scan's reader.
+NDB_ADD_TEST(pmem_redo_writer-t pmem_redo_writer-t.cpp PmemRedoScan.cpp
+  LIBS ndbgeneral ndbportlib)
