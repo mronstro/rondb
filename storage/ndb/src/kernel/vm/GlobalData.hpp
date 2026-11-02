@@ -147,6 +147,20 @@ struct GlobalData {
   Uint32     theNumScanFragReqCounts;
 
   /**
+   * RONDB-1150, RedoLogMode=pmem: what the start-time probe of NDBFS found
+   * behind each REDO path, indexed by the REDO path number of FsOpenReq,
+   * REDO_PATH_FS for FileSystemPath. Written in NDBFS's READ_CONFIG_REQ,
+   * before DBLQH reads it for ndbinfo redo_log_pmem. A path not probed
+   * (__RedoLogPmemTestMode=nodax) keeps domain 0 and dirty_shutdown ~0.
+   */
+  static constexpr Uint32 REDO_PMEM_PATHS = 16;
+  struct RedoPmemPathInfo {
+    Uint32 domain;          // ndb_pmem_domain, 0: unknown
+    Uint64 dirty_shutdown;  // summed over the devices, ~0: unknown
+  };
+  RedoPmemPathInfo theRedoPmemPath[REDO_PMEM_PATHS];
+
+  /**
    * NodeStartLogReportFrequency, seconds between [NODE-START] progress
    * reports during the node start, 0 = only step boundary reports.
    * theNodeStartTicks is set at the top of ndbd_run and anchors all
@@ -246,6 +260,10 @@ struct GlobalData {
     theMaxSendDelay = 0;
     theNumLqhKeyReqCounts = 0;
     theNumScanFragReqCounts = 0;
+    for (RedoPmemPathInfo &path : theRedoPmemPath) {
+      path.domain = 0;
+      path.dirty_shutdown = ~Uint64(0);
+    }
     theNodeStartLogReportFrequency = 15;
     NdbTick_Invalidate(&theNodeStartTicks);
     theNodeStartLogState = NSL_STARTING;

@@ -18,6 +18,9 @@ let $cluster = $MYSQLTEST_VARDIR/mysql_cluster.1;
 --error 1
 --file_exists $cluster/ndb_2_fs
 
+--echo == 2b == ndbinfo.redo_log_pmem has no rows in file mode
+SELECT COUNT(*) FROM ndbinfo.redo_log_pmem;
+
 --echo == 3 == an initial node restart leaves FileSystemPathRedoLog alone
 --mkdir $cluster/ndb_1_fs
 --write_file $cluster/ndb_1_fs/canary
