@@ -33,3 +33,10 @@ MYSQL_ADD_EXECUTABLE(ndb_redo_log_reader
   ndbportlib
   ndbtrace
   )
+
+# RONDB-1150: the REDO log format with RedoLogMode=pmem (PmemRedoFormat.hpp)
+# and the restart scan over it (PmemRedoScan.cpp), on synthetic logs.
+NDB_ADD_TEST(pmem_redo_format-t pmem_redo_format-t.cpp
+  LIBS ndbgeneral ndbportlib)
+NDB_ADD_TEST(pmem_redo_scan-t pmem_redo_scan-t.cpp PmemRedoScan.cpp
+  LIBS ndbgeneral ndbportlib)
