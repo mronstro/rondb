@@ -656,7 +656,7 @@ DECLARE_NDBINFO_TABLE(TC_TIME_TRACK_STATS, 15) = {
 DECLARE_NDBINFO_TABLE(CONFIG_VALUES, 3) = {
     {"config_values", 3, 0,
      [](const Ndbinfo::Counts &c) {
-       return c.data_nodes * 197;  // 197 = current number of config parameters
+       return c.data_nodes * 201;  // 201 = current number of config parameters
      },
      "Configuration parameter values"},
     {

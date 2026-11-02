@@ -126,7 +126,7 @@ BETWEEN -10 AND 10 AS actual_close_to_estimate
 FROM rowcounts
 WHERE table_name = "ndb$config_values";
 table_name	est_rows	actual_close_to_estimate
-ndb$config_values	394	1
+ndb$config_values	402	1
 ## Note:
 ## the estimate for config_values relies on a constant in NdbinfoTables.cpp
 ## which must be manually maintained (within a tolerance of 10 rows)
