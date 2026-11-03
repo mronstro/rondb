@@ -25,6 +25,8 @@
 
 #include "PmemRedoScan.hpp"
 
+#include <cstdio>
+
 namespace PmemRedo {
 
 namespace {
@@ -203,6 +205,79 @@ LastMbyte findLastMbyte(const PartView &v, Uint32 fileNo, Uint32 lap) {
     }
   }
   return res;
+}
+
+Uint32 checkCtrlConfig(const Uint32 *line, const Geom &g, Uint32 noParts,
+                       Uint32 nodeId, char *msg, size_t size) {
+  if (line[CTRL_W_MAGIC] != CTRL_MAGIC) {
+    snprintf(msg, size, "no control area: not written in PMEM mode");
+    return CTRL_NOT_PMEM;
+  }
+  if (line[LINE_CHECKSUM] != lineChecksum(line)) {
+    snprintf(msg, size, "control area checksum");
+    return CTRL_CORRUPT;
+  }
+  if (line[CTRL_W_VERSION] != CTRL_VERSION) {
+    snprintf(msg, size, "control area version %u, this node reads %u",
+             line[CTRL_W_VERSION], CTRL_VERSION);
+    return CTRL_OTHER_VERSION;
+  }
+  static const struct {
+    Uint32 word;
+    const char *name;
+  } fields[] = {{CTRL_W_NO_PARTS, "NoOfFragmentLogParts"},
+                {CTRL_W_PART_NO, "log part"},
+                {CTRL_W_NO_FILES, "NoOfFragmentLogFiles"},
+                {CTRL_W_FILE_SIZE_MB, "FragmentLogFileSize in MB"},
+                {CTRL_W_WRITE_UNIT, "write unit in bytes"},
+                {CTRL_W_NODE_ID, "node id"}};
+  const Uint32 expected[] = {noParts,      g.logPartNo, g.noFiles,
+                             g.fileSizeMb, W_BYTES,     nodeId};
+  for (Uint32 i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+    if (line[fields[i].word] != expected[i]) {
+      snprintf(msg, size, "%s is %u in the REDO log and %u here",
+               fields[i].name, line[fields[i].word], expected[i]);
+      return CTRL_MISMATCH;
+    }
+  }
+  snprintf(msg, size, "valid");
+  return CTRL_VALID;
+}
+
+bool slotValid(const Uint32 *line, Uint32 index, const Geom &g, Slot *out) {
+  if (line[SLOT_W_MAGIC] != SLOT_MAGIC ||
+      line[LINE_CHECKSUM] != lineChecksum(line))
+    return false;
+  const Uint64 seq =
+      line[SLOT_W_SEQ] | (Uint64(line[SLOT_W_SEQ + 1]) << 32);
+  const Uint32 flags = line[SLOT_W_FLAGS];
+  if (seq == 0 || slotIndex(seq) != index || (flags >> 8) != index ||
+      line[SLOT_W_PART_NO] != g.logPartNo ||
+      line[SLOT_W_FILE_NO] >= g.noFiles || line[SLOT_W_LAP] == 0)
+    return false;
+  out->seq = seq;
+  out->fileNo = line[SLOT_W_FILE_NO];
+  out->lap = line[SLOT_W_LAP];
+  out->dirtyShutdownCount =
+      line[SLOT_W_DSC] | (Uint64(line[SLOT_W_DSC + 1]) << 32);
+  out->flags = flags & 0xFF;
+  return true;
+}
+
+int pickSlot(const Uint32 *slot0, const Uint32 *slot1, const Geom &g,
+             Slot *out) {
+  Slot s[2];
+  const bool valid[2] = {slotValid(slot0, 0, g, &s[0]),
+                         slotValid(slot1, 1, g, &s[1])};
+  int index = -1;
+  if (valid[0] && valid[1])
+    index = s[1].seq > s[0].seq ? 1 : 0;
+  else if (valid[0])
+    index = 0;
+  else if (valid[1])
+    index = 1;
+  if (index >= 0) *out = s[index];
+  return index;
 }
 
 }  // namespace PmemRedo

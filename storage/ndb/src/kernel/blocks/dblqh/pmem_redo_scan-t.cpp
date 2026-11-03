@@ -686,6 +686,9 @@ bool arithmetic(TestLog &log) {
   const Pos end = {1, 50, 100, 3};
   CHECK(expectedLap(end, 0) == 3 && expectedLap(end, 1) == 3 &&
         expectedLap(end, 2) == 2);
+  CHECK(lapAt(end, 0, 120, 32) == 3 && lapAt(end, 2, 0, 32) == 2);
+  CHECK(lapAt(end, 1, 49, 8000) == 3 && lapAt(end, 1, 50, 100) == 3);
+  CHECK(lapAt(end, 1, 50, 102) == 2 && lapAt(end, 1, 51, 32) == 2);
 
   CHECK(posLsn(g, Pos{2, 127, 8190, 1}) < posLsn(g, Pos{0, 0, 0, 2}));
   CHECK(posLsn(g, Pos{0, 0, 32, 1}) < posLsn(g, Pos{0, 1, 32, 1}));

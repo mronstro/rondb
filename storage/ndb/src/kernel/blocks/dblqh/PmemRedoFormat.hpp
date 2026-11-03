@@ -449,6 +449,94 @@ inline void buildPageHeader(Uint32 *img, const Uint32 *dramHdr, Uint32 fileNo,
   img[HDR_CHECKSUM] = headerChecksum(img);
 }
 
+/**
+ * The control area of a log part (E10, recovery plan S6.3): four lines of
+ * W at CONTROL_AREA_WORD of page 0 of file 0.
+ *   config          written once at the initial start: the configuration
+ *                   the files were made for
+ *   reserved        0 (X5, X6)
+ *   slot 0, slot 1  the last file of the log and its lap. A file switch
+ *                   writes slot seq & 1 with seq + 1 once the new file's
+ *                   FD is persistent, so a torn slot leaves the other.
+ * Each line is stored with one copy and a fence. Its last word is the low
+ * 32 bits of XXH3_64 of the 15 words before it.
+ */
+constexpr Uint32 CTRL_CONFIG_WORD = CONTROL_AREA_WORD;
+constexpr Uint32 SLOT0_WORD = CONTROL_AREA_WORD + 2 * W_WORDS;
+constexpr Uint32 SLOT1_WORD = SLOT0_WORD + W_WORDS;
+constexpr Uint32 LINE_CHECKSUM = W_WORDS - 1;
+
+constexpr Uint32 CTRL_MAGIC = 0x5243544C;  // "RCTL"
+constexpr Uint32 CTRL_VERSION = 1;
+constexpr Uint32 CTRL_W_MAGIC = 0;
+constexpr Uint32 CTRL_W_VERSION = 1;
+constexpr Uint32 CTRL_W_NO_PARTS = 2;
+constexpr Uint32 CTRL_W_PART_NO = 3;
+constexpr Uint32 CTRL_W_NO_FILES = 4;
+constexpr Uint32 CTRL_W_FILE_SIZE_MB = 5;
+constexpr Uint32 CTRL_W_WRITE_UNIT = 6;
+constexpr Uint32 CTRL_W_NODE_ID = 7;
+
+/* Slot words; a 64-bit value low word first */
+constexpr Uint32 SLOT_MAGIC = 0x52534C54;  // "RSLT"
+constexpr Uint32 SLOT_W_MAGIC = 0;
+constexpr Uint32 SLOT_W_SEQ = 1;
+constexpr Uint32 SLOT_W_FILE_NO = 3;
+constexpr Uint32 SLOT_W_LAP = 4;
+constexpr Uint32 SLOT_W_PART_NO = 5;
+constexpr Uint32 SLOT_W_DSC = 6;  // the dirty-shutdown count recorded
+constexpr Uint32 SLOT_W_FLAGS = 8;
+/* Slot flags (bits 0-7); bits 8-15 hold the index of the slot */
+constexpr Uint32 SLOT_F_DSC_VALID = 1;        // the device reports the count
+constexpr Uint32 SLOT_F_UNSAFE_SHUTDOWN = 2;  // seen by the start that wrote it
+
+/* The largest FD ends early enough that the FILLER after it stays clear */
+static_assert((HEADER_WORDS + FD_HEADER + (PAGE_WORDS - HEADER_WORDS - 128) +
+               1 + FILLER_MIN + W_WORDS - 1) /
+                      W_WORDS * W_WORDS <=
+                  CONTROL_AREA_WORD,
+              "page 0 is stored up to the unit of the FD's FILLER header");
+
+inline Uint32 lineChecksum(const Uint32 *line) {
+  return Uint32(ndb_xxh3_64(line, 4 * LINE_CHECKSUM));
+}
+
+inline void buildCtrlConfig(Uint32 *line, Uint32 noParts, Uint32 logPartNo,
+                            Uint32 noFiles, Uint32 fileSizeMb, Uint32 nodeId) {
+  for (Uint32 i = 0; i < W_WORDS; i++) line[i] = 0;
+  line[CTRL_W_MAGIC] = CTRL_MAGIC;
+  line[CTRL_W_VERSION] = CTRL_VERSION;
+  line[CTRL_W_NO_PARTS] = noParts;
+  line[CTRL_W_PART_NO] = logPartNo;
+  line[CTRL_W_NO_FILES] = noFiles;
+  line[CTRL_W_FILE_SIZE_MB] = fileSizeMb;
+  line[CTRL_W_WRITE_UNIT] = W_BYTES;
+  line[CTRL_W_NODE_ID] = nodeId;
+  line[LINE_CHECKSUM] = lineChecksum(line);
+}
+
+/* The slot that sequence number seq goes in */
+inline Uint32 slotIndex(Uint64 seq) { return Uint32(seq & 1); }
+inline Uint32 slotWord(Uint64 seq) {
+  return slotIndex(seq) == 0 ? SLOT0_WORD : SLOT1_WORD;
+}
+
+inline void buildSlot(Uint32 *line, Uint64 seq, Uint32 fileNo, Uint32 lap,
+                      Uint32 logPartNo, Uint64 dirtyShutdownCount,
+                      Uint32 flags) {
+  for (Uint32 i = 0; i < W_WORDS; i++) line[i] = 0;
+  line[SLOT_W_MAGIC] = SLOT_MAGIC;
+  line[SLOT_W_SEQ] = Uint32(seq);
+  line[SLOT_W_SEQ + 1] = Uint32(seq >> 32);
+  line[SLOT_W_FILE_NO] = fileNo;
+  line[SLOT_W_LAP] = lap;
+  line[SLOT_W_PART_NO] = logPartNo;
+  line[SLOT_W_DSC] = Uint32(dirtyShutdownCount);
+  line[SLOT_W_DSC + 1] = Uint32(dirtyShutdownCount >> 32);
+  line[SLOT_W_FLAGS] = (flags & 0xFF) | (slotIndex(seq) << 8);
+  line[LINE_CHECKSUM] = lineChecksum(line);
+}
+
 /* Why a page or a record is not valid (recovery §3.2, V1-V5) */
 enum Reason : Uint32 {
   R_VALID = 0,

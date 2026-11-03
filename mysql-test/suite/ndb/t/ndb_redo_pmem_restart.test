@@ -1,0 +1,96 @@
+--source include/have_ndb.inc
+
+# RONDB-1150 phase 8c: system and node restarts from the REDO log in the
+# PMEM format (recovery plan S6.1, S6.3-S6.6). Phase 1 reads the control
+# area, the last file and the end of the log from the mappings; phase 3
+# checks every record it reads and replays the COMMITs up to the
+# restart's GCI; phase 4 zeroes the log after the head and writes the
+# last-file slot. The cluster config is not the one of
+# ndb_redo_pmem_write, so the cluster and its logs start afresh.
+
+let $cluster = $MYSQLTEST_VARDIR/mysql_cluster.1;
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b VARCHAR(255)) ENGINE=NDB;
+SET SESSION cte_max_recursion_depth = 4000;
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+                            WHERE n < 4000)
+  SELECT n, REPEAT('a', 250) FROM seq;
+SET SESSION cte_max_recursion_depth = DEFAULT;
+
+# Each round logs about 0.35 MB per log part: 24 rounds switch mbyte and
+# file twice in every log part. The last round writes 'B'.
+--echo == 1 == updates that switch mbyte and file in every log part
+--disable_query_log
+let $i = 24;
+while ($i) {
+  eval UPDATE t1 SET b = REPEAT(CHAR(65 + $i % 26), 250);
+  --sleep 0.25
+  dec $i;
+}
+--enable_query_log
+SELECT COUNT(*), SUM(LENGTH(b)), MIN(b) = MAX(b) AS same, LEFT(MIN(b), 1) AS c
+  FROM t1;
+
+--echo == 2 == system restart
+--exec $NDB_MGM -e "all restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "all start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+--source include/ndb_not_readonly.inc
+SELECT COUNT(*), SUM(LENGTH(b)), MIN(b) = MAX(b) AS same, LEFT(MIN(b), 1) AS c
+  FROM t1;
+
+# The last round writes 'b'; its GCP is saved long before the data nodes
+# stop at once, without a graceful shutdown.
+--echo == 3 == system restart after all data nodes stopped at once
+--disable_query_log
+let $i = 8;
+while ($i) {
+  eval UPDATE t1 SET b = REPEAT(CHAR(97 + $i % 26), 250);
+  --sleep 0.25
+  dec $i;
+}
+--enable_query_log
+--sleep 3
+--exec $NDB_MGM -e "all restart -n -a" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "all start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+--source include/ndb_not_readonly.inc
+SELECT COUNT(*), SUM(LENGTH(b)), MIN(b) = MAX(b) AS same, LEFT(MIN(b), 1) AS c
+  FROM t1;
+
+# Node 1 stops at once and node 2 takes the updates, the last one '1'.
+--echo == 4 == node restart of a node that stopped at once
+--exec $NDB_MGM -e "1 restart -n -a" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --wait-nodes=1 --not-started >> $NDB_TOOLS_OUTPUT
+--disable_query_log
+let $i = 4;
+while ($i) {
+  eval UPDATE t1 SET b = REPEAT(CHAR(48 + $i), 250);
+  --sleep 0.25
+  dec $i;
+}
+--enable_query_log
+--exec $NDB_MGM -e "1 start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+SELECT COUNT(*), SUM(LENGTH(b)), MIN(b) = MAX(b) AS same, LEFT(MIN(b), 1) AS c
+  FROM t1;
+
+# One line per log part and restart: node 1 restarted 3 times, node 2
+# twice.
+--echo == 5 == phase 1 found the end of the log of each part in the mappings
+--exec grep -c "PMEM REDO log part 0: last file" $cluster/ndbd.1/ndbd.log
+--exec grep -c "PMEM REDO log part 0: last file" $cluster/ndbd.2/ndbd.log
+
+--echo == 6 == every log part reads back through the mapping to its end
+--exec $NDB_MGM -e "all dump 2368 3" >> $NDB_TOOLS_OUTPUT
+--sleep 2
+--exec grep -c "PMEM REDO verify ok" $cluster/ndbd.1/ndbd.log
+--exec grep -c "PMEM REDO verify ok" $cluster/ndbd.2/ndbd.log
+--error 1
+--exec grep "PMEM REDO verify failed" $cluster/ndbd.1/ndbd.log $cluster/ndbd.2/ndbd.log
+
+DROP TABLE t1;
+--remove_file $NDB_TOOLS_OUTPUT

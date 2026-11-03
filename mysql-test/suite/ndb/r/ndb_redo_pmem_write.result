@@ -1,0 +1,31 @@
+== 1 == the initial start wrote the first pages through the mapping
+4
+4
+CREATE TABLE t1 (a INT PRIMARY KEY, b VARCHAR(255)) ENGINE=NDB;
+SET SESSION cte_max_recursion_depth = 4000;
+INSERT INTO t1
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+WHERE n < 4000)
+SELECT n, REPEAT('a', 250) FROM seq;
+SET SESSION cte_max_recursion_depth = DEFAULT;
+== 2 == updates that wrap the REDO log of every log part
+SELECT COUNT(*), SUM(LENGTH(b)), MIN(b) = MAX(b) AS same FROM t1;
+COUNT(*)	SUM(LENGTH(b))	same
+4000	1000000	1
+== 3 == every log part reads back through the mapping to its end
+8
+8
+== 4 == the writes went through the mapping
+SELECT node_id, log_part, barriers > 0 AND bytes_copied > 0 AS persisted,
+filler_bytes > 0 AS fillers, lat_samples > 0 AS timed
+FROM ndbinfo.redo_log_pmem ORDER BY node_id, log_part;
+node_id	log_part	persisted	fillers	timed
+1	0	1	1	1
+1	1	1	1	1
+1	2	1	1	1
+1	3	1	1	1
+2	0	1	1	1
+2	1	1	1	1
+2	2	1	1	1
+2	3	1	1	1
+DROP TABLE t1;

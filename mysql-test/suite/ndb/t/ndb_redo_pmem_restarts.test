@@ -45,6 +45,9 @@ let NDBAPITEST_ARGS=-n NoLoad -l 1 T1;
 --echo == 4 == the restarts mapped every file of a log part at once
 --exec grep -q "the 4 REDO log files of log part 0 are open and mapped, 64 MB" $MYSQLTEST_VARDIR/mysql_cluster.1/ndbd.1/ndbd.log
 --exec grep -q "the 4 REDO log files of log part 1 are open and mapped, 64 MB" $MYSQLTEST_VARDIR/mysql_cluster.1/ndbd.2/ndbd.log
+# RONDB-1150 phase 8c: and read the log in the PMEM format from them
+--exec grep -q "PMEM REDO log part 0: last file" $MYSQLTEST_VARDIR/mysql_cluster.1/ndbd.1/ndbd.log
+--exec grep -q "PMEM REDO log part 1: last file" $MYSQLTEST_VARDIR/mysql_cluster.1/ndbd.2/ndbd.log
 
 # NDBT drops T1 before reporting success. With no metadata discovery
 # during the test, there is no SQL TEST_DB schema to clean up.

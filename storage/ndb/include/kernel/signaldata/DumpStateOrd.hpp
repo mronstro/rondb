@@ -203,6 +203,9 @@ class DumpStateOrd {
     // GROUP BY table size hints (m3_run6_plan.md D1a): 0 = not applied
     // (still recorded), 1 = applied (the default), 2 = forget them all
     LqhGroupTableSizeHints = 2367,
+    // RONDB-1150, RedoLogMode=pmem: 3 = persist the REDO log and check it
+    // through the mappings (impl_step1_lqh_write.md S5.2, S5.8)
+    LqhRedoPmem = 2368,
 
     TupDumpOneScanRec = 2380,
     TupSaveCopyTupleCount = 2381,

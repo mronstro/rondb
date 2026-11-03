@@ -3,18 +3,18 @@
 SELECT node_id, log_part, ldm_instance, redo_path, files, mapped_bytes,
 mem_numa_node, persistence_domain, copy_method <> '' AS copy_method,
 test_mode,
-barriers + bytes_copied + filler_bytes + lat_samples AS counters,
+barriers > 0 AND bytes_copied > 0 AS persisted,
 dirty_shutdown_count
 FROM ndbinfo.redo_log_pmem ORDER BY node_id, log_part;
-node_id	log_part	ldm_instance	redo_path	files	mapped_bytes	mem_numa_node	persistence_domain	copy_method	test_mode	counters	dirty_shutdown_count
-1	0	1	0	4	67108864	NULL	NULL	1	nodax	0	NULL
-1	1	2	0	4	67108864	NULL	NULL	1	nodax	0	NULL
-1	2	3	0	4	67108864	NULL	NULL	1	nodax	0	NULL
-1	3	4	0	4	67108864	NULL	NULL	1	nodax	0	NULL
-2	0	1	0	4	67108864	NULL	NULL	1	nodax	0	NULL
-2	1	2	0	4	67108864	NULL	NULL	1	nodax	0	NULL
-2	2	3	0	4	67108864	NULL	NULL	1	nodax	0	NULL
-2	3	4	0	4	67108864	NULL	NULL	1	nodax	0	NULL
+node_id	log_part	ldm_instance	redo_path	files	mapped_bytes	mem_numa_node	persistence_domain	copy_method	test_mode	persisted	dirty_shutdown_count
+1	0	1	0	4	67108864	NULL	NULL	1	nodax	1	NULL
+1	1	2	0	4	67108864	NULL	NULL	1	nodax	1	NULL
+1	2	3	0	4	67108864	NULL	NULL	1	nodax	1	NULL
+1	3	4	0	4	67108864	NULL	NULL	1	nodax	1	NULL
+2	0	1	0	4	67108864	NULL	NULL	1	nodax	1	NULL
+2	1	2	0	4	67108864	NULL	NULL	1	nodax	1	NULL
+2	2	3	0	4	67108864	NULL	NULL	1	nodax	1	NULL
+2	3	4	0	4	67108864	NULL	NULL	1	nodax	1	NULL
 CREATE TABLE t1 (a INT PRIMARY KEY, b VARCHAR(255)) ENGINE=NDB;
 INSERT INTO t1
 WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
