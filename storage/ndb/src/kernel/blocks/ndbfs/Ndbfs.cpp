@@ -457,9 +457,6 @@ void Ndbfs::read_redo_pmem_config(const ndb_mgm_configuration_iterator *p,
           globalData.theRedoPmemPath[FsOpenReq::REDO_PATH_FS];
     }
   }
-  g_eventLogger->warning(
-      "RedoLogMode=pmem: the REDO log files are mapped, but still written "
-      "as in file mode in this version");
 }
 
 /**

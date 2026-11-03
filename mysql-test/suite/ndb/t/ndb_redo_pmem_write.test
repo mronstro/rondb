@@ -1,0 +1,56 @@
+--source include/have_ndb.inc
+
+# RONDB-1150 phase 8b: with RedoLogMode=pmem the REDO log is written in
+# the PMEM format through the mappings (impl_step1_lqh_write.md S4.8,
+# S5.2-S5.4): the initial images, the copy-out at the end of each record,
+# the persist at each GCP save, the mbyte and file switches with the
+# last-file slot. DUMP 2368 3 persists each log part and reads its log
+# back through the mapping with the restart's scan; every log part must
+# end where it was persisted. ndb_redo_pmem_restart tests the restarts.
+
+let $cluster = $MYSQLTEST_VARDIR/mysql_cluster.1;
+
+--echo == 1 == the initial start wrote the first pages through the mapping
+--exec $NDB_MGM -e "all dump 2368 3" >> $NDB_TOOLS_OUTPUT
+--sleep 2
+--exec grep -c "PMEM REDO verify ok" $cluster/ndbd.1/ndbd.log
+--exec grep -c "PMEM REDO verify ok" $cluster/ndbd.2/ndbd.log
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b VARCHAR(255)) ENGINE=NDB;
+SET SESSION cte_max_recursion_depth = 4000;
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+                            WHERE n < 4000)
+  SELECT n, REPEAT('a', 250) FROM seq;
+SET SESSION cte_max_recursion_depth = DEFAULT;
+
+# Each round logs every row on both data nodes, about 1.4 MB per node and
+# 0.35 MB per log part. 64 rounds write about 22 MB per log part, more than
+# its 16 MB, so every part switches mbyte and file and wraps. The pause
+# lets the LCPs cut the tail in time.
+--echo == 2 == updates that wrap the REDO log of every log part
+--disable_query_log
+let $i = 64;
+while ($i) {
+  eval UPDATE t1 SET b = REPEAT(CHAR(65 + $i % 26), 250);
+  --sleep 0.25
+  dec $i;
+}
+--enable_query_log
+SELECT COUNT(*), SUM(LENGTH(b)), MIN(b) = MAX(b) AS same FROM t1;
+
+--echo == 3 == every log part reads back through the mapping to its end
+--exec $NDB_MGM -e "all dump 2368 3" >> $NDB_TOOLS_OUTPUT
+--sleep 2
+--exec grep -c "PMEM REDO verify ok" $cluster/ndbd.1/ndbd.log
+--exec grep -c "PMEM REDO verify ok" $cluster/ndbd.2/ndbd.log
+--error 1
+--exec grep "PMEM REDO verify failed" $cluster/ndbd.1/ndbd.log $cluster/ndbd.2/ndbd.log
+
+--echo == 4 == the writes went through the mapping
+SELECT node_id, log_part, barriers > 0 AND bytes_copied > 0 AS persisted,
+       filler_bytes > 0 AS fillers, lat_samples > 0 AS timed
+  FROM ndbinfo.redo_log_pmem ORDER BY node_id, log_part;
+
+DROP TABLE t1;
+--remove_file $NDB_TOOLS_OUTPUT
