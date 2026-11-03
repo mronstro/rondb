@@ -61,7 +61,7 @@
 #include <signaldata/LqhTransConf.hpp>
 #include <signaldata/NodeRecoveryStatusRep.hpp>
 #include "NdbAggregationCommon.hpp"
-#include "PmemRedoFormat.hpp"
+#include "PmemRedoScan.hpp"
 #include "kernel/DblqhState.hpp"
 
 // primary key is stored in TUP
@@ -397,6 +397,8 @@ class FsReadWriteReq;
 /* Test hook 5150: one timer per instance re-checks the held replays. */
 #define ZCONTINUE_JOIN_AGG_FLUSH_HELD 60
 #endif
+/* RONDB-1150: the zeroing of phase 4 of a restart in the PMEM format */
+#define ZPMEM_SR_ZERO 62
 
 /* ------------------------------------------------------------------------- */
 /*        NODE STATE DURING SYSTEM RESTART, VARIABLES CNODES_SR_STATE        */
@@ -2104,6 +2106,36 @@ class Dblqh : public SimulatedBlock {
      * redoInitWritePosition() at a restart.
      */
     Uint64 m_pmem_persisted_lsn;
+    /**
+     * RONDB-1150, PMEM format: the seq of the last-file slot written last
+     * (PmemRedoFormat.hpp), and the dirty-shutdown count and the
+     * SLOT_F_* flags that the next slot records.
+     */
+    Uint64 m_pmem_slot_seq;
+    Uint64 m_pmem_dsc_recorded;
+    Uint32 m_pmem_dsc_flags;
+    /**
+     * RONDB-1150, PMEM format, a system or node restart (recovery plan
+     * S6.3-S6.6), from phase 1 to the end of phase 4:
+     *   m_pmem_file_base   the mapping of each file, by file number
+     *   m_pmem_end         E, the end of the valid log that phase 1
+     *                      found, and m_pmem_end_reason why the record
+     *                      there is not valid
+     *   m_pmem_exec_lap    the lap of the log where phase 3 reads
+     *   m_pmem_inval_pending  COMMITs invalidated in phase 3, not fenced
+     *   m_pmem_zero_from, m_pmem_zero_to  the LSNs that phase 4 still
+     *                      zeroes, from the end backwards
+     *   m_pmem_unsafe_shutdown  the device reported an unsafe shutdown
+     *                      since the last-file slot was written
+     */
+    Uint8 **m_pmem_file_base;
+    PmemRedo::Pos m_pmem_end;
+    Uint32 m_pmem_end_reason;
+    Uint32 m_pmem_exec_lap;
+    Uint32 m_pmem_inval_pending;
+    Uint64 m_pmem_zero_from;
+    Uint64 m_pmem_zero_to;
+    bool m_pmem_unsafe_shutdown;
 
     /**
      *       A timer that is set every time a log page is sent to disk.
@@ -4273,6 +4305,65 @@ private:
                       Uint32 word) const;
   bool redoHasUnpersisted(LogPartRecord *logPartPtrP);
   void redoInitWritePosition(LogPartRecord *logPartPtrP);
+  /**
+   * RONDB-1150, PMEM format: the write path (impl_step1_lqh_write.md
+   * S4.8, S5.2-S5.4): the copy of the log pages to the mapping, the
+   * persist, page 0 of a file, the initial images and the last-file slot.
+   */
+  Uint32 redoCopyPage(const LogPartRecord *logPartPtrP,
+                      const LogFileRecord *logFilePtrP,
+                      const LogPageRecord *logPagePtrP, Uint32 pageNo,
+                      Uint32 from, Uint32 to);
+  void redoCopyOut(LogPartRecord *logPartPtrP, bool filledOnly);
+  void redoEndOfRecord(LogPartRecord *logPartPtrP,
+                       const LogFileRecord *logFilePtrP);
+  void redoPadToUnit(Signal *signal, LogPartRecord *logPartPtrP);
+  void redoPersist(Signal *signal, LogPartRecord *logPartPtrP);
+  void redoCountPersist(LogPartRecord *logPartPtrP, Uint64 bytes,
+                        const NDB_TICKS *start);
+  void writeFileHeaderOpenPmem(LogPageRecordPtr &logPagePtr,
+                               LogFileRecordPtr logFilePtr,
+                               LogPartRecord *logPartPtrP);
+  void redoCopyPageZero(LogPageRecordPtr logPagePtr,
+                        LogFileRecordPtr logFilePtr,
+                        LogPartRecord *logPartPtrP);
+  void redoPmemInitFile(LogPageRecordPtr logPagePtr,
+                        LogFileRecordPtr logFilePtr,
+                        LogPartRecord *logPartPtrP);
+  void redoWriteLastFileSlot(LogPartRecord *logPartPtrP, Uint32 fileNo,
+                             Uint32 lap);
+  void redoPmemVerify(Signal *signal, LogPartRecord *logPartPtrP);
+  void sendGcpSaveConf(Signal *signal);
+  /**
+   * RONDB-1150, PMEM format: a system or node restart from the mappings
+   * (recovery plan S6.1, S6.3-S6.6): the reads, phase 1, the records of
+   * phase 3, and phase 4.
+   */
+  PmemRedo::PartView redoPmemView(const LogPartRecord *logPartPtrP) const;
+  void redoPmemReadPages(Signal *signal, LogFileOperationRecordPtr lfoPtr,
+                         const LogFileRecord *logFilePtrP,
+                         LogPartRecord *logPartPtrP);
+  void redoPmemSrPhase1(Signal *signal, LogPartRecordPtr logPartPtr);
+  void redoPmemCheckDirtyShutdown(LogPartRecord *logPartPtrP,
+                                  const PmemRedo::Slot &slot);
+  void redoPmemGciFromFd(const Uint32 *page0, Uint32 noFd,
+                         LogFileRecordPtr logFilePtr);
+  void redoPmemZero(LogPartRecord *logPartPtrP, Uint64 from, Uint64 to);
+  [[noreturn]] void redoPmemSrError(const LogPartRecord *logPartPtrP,
+                                    const PmemRedo::Pos &pos, Uint32 reason,
+                                    const char *what);
+  void readCommitLogPmem(CommitLogRecord *commitLogRecord,
+                         const TcConnectionrecPtr tcConnectptr,
+                         LogPageRecordPtr &logPagePtr,
+                         LogFileRecord *logFilePtrP,
+                         LogPartRecord *logPartPtrP);
+  void redoPmemCheckPrepare(const LogPartRecord *logPartPtrP,
+                            const PmemRedo::Pos &commitPos,
+                            const CommitLogRecord &commitLogRecord);
+  void redoPmemInvalidateCommit(LogPartRecord *logPartPtrP, Uint32 fileNo,
+                                Uint32 pageNo, Uint32 pageIndex, Uint32 w0);
+  void redoPmemSrFourth(Signal *signal, LogPartRecord *logPartPtrP);
+  void redoPmemSrZero(Signal *signal, Uint32 logPartPtrI);
   void writeDbgInfoPageHeader(LogPageRecordPtr logPagePtr,
                               LogFileRecord *logFilePtrP,
                               LogPartRecord *logPartPtrP, Uint32 place,
@@ -5498,9 +5589,9 @@ public:
   Uint32 c_redo_pmem_test_mode;
   /**
    * RONDB-1150: the REDO records are written in the PMEM format
-   * (PmemRedoFormat.hpp) by the writers that dispatch on it. False until
-   * phase 8, which adds the copy to the mapping and the restart that
-   * reads the format: until then PMEM mode writes today's format.
+   * (PmemRedoFormat.hpp) by the writers that dispatch on it, copied to
+   * the mappings, and read from them at a system or node restart; set in
+   * PMEM mode.
    */
   bool c_redo_pmem_format;
   /**

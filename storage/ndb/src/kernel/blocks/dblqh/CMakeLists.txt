@@ -43,3 +43,6 @@ NDB_ADD_TEST(pmem_redo_scan-t pmem_redo_scan-t.cpp PmemRedoScan.cpp
 # The records as the DBLQH writers build them, checked by the scan's reader.
 NDB_ADD_TEST(pmem_redo_writer-t pmem_redo_writer-t.cpp PmemRedoScan.cpp
   LIBS ndbgeneral ndbportlib)
+# The control area of a log part: the config line and the last-file slots.
+NDB_ADD_TEST(pmem_redo_slot-t pmem_redo_slot-t.cpp PmemRedoScan.cpp
+  LIBS ndbgeneral ndbportlib)

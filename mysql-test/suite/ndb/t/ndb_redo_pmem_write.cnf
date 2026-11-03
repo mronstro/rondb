@@ -1,0 +1,12 @@
+!include ../my.cnf
+
+# RONDB-1150 phase 8b: small REDO files, so that the writes cross mbytes
+# and files and wrap the log of each part; LCPs all the time, so that the
+# tail moves; GCP saves twice a second.
+[cluster_config.1]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+NoOfFragmentLogFiles=4
+FragmentLogFileSize=4M
+TimeBetweenLocalCheckpoints=6
+TimeBetweenGlobalCheckpoints=500

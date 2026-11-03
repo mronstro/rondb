@@ -18,8 +18,8 @@ unchanged.
 | 4 | 5 | NDBFS mapping and placement; PMEM mode with today's format (**M0.2**) | S3.1–S3.4, S2.4, S2.5 | MTR ndb suite and a testSystemRestart subset in `nodax` and on `memmap=` | 2, 3 | **In progress**: 4a (NDBFS maps the REDO files), 4b (REDO paths, NUMA placement) and 4c (start-time platform checks) passed on macOS ARM64 and Linux x86_64 (2026-10-30), after the fix of a race in `ndb_pmem_map` that 4a found on Linux. Still to run for the gate: Linux ARM64 (postponed), the testSystemRestart subset, and `memmap=` |
 | 5 | 6 | Initial start and restarts with every file mapped; ndbinfo `redo_log_pmem` | S3.5, S3.6, S2.6 | Initial start, SR and NR in PMEM mode; ndbinfo rows | 4 | **In progress**: 5a (every REDO file kept open and mapped, by a close that keeps the file in NDBFS) passed on macOS ARM64 (2026-10-31), Linux x86_64 to be tested; 5b (ndbinfo `redo_log_pmem`) passed on macOS ARM64 (2026-11-02), Linux x86_64 to be tested |
 | 6 | 7 | Record format and reader module | S4.1, S6.2 | Unit tests over synthetic logs on the three platforms | 1 | **In progress**: `pmem_redo_format-t` and `pmem_redo_scan-t` (300 random logs from seed 1, then 10000 from a time-based seed) passed on macOS ARM64 (2026-11-02); Linux x86_64 and Linux ARM64 to be tested |
-| 7 | 8 | Record writers | S4.2–S4.7, S5.1 | Unit tests; file-mode regression | 6 | **Written** (2026-11-02), to be tested: the PMEM record writers behind `c_redo_pmem_format` (false until phase 8), the reservation, the LSN helpers, `pmem_redo_writer-t` |
-| 8 | 9 | PMEM REDO end to end: write path and recovery together (**M0.3**) | S4.8, S5.2–S5.5, S6.1, S6.3–S6.6 | Initial start, traffic, SR and NR in PMEM mode; the ledger in PMEM mode | 5, 7, ledger | Not started |
+| 7 | 8 | Record writers | S4.2–S4.7, S5.1 | Unit tests; file-mode regression | 6 | **In progress**: the PMEM record writers behind `c_redo_pmem_format` (false until phase 8), the reservation, the LSN helpers, `pmem_redo_writer-t`; passed on macOS ARM64 (2026-11-03), Linux x86_64 and Linux ARM64 to be tested |
+| 8 | 9 | PMEM REDO end to end: write path and recovery together (**M0.3**) | S4.8, S5.2–S5.5, S6.1, S6.3–S6.6 | Initial start, traffic, SR and NR in PMEM mode; the ledger in PMEM mode | 5, 7, ledger | **In progress**, in three parts (below): 8a (control area and slots) and 8b (write path) built, `ndb_redo_pmem_write` and `ndb_basic` in PMEM mode passed on macOS ARM64 (2026-11-03); 8c (the restart) written (2026-11-03), to be tested |
 | 9 | 10 | Checks, benchmark switch, persist delay | S5.6–S5.9, Q-A11 | Shared log parts; debug send checks; `DUMP 2368` latency numbers | 8 | Not started |
 | 10 | 11 | Node restart and `redoLogReader` | S6.7, S6.8 | testNodeRestart subset; reader on files from crash tests | 8 | Not started |
 | 11 | 12 | Power-loss emulation and crash inserts (**M0.4**) | S1.5, S7.1–S7.3, S7.5 | `pmem-redo-tests.txt` with power-loss emulation | 8, 10 | Not started |
@@ -1103,3 +1103,200 @@ cd mysql-test
 ./mtr --suite=ndb --parallel=auto
 ./mtr ndb.ndb_redo_pmem_restarts ndb.ndb_redo_pmem_paths
 ```
+
+---
+
+## Phase 8: PMEM REDO end to end
+
+**Scope.** `implementation_plan.md` pull request 9; write plan S4.8 and
+S5.2-S5.5, recovery plan S6.1 and S6.3-S6.6. PMEM mode writes the log in
+the PMEM format through the mappings and restarts from it: the copy-out
+of the log pages, the persist at the GCP save, the mbyte and file switch
+with the last-file slot, the initial images, and the restart's phases 1,
+3 and 4 on the mappings. File mode is unchanged. Written in three parts:
+
+| Part | Packages | Content | State |
+|---|---|---|---|
+| 8a | S6.3 (codecs), U5 | The control area of a log part: the config line and the two last-file slots, their builders (writer) and checks (reader); `pmem_redo_slot-t` | Built with 8b (2026-11-03); `ctest -R pmem_redo` not yet reported |
+| 8b | S4.8, S5.2-S5.5 | The write path: the initial images through the mapping, the copy-out at the end of each record, the persist, the mbyte and file switch with the slot, GCP_SAVEREQ with no FSSYNCREQ, the bypassed paths, `DUMP 2368 3` to verify the persisted log. `c_redo_pmem_format` is set in PMEM mode | `ndb.ndb_redo_pmem_write` and `ndb.ndb_basic` with `pmem_redo.cnf` passed on macOS ARM64 (2026-11-03), after the fix of the test's recursive CTE; the rest of the commands below to be run |
+| 8c | S6.1, S6.3-S6.6 | The restart: the reads from the mapping, the control area and the slot at phase 1, the exact end E and its zeroing, phase 3 on the new records with the COMMIT invalidation in place, phase 4 with the zeroing back to the head and the writer resume | Written (2026-11-03). First run on macOS ARM64: `ndb.ndb_restart` with `pmem_redo.cnf` passed; `ndb.ndb_basic` with it hung in the initial start (decision 10, fixed); to be run again |
+
+**Decision taken before 8b: the format comes on in 8b, and a PMEM-mode
+restart is refused until 8c.** The write path can then be tested on its
+own: an initial start, traffic and GCP saves in PMEM mode, checked
+through the mapping with `DUMP 2368 3`. A system or node restart in PMEM
+mode stops with a message until 8c; an initial start or an initial node
+restart works. Phase 8 is one pull request, and its gate runs after 8c.
+
+**Changes in 8a.** No DBLQH change; the DBLQH users come in 8b and 8c.
+
+| File | Change |
+|---|---|
+| `src/kernel/blocks/dblqh/PmemRedoFormat.hpp` | The control area layout: `CTRL_CONFIG_WORD` (8128), `SLOT0_WORD` (8160), `SLOT1_WORD` (8176), the words of the config line (`CTRL_W_*`) and of a slot (`SLOT_W_*`), `CTRL_MAGIC` ("RCTL"), `CTRL_VERSION` 1, `SLOT_MAGIC` ("RSLT"), `SLOT_F_DSC_VALID`, `SLOT_F_UNSAFE_SHUTDOWN`; `lineChecksum` (low 32 bits of XXH3_64 of the first 15 words), `buildCtrlConfig`, `slotIndex`, `slotWord`, `buildSlot`; a static assert that the largest FD and the unit of its FILLER's header end before the control area |
+| `src/kernel/blocks/dblqh/PmemRedoScan.hpp`, `.cpp` | `checkCtrlConfig` (`CTRL_VALID`, `CTRL_NOT_PMEM`, `CTRL_CORRUPT`, `CTRL_OTHER_VERSION`, `CTRL_MISMATCH`, with a message that names the field), `Slot`, `slotValid`, `pickSlot` |
+| `src/kernel/blocks/dblqh/CMakeLists.txt` | `pmem_redo_slot-t`, built with `PmemRedoScan.cpp` |
+| `src/kernel/blocks/dblqh/pmem_redo_slot-t.cpp` | U5: the layout, and the FD of every file size from 1 to 1024 MB clear of the control area; the config line valid, never written, any word changed, another version, and made for another configuration, the message naming each field; the slots alone and in pairs, the higher seq winning, their 64-bit values and flags; a slot not valid in the other slot's place, for another part, a file outside the part, lap 0, seq 0, any word changed; 40 file switches with every write torn at 8 bytes in all 256 ways, the pick being the new slot with exactly its values or the other slot, never a mix |
+
+**Decisions taken in 8a.**
+
+1. **The builders are in the format header, the checks in the scan
+   module**, as phase 6 split them: the writer builds the config line at
+   the initial start and a slot at every file switch; the restart checks
+   them.
+2. **The slot index is part of the slot.** Bits 8-15 of the flags word
+   and the parity of seq both name it, so a slot line found in the other
+   slot's place is not valid.
+3. **seq starts at 1**, written by the initial start into slot 1. Slot 0
+   stays zero until the first file switch, and a start with neither slot
+   valid is refused.
+4. **The config line holds the node id**, as the page headers do, so the
+   files of another node are refused.
+
+**Commands for the pusher (8a).** `cmake .` first, because there is a new
+test. Then, on Linux x86_64, Linux ARM64 and macOS ARM64:
+
+```
+cmake --build .
+ctest -R pmem_redo --output-on-failure
+```
+
+**Changes in 8b.** File mode is unchanged: every change is under
+`c_redo_pmem_format`, except `sendGcpSaveConf()`, which `execFSSYNCCONF`
+now calls with the same signal as before.
+
+| File | Change |
+|---|---|
+| `include/kernel/signaldata/DumpStateOrd.hpp` | `LqhRedoPmem = 2368` |
+| `src/kernel/blocks/dblqh/Dblqh.hpp` | `LogPartRecord::m_pmem_slot_seq`, `m_pmem_dsc_recorded`, `m_pmem_dsc_flags`; the declarations below |
+| `src/kernel/blocks/dblqh/DblqhMain.cpp` | `c_redo_pmem_format = c_redo_pmem` at READ_CONFIG. A "write path" section after the phase 7 writers: `redoCopyPage` (a page from a W boundary to a W boundary, its header from the DRAM header when the copy starts at word 0), `redoCopyOut` (the filled pages and, unless only the filled ones, the current page, one fence, the pages released, the persisted LSN moved; the counters, one copy in 16 timed), `redoEndOfRecord`, `redoPadToUnit` (FILLER, or NEXT_MBYTE in the last unit of the mbyte), `redoPersist`, `writeFileHeaderOpenPmem` (FD, page 0, slot, page 1), `redoCopyPageZero` (up to the unit of the FD's FILLER header), `redoPmemInitFile`, `redoWriteLastFileSlot`, `redoPmemVerify`, `sendGcpSaveConf`. Calls: the copy-out at the end of `redoAppendFixed` and `writePrepareLogPmem`; `completedLogPage` links the page and returns; `writeNextLog` writes the NEXT_MBYTE and copies before the lap and the file change, then page 0 and the slot of a new file, no open of the next file, no error insert 5058; `writeFileHeaderOpen` goes to `writeFileHeaderOpenPmem`; `initWriteEndLab` writes the first pages through the mapping and goes on as after `INIT_FIRST_PAGE` and `WRITE_GCI_ZERO`; the NDBFS callback `execFSWRITEREQ` gives zeros; `initFourth` puts the head at word 48; `readSrFourthZeroLab` sets the write position and completes phase 4 with nothing to invalidate; `start_synch_gcp` persists each part after its COMPLETED_GCI and sends GCP_SAVECONF; `initGcpRecLab` persists every part and sends it. `ndbrequire` in `timeSup`, `ndbassert` in `openNextLogfile`, `writeLogfileLab`, `firstPageWriteLab`, `lastWriteInFileLab`, `writePageZeroLab`. `startphase3Lab` refuses a system or node restart. `DUMP 2368 3` runs `redoPmemVerify` on every log part of the LDM |
+| `mysql-test/suite/ndb/t/ndb_redo_pmem_write.{test,cnf}`, `r/` | New: PMEM mode with `nodax`, 4 files of 4 MB per log part, LCPs all the time, a GCP save every 500 ms. `DUMP 2368 3` after the initial start, then 64 rounds of updates of 4000 rows, about 22 MB per log part, which switch mbyte and file and wrap the log, then `DUMP 2368 3` again: every log part reads back to its persisted end, and ndbinfo shows barriers, fillers and timed persists on each |
+| `mysql-test/suite/ndb/t/ndb_redo_pmem_paths.test`, `r/` | The counters column is now "persisted", 1 on every row, since the initial start already writes through the mapping |
+
+**Decisions taken in 8b.**
+
+1. **The persisted LSN is the end of the last copy.** A copy of the
+   filled pages alone leaves it at the start of the current page; a
+   persist, at the end of the current page's last unit; a mbyte switch,
+   at the start of the next mbyte, whose dead space is never stored; a
+   file switch, at the start of page 1. So a copy always starts at the
+   page and word of the persisted LSN, and a page's header goes with its
+   first copy only, from word 0.
+2. **The page after the NEXT_MBYTE is released at once**, after its copy:
+   in the PMEM format the mbyte switch is synchronous, and there is no
+   file write that would release it.
+3. **The FD's FILLER body inside its unit is zeroed** before page 0 is
+   copied, as every other FILLER's body is, so that page 0 is stored the
+   same each time. The body after that unit is never stored (D4).
+4. **The initial start writes the slot seq 1 in file 0's init**, with the
+   dirty-shutdown count of the REDO path from `GlobalData`
+   (`theRedoPmemPath`, phase 5b), and the config line. Page 0 of the
+   other files has lap 0, as today's initial start leaves it: the restart
+   reads lap 0 as never written.
+5. **The phase 4 of an initial start reads the head page through NDBFS
+   as today**; the bytes are the ones stored through the mapping, since
+   the files are mapped shared. 8c replaces the reads (S6.1).
+6. **GCP_SAVECONF goes from `start_synch_gcp`**, or from `initGcpRecLab`
+   when a part was ACTIVE: there the COMPLETED_GCI was queued, and
+   `logNextStart` wrote it before `ZINIT_GCP_REC`. `initGcpRecLab`
+   persists every part again, which costs nothing when nothing is new.
+7. **No staging check of RedoBuffer yet** (S5.5): the copy-out at the end
+   of every record leaves at most the pages of one PREPARE in DRAM, 4,
+   and MTR has 128 pages per log part.
+8. **`DUMP 2368 3` persists first** and scans from the start of the
+   current mbyte with `PmemRedo::findEnd`, under the log part lock. The
+   end must be the persisted LSN; the start of a page whose header is not
+   yet stored counts as its first record position. It logs "PMEM REDO
+   verify ok" or "PMEM REDO verify failed" for each log part. The other
+   sub-commands come with phase 9 (S5.8).
+
+**Commands for the pusher (8b).** `cmake .` first if 8a's test is not yet
+in the build. On Linux x86_64, Linux ARM64 and macOS ARM64:
+
+```
+cmake --build .
+ctest -R pmem_redo --output-on-failure
+cd mysql-test
+./mtr ndb.ndb_redo_pmem_write ndb.ndb_redo_pmem_config ndb.ndb_redo_paths_file_mode
+./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndb_basic
+./mtr --suite=ndb --parallel=auto
+```
+
+Until 8c a system or node restart in PMEM mode stops the node with "a
+system or node restart from the PMEM REDO log format is not implemented
+yet": `ndb.ndb_redo_pmem_restarts`, `ndb.ndb_redo_pmem_paths` and the
+`pmem_redo.cnf` runs of `ndb_restart` and the other restart tests fail
+that way. The last command is the file-mode regression.
+
+**Changes in 8c.** The restart refusal of 8b is gone. File mode is
+unchanged but for one check: `readSrFrontpageLab` refuses a page 0 with
+the PMEM magic.
+
+| File | Change |
+|---|---|
+| `src/kernel/blocks/dblqh/PmemRedoScan.hpp` | `lapAt(end, fileNo, pageNo, pageIndex)`: the lap of a position less than a lap before the end, the end's lap up to it and the lap before after it |
+| `src/kernel/blocks/dblqh/pmem_redo_scan-t.cpp` | `lapAt` in the test of the positions |
+| `src/kernel/blocks/dblqh/Dblqh.hpp` | Includes `PmemRedoScan.hpp`. `LogPartRecord::m_pmem_file_base`, `m_pmem_end`, `m_pmem_end_reason`, `m_pmem_exec_lap`, `m_pmem_inval_pending`, `m_pmem_zero_from`, `m_pmem_zero_to`, `m_pmem_unsafe_shutdown`. CONTINUEB `ZPMEM_SR_ZERO` (62). The declarations below |
+| `src/kernel/blocks/dblqh/DblqhMain.cpp` | A restart section after `redoPmemVerify`: `redoPmemView`; `redoPmemReadPages` (S6.1: pages copied from the mapping, FSREADCONF to the block); `redoPmemSrPhase1` (S6.3, S6.4: control area and slot, last mbyte and the GCIs of the last file's mbytes from their headers, the FDs of the files before it, E with `findEnd`, the rest of E's mbyte zeroed, then `closingSrLab`); `redoPmemCheckDirtyShutdown`; `redoPmemGciFromFd`; `redoPmemZero`; `redoPmemSrError`; `readCommitLogPmem`; `redoPmemCheckPrepare` (R6); `redoPmemInvalidateCommit` (E9); `redoPmemSrFourth` and `redoPmemSrZero` (S6.6: the invalidations fenced, `[ceilW(H), E)` zeroed one mbyte per signal backwards, the unit at H closed, the slot). Calls: `execFSOPENCONF` runs phase 1 when the last file of a part is mapped; `readSinglePage`, `readExecSr` and `readExecLog` read from the mapping; `openExecSrStartLab` sets the lap where a round starts and `execSr` counts it at file 0; `execSr` checks each record before E and stops at E, skips all but a COMMIT, a NEXT_MBYTE and a COMPLETED_GCI, reads a COMMIT with `readCommitLogPmem`, checks its PREPARE before the replay, invalidates it in place, reads the GCI from w2 and records the head after w3, and fences the invalidations at the end of a round; `readSrFourthPhaseLab` keeps the lap of phase 3 and zeroes the head page after the head; `readSrFourthZeroLab` runs `redoPmemSrFourth`; `initFourth` sets lap 1 and E = H; `execREAD_NODESCONF` calls `checkStartCompletedLab()` at an initial start (decision 10) |
+| `src/kernel/blocks/ndbfs/Ndbfs.cpp` | The start-time warning that PMEM mode still writes the REDO log as in file mode is gone; it stopped being true with 8b |
+| `mysql-test/suite/ndb/t/ndb_redo_pmem_restart.{test,cnf}`, `r/` | New: 5 files of 4 MB per log part. Updates that switch mbyte and file, a system restart, more updates, a system restart after all data nodes stop at once (`all restart -n -a`), a node restart of a node that stops at once while the other takes updates; the rows after each; phase 1's line per log part and restart; `DUMP 2368 3` after the restarts |
+| `mysql-test/suite/ndb/t/ndb_redo_pmem_restarts.test` | Its NDBT restarts read the PMEM format (phase 1's line in the node logs); the result is unchanged |
+| `mysql-test/suite/ndb/t/ndb_redo_pmem_write.test` | Comment only |
+
+**Decisions taken in 8c.**
+
+1. **Phase 1 reads the mappings in one signal** and opens no file. It
+   checks at most the mbyte headers of one file, the FDs of the files
+   before it and 1 MB of records, and zeroes at most 1 MB.
+2. **Page 0 of a file before the last may have the last file's lap
+   although it lies after the last file.** A restart that moved the
+   head back from a later file left that file's page 0, as page 0 is
+   never zeroed. Its FD is read with its own lap; the GCIs it gives are
+   of files in the free part of the log, which phase 3 does not reach.
+3. **A page whose first record position is E or H is zeroed from its
+   start**, header included. A header stored with a torn first record
+   then does not stay; at H the write position starts at the page start,
+   so the first copy stores a new header (design issue 4).
+4. **Phase 3 counts the lap from where a round starts** (`lapAt` from E)
+   and adds one at file 0. A position is E only with E's lap, and the
+   PREPARE of a COMMIT is read with `lapAt` from the COMMIT.
+5. **The unit at H is closed with `redoPersist`**: the FILLER, or the
+   NEXT_MBYTE with its mbyte or file switch, that the GCP save of the
+   restart's GCI stored there, written again from the words before H as
+   the head page holds them. A file switch here writes a slot, and phase
+   4 writes another (seq + 1, same file).
+6. **An initial start runs the same phase 4** with E = H: nothing to
+   zero, nothing to close, and slot seq 2.
+7. **The invalidated COMMITs are fenced at the end of each round and
+   before phase 4 moves the head.** A later round reads the flag from a
+   new copy and skips the COMMIT.
+8. **A higher dirty-shutdown count is reported and recorded** in every
+   slot that the run writes (`SLOT_F_UNSAFE_SHUTDOWN`); the error at E
+   then says to restart with `--initial`. The stale handling is X6.
+9. **Not in 8c:** `ZMIN_READ_BUFFER_SIZE` 3 → 4 (pull request 0), a
+   RedoBuffer of at least 43 pages (W D3), the crash inserts (phase 11),
+   `redoLogReader` (phase 10), DUMP 2369.
+10. **`execREAD_NODESCONF` completes start phase 3 when phase 4 of the
+    REDO log was first.** At an initial start DBLQH sends NDB_STTORRY
+    once both READ_NODESCONF has come and phase 4 has completed; only
+    `continue_srFourthComp()` checked, as phase 4 waited for NDBFS. With
+    its reads from the mappings phase 4 can complete first, and the
+    start hung (node 1 of `ndb_basic` with `pmem_redo.cnf`, after "All
+    redo actions complete"). Now both call `checkStartCompletedLab()`,
+    which sends it when the other has happened; in file mode the new call
+    finds phase 4 still running and does nothing.
+
+**Commands for the pusher (8c).** `cmake .` first if 8a's test is not yet
+in the build. On Linux x86_64, Linux ARM64 and macOS ARM64:
+
+```
+cmake --build .
+ctest -R pmem_redo --output-on-failure
+cd mysql-test
+./mtr ndb.ndb_redo_pmem_restart ndb.ndb_redo_pmem_restarts ndb.ndb_redo_pmem_paths
+./mtr ndb.ndb_redo_pmem_write ndb.ndb_redo_pmem_config ndb.ndb_redo_paths_file_mode
+./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndb_basic ndb.ndb_restart
+./mtr --suite=ndb --parallel=auto
+```
+
+The last command is the file-mode regression. The phase 8 gate also
+needs the ledger in PMEM mode (side track, S7.4), not started.

@@ -26,7 +26,7 @@ let $cluster = $MYSQLTEST_VARDIR/mysql_cluster.1;
 SELECT node_id, log_part, ldm_instance, redo_path, files, mapped_bytes,
        mem_numa_node, persistence_domain, copy_method <> '' AS copy_method,
        test_mode,
-       barriers + bytes_copied + filler_bytes + lat_samples AS counters,
+       barriers > 0 AND bytes_copied > 0 AS persisted,
        dirty_shutdown_count
   FROM ndbinfo.redo_log_pmem ORDER BY node_id, log_part;
 

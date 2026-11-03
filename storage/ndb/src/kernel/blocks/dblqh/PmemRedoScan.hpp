@@ -25,6 +25,8 @@
 #ifndef PMEM_REDO_SCAN_HPP
 #define PMEM_REDO_SCAN_HPP
 
+#include <cstddef>
+
 #include "PmemRedoFormat.hpp"
 
 /**
@@ -129,6 +131,20 @@ inline Uint32 expectedLap(const Pos &end, Uint32 fileNo) {
   return fileNo <= end.fileNo ? end.lap : end.lap - 1;
 }
 
+/**
+ * The lap of a position less than one lap before end in the log: end's
+ * lap up to end, the lap before after it in end's file and in the files
+ * after end's. The restart reads its start (recovery plan S6.5) and the
+ * PREPARE of a COMMIT this way.
+ */
+inline Uint32 lapAt(const Pos &end, Uint32 fileNo, Uint32 pageNo,
+                    Uint32 pageIndex) {
+  if (fileNo != end.fileNo) return expectedLap(end, fileNo);
+  const bool after = pageNo > end.pageNo ||
+                     (pageNo == end.pageNo && pageIndex > end.pageIndex);
+  return after ? end.lap - 1 : end.lap;
+}
+
 /* The first record position of the mbyte after the one holding p */
 Pos nextMbyteStart(const Geom &g, const Pos &p);
 
@@ -161,6 +177,42 @@ ScanResult findEnd(const PartView &v, Uint32 fileNo, Uint32 mbyte,
  * as an older lap (recovery §3.4 step 3).
  */
 LastMbyte findLastMbyte(const PartView &v, Uint32 fileNo, Uint32 lap);
+
+/* The config line of the control area against the node's configuration */
+enum CtrlCheck : Uint32 {
+  CTRL_VALID = 0,
+  CTRL_NOT_PMEM,       // no magic: the files were not written in PMEM mode
+  CTRL_CORRUPT,        // the checksum fails
+  CTRL_OTHER_VERSION,  // another version of the control area
+  CTRL_MISMATCH        // made for another configuration or node
+};
+
+/**
+ * CTRL_VALID, or why not, with a message in msg; for CTRL_MISMATCH it
+ * names the first field that differs.
+ */
+Uint32 checkCtrlConfig(const Uint32 *line, const Geom &g, Uint32 noParts,
+                       Uint32 nodeId, char *msg, size_t size);
+
+/* A valid last-file slot */
+struct Slot {
+  Uint64 seq;
+  Uint32 fileNo;
+  Uint32 lap;
+  Uint64 dirtyShutdownCount;
+  Uint32 flags;  // SLOT_F_*
+};
+
+/**
+ * The slot line at index (0 or 1) is valid for the part: its magic, its
+ * checksum, its own index and seq, the log part, a file of the part, and
+ * a lap of at least 1.
+ */
+bool slotValid(const Uint32 *line, Uint32 index, const Geom &g, Slot *out);
+
+/* The index of the valid slot with the higher seq, -1 if neither is valid */
+int pickSlot(const Uint32 *slot0, const Uint32 *slot1, const Geom &g,
+             Slot *out);
 
 }  // namespace PmemRedo
 
