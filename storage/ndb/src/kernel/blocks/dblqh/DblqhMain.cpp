@@ -3034,6 +3034,27 @@ void Dblqh::execREAD_CONFIG_REQ(Signal *signal) {
                             &cTransactionDeadlockDetectionTimeout);
 
   initRecords(p, logPageFileSize);
+  if (c_redo_pmem) {
+    /**
+     * RONDB-1150 (S5.5, D3): the log pages of each part. A restart holds
+     * the window of phase 3 with a read under way, the pages of a PREPARE
+     * read from the log, and page 0 and the head page; writing holds at
+     * most 6.
+     */
+    const Uint32 minPages = ZMAX_MM_BUFFER_SIZE + ZREAD_AHEAD_SIZE +
+                            LogFileOperationRecord::LOG_PAGE_ARRAY_SIZE + 2;
+    for (Uint32 i = 0; i < clogPartFileSize; i++) {
+      if (logPartRecord[i].logPageCount < minPages) {
+        char buf[200];
+        BaseString::snprintf(
+            buf, sizeof(buf),
+            "RedoLogMode=pmem: RedoBuffer gives the REDO log parts of LDM "
+            "%u %u pages of 32 kB each, a restart from the log needs %u",
+            instance(), logPartRecord[i].logPageCount, minPages);
+        progError(__LINE__, NDBD_EXIT_INVALID_CONFIG, buf);
+      }
+    }
+  }
   initialiseRecordsLab(signal, 0, ref, senderData);
 
   c_max_redo_lag = 30;
@@ -5887,7 +5908,9 @@ void Dblqh::timer_handling(Signal *signal) {
   cLqhTimeOutCheckCount++;
 
   LogPartRecordPtr logPartPtr;
-  for (logPartPtr.i = 0; logPartPtr.i < clogPartFileSize; logPartPtr.i++) {
+  /* The PMEM format does no REDO IO, so no lag can build up (S5.5) */
+  const Uint32 trackedParts = c_redo_pmem_format ? 0 : clogPartFileSize;
+  for (logPartPtr.i = 0; logPartPtr.i < trackedParts; logPartPtr.i++) {
     jam();
     ptrCheckGuard(logPartPtr, clogPartFileSize, logPartRecord);
     int ret =
@@ -13522,6 +13545,12 @@ void Dblqh::writePrepareLog(Signal *signal,
 
   Uint32 noOfFreeLogPages = count_free_log_pages(regLogPartPtr);
   const bool out_of_log_buffer = noOfFreeLogPages < ZMIN_LOG_PAGES_OPERATION;
+  /**
+   * The PMEM format holds at most 6 log pages of a part at once: the
+   * copy-out at each record end releases the rest (S5.5, D3), and
+   * initRecords() gives every part far more
+   */
+  ndbassert(!c_redo_pmem_format || !out_of_log_buffer);
   bool abort_on_redo_problems =
       (LqhKeyReq::getQueueOnRedoProblemFlag(regTcPtr->reqinfo) == 0);
 
@@ -34508,6 +34537,8 @@ bool Dblqh::checkGcpCompleted(Signal *signal, Uint32 tcgcPageWritten,
                               LogPartRecord *logPartPtrP) {
   UintR tcgcFlag;
   UintR tcgcJ;
+  /* The PMEM format confirms the GCP save at once (start_synch_gcp()) */
+  ndbassert(!c_redo_pmem_format);
 
   gcpPtr.i = logPartPtrP->gcprec;
   Uint32 logPartPtrI = logPartPtrP->ptrI;
@@ -35325,6 +35356,8 @@ void Dblqh::initFsopenconf(Signal *signal, LogFileRecordPtr &logFilePtr,
       logFilePtr.p->fileChangeState == LogFileRecord::LAST_FILEWRITE_WAITS ||
       logFilePtr.p->fileChangeState == LogFileRecord::FIRST_FILEWRITE_WAITS) {
     jam();
+    /* The PMEM format switches file at once, all files mapped (S5.3) */
+    ndbassert(!c_redo_pmem_format);
     LogPageRecordPtr logPagePtr;
     logPagePtr.i = logFilePtr.p->currentLogpage;
     ptrCheckGuard(logPagePtr, logPartPtr.p->logPageFileSize,

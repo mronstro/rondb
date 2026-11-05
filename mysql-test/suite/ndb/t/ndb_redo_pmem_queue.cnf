@@ -1,0 +1,9 @@
+!include ../my.cnf
+
+# RONDB-1150 phase 8 (S5.5): PMEM mode, a cluster of its own for the
+# counts of the DUMP 2368 3 lines.
+[cluster_config.1]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+NoOfFragmentLogFiles=3
+FragmentLogFileSize=16M
