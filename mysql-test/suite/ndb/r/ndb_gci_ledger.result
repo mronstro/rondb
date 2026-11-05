@@ -1,0 +1,14 @@
+# Shutting down mysqld 1
+# Shutting down mysqld 2
+== 1 == system restarts with abort while the writers write
+Running command
+Result of command: 0
+Test program success!
+== 2 == a node restart with abort, then a system restart
+Running command
+Result of command: 0
+Test program success!
+# Starting mysqld 1
+# restart
+# Starting mysqld 2
+# restart
