@@ -23,6 +23,11 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 */
 
+#include <algorithm>
+#include <map>
+#include <utility>
+#include <vector>
+
 #include "HugoTransactions.hpp"
 #include "NDBT_ReturnCodes.h"
 #include "NDBT_Test.hpp"
@@ -623,6 +628,451 @@ int runUpdateVerifyGCI(NDBT_Context *ctx, NDBT_Step *step) {
   return result;
 }
 
+/**
+ * RONDB-1150 (recovery plan S7.4): the GCP-saved ledger. Writer steps
+ * insert, update and delete the rows of their own key range in
+ * transactions of 1 to 8 rows, and keep the history of each row: the GCI
+ * of each committed transaction, and a transaction whose result is
+ * unknown, after which the writer leaves its rows alone until they are
+ * checked. After a system restart from GCI R a row holds what the last
+ * of its committed transactions with a GCI up to R wrote, or what an
+ * unknown transaction after it wrote; after a node restart the last
+ * committed one, or an unknown one after it. A transaction with an
+ * unknown result is in all of its rows or in none. Committed
+ * transactions with a GCI after R are lost, which a system restart
+ * allows; the count is reported, as durable commits will bring it to 0.
+ */
+namespace {
+
+constexpr int LEDGER_WRITERS = 4;  // the STEPS of a ledger test case
+constexpr Uint32 LEDGER_MAX_ROWS = 8;
+const char *const LEDGER_PAUSE = "LedgerPause";
+const char *const LEDGER_PARKED = "LedgerParked";
+
+enum LedgerOp : Uint32 { LEDGER_INSERT, LEDGER_UPDATE, LEDGER_DELETE };
+enum LedgerState : Uint32 { LEDGER_COMMITTED, LEDGER_UNKNOWN };
+
+struct LedgerTxn {
+  Uint64 id;   // writer << 32 | transaction number
+  Uint64 gci;  // the commit GCI, 0 when unknown
+  Uint32 op;
+  Uint32 updates;  // written by an insert or an update
+  Uint32 state;
+};
+
+struct LedgerRow {
+  /* The row as read back when the round started */
+  bool exists = false;
+  Uint32 updates = 0;
+  Uint64 gci = 0;
+  /* The transactions of this round on the row, in commit order */
+  std::vector<LedgerTxn> txns;
+  /* Its last transaction has an unknown result */
+  bool blocked = false;
+  /* The row as the writer has left it */
+  bool curExists = false;
+  Uint32 nextUpdates = 0;
+};
+
+std::vector<LedgerRow> g_ledger;
+
+/* ROW_GCI64 as committed, or with the low word rounded up */
+bool ledgerGciMatches(Uint64 readGci, Uint64 gci) {
+  return readGci == gci || readGci == (gci | 0xffffffff);
+}
+
+const char *ledgerOpName(Uint32 op) {
+  return op == LEDGER_INSERT ? "insert"
+                             : op == LEDGER_UPDATE ? "update" : "delete";
+}
+
+/* The row r as it is: whether it exists, its updates value and GCI */
+int ledgerReadRow(NDBT_Context *ctx, NDBT_Step *step, HugoOperations &hugoOps,
+                  HugoCalculator &hugoCalc, Uint32 r, bool *exists,
+                  Uint32 *updates, Uint64 *gci) {
+  Ndb *pNdb = GETNDB(step);
+  for (int attempt = 0; attempt < 100; attempt++) {
+    if (hugoOps.startTransaction(pNdb) != 0) {
+      NdbSleep_MilliSleep(100);
+      continue;
+    }
+    NdbRecAttr *rowGci = nullptr;
+    if (hugoOps.pkReadRecord(pNdb, r) == 0) {
+      NdbOperation *readOp =
+          hugoOps.getTransaction()->getNdbOperation(ctx->getTab());
+      if (readOp != nullptr && readOp->readTuple() == 0 &&
+          hugoOps.equalForRow(readOp, r) == 0) {
+        rowGci = readOp->getValue(NdbDictionary::Column::ROW_GCI64);
+      }
+    }
+    if (rowGci == nullptr) {
+      ndbout_c("ERR: ledger: could not define the read of row %u", r);
+      hugoOps.closeTransaction(pNdb);
+      return NDBT_FAILED;
+    }
+    const int res = hugoOps.execute_Commit(pNdb);
+    if (res == 0) {
+      NDBT_ResultRow &row = hugoOps.get_row(0);
+      if (hugoCalc.verifyRowValues(&row) != 0) {
+        ndbout_c("ERR: ledger: row %u has wrong values", r);
+        hugoOps.closeTransaction(pNdb);
+        return NDBT_FAILED;
+      }
+      *exists = true;
+      *updates = hugoCalc.getUpdatesValue(&row);
+      *gci = rowGci->u_64_value();
+      hugoOps.closeTransaction(pNdb);
+      return NDBT_OK;
+    }
+    if (res == 626) {
+      *exists = false;
+      *updates = 0;
+      *gci = 0;
+      hugoOps.closeTransaction(pNdb);
+      return NDBT_OK;
+    }
+    const NdbError err = hugoOps.getNdbError();
+    hugoOps.closeTransaction(pNdb);
+    if (err.status == NdbError::PermanentError) {
+      ndbout << "ERR: ledger: read of row " << r << ": " << err << endl;
+      return NDBT_FAILED;
+    }
+    NdbSleep_MilliSleep(100);
+  }
+  ndbout_c("ERR: ledger: row %u could not be read", r);
+  return NDBT_FAILED;
+}
+
+void ledgerPrintRow(Uint32 r, const LedgerRow &row) {
+  ndbout_c("  row %u at the round's start: %s, updates %u, GCI 0x%x/0x%x", r,
+           row.exists ? "exists" : "absent", row.updates,
+           Uint32(row.gci >> 32), Uint32(row.gci));
+  for (const LedgerTxn &t : row.txns) {
+    ndbout_c("  writer %u transaction %u: %s, updates %u, %s, GCI 0x%x/0x%x",
+             Uint32(t.id >> 32), Uint32(t.id), ledgerOpName(t.op), t.updates,
+             t.state == LEDGER_COMMITTED ? "committed" : "unknown result",
+             Uint32(t.gci >> 32), Uint32(t.gci));
+  }
+}
+
+/**
+ * Every row against its history, the writers parked; maxGci is the
+ * highest GCI that the restart kept. The next round starts from the rows
+ * as they are.
+ */
+int ledgerVerify(NDBT_Context *ctx, NDBT_Step *step, Uint64 maxGci,
+                 const char *what) {
+  HugoOperations hugoOps(*ctx->getTab());
+  HugoCalculator hugoCalc(*ctx->getTab());
+  std::map<Uint64, std::pair<Uint32, Uint32>> unknownTxns;  // with, without
+  Uint32 kept = 0;
+  Uint32 lost = 0;
+  Uint32 unknownRows = 0;
+  Uint32 failures = 0;
+  for (Uint32 r = 0; r < g_ledger.size(); r++) {
+    LedgerRow &row = g_ledger[r];
+    bool exists = false;
+    Uint32 updates = 0;
+    Uint64 gci = 0;
+    if (ledgerReadRow(ctx, step, hugoOps, hugoCalc, r, &exists, &updates,
+                      &gci) != NDBT_OK) {
+      return NDBT_FAILED;
+    }
+    bool expExists = row.exists;
+    Uint32 expUpdates = row.updates;
+    Uint64 expGci = row.gci;
+    const LedgerTxn *unknown = nullptr;
+    for (const LedgerTxn &t : row.txns) {
+      if (t.state == LEDGER_UNKNOWN) {
+        unknown = &t;
+        break;
+      }
+      if (t.gci > maxGci) {
+        /* A later transaction on the row has a GCI at least this one's */
+        lost++;
+        break;
+      }
+      kept++;
+      expExists = t.op != LEDGER_DELETE;
+      expUpdates = t.updates;
+      expGci = t.gci;
+    }
+    bool ok = exists == expExists &&
+              (!exists ||
+               (updates == expUpdates && ledgerGciMatches(gci, expGci)));
+    if (unknown != nullptr) {
+      unknownRows++;
+      const bool uExists = unknown->op != LEDGER_DELETE;
+      const bool asUnknown =
+          !ok && exists == uExists &&
+          (!exists || (updates == unknown->updates &&
+                       (gci >> 32) <= (maxGci >> 32)));
+      std::pair<Uint32, Uint32> &seen = unknownTxns[unknown->id];
+      if (asUnknown) {
+        seen.first++;
+      } else {
+        seen.second++;
+      }
+      ok = ok || asUnknown;
+    }
+    if (!ok) {
+      failures++;
+      ndbout_c(
+          "ERR: ledger after the %s: row %u %s, updates %u, GCI 0x%x/0x%x; "
+          "expected %s, updates %u, GCI 0x%x/0x%x",
+          what, r, exists ? "exists" : "absent", updates, Uint32(gci >> 32),
+          Uint32(gci), expExists ? "exists" : "absent", expUpdates,
+          Uint32(expGci >> 32), Uint32(expGci));
+      ledgerPrintRow(r, row);
+    }
+    row.exists = exists;
+    row.updates = updates;
+    row.gci = gci;
+    row.txns.clear();
+    row.blocked = false;
+    row.curExists = exists;
+  }
+  for (const auto &txn : unknownTxns) {
+    if (txn.second.first > 0 && txn.second.second > 0) {
+      failures++;
+      ndbout_c(
+          "ERR: ledger after the %s: transaction %u of writer %u, whose "
+          "result was unknown, is in %u of its rows and not in %u",
+          what, Uint32(txn.first), Uint32(txn.first >> 32), txn.second.first,
+          txn.second.second);
+    }
+  }
+  ndbout_c(
+      "Ledger after the %s: %u rows, %u row writes kept, %u row writes "
+      "acknowledged and lost, %u rows of %u transactions with an unknown "
+      "result, %u failures",
+      what, Uint32(g_ledger.size()), kept, lost, unknownRows,
+      Uint32(unknownTxns.size()), failures);
+  return failures == 0 ? NDBT_OK : NDBT_FAILED;
+}
+
+/* False if a writer stopped the test */
+bool ledgerSleep(NDBT_Context *ctx, Uint32 seconds) {
+  for (Uint32 i = 0; i < 100 * seconds; i++) {
+    if (ctx->isTestStopped()) return false;
+    NdbSleep_MilliSleep(10);
+  }
+  return !ctx->isTestStopped();
+}
+
+bool ledgerPause(NDBT_Context *ctx) {
+  ctx->setProperty(LEDGER_PAUSE, Uint32(1));
+  for (int i = 0; i < 30000; i++) {
+    if (ctx->getProperty(LEDGER_PARKED, Uint32(0)) == Uint32(LEDGER_WRITERS)) {
+      return true;
+    }
+    if (ctx->isTestStopped()) return false;
+    NdbSleep_MilliSleep(10);
+  }
+  ndbout_c("ERR: ledger: the writers did not stop");
+  return false;
+}
+
+void ledgerResume(NDBT_Context *ctx) {
+  ctx->setProperty(LEDGER_PAUSE, Uint32(0));
+}
+
+/* A system restart with abort while the writers write, then the check */
+int ledgerSystemRestart(NDBT_Context *ctx, NDBT_Step *step) {
+  Ndb *pNdb = GETNDB(step);
+  NdbRestarter restarter;
+  ndbout_c("Ledger: system restart with abort");
+  if (restarter.restartAll(false, false, true) != 0) {
+    return NDBT_FAILED;
+  }
+  /* No transaction starts before the check; those under way fail */
+  if (!ledgerPause(ctx)) return NDBT_FAILED;
+  if (restarter.waitClusterStarted(300) != 0 || pNdb->waitUntilReady() != 0) {
+    return NDBT_FAILED;
+  }
+  Uint32 restartGci = 0;
+  if (pNdb->getDictionary()->getRestartGCI(&restartGci) != 0) {
+    ndbout << "ERR: ledger: no restart GCI: "
+           << pNdb->getDictionary()->getNdbError() << endl;
+    return NDBT_FAILED;
+  }
+  ndbout_c("Ledger: restart GCI %u", restartGci);
+  const int res = ledgerVerify(
+      ctx, step, (Uint64(restartGci) << 32) | 0xffffffff, "system restart");
+  ledgerResume(ctx);
+  return res;
+}
+
+}  // namespace
+
+int runLedgerInit(NDBT_Context *ctx, NDBT_Step *step) {
+  g_ledger.assign(ctx->getNumRecords(), LedgerRow());
+  ctx->setProperty(LEDGER_PAUSE, Uint32(0));
+  ctx->setProperty(LEDGER_PARKED, Uint32(0));
+  return NDBT_OK;
+}
+
+int runLedgerWriter(NDBT_Context *ctx, NDBT_Step *step) {
+  const Uint32 writerNo = step->getStepTypeNo();
+  const Uint32 range = Uint32(g_ledger.size()) / step->getStepTypeCount();
+  const Uint32 first = writerNo * range;
+  if (range == 0) {
+    ndbout_c("ERR: ledger: fewer records than writers");
+    return NDBT_FAILED;
+  }
+  Ndb *pNdb = GETNDB(step);
+  HugoOperations hugoOps(*ctx->getTab());
+  Uint32 txnNo = 0;
+  Uint32 waits = 0;
+  while (!ctx->isTestStopped()) {
+    if (ctx->getProperty(LEDGER_PAUSE, Uint32(0)) != 0) {
+      ctx->incProperty(LEDGER_PARKED);
+      while (ctx->getProperty(LEDGER_PAUSE, Uint32(0)) != 0 &&
+             !ctx->isTestStopped()) {
+        NdbSleep_MilliSleep(10);
+      }
+      ctx->decProperty(LEDGER_PARKED);
+      continue;
+    }
+    const Uint32 nRows = 1 + ndb_rand() % std::min(LEDGER_MAX_ROWS, range);
+    const Uint32 r0 = first + ndb_rand() % (range - nRows + 1);
+    bool blocked = false;
+    for (Uint32 r = r0; r < r0 + nRows; r++) blocked |= g_ledger[r].blocked;
+    if (blocked) {
+      /* Rows with an unknown result wait for the check */
+      if (++waits % 64 == 0) NdbSleep_MilliSleep(1);
+      continue;
+    }
+    if (hugoOps.startTransaction(pNdb) != 0) {
+      /* The cluster is not there */
+      NdbSleep_MilliSleep(100);
+      continue;
+    }
+    LedgerTxn txns[LEDGER_MAX_ROWS];
+    bool defined = true;
+    for (Uint32 i = 0; i < nRows && defined; i++) {
+      LedgerRow &row = g_ledger[r0 + i];
+      LedgerTxn &t = txns[i];
+      t.id = (Uint64(writerNo) << 32) | txnNo;
+      t.gci = 0;
+      t.updates = 0;
+      t.state = LEDGER_UNKNOWN;
+      if (!row.curExists) {
+        t.op = LEDGER_INSERT;
+        t.updates = row.nextUpdates++;
+        defined = hugoOps.pkInsertRecord(pNdb, r0 + i, 1, t.updates) == 0;
+      } else if (ndb_rand() % 5 == 0) {
+        t.op = LEDGER_DELETE;
+        defined = hugoOps.pkDeleteRecord(pNdb, r0 + i, 1) == 0;
+      } else {
+        t.op = LEDGER_UPDATE;
+        t.updates = row.nextUpdates++;
+        defined = hugoOps.pkUpdateRecord(pNdb, r0 + i, 1, t.updates) == 0;
+      }
+    }
+    txnNo++;
+    if (!defined) {
+      hugoOps.closeTransaction(pNdb);
+      NdbSleep_MilliSleep(10);
+      continue;
+    }
+    const int res = hugoOps.execute_Commit(pNdb);
+    const NdbError err = hugoOps.getTransaction()->getNdbError();
+    Uint64 gci = 0;
+    const bool committed =
+        res == 0 && hugoOps.getTransaction()->getGCI(&gci) == 0;
+    if (committed || err.status == NdbError::UnknownResult ||
+        err.status == NdbError::Success) {
+      /* Committed, or perhaps */
+      for (Uint32 i = 0; i < nRows; i++) {
+        LedgerRow &row = g_ledger[r0 + i];
+        LedgerTxn &t = txns[i];
+        if (committed) {
+          t.gci = gci;
+          t.state = LEDGER_COMMITTED;
+          row.curExists = t.op != LEDGER_DELETE;
+        } else {
+          row.blocked = true;
+        }
+        row.txns.push_back(t);
+      }
+      if (!committed) {
+        ndbout_c("Ledger: writer %u transaction %u, rows %u-%u: unknown "
+                 "result, error %d",
+                 writerNo, txnNo - 1, r0, r0 + nRows - 1, err.code);
+      }
+    } else if (err.status == NdbError::PermanentError) {
+      /* The ledger and the rows disagree */
+      ndbout << "ERR: ledger: writer " << writerNo << " transaction "
+             << txnNo - 1 << ", rows " << r0 << "-" << r0 + nRows - 1 << ": "
+             << err << endl;
+      for (Uint32 i = 0; i < nRows; i++) {
+        ledgerPrintRow(r0 + i, g_ledger[r0 + i]);
+      }
+      hugoOps.closeTransaction(pNdb);
+      ctx->stopTest();
+      return NDBT_FAILED;
+    } else {
+      /* Aborted */
+      NdbSleep_MilliSleep(10);
+    }
+    hugoOps.closeTransaction(pNdb);
+  }
+  return NDBT_OK;
+}
+
+int runLedgerSR(NDBT_Context *ctx, NDBT_Step *step) {
+  const Uint32 seconds = ctx->getProperty("LedgerSeconds", Uint32(5));
+  int result = NDBT_OK;
+  for (int l = 0; l < ctx->getNumLoops() && result == NDBT_OK; l++) {
+    if (!ledgerSleep(ctx, seconds)) {
+      result = NDBT_FAILED;
+      break;
+    }
+    ndbout_c("Ledger loop %d", l);
+    result = ledgerSystemRestart(ctx, step);
+  }
+  ctx->stopTest();
+  return result;
+}
+
+/**
+ * A node restart with abort while the writers write: every committed
+ * transaction stays. Then a system restart.
+ */
+int runLedgerNR(NDBT_Context *ctx, NDBT_Step *step) {
+  const Uint32 seconds = ctx->getProperty("LedgerSeconds", Uint32(5));
+  NdbRestarter restarter;
+  int result = NDBT_OK;
+  for (int l = 0; l < ctx->getNumLoops() && result == NDBT_OK; l++) {
+    if (!ledgerSleep(ctx, seconds)) {
+      result = NDBT_FAILED;
+      break;
+    }
+    const int node = restarter.getNode(NdbRestarter::NS_RANDOM);
+    ndbout_c("Ledger loop %d: node restart of node %d with abort", l, node);
+    if (restarter.restartOneDbNode(node, false, false, true) != 0 ||
+        restarter.waitClusterStarted(300) != 0) {
+      result = NDBT_FAILED;
+      break;
+    }
+    if (!ledgerPause(ctx)) {
+      result = NDBT_FAILED;
+      break;
+    }
+    result = ledgerVerify(ctx, step, ~Uint64(0), "node restart");
+    ledgerResume(ctx);
+    if (result != NDBT_OK) break;
+    if (!ledgerSleep(ctx, seconds)) {
+      result = NDBT_FAILED;
+      break;
+    }
+    result = ledgerSystemRestart(ctx, step);
+  }
+  ctx->stopTest();
+  return result;
+}
+
 NDBT_TESTSUITE(testRestartGci);
 TESTCASE("InsertRestartGci",
          "Verify that only expected records are still in NDB\n"
@@ -674,6 +1124,28 @@ TESTCASE("InitialNodeRestartUpdate",
   STEP(runNodeInitialRestarts);
   STEP(runUpdateVerifyGCI);
   FINALIZER(runClearTable);
+  FINALIZER(runDropTable);
+}
+TESTCASE("GciLedgerSR",
+         "RONDB-1150 (S7.4): writers keep the GCI of each transaction; "
+         "after each system restart with abort every row holds the last of "
+         "its transactions with a GCI up to the restart's") {
+  TC_PROPERTY("LedgerSeconds", Uint32(5));
+  INITIALIZER(runCreateTable);
+  INITIALIZER(runLedgerInit);
+  STEPS(runLedgerWriter, LEDGER_WRITERS);
+  STEP(runLedgerSR);
+  FINALIZER(runDropTable);
+}
+TESTCASE("GciLedgerNR",
+         "RONDB-1150 (S7.4): as GciLedgerSR with a node restart with abort "
+         "before each system restart, after which every committed "
+         "transaction is there") {
+  TC_PROPERTY("LedgerSeconds", Uint32(5));
+  INITIALIZER(runCreateTable);
+  INITIALIZER(runLedgerInit);
+  STEPS(runLedgerWriter, LEDGER_WRITERS);
+  STEP(runLedgerNR);
   FINALIZER(runDropTable);
 }
 NDBT_TESTSUITE_END(testRestartGci)
