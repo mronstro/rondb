@@ -19,7 +19,7 @@ unchanged.
 | 5 | 6 | Initial start and restarts with every file mapped; ndbinfo `redo_log_pmem` | S3.5, S3.6, S2.6 | Initial start, SR and NR in PMEM mode; ndbinfo rows | 4 | **In progress**: 5a (every REDO file kept open and mapped, by a close that keeps the file in NDBFS) passed on macOS ARM64 (2026-10-31), Linux x86_64 to be tested; 5b (ndbinfo `redo_log_pmem`) passed on macOS ARM64 (2026-11-02), Linux x86_64 to be tested |
 | 6 | 7 | Record format and reader module | S4.1, S6.2 | Unit tests over synthetic logs on the three platforms | 1 | **In progress**: `pmem_redo_format-t` and `pmem_redo_scan-t` (300 random logs from seed 1, then 10000 from a time-based seed) passed on macOS ARM64 (2026-11-02); Linux x86_64 and Linux ARM64 to be tested |
 | 7 | 8 | Record writers | S4.2–S4.7, S5.1 | Unit tests; file-mode regression | 6 | **In progress**: the PMEM record writers behind `c_redo_pmem_format` (false until phase 8), the reservation, the LSN helpers, `pmem_redo_writer-t`; passed on macOS ARM64 (2026-11-03), Linux x86_64 and Linux ARM64 to be tested |
-| 8 | 9 | PMEM REDO end to end: write path and recovery together (**M0.3**) | S4.8, S5.2–S5.5, S6.1, S6.3–S6.6 | Initial start, traffic, SR and NR in PMEM mode; the ledger in PMEM mode | 5, 7, ledger | **In progress**, in three parts (below): 8a (control area and slots) and 8b (write path) built, `ndb_redo_pmem_write` and `ndb_basic` in PMEM mode passed on macOS ARM64 (2026-11-03); 8c (the restart) written (2026-11-03), to be tested |
+| 8 | 9 | PMEM REDO end to end: write path and recovery together (**M0.3**) | S4.8, S5.2–S5.5, S6.1, S6.3–S6.6 | Initial start, traffic, SR and NR in PMEM mode; the ledger in PMEM mode | 5, 7, ledger | **In progress**, in four parts (below): 8a-8d (control area and slots, write path, restart, the rest of S5.5) passed their commands on macOS ARM64 (reported 2026-11-05), the ledger too; Linux x86_64 and Linux ARM64 to be run |
 | 9 | 10 | Checks, benchmark switch, persist delay | S5.6–S5.9, Q-A11 | Shared log parts; debug send checks; `DUMP 2368` latency numbers | 8 | Not started |
 | 10 | 11 | Node restart and `redoLogReader` | S6.7, S6.8 | testNodeRestart subset; reader on files from crash tests | 8 | Not started |
 | 11 | 12 | Power-loss emulation and crash inserts (**M0.4**) | S1.5, S7.1–S7.3, S7.5 | `pmem-redo-tests.txt` with power-loss emulation | 8, 10 | Not started |
@@ -28,7 +28,7 @@ unchanged.
 
 | Track | Pull request | Content | Needed by | State |
 |---|---|---|---|---|
-| Ledger | 1 | GCP-saved ledger checker (S7.4), validated in file mode on today's code | Phase 8 | Not started |
+| Ledger | 1 | GCP-saved ledger checker (S7.4), validated in file mode on today's code | Phase 8 | `GciLedgerSR`, `GciLedgerNR` and `ndb.ndb_gci_ledger` passed on macOS ARM64 (reported 2026-11-05), after a fix of two sign-compare warnings (section below) |
 | Bug fix | 0 | `ZMIN_READ_BUFFER_SIZE` 3 → 4 in both modes, own ticket (R13, Q-A6) | — | Not started |
 
 ---
@@ -1119,7 +1119,8 @@ with the last-file slot, the initial images, and the restart's phases 1,
 |---|---|---|---|
 | 8a | S6.3 (codecs), U5 | The control area of a log part: the config line and the two last-file slots, their builders (writer) and checks (reader); `pmem_redo_slot-t` | Built with 8b (2026-11-03); `ctest -R pmem_redo` not yet reported |
 | 8b | S4.8, S5.2-S5.5 | The write path: the initial images through the mapping, the copy-out at the end of each record, the persist, the mbyte and file switch with the slot, GCP_SAVEREQ with no FSSYNCREQ, the bypassed paths, `DUMP 2368 3` to verify the persisted log. `c_redo_pmem_format` is set in PMEM mode | `ndb.ndb_redo_pmem_write` and `ndb.ndb_basic` with `pmem_redo.cnf` passed on macOS ARM64 (2026-11-03), after the fix of the test's recursive CTE; the rest of the commands below to be run |
-| 8c | S6.1, S6.3-S6.6 | The restart: the reads from the mapping, the control area and the slot at phase 1, the exact end E and its zeroing, phase 3 on the new records with the COMMIT invalidation in place, phase 4 with the zeroing back to the head and the writer resume | Written (2026-11-03). First run on macOS ARM64: `ndb.ndb_restart` with `pmem_redo.cnf` passed; `ndb.ndb_basic` with it hung in the initial start (decision 10, fixed); to be run again |
+| 8c | S6.1, S6.3-S6.6 | The restart: the reads from the mapping, the control area and the slot at phase 1, the exact end E and its zeroing, phase 3 on the new records with the COMMIT invalidation in place, phase 4 with the zeroing back to the head and the writer resume | First run on macOS ARM64: `ndb.ndb_basic` with `pmem_redo.cnf` hung in the initial start (decision 10, fixed); then all of its commands passed (reported 2026-11-05). Committed as `851222d8059` with 8a and 8b |
+| 8d | S5.5 | The rest of S5.5: the asserts on the paths the PMEM format never takes, no IO tracker tick, the log-buffer-full assert, the RedoBuffer check at start, `ndb_redo_pmem_queue` | All of its commands passed on macOS ARM64 (reported 2026-11-05) |
 
 **Decision taken before 8b: the format comes on in 8b, and a PMEM-mode
 restart is refused until 8c.** The write path can then be tested on its
@@ -1299,4 +1300,74 @@ cd mysql-test
 ```
 
 The last command is the file-mode regression. The phase 8 gate also
-needs the ledger in PMEM mode (side track, S7.4), not started.
+needs the ledger in PMEM mode (side track, S7.4, below).
+
+**Changes in 8d.** The rest of S5.5. File mode is unchanged.
+
+| File | Change |
+|---|---|
+| `src/kernel/blocks/dblqh/DblqhMain.cpp` | `ndbassert(!c_redo_pmem_format)` in `checkGcpCompleted` and in the wait states of `initFsopenconf` that open the next file. `timer_handling` ticks no IO tracker in the PMEM format. `writePrepareLog` asserts that the PMEM format is never short of log pages. READ_CONFIG refuses PMEM mode when RedoBuffer gives a log part fewer than 51 pages |
+| `mysql-test/suite/ndb/t/ndb_redo_pmem_queue.{test,cnf}`, `r/` | New, needs error inserts: `testBasic -n FillQueueREDOLog` (error insert 5083 queues every PREPARE until it times out) in PMEM mode, then `DUMP 2368 3` |
+
+**Decisions taken in 8d.**
+
+1. **A log part needs 51 log pages in PMEM mode**: the 32 pages of the
+   window of phase 3 (`ZMAX_MM_BUFFER_SIZE`), a read of 8 under way
+   (`ZREAD_AHEAD_SIZE`), the 9 of a PREPARE read from the log
+   (`LOG_PAGE_ARRAY_SIZE`), and page 0 and the head page in phase 4.
+   Writing holds at most 6, plus `ZMIN_LOG_PAGES_OPERATION`. MTR's
+   RedoBuffer of 4M per LDM gives 128 pages to each part; a smaller
+   RedoBuffer, as in `ndb_fragmented_redo_log_buffer`, is refused in PMEM
+   mode at start. This replaces decision 7 of 8b.
+2. **The IO tracker is not ticked** in the PMEM format: there is no REDO
+   IO, so no `P_REDO_IO_PROBLEM`. `P_TAIL_PROBLEM` still aborts with 410.
+3. **Error insert 5032** takes the same abort path in both modes, with no
+   PMEM code; `testBackup` covers it. Only 5083, whose queue goes through
+   the PMEM writers, gets a PMEM test.
+
+Since 8c, decision 5 of 8b no longer holds: phase 4 of an initial start
+reads its pages from the mapping (S6.1).
+
+**Commands for the pusher (8d).** On Linux x86_64, Linux ARM64 and macOS
+ARM64, in a build with error inserts:
+
+```
+cmake --build .
+cd mysql-test
+./mtr ndb.ndb_redo_pmem_queue ndb.ndb_redo_pmem_write ndb.ndb_redo_pmem_restart
+./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndb_basic
+./mtr --suite=ndb --parallel=auto
+```
+
+---
+
+## Side track: the GCP-saved ledger (S7.4)
+
+**Scope.** `implementation_plan.md` pull request 1: a checker of what a
+restart keeps, in `testRestartGci`, valid in file mode on today's code
+and the gate of phase 8 in PMEM mode. The crash-point, torn-tail and
+power-loss cases come with phase 11.
+
+| File | Change |
+|---|---|
+| `test/ndbapi/testRestartGci.cpp` | The ledger: 4 writer steps, each on its own quarter of the rows, commit transactions of 1 to 8 rows that insert, update (a new `updates` value each time) or delete, and keep each row's history: the commit GCI, or an unknown result after which the rows wait for the check. `GciLedgerSR`: write 5 s, a system restart with abort, the writers stop before the cluster is back, then every row is read with its ROW_GCI64; loop. `GciLedgerNR`: write, a node restart with abort of a random node while the writers go on, the check, then as `GciLedgerSR` |
+| `mysql-test/suite/ndb/t/ndb_gci_ledger.test`, `r/` | Runs `GciLedgerSR -l 3` and `GciLedgerNR -l 1` with the mysqlds stopped, as `ndb_redo_pmem_restarts` does |
+
+**The check.** After a system restart from GCI R a row holds what the
+last of its committed transactions with a GCI up to R wrote, with that
+GCI (the low word may be rounded up, as `runVerifyInserts` allows), or
+what its transaction with an unknown result wrote. Once one committed
+transaction of a row is after R, the later ones are too. After a node
+restart every committed transaction is there. A transaction with an
+unknown result is in all of its rows or in none. The report counts the
+row writes acknowledged and lost (GCI after R): legal in step 1, the
+measure that durable commits bring to 0.
+
+**Commands for the pusher.** File mode first, then PMEM mode:
+
+```
+cmake --build .
+cd mysql-test
+./mtr ndb.ndb_gci_ledger
+./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndb_gci_ledger
+```

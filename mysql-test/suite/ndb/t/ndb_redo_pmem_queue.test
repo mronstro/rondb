@@ -1,0 +1,57 @@
+--source include/have_ndb.inc
+--source have_ndb_error_insert.inc
+
+# RONDB-1150 phase 8 (impl_step1_lqh_write.md S5.5): with RedoLogMode=pmem
+# the REDO writes of a log part still queue when the part has a problem.
+# Error insert 5083 queues every PREPARE until it times out (266), as
+# testBasic -n FillQueueREDOLog checks; the queue then goes through the
+# PMEM writers, and every log part must read back through the mapping to
+# where it was persisted.
+
+let $cluster = $MYSQLTEST_VARDIR/mysql_cluster.1;
+
+# NDBT creates TEST_DB.T1 directly through the NDB API. Keep both
+# mysqlds stopped so metadata discovery cannot import the API table.
+--connect(s2,127.0.0.1,root,,test,$MASTER_MYPORT1,)
+--connection default
+--echo # Shutting down mysqld 1
+--let $mysqld_name=mysqld.1.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld1_file_name= $_expect_file_name
+
+--connection s2
+--echo # Shutting down mysqld 2
+--let $mysqld_name=mysqld.2.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld2_file_name= $_expect_file_name
+
+let NDBAPITEST_CLEANUP_QUERY=;
+
+--echo == 1 == REDO writes queued until they time out (error insert 5083)
+let NDBAPITEST_NAME=testBasic;
+let NDBAPITEST_ARGS=-n FillQueueREDOLog -l 1 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+--echo == 2 == every log part reads back through the mapping to its end
+--exec $NDB_MGM -e "all dump 2368 3" >> $NDB_TOOLS_OUTPUT
+--sleep 2
+--exec grep -c "PMEM REDO verify ok" $cluster/ndbd.1/ndbd.log
+--exec grep -c "PMEM REDO verify ok" $cluster/ndbd.2/ndbd.log
+--error 1
+--exec grep "PMEM REDO verify failed" $cluster/ndbd.1/ndbd.log $cluster/ndbd.2/ndbd.log
+
+--connection default
+--echo # Starting mysqld 1
+--let $_expect_file_name= $expect_mysqld1_file_name
+--let $mysqld_name=mysqld.1.1
+--source include/start_mysqld.inc
+
+--connection s2
+--echo # Starting mysqld 2
+--let $_expect_file_name= $expect_mysqld2_file_name
+--let $mysqld_name=mysqld.2.1
+--source include/start_mysqld.inc
+
+--connection default
+--disconnect s2
+--remove_file $NDB_TOOLS_OUTPUT
