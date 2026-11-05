@@ -1,0 +1,53 @@
+--source include/have_ndb.inc
+
+# RONDB-1150 (recovery plan S7.4): the GCP-saved ledger of testRestartGci.
+# Writers keep the GCI of each transaction they commit, and the
+# transactions whose result is unknown. After a system restart with abort
+# every row holds the last of its transactions with a GCI up to the
+# restart's, after a node restart with abort every committed one; an
+# unknown transaction is in all of its rows or none. It runs in file mode
+# here, and in PMEM mode with:
+#   ./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndb_gci_ledger
+
+# NDBT creates TEST_DB.T1 directly through the NDB API. Keep both
+# mysqlds stopped so metadata discovery cannot import the API table;
+# on a case-insensitive file system it retries CREATE DATABASE TEST_DB
+# after each system restart and fails.
+--connect(s2,127.0.0.1,root,,test,$MASTER_MYPORT1,)
+--connection default
+--echo # Shutting down mysqld 1
+--let $mysqld_name=mysqld.1.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld1_file_name= $_expect_file_name
+
+--connection s2
+--echo # Shutting down mysqld 2
+--let $mysqld_name=mysqld.2.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld2_file_name= $_expect_file_name
+
+let NDBAPITEST_CLEANUP_QUERY=;
+let NDBAPITEST_NAME=testRestartGci;
+
+--echo == 1 == system restarts with abort while the writers write
+let NDBAPITEST_ARGS=-n GciLedgerSR -l 3 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+--echo == 2 == a node restart with abort, then a system restart
+let NDBAPITEST_ARGS=-n GciLedgerNR -l 1 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+--connection default
+--echo # Starting mysqld 1
+--let $_expect_file_name= $expect_mysqld1_file_name
+--let $mysqld_name=mysqld.1.1
+--source include/start_mysqld.inc
+
+--connection s2
+--echo # Starting mysqld 2
+--let $_expect_file_name= $expect_mysqld2_file_name
+--let $mysqld_name=mysqld.2.1
+--source include/start_mysqld.inc
+
+--connection default
+--disconnect s2
