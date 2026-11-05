@@ -1,0 +1,18 @@
+# Create and drop t1 a few times, the versions of its ids go up
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, KEY(b)) ENGINE=NDB;
+DROP TABLE t1;
+# Stop both mysqlds, so that no DDL comes between the system restarts
+# Shutting down mysqld 1
+# Shutting down mysqld 2
+# Two system restarts with nothing in between
+# Starting mysqld 1
+# restart
+# Starting mysqld 2
+# restart
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, KEY(b)) ENGINE=NDB;
+# t1 and its index b have the same ids again, with higher versions
+same_id	higher_version
+1	1
+same_id	higher_version
+1	1
+DROP TABLE t1;

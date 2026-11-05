@@ -4550,6 +4550,25 @@ static const Uint32 DROP_OLD_PASS = 15;
 static const Uint32 CREATE_NEW_PASS = 23;
 static const Uint32 LAST_PASS = 23;
 
+/**
+ * Clear the entry of an object id not in use after the restart, but keep
+ * the higher of the two versions of the id. The restart writes the entry
+ * to disk, and a version cleared there would be read back by the next
+ * system restart: the id's next objects would then get versions it had
+ * before, and a new ordered index could match the rows a dropped one left
+ * in ndb_index_stat_head under the same id and version (error 917).
+ */
+static void clear_unused_entry(SchemaFile::TableEntry *ownEntry,
+                               const SchemaFile::TableEntry *masterEntry) {
+  const Uint32 ownVersion = ownEntry->m_tableVersion;
+  const Uint32 masterVersion = masterEntry->m_tableVersion;
+  ownEntry->init();
+  ownEntry->m_tableVersion =
+      (ownVersion & 0x00FFFFFF) >= (masterVersion & 0x00FFFFFF)
+          ? ownVersion
+          : masterVersion;
+}
+
 NdbOut &operator<<(NdbOut &out, const SchemaFile::TableEntry entry) {
   out << "[";
   out << " state: " << entry.m_tableState;
@@ -4699,7 +4718,7 @@ void Dbdict::checkSchemaStatus(Signal *signal) {
       if (masterState != SchemaFile::SF_IN_USE) {
         if (ownEntry->m_tableType != DictTabInfo::SchemaTransaction) {
           jam();
-          ownEntry->init();
+          clear_unused_entry(ownEntry, masterEntry);
         }
         continue;
       }
@@ -4884,7 +4903,7 @@ void Dbdict::set_max_check_schema_status() {
     if (ownState == SchemaFile::SF_UNUSED &&
         masterState == SchemaFile::SF_UNUSED &&
         ownEntry->m_tableType != DictTabInfo::SchemaTransaction) {
-      ownEntry->init();
+      clear_unused_entry(ownEntry, masterEntry);
       continue;
     }
     c_max_restart_table_id = tableId;

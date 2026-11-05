@@ -1,0 +1,87 @@
+--source include/have_ndb.inc
+--source ndb_mgm.inc
+--source ndb_waiter.inc
+
+# The ids of a dropped table keep their versions over system restarts.
+# A restart wrote the unused entries of the schema file to disk with
+# their versions cleared, so after a second system restart with no DDL
+# in between the next objects with these ids got the versions they had
+# before. A new ordered index could then match the rows a dropped one
+# left in mysql.ndb_index_stat_head under the same id and version, and
+# CREATE TABLE failed with error 917 "Invalid index stats sys tables data".
+
+--echo # Create and drop t1 a few times, the versions of its ids go up
+--disable_query_log
+let $i = 3;
+while ($i)
+{
+  CREATE TABLE t1 (a INT PRIMARY KEY, b INT, KEY(b)) ENGINE=NDB;
+  DROP TABLE t1;
+  dec $i;
+}
+--enable_query_log
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, KEY(b)) ENGINE=NDB;
+let $t1_id = query_get_value(SELECT id FROM ndbinfo.dict_obj_info WHERE fq_name = 'test/def/t1', id, 1);
+let $t1_major = query_get_value(SELECT version & 0xffffff AS major FROM ndbinfo.dict_obj_info WHERE fq_name = 'test/def/t1', major, 1);
+let $b_id = query_get_value(SELECT id FROM ndbinfo.dict_obj_info WHERE parent_obj_id = $t1_id AND fq_name LIKE 'sys/def/%/b', id, 1);
+let $b_major = query_get_value(SELECT version & 0xffffff AS major FROM ndbinfo.dict_obj_info WHERE id = $b_id, major, 1);
+DROP TABLE t1;
+
+--echo # Stop both mysqlds, so that no DDL comes between the system restarts
+--connect(s2,127.0.0.1,root,,test,$MASTER_MYPORT1,)
+--connection default
+--echo # Shutting down mysqld 1
+--let $mysqld_name=mysqld.1.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld1_file_name= $_expect_file_name
+
+--connection s2
+--echo # Shutting down mysqld 2
+--let $mysqld_name=mysqld.2.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld2_file_name= $_expect_file_name
+
+--echo # Two system restarts with nothing in between
+let $i = 2;
+while ($i)
+{
+  --exec $_mgm_cmd -e "ALL RESTART -n" >> $NDB_TOOLS_OUTPUT
+  --exec $_waiter_cmd --not-started >> $NDB_TOOLS_OUTPUT
+  --exec $_mgm_cmd -e "ALL START" >> $NDB_TOOLS_OUTPUT
+  --exec $_waiter_cmd >> $NDB_TOOLS_OUTPUT
+  dec $i;
+}
+
+--connection default
+--echo # Starting mysqld 1
+--let $_expect_file_name= $expect_mysqld1_file_name
+--let $mysqld_name=mysqld.1.1
+--source include/start_mysqld.inc
+
+--connection s2
+--echo # Starting mysqld 2
+--let $_expect_file_name= $expect_mysqld2_file_name
+--let $mysqld_name=mysqld.2.1
+--source include/start_mysqld.inc
+
+--connection default
+--disconnect s2
+--source include/ndb_not_readonly.inc
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, KEY(b)) ENGINE=NDB;
+--echo # t1 and its index b have the same ids again, with higher versions
+--disable_query_log
+eval SELECT id = $t1_id AS same_id,
+            (version & 0xffffff) > $t1_major AS higher_version
+       FROM ndbinfo.dict_obj_info
+      WHERE fq_name = 'test/def/t1';
+eval SELECT id = $b_id AS same_id,
+            (version & 0xffffff) > $b_major AS higher_version
+       FROM ndbinfo.dict_obj_info
+      WHERE fq_name LIKE 'sys/def/%/b'
+        AND parent_obj_id = (SELECT id FROM ndbinfo.dict_obj_info
+                              WHERE fq_name = 'test/def/t1');
+--enable_query_log
+DROP TABLE t1;
+
+--remove_file $NDB_TOOLS_OUTPUT
