@@ -1070,6 +1070,20 @@ const ConfigInfo::ParamInfo ConfigInfo::m_ParamInfo[] = {
     "auto",
     redo_pmem_copy_method_typelib },
 
+  {
+    CFG_DB_REDO_PMEM_PERSIST_DELAY_NS,
+    "__RedoLogPmemPersistDelayNs",
+    DB_TOKEN,
+    "Test setting for RedoLogMode=pmem: each persist of the REDO log waits "
+    "this many nanoseconds after its fence, so that commit latency and "
+    "throughput can be measured for slower persistent memory (200-2000 ns "
+    "on CXL); 0 (default) = no wait",
+    ConfigInfo::CI_USED,
+    false,
+    ConfigInfo::CI_INT,
+    "0",
+    "0", "100000" },
+
     /* End RonDB additions */
 
     {CFG_DB_TRANSACTION_MEM, "TransactionMemory", DB_TOKEN,
@@ -4195,16 +4209,19 @@ static bool checkRedoLogPmem(InitConfigFileParser::Context &ctx) {
   Uint32 testMode = NDB_REDO_PMEM_TEST_MODE_OFF;
   Uint32 powerLossEmul = 0;
   Uint32 copyMethod = NDB_REDO_PMEM_COPY_AUTO;
+  Uint32 persistDelayNs = 0;
   const char *path = nullptr;
   ctx.m_currentSection->get("RedoLogMode", &mode);
   ctx.m_currentSection->get("__RedoLogPmemTestMode", &testMode);
   ctx.m_currentSection->get("__RedoLogPmemPowerLossEmulation",
                             &powerLossEmul);
   ctx.m_currentSection->get("__RedoLogPmemCopyMethod", &copyMethod);
+  ctx.m_currentSection->get("__RedoLogPmemPersistDelayNs", &persistDelayNs);
   ctx.m_currentSection->get("FileSystemPathRedoLog", &path);
   const bool testSettings = testMode != NDB_REDO_PMEM_TEST_MODE_OFF ||
                             powerLossEmul != 0 ||
-                            copyMethod != NDB_REDO_PMEM_COPY_AUTO;
+                            copyMethod != NDB_REDO_PMEM_COPY_AUTO ||
+                            persistDelayNs != 0;
 
   if (mode != NDB_REDO_LOG_MODE_PMEM) {
     if (path != nullptr) {
@@ -4288,6 +4305,12 @@ static bool checkRedoLogPmem(InitConfigFileParser::Context &ctx) {
         "__RedoLogPmemCopyMethod=%s is a test setting (section starting at "
         "line %u)",
         redo_pmem_copy_method_typelib[copyMethod].name, ctx.m_sectionLineno);
+  }
+  if (persistDelayNs != 0) {
+    ctx.reportWarning(
+        "__RedoLogPmemPersistDelayNs=%u is a test setting, each persist of "
+        "the REDO log waits %u ns (section starting at line %u)",
+        persistDelayNs, persistDelayNs, ctx.m_sectionLineno);
   }
   return true;
 }

@@ -20,7 +20,7 @@ unchanged.
 | 6 | 7 | Record format and reader module | S4.1, S6.2 | Unit tests over synthetic logs on the three platforms | 1 | **In progress**: `pmem_redo_format-t` and `pmem_redo_scan-t` (300 random logs from seed 1, then 10000 from a time-based seed) passed on macOS ARM64 (2026-11-02); Linux x86_64 and Linux ARM64 to be tested |
 | 7 | 8 | Record writers | S4.2–S4.7, S5.1 | Unit tests; file-mode regression | 6 | **In progress**: the PMEM record writers behind `c_redo_pmem_format` (false until phase 8), the reservation, the LSN helpers, `pmem_redo_writer-t`; passed on macOS ARM64 (2026-11-03), Linux x86_64 and Linux ARM64 to be tested |
 | 8 | 9 | PMEM REDO end to end: write path and recovery together (**M0.3**) | S4.8, S5.2–S5.5, S6.1, S6.3–S6.6 | Initial start, traffic, SR and NR in PMEM mode; the ledger in PMEM mode | 5, 7, ledger | **In progress**, in four parts (below): 8a-8d (control area and slots, write path, restart, the rest of S5.5) passed their commands on macOS ARM64 (reported 2026-11-05), the ledger too; Linux x86_64 and Linux ARM64 to be run |
-| 9 | 10 | Checks, benchmark switch, persist delay | S5.6–S5.9, Q-A11 | Shared log parts; debug send checks; `DUMP 2368` latency numbers | 8 | Not started |
+| 9 | 10 | Checks, benchmark switch, persist delay | S5.6–S5.9, Q-A11 | Shared log parts; debug send checks; `DUMP 2368` latency numbers | 8 | **In progress**: the fence check at unlock, the barriers at the C places of E8 behind the benchmark switch, the check of the dependent signals, `DUMP 2368 0`-`4`, `__RedoLogPmemPersistDelayNs`, `ndb_redo_pmem_shared_parts` and `ndb_redo_pmem_persist_check`; passed its commands on macOS ARM64 (reported 2026-11-07); the latency numbers to be measured; Linux x86_64 and Linux ARM64 to be run |
 | 10 | 11 | Node restart and `redoLogReader` | S6.7, S6.8 | testNodeRestart subset; reader on files from crash tests | 8 | Not started |
 | 11 | 12 | Power-loss emulation and crash inserts (**M0.4**) | S1.5, S7.1–S7.3, S7.5 | `pmem-redo-tests.txt` with power-loss emulation | 8, 10 | Not started |
 
@@ -1315,8 +1315,8 @@ needs the ledger in PMEM mode (side track, S7.4, below).
    window of phase 3 (`ZMAX_MM_BUFFER_SIZE`), a read of 8 under way
    (`ZREAD_AHEAD_SIZE`), the 9 of a PREPARE read from the log
    (`LOG_PAGE_ARRAY_SIZE`), and page 0 and the head page in phase 4.
-   Writing holds at most 6, plus `ZMIN_LOG_PAGES_OPERATION`. MTR's
-   RedoBuffer of 4M per LDM gives 128 pages to each part; a smaller
+   Writing holds at most 6, plus `ZMIN_LOG_PAGES_OPERATION`. RedoBuffer
+   is per log part, so MTR's 4M gives 128 pages to each part; a smaller
    RedoBuffer, as in `ndb_fragmented_redo_log_buffer`, is refused in PMEM
    mode at start. This replaces decision 7 of 8b.
 2. **The IO tracker is not ticked** in the PMEM format: there is no REDO
@@ -1338,6 +1338,93 @@ cd mysql-test
 ./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndb_basic
 ./mtr --suite=ndb --parallel=auto
 ```
+
+---
+
+## Phase 9: checks, benchmark switch, persist delay
+
+**Scope.** `implementation_plan.md` pull request 10; write plan S5.6-S5.9
+and Q-A11. The checks that every store to the mapping is fenced before
+the log part is unlocked and that no signal goes before the COMMIT it
+depends on is persistent, the barriers at the C places of E8 that X4
+keeps for durable operations (here behind a benchmark switch), the
+sub-commands of `DUMP 2368`, and a delay after each persist that stands
+in for slower persistent memory. File mode is unchanged but for one
+compare at each C place.
+
+| File | Change |
+|---|---|
+| `include/mgmapi/mgmapi_config_parameters.h` | `CFG_DB_REDO_PMEM_PERSIST_DELAY_NS` 717, now the highest DB id (716 stays kept for `DurableCommits`) |
+| `src/common/mgmcommon/ConfigInfo.cpp` | `__RedoLogPmemPersistDelayNs`, int 0-100000, default 0; `checkRedoLogPmem` warns that it is a test setting, and counts it among the settings that have no effect in file mode |
+| `src/mgmsrv/testConfig.cpp` | The value 500 and the default 0 reach the data node |
+| `include/kernel/signaldata/DumpStateOrd.hpp` | The comment of `LqhRedoPmem` lists sub-commands 0-4 |
+| `src/kernel/blocks/dblqh/Dblqh.hpp` | `LogPartRecord::m_pmem_unfenced`; `c_redo_pmem_persist_commit`, `c_redo_pmem_skip_barrier`, `c_redo_pmem_persist_delay_ns`; both `unlock_log_part` assert `m_pmem_unfenced == 0` (debug builds); inline `redoCheckPersisted()`, empty unless VM_TRACE or ERROR_INSERT; the new declarations |
+| `src/kernel/blocks/dblqh/DblqhMain.cpp` | `redoCopyPage` counts its bytes in `m_pmem_unfenced`, as do the copies of the config line and the slot; `redoPmemFence()` (drain, zero the count, then the delay) replaces `ndb_pmem_drain()` in `redoCopyOut`, `redoCopyPageZero`, `redoPmemInitFile` and `redoWriteLastFileSlot`. `writeCommitLogPmem` sets `m_redo_end_lsn` only for a durable COMMIT or with the switch on. `redoPersistCommit()` at the three C places (after TUP's loop in `commitReqLab` through `redoPersistOp()`, after `writeCommitLog` in `handle_queued_log_write` and in `doWritePrepareLog` for a dirty write). `redoCheckPersisted()` at the start of `localCommitLab` and `commitReplyLab`, before the COMMITCONF of an operation already committed, and in `completeTransNotLastLab` and `completeTransLastLab`. `DUMP 2368 0`/`1` (switch), `2` (counters of each log part to the cluster log, `redoPmemPrintCounters()`), `3` (verify, as before), `4` (debug builds: skip the next barrier); a message in file mode and for an unknown sub-command. READ_CONFIG reads the delay and logs it |
+| `mysql-test/suite/ndb/ndb_redo_pmem_config.ini`, `t/` and `r/ndb_redo_pmem_config` | Node 4 also sets `__RedoLogPmemPersistDelayNs=500` |
+| `mysql-test/suite/ndb/t/ndb_redo_pmem_shared_parts.{test,cnf}`, `r/` | New: 3 LDM threads and 4 log parts (the mutex is on), a delay of 3000 ns; writes with the switch off, on and off; `DUMP 2368 2` must print 4 parts per node with the switch on and no persist under 2 us; `DUMP 2368 3` must verify all 4 |
+| `mysql-test/suite/ndb/t/ndb_redo_pmem_persist_check.{test,cnf}`, `r/` | New, needs error inserts: the switch on, then `1 DUMP 2368 4`; an update must stop node 1 at the check (its error log has the message), `StopOnError=0` brings it back by a node restart in PMEM mode, and every log part verifies |
+
+**Decisions taken in phase 9.**
+
+1. **`m_redo_end_lsn` is set only when a dependent signal waits for the
+   record**: by `writeCommitLogPmem` for a durable COMMIT (X4) or for any
+   COMMIT written while the switch is on, else 0. The C places and the
+   check read only this field, so the switch needs no test at either, a
+   switch turned on between an operation's COMMIT and its COMPLETE cannot
+   fail the check, and file mode pays one compare of 0 per commit. The
+   plan read the switch at the check.
+2. **The check sites** cover the plan's list through the labels they
+   share: `commitReplyLab` sends COMMITTED, COMMIT to the next LQH and
+   the COMMITCONF of a takeover; `completeTransNotLastLab` and
+   `completeTransLastLab` send COMPLETE, COMPLETED and, through
+   `completeUnusualLab`, COMPLETECONF. The COMPLETECONF that
+   `execCOMPLETE` sends for a transaction that is gone has no operation
+   record and is not checked.
+3. **One barrier at `commitReqLab`** for each operation, after TUP's loop
+   has written the COMMITs of the operations on the row: it persists the
+   whole log part. The other operations of the row reach `commitReqLab`
+   with their own COMMIT signal and find theirs persistent.
+4. **`DUMP 2368 4` skips the next barrier that is needed**, in each LDM
+   that gets it; a barrier with nothing to persist does not use it up.
+   The check then fails in the same signal, so the negative test is an
+   MTR test rather than the autotest the plan named.
+5. **The counters printed** are those of phase 5b (`RedoPmemStats`, the
+   ndbinfo `redo_log_pmem` columns, 8 latency buckets), not the 16 of the
+   plan's §3.2.
+6. **The delay** is spent in `redoPmemFence()` after the drain, inside the
+   time that the latency buckets measure, on the four fences of the write
+   path. The restart's fences (zeroing, invalidation, the end-of-round
+   drain) have none, and do not count in `m_pmem_unfenced`: they run
+   before any writer, by the owner LDM.
+7. **The atrt configurations** with `RedoLogMode=pmem` for testBasic,
+   testIndex and testTransactions (S5.9) are left to S7.5 in phase 11,
+   with the other test lists.
+
+**Commands for the pusher.** On Linux x86_64, Linux ARM64 and macOS
+ARM64; the persist-check test needs a build with error inserts:
+
+```
+cmake --build .
+ctest -R MgmConfig
+cd mysql-test
+./mtr ndb.ndb_redo_pmem_config ndb.ndb_redo_pmem_shared_parts ndb.ndb_redo_pmem_persist_check
+./mtr ndb.ndb_redo_pmem_write ndb.ndb_redo_pmem_restart ndb.ndb_redo_pmem_queue
+./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndb_basic ndb.ndb_gci_ledger
+./mtr --suite=ndb --parallel=auto
+```
+
+**The latency numbers of the gate** are measured by hand, in a release
+build: a cluster in PMEM mode, `ALL DUMP 2368 1`, the update phase of
+`flexAsynch` (or sysbench `oltp_update_index` through mysqld), then
+`ALL DUMP 2368 2` for the counters; again with `ALL DUMP 2368 0`; and
+with `__RedoLogPmemPersistDelayNs` at 0, 200 and 2000.
+
+**Results.** All of the commands passed on macOS ARM64 (reported
+2026-11-07) but the shutdown report of the full suite: data node 1 had a
+GCP stop while MTR stopped the cluster after
+`testNodeRestartGcpSaveAndFileChange`, the last test of its worker. The
+GCP save of one LDM waited for page 0 of a new REDO file; file mode,
+older than phase 9, fixed in a commit of its own.
 
 ---
 

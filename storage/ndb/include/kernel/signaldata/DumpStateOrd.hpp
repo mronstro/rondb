@@ -203,8 +203,10 @@ class DumpStateOrd {
     // GROUP BY table size hints (m3_run6_plan.md D1a): 0 = not applied
     // (still recorded), 1 = applied (the default), 2 = forget them all
     LqhGroupTableSizeHints = 2367,
-    // RONDB-1150, RedoLogMode=pmem: 3 = persist the REDO log and check it
-    // through the mappings (impl_step1_lqh_write.md S5.2, S5.8)
+    // RONDB-1150, RedoLogMode=pmem (impl_step1_lqh_write.md S5.8): 0 / 1 =
+    // persist at commit off / on, 2 = counters to the cluster log, 3 =
+    // persist the REDO log and check it through the mappings, 4 = skip
+    // the next barrier at commit (debug builds)
     LqhRedoPmem = 2368,
 
     TupDumpOneScanRec = 2380,

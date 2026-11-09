@@ -328,12 +328,14 @@
 #define NDB_COMPILED_INTERPRETER_ON    2  /* force JIT (reserved; == AUTO today) */
 
 /* RONDB-1150: the REDO log on persistent memory. 716 is kept for
- * DurableCommits. Keep CFG_DB_REDO_PMEM_COPY_METHOD the highest DB id. */
+ * DurableCommits. Keep CFG_DB_REDO_PMEM_PERSIST_DELAY_NS the highest DB
+ * id. */
 #define CFG_DB_REDO_LOG_MODE              711
 #define CFG_DB_REDO_LOG_PATH              712
 #define CFG_DB_REDO_PMEM_TEST_MODE        713
 #define CFG_DB_REDO_PMEM_POWER_LOSS_EMUL  714
 #define CFG_DB_REDO_PMEM_COPY_METHOD      715
+#define CFG_DB_REDO_PMEM_PERSIST_DELAY_NS 717
 
 /* Values for CFG_DB_REDO_LOG_MODE (RedoLogMode) */
 #define NDB_REDO_LOG_MODE_FILE 0 /* files written through NDBFS (default) */

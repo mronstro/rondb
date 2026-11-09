@@ -1,0 +1,78 @@
+--source include/have_ndb.inc
+--source have_ndb_error_insert.inc
+
+# RONDB-1150 phase 9 (impl_step1_lqh_write.md S5.7): with the benchmark
+# switch on (DUMP 2368 1) a signal that depends on a COMMIT goes only once
+# the COMMIT is persistent, which builds with error inserts check before
+# each such signal. DUMP 2368 4 makes data node 1 skip its next barrier at
+# a COMMIT; the check before the dependent signal must then stop the
+# node. With StopOnError=0 it comes back by a node restart in PMEM mode,
+# and every log part of both nodes reads back through the mapping.
+
+let $cluster = $MYSQLTEST_VARDIR/mysql_cluster.1;
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=NDB;
+INSERT INTO t1 VALUES (1,1), (2,2), (3,3);
+
+--echo == 1 == the benchmark switch on, the checks pass
+--exec $NDB_MGM -e "all dump 2368 1" >> $NDB_TOOLS_OUTPUT
+--sleep 1
+UPDATE t1 SET b = b + 1;
+
+--echo == 2 == node 1 skips its next barrier, and the check stops it
+--exec $NDB_MGM -e "1 dump 2368 4" >> $NDB_TOOLS_OUTPUT
+--sleep 1
+# The transaction may commit, or fail with the node
+--disable_query_log
+--disable_result_log
+--error 0,1030,1180,1205,1296,1297
+UPDATE t1 SET b = b + 1 WHERE a = 1;
+--enable_result_log
+--enable_query_log
+
+# progError() writes the check's message to the error log of node 1
+# before the node stops; then its angel starts it again
+--perl
+  use strict;
+  my $log = "$ENV{MYSQLTEST_VARDIR}/mysql_cluster.1/ndbd.1/ndb_1_error.log";
+  my $timeout = 120;
+  my $start = time();
+  while (1) {
+    my $found = 0;
+    if (open(my $fh, '<', $log)) {
+      $found = grep { /waits for a REDO record that is not persistent/ } <$fh>;
+      close($fh);
+    }
+    last if $found;
+    die "Timeout waiting for the check to stop node 1\n"
+      if time() - $start > $timeout;
+    sleep(1);
+  }
+  # Then until the management server no longer sees it started, so that
+  # the waiter below waits for its node restart
+  my $mgm = $ENV{NDB_MGM} or die "NDB_MGM not set\n";
+  while (1) {
+    my $out = `$mgm -e "1 STATUS" 2>&1`;
+    last if $out !~ /^Node 1: started/m;
+    die "Timeout waiting for node 1 to stop:\n$out"
+      if time() - $start > $timeout;
+    select(undef, undef, undef, 0.2);
+  }
+EOF
+
+--echo == 3 == node 1 comes back by a node restart
+--exec $NDB_WAITER --timeout=300 >> $NDB_TOOLS_OUTPUT
+
+--echo == 4 == every log part reads back through the mapping to its end
+--exec $NDB_MGM -e "all dump 2368 0" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "all dump 2368 3" >> $NDB_TOOLS_OUTPUT
+--sleep 2
+--exec grep -c "PMEM REDO verify ok" $cluster/ndbd.1/ndbd.log
+--exec grep -c "PMEM REDO verify ok" $cluster/ndbd.2/ndbd.log
+--error 1
+--exec grep "PMEM REDO verify failed" $cluster/ndbd.1/ndbd.log $cluster/ndbd.2/ndbd.log
+
+SELECT a, b FROM t1 WHERE a > 1 ORDER BY a;
+SELECT b IN (2, 3) AS committed_or_not FROM t1 WHERE a = 1;
+DROP TABLE t1;
+--remove_file $NDB_TOOLS_OUTPUT

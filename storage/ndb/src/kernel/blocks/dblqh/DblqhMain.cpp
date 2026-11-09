@@ -916,6 +916,11 @@ void Dblqh::handle_queued_log_write(Signal *signal, LogPartRecord *logPartPtrP,
       jam();
       writeCommitLog(signal, tcConnectptr.p, logPartPtrP);
       removeLogTcrec(tcConnectptr.p, logPartPtrP);
+      if (unlikely(tcConnectptr.p->m_redo_end_lsn != 0)) {
+        /* RONDB-1150 (S5.8): a C place of E8 */
+        jam();
+        redoPersistCommit(signal, logPartPtrP, tcConnectptr.p);
+      }
       unlock_log_part(logPartPtrP);
       if (tcConnectptr.p->transactionState ==
           TcConnectionrec::LOG_COMMIT_QUEUED) {
@@ -2901,6 +2906,13 @@ void Dblqh::execREAD_CONFIG_REQ(Signal *signal) {
     c_redo_pmem_test_mode = NDB_REDO_PMEM_TEST_MODE_OFF;
     ndb_mgm_get_int_parameter(p, CFG_DB_REDO_PMEM_TEST_MODE,
                               &c_redo_pmem_test_mode);
+    c_redo_pmem_persist_commit = 0;
+    c_redo_pmem_skip_barrier = false;
+    c_redo_pmem_persist_delay_ns = 0;
+    if (c_redo_pmem) {
+      ndb_mgm_get_int_parameter(p, CFG_DB_REDO_PMEM_PERSIST_DELAY_NS,
+                                &c_redo_pmem_persist_delay_ns);
+    }
     c_ldm_numa_node = -1;
     c_redo_path_no = FsOpenReq::REDO_PATH_FS;
   }
@@ -2931,6 +2943,12 @@ void Dblqh::execREAD_CONFIG_REQ(Signal *signal) {
             "RedoLogMode=pmem: ODirect and ODirectSyncFlag are not used for "
             "the REDO log");
       }
+    }
+    if (c_redo_pmem_persist_delay_ns != 0 && log) {
+      g_eventLogger->info(
+          "__RedoLogPmemPersistDelayNs=%u: each persist of the REDO log "
+          "waits %u ns after its fence (test setting)",
+          c_redo_pmem_persist_delay_ns, c_redo_pmem_persist_delay_ns);
     }
     if (clogPartFileSize > 0) {
       jam();
@@ -13752,6 +13770,11 @@ void Dblqh::doWritePrepareLog(Signal *signal,
      * -------------------------------------------------------------------- */
     writeCommitLog(signal, regTcPtr, regLogPartPtr);
     removeLogTcrec(regTcPtr, regLogPartPtr);
+    if (unlikely(regTcPtr->m_redo_end_lsn != 0)) {
+      /* RONDB-1150 (S5.8): a C place of E8, the COMMIT of a dirty write */
+      jam();
+      redoPersistCommit(signal, regLogPartPtr, regTcPtr);
+    }
     unlock_log_part(regLogPartPtr);
     /* ----------------------------------------------------------------------
      * DIRTY OPERATIONS SHOULD COMMIT BEFORE THEY PACK THE REQUEST/RESPONSE.
@@ -15080,6 +15103,7 @@ void Dblqh::execCOMMITREQ(Signal *signal) {
     regTcPtr->reqBlockref = reqBlockref;
     regTcPtr->reqRef = reqPtr;
     regTcPtr->abortState = TcConnectionrec::REQ_FROM_TC_COMMIT;
+    redoCheckPersisted(regTcPtr, __LINE__);
     CommitConf* conf = (CommitConf*)signal->theData;
     conf->tcConnectPtr = regTcPtr->reqRef;
     conf->senderNodeId = cownNodeid;
@@ -15445,6 +15469,14 @@ void Dblqh::commitReqLab(Signal *signal, Uint32 gci_hi, Uint32 gci_lo,
     warningReport(signal, 0, regTcPtr->tcOprec);
     return;
   }  // if
+  if (unlikely(regTcPtr->m_redo_end_lsn != 0)) {
+    /**
+     * RONDB-1150 (S5.8): a C place of E8, one barrier after TUP's loop
+     * over the operations on the row wrote their COMMITs.
+     */
+    jam();
+    redoPersistOp(signal, regTcPtr);
+  }
   if (unlikely(regTcPtr->seqNoReplica == 0 ||
                regTcPtr->activeCreat == Fragrecord::AC_NR_COPY)) {
     jamDebug();
@@ -15538,6 +15570,7 @@ void Dblqh::execLQH_WRITELOG_REQ(Signal *signal) {
 
 void Dblqh::localCommitLab(Signal *signal,
                            const TcConnectionrecPtr tcConnectptr) {
+  redoCheckPersisted(tcConnectptr.p, __LINE__);
   FragrecordPtr regFragptr;
   regFragptr.i = tcConnectptr.p->fragmentptr;
   ndbrequire(c_fragment_pool.getPtr(regFragptr));
@@ -15799,6 +15832,7 @@ void Dblqh::commitReplyLab(Signal *signal, TcConnectionrec *const regTcPtr) {
   /* -------------------------------------------------------------- */
   /* BACKUP AND STAND-BY REPLICAS ONLY UPDATE THE TRANSACTION STATE */
   /* -------------------------------------------------------------- */
+  redoCheckPersisted(regTcPtr, __LINE__);
   TcConnectionrec::AbortState abortState = regTcPtr->abortState;
   regTcPtr->transactionState = TcConnectionrec::COMMITTED;
   if (abortState == TcConnectionrec::ABORT_IDLE) {
@@ -15835,6 +15869,7 @@ void Dblqh::commitReplyLab(Signal *signal, TcConnectionrec *const regTcPtr) {
 void Dblqh::completeTransNotLastLab(Signal *signal,
                                     const TcConnectionrecPtr tcConnectptr) {
   TcConnectionrec *const regTcPtr = tcConnectptr.p;
+  redoCheckPersisted(regTcPtr, __LINE__);
   if (likely(regTcPtr->abortState == TcConnectionrec::ABORT_IDLE)) {
     Uint32 clientBlockref = regTcPtr->clientBlockref;
     jamDebug();
@@ -15849,6 +15884,7 @@ void Dblqh::completeTransNotLastLab(Signal *signal,
 void Dblqh::completeTransLastLab(Signal *signal,
                                  const TcConnectionrecPtr tcConnectptr) {
   TcConnectionrec *const regTcPtr = tcConnectptr.p;
+  redoCheckPersisted(regTcPtr, __LINE__);
   if (likely(regTcPtr->abortState == TcConnectionrec::ABORT_IDLE)) {
     Uint32 clientBlockref = regTcPtr->clientBlockref;
     jam();
@@ -43147,6 +43183,7 @@ void Dblqh::initLogpart(Signal *signal, LogPartRecordPtr logPartPtr) {
   std::memset(&logPartPtr.p->m_pmem_stats, 0,
               sizeof(logPartPtr.p->m_pmem_stats));
   logPartPtr.p->m_pmem_persisted_lsn = 0;
+  logPartPtr.p->m_pmem_unfenced = 0;
   logPartPtr.p->m_pmem_slot_seq = 0;
   logPartPtr.p->m_pmem_dsc_recorded = 0;
   logPartPtr.p->m_pmem_dsc_flags = 0;
@@ -45006,9 +45043,11 @@ void Dblqh::writePrepareLogPmem(Signal *signal,
 
 /**
  * S4.4: a COMMIT (format §5.2): where its PREPARE is, the GCI and the
- * transid; opCount 0 until X4. A dependent signal waits for its end
- * (m_redo_end_lsn). It gives back the operation's reservation; durable
- * is false in step 1.
+ * transid; opCount 0 until X4. It gives back the operation's
+ * reservation; durable is false in step 1. Its end goes to m_redo_end_lsn
+ * when a dependent signal waits for it (S5.7, S5.8): a durable COMMIT, or
+ * any with the benchmark switch on; else 0, so that a switch turned on
+ * later is not waited for by an older COMMIT.
  */
 void Dblqh::writeCommitLogPmem(Signal *signal, TcConnectionrec *regTcPtr,
                                LogPartRecord *logPartPtrP, bool durable) {
@@ -45031,7 +45070,9 @@ void Dblqh::writeCommitLogPmem(Signal *signal, TcConnectionrec *regTcPtr,
   redoAppendFixed(signal, logPartPtrP, logPagePtr, logFilePtr, rec,
                   PmemRedo::COMMIT_LEN);
   regTcPtr->m_redo_end_lsn =
-      redoPosLsn(logPartPtrP, logFilePtr.p, logPagePtr.p);
+      (durable || c_redo_pmem_persist_commit != 0)
+          ? redoPosLsn(logPartPtrP, logFilePtr.p, logPagePtr.p)
+          : 0;
   release_committed_words(logPartPtrP, regTcPtr, PmemRedo::AT_COMMIT,
                           durable);
 }
@@ -45299,9 +45340,9 @@ void Dblqh::redoInitWritePosition(LogPartRecord *logPartPtrP) {
  * file. From word 0 the page's header goes first, built from its DRAM
  * header (R3); it is stored once in the lap (E5), as nothing is copied
  * from word 0 of a page again. A page with nothing after its header is
- * not stored yet. Returns the bytes copied.
+ * not stored yet. Returns the bytes copied, which the caller fences.
  */
-Uint32 Dblqh::redoCopyPage(const LogPartRecord *logPartPtrP,
+Uint32 Dblqh::redoCopyPage(LogPartRecord *logPartPtrP,
                            const LogFileRecord *logFilePtrP,
                            const LogPageRecord *logPagePtrP, Uint32 pageNo,
                            Uint32 from, Uint32 to) {
@@ -45322,7 +45363,27 @@ Uint32 Dblqh::redoCopyPage(const LogPartRecord *logPartPtrP,
                      &logPagePtrP->logPageWord[from], 4 * (to - from));
     bytes += 4 * (to - from);
   }
+  logPartPtrP->m_pmem_unfenced += bytes;
   return bytes;
+}
+
+/**
+ * S5.2, S5.6: the fence after the write path's stores to the mapping, by
+ * the thread that made them and before the log part is unlocked. Then
+ * __RedoLogPmemPersistDelayNs (Q-A11): the persist takes as long as it
+ * would on slower persistent memory, 200-2000 ns on CXL, so that commit
+ * latency and throughput can be measured for it on DRAM.
+ */
+void Dblqh::redoPmemFence(LogPartRecord *logPartPtrP) {
+  ndb_pmem_drain();
+  logPartPtrP->m_pmem_unfenced = 0;
+  const Uint32 delayNs = c_redo_pmem_persist_delay_ns;
+  if (delayNs != 0) {
+    const NDB_TICKS start = NdbTick_getCurrentTicks();
+    while (NdbTick_Elapsed(start, NdbTick_getCurrentTicks()).nanoSec() <
+           delayNs) {
+    }
+  }
 }
 
 /**
@@ -45396,7 +45457,7 @@ void Dblqh::redoCopyOut(LogPartRecord *logPartPtrP, bool filledOnly) {
     bytes += redoCopyPage(logPartPtrP, filePtrP, curPagePtr.p, pageNo, word,
                           curPagePtr.p->logPageWord[ZCURR_PAGE_INDEX]);
   }
-  ndb_pmem_drain();
+  redoPmemFence(logPartPtrP);
   redoCountPersist(logPartPtrP, bytes, timed ? &start : nullptr);
 
   pagePtr.i = filePtrP->firstFilledPage;
@@ -45470,6 +45531,81 @@ void Dblqh::redoPersist(Signal *signal, LogPartRecord *logPartPtrP) {
 }
 
 /**
+ * S5.8: the barrier at a C place of E8 (impl_step1_lqh_write.md), where
+ * X4 keeps it for durable operations: the COMMIT that a dependent signal
+ * waits for is persistent before the signal. One barrier persists the
+ * whole log part, so the other COMMITs written since are persistent too.
+ * With the log part locked. In a debug build DUMP 2368 4 skips the next
+ * one, and the check before the dependent signal stops the node.
+ */
+void Dblqh::redoPersistCommit(Signal *signal, LogPartRecord *logPartPtrP,
+                              const TcConnectionrec *regTcPtr) {
+  if (regTcPtr->m_redo_end_lsn <= logPartPtrP->m_pmem_persisted_lsn) return;
+#if defined(VM_TRACE) || defined(ERROR_INSERT)
+  if (unlikely(c_redo_pmem_skip_barrier)) {
+    jam();
+    c_redo_pmem_skip_barrier = false;
+    g_eventLogger->info(
+        "LDM(%u): PMEM REDO: DUMP 2368 4 skips the barrier of a COMMIT in "
+        "log part %u",
+        instance(), logPartPtrP->logPartNo);
+    return;
+  }
+#endif
+  redoPersist(signal, logPartPtrP);
+}
+
+/* S5.8: redoPersistCommit() at commitReqLab, which takes the lock */
+void Dblqh::redoPersistOp(Signal *signal, const TcConnectionrec *regTcPtr) {
+  LogPartRecord *const logPartPtrP = regTcPtr->m_log_part_ptr_p;
+  lock_log_part(logPartPtrP);
+  redoPersistCommit(signal, logPartPtrP, regTcPtr);
+  unlock_log_part(logPartPtrP);
+}
+
+/* S5.7: a dependent signal would go before its REDO record is persistent */
+void Dblqh::redoCheckPersistedFailed(const TcConnectionrec *regTcPtr,
+                                     Uint64 persisted, Uint32 line) {
+  const LogPartRecord *const logPartPtrP = regTcPtr->m_log_part_ptr_p;
+  char buf[200];
+  BaseString::snprintf(
+      buf, sizeof(buf),
+      "PMEM REDO: the signal at line %u waits for a REDO record that is "
+      "not persistent: log part %u, record end LSN %llu, persisted LSN %llu",
+      line, logPartPtrP->logPartNo,
+      (unsigned long long)regTcPtr->m_redo_end_lsn,
+      (unsigned long long)persisted);
+  g_eventLogger->error("LDM(%u): %s", instance(), buf);
+  progError(__LINE__, NDBD_EXIT_PRGERR, buf);
+}
+
+/**
+ * DUMP 2368 2 (S5.8): the counters of ndbinfo redo_log_pmem of a log
+ * part, to the cluster log: the persists, the bytes stored, the FILLER
+ * bytes, and the persist time of one persist in 16.
+ */
+void Dblqh::redoPmemPrintCounters(const LogPartRecord *logPartPtrP) {
+  const LogPartRecord::RedoPmemStats &s = logPartPtrP->m_pmem_stats;
+  char buf[400];
+  BaseString::snprintf(
+      buf, sizeof(buf),
+      "PMEM REDO log part %u: %llu persists, %llu bytes stored, %llu filler "
+      "bytes; persist time of %llu: <=250ns %llu, <=500ns %llu, <=1us %llu, "
+      "<=2us %llu, <=4us %llu, <=8us %llu, <=16us %llu, >16us %llu; persist "
+      "at commit %s",
+      logPartPtrP->logPartNo, (unsigned long long)s.barriers,
+      (unsigned long long)s.bytes_copied, (unsigned long long)s.filler_bytes,
+      (unsigned long long)s.lat_samples, (unsigned long long)s.lat_hist[0],
+      (unsigned long long)s.lat_hist[1], (unsigned long long)s.lat_hist[2],
+      (unsigned long long)s.lat_hist[3], (unsigned long long)s.lat_hist[4],
+      (unsigned long long)s.lat_hist[5], (unsigned long long)s.lat_hist[6],
+      (unsigned long long)s.lat_hist[7],
+      c_redo_pmem_persist_commit != 0 ? "on" : "off");
+  g_eventLogger->info("LDM(%u): %s", instance(), buf);
+  infoEvent("%s", buf);
+}
+
+/**
  * S5.3: page 0 of a new file at a file switch, in its log page after
  * initLogpage(): the FD and its FILLER (S4.6), persistent; then the
  * last-file slot, persistent before the first record of the file (W3).
@@ -45517,7 +45653,7 @@ void Dblqh::redoCopyPageZero(LogPageRecordPtr logPagePtr,
   std::memset(&page[end], 0, sizeof(Uint32) * (unitEnd - end));
   const Uint32 bytes =
       redoCopyPage(logPartPtrP, logFilePtr.p, logPagePtr.p, 0, 0, unitEnd);
-  ndb_pmem_drain();
+  redoPmemFence(logPartPtrP);
   redoCountPersist(logPartPtrP, bytes, nullptr);
 }
 
@@ -45562,7 +45698,8 @@ void Dblqh::redoPmemInitFile(LogPageRecordPtr logPagePtr,
   ndb_pmem_copy_nt(redoPmemAddr(logFilePtr.p, 0, PmemRedo::CTRL_CONFIG_WORD),
                    line, sizeof(line));
   bytes += sizeof(line);
-  ndb_pmem_drain();
+  logPartPtrP->m_pmem_unfenced += sizeof(line);
+  redoPmemFence(logPartPtrP);
   redoCountPersist(logPartPtrP, bytes, nullptr);
 
   /* The dirty-shutdown count of the REDO path, which the slots record */
@@ -45596,7 +45733,8 @@ void Dblqh::redoWriteLastFileSlot(LogPartRecord *logPartPtrP, Uint32 fileNo,
                       logPartPtrP->m_pmem_dsc_flags);
   ndb_pmem_copy_nt(redoPmemAddr(file0Ptr.p, 0, PmemRedo::slotWord(seq)), line,
                    sizeof(line));
-  ndb_pmem_drain();
+  logPartPtrP->m_pmem_unfenced += sizeof(line);
+  redoPmemFence(logPartPtrP);
   redoCountPersist(logPartPtrP, sizeof(line), nullptr);
   logPartPtrP->m_pmem_slot_seq = seq;
 }
@@ -46377,18 +46515,72 @@ void Dblqh::execDUMP_STATE_ORD(Signal *signal) {
   if (arg == DumpStateOrd::LqhRedoPmem) {
     jam();
     /**
-     * RONDB-1150, RedoLogMode=pmem: 3 = persist each log part of this LDM
-     * and check its log through the mappings (redoPmemVerify()). The
-     * other sub-commands come with the benchmark switch (S5.8).
+     * RONDB-1150, RedoLogMode=pmem (impl_step1_lqh_write.md S5.8), sent
+     * to every LDM:
+     *   0, 1  the benchmark switch off or on: a barrier at the C places
+     *         of E8 for every COMMIT
+     *   2     the counters of each log part of this LDM to the cluster log
+     *   3     persist each log part of this LDM and check its log through
+     *         the mappings (redoPmemVerify())
+     *   4     debug builds: skip the next barrier at a C place, so that
+     *         the check before the dependent signal stops the node (S5.7)
      */
     const Uint32 cmd = signal->getLength() >= 2 ? signal->theData[1] : ~0u;
-    if (cmd == 3 && c_redo_pmem_format && !m_is_query_block) {
-      LogPartRecordPtr logPartPtr;
-      for (logPartPtr.i = 0; logPartPtr.i < clogPartFileSize;
-           logPartPtr.i++) {
-        ptrAss(logPartPtr, logPartRecord);
-        redoPmemVerify(signal, logPartPtr.p);
+    if (m_is_query_block) return;
+    if (!c_redo_pmem_format) {
+      if (instance() <= 1) {
+        infoEvent("DUMP 2368: RedoLogMode=pmem is not used on node %u",
+                  getOwnNodeId());
       }
+      return;
+    }
+    LogPartRecordPtr logPartPtr;
+    switch (cmd) {
+      case 0:
+      case 1:
+        jam();
+        c_redo_pmem_persist_commit = cmd;
+        if (instance() <= 1) {
+          infoEvent("PMEM REDO: persist at commit %s on node %u",
+                    cmd != 0 ? "on" : "off", getOwnNodeId());
+        }
+        break;
+      case 2:
+        jam();
+        for (logPartPtr.i = 0; logPartPtr.i < clogPartFileSize;
+             logPartPtr.i++) {
+          ptrAss(logPartPtr, logPartRecord);
+          redoPmemPrintCounters(logPartPtr.p);
+        }
+        break;
+      case 3:
+        jam();
+        for (logPartPtr.i = 0; logPartPtr.i < clogPartFileSize;
+             logPartPtr.i++) {
+          ptrAss(logPartPtr, logPartRecord);
+          redoPmemVerify(signal, logPartPtr.p);
+        }
+        break;
+#if defined(VM_TRACE) || defined(ERROR_INSERT)
+      case 4:
+        jam();
+        c_redo_pmem_skip_barrier = true;
+        if (instance() <= 1) {
+          infoEvent("PMEM REDO: the next barrier at commit is skipped on "
+                    "node %u",
+                    getOwnNodeId());
+        }
+        break;
+#endif
+      default:
+        jam();
+        if (instance() <= 1) {
+          infoEvent("DUMP 2368 %u: unknown, use 0|1 (persist at commit), "
+                    "2 (counters), 3 (verify) or 4 (skip a barrier, debug "
+                    "builds)",
+                    cmd);
+        }
+        break;
     }
     return;
   }

@@ -2107,6 +2107,13 @@ class Dblqh : public SimulatedBlock {
      */
     Uint64 m_pmem_persisted_lsn;
     /**
+     * RONDB-1150, PMEM format (S5.6): bytes stored to the mapping by the
+     * write path and not yet fenced. Every function that stores fences
+     * before it returns, so it is 0 whenever the log part is unlocked,
+     * which unlock_log_part() checks in debug builds.
+     */
+    Uint32 m_pmem_unfenced;
+    /**
      * RONDB-1150, PMEM format: the seq of the last-file slot written last
      * (PmemRedoFormat.hpp), and the dirty-shutdown count and the
      * SLOT_F_* flags that the next slot records.
@@ -4349,10 +4356,11 @@ private:
    * S4.8, S5.2-S5.4): the copy of the log pages to the mapping, the
    * persist, page 0 of a file, the initial images and the last-file slot.
    */
-  Uint32 redoCopyPage(const LogPartRecord *logPartPtrP,
+  Uint32 redoCopyPage(LogPartRecord *logPartPtrP,
                       const LogFileRecord *logFilePtrP,
                       const LogPageRecord *logPagePtrP, Uint32 pageNo,
                       Uint32 from, Uint32 to);
+  void redoPmemFence(LogPartRecord *logPartPtrP);
   void redoCopyOut(LogPartRecord *logPartPtrP, bool filledOnly);
   void redoEndOfRecord(LogPartRecord *logPartPtrP,
                        const LogFileRecord *logFilePtrP);
@@ -4360,6 +4368,19 @@ private:
   void redoPersist(Signal *signal, LogPartRecord *logPartPtrP);
   void redoCountPersist(LogPartRecord *logPartPtrP, Uint64 bytes,
                         const NDB_TICKS *start);
+  /**
+   * RONDB-1150, PMEM format: the barriers at the C places of E8 and the
+   * check of the signals that depend on them (impl_step1_lqh_write.md
+   * S5.7, S5.8); with the benchmark switch in step 1, for durable
+   * operations from X4.
+   */
+  void redoPersistCommit(Signal *signal, LogPartRecord *logPartPtrP,
+                         const TcConnectionrec *regTcPtr);
+  void redoPersistOp(Signal *signal, const TcConnectionrec *regTcPtr);
+  void redoCheckPersisted(const TcConnectionrec *regTcPtr, Uint32 line);
+  [[noreturn]] void redoCheckPersistedFailed(const TcConnectionrec *regTcPtr,
+                                             Uint64 persisted, Uint32 line);
+  void redoPmemPrintCounters(const LogPartRecord *logPartPtrP);
   void writeFileHeaderOpenPmem(LogPageRecordPtr &logPagePtr,
                                LogFileRecordPtr logFilePtr,
                                LogPartRecord *logPartPtrP);
@@ -5633,6 +5654,18 @@ public:
    * PMEM mode.
    */
   bool c_redo_pmem_format;
+  /**
+   * RONDB-1150, PMEM format (impl_step1_lqh_write.md S5.8, Q-A11):
+   * c_redo_pmem_persist_commit is the benchmark switch of DUMP 2368 0|1,
+   * a barrier at the C places of E8 for every COMMIT;
+   * c_redo_pmem_skip_barrier skips the next of them (DUMP 2368 4, debug
+   * builds), so that redoCheckPersisted() fails; and
+   * c_redo_pmem_persist_delay_ns is __RedoLogPmemPersistDelayNs, the
+   * time each persist waits after its fence.
+   */
+  Uint32 c_redo_pmem_persist_commit;
+  bool c_redo_pmem_skip_barrier;
+  Uint32 c_redo_pmem_persist_delay_ns;
   /**
    * PMEM mode: the NUMA node of this LDM thread (-1 if its CPUs span
    * nodes or it is not known) and the REDO path of its log parts,
@@ -6910,10 +6943,37 @@ inline void Dblqh::lock_log_part(LogPartRecord *logPartPtrP) {
 }
 
 inline void Dblqh::unlock_log_part(LogPartRecord *logPartPtrP) {
+  /* RONDB-1150 (S5.6): no store to the mapping is left unfenced */
+  ndbassert(logPartPtrP->m_pmem_unfenced == 0);
   if (qt_likely(m_use_mutex_for_log_parts)) {
     jamDebug();
     NdbMutex_Unlock(&logPartPtrP->m_log_part_mutex);
   }
+}
+
+/**
+ * RONDB-1150, PMEM format (impl_step1_lqh_write.md S5.7): before a
+ * signal that depends on the operation's REDO record, the record is
+ * persistent, if a dependent signal waits for it (m_redo_end_lsn): in
+ * step 1 a COMMIT written with the benchmark switch on, from X4 a durable
+ * one. Debug and error-insert builds only.
+ */
+inline void Dblqh::redoCheckPersisted(const TcConnectionrec *regTcPtr,
+                                      Uint32 line) {
+#if defined(VM_TRACE) || defined(ERROR_INSERT)
+  const Uint64 end = regTcPtr->m_redo_end_lsn;
+  if (end == 0) return;
+  LogPartRecord *const logPartPtrP = regTcPtr->m_log_part_ptr_p;
+  lock_log_part(logPartPtrP);
+  const Uint64 persisted = logPartPtrP->m_pmem_persisted_lsn;
+  unlock_log_part(logPartPtrP);
+  if (end > persisted) {
+    redoCheckPersistedFailed(regTcPtr, persisted, line);
+  }
+#else
+  (void)regTcPtr;
+  (void)line;
+#endif
 }
 
 inline void Dblqh::get_tc_ref(Uint32 tcPtrI,
@@ -6992,6 +7052,8 @@ Dblqh::lock_log_part(LogPartRecord *logPartPtrP,
 inline void Dblqh::unlock_log_part(LogPartRecord *logPartPtrP,
                                    EmulatedJamBuffer *jamBuf)
 {
+  /* RONDB-1150 (S5.6): no store to the mapping is left unfenced */
+  ndbassert(logPartPtrP->m_pmem_unfenced == 0);
   if (qt_likely(m_use_mutex_for_log_parts))
   {
     thrjamDebug(jamBuf);
