@@ -2540,14 +2540,14 @@ class Dblqh : public SimulatedBlock {
     UintR lastFilledPage;
     /**
      *       This variable keeps track of the last written page in the
-     *       file while writing page zero in file zero when changing log
-     *       file.
+     *       file in this lap: the page of the last completed write.
+     *       Set to page 0, the file descriptor, when logging moves to
+     *       the file; valid once the file change is done.
      */
     UintR lastPageWritten;
     /**
      *       This variable keeps track of the last written word in the
-     *       last page written in the file while writing page zero in
-     *       file zero when changing log file.
+     *       last page written in the file, as lastPageWritten.
      */
     UintR lastWordWritten;
     /**

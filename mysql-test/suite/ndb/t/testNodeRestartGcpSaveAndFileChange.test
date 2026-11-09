@@ -4,3 +4,14 @@
 let NDBAPITEST_NAME=testNodeRestart;
 let NDBAPITEST_ARGS=-n GCPSaveAndFileChange --records=2000 T3;
 --source suite/ndb/include/run_ndbapitest.inc
+
+# The GCP save must go on once the writes have stopped. A graceful
+# system restart waits for it: a GCP save left waiting for a REDO write
+# that never comes (a log part whose GCP position is the end of page 0
+# of a new REDO file) holds the shutdown until the GCP monitor stops a
+# node, after minutes.
+let $waiter_timeout_stop = 60;
+--source suite/ndb/include/restart_cluster.inc
+--source include/ndb_not_readonly.inc
+# restart_cluster.inc writes to $NDB_TOOLS_OUTPUT
+--remove_file $NDB_TOOLS_OUTPUT

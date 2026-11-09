@@ -34539,7 +34539,12 @@ void Dblqh::initGcpRecLab(Signal *signal) {
       /*       IF NO WORD HAS BEEN WRITTEN ON THE CURRENT */
       /*       FILEPAGE.                                  */
       /*--------------------------------------------------*/
-      gcpPtr.p->gcpPageNo[logPartPtr.i] = logFilePtr.p->currentFilepage - 1;
+      /* Page 0 of a file that was not open in time (it gets the file
+         descriptor when opened) has no page before it: the end of
+         page 0, which writePageZeroLab() reaches */
+      const Uint32 currentFilepage = logFilePtr.p->currentFilepage;
+      gcpPtr.p->gcpPageNo[logPartPtr.i] =
+          currentFilepage > 0 ? currentFilepage - 1 : 0;
       gcpPtr.p->gcpWordNo[logPartPtr.i] = ZPAGE_SIZE - 1;
     } else {
       jam();
@@ -34557,6 +34562,30 @@ void Dblqh::initGcpRecLab(Signal *signal) {
     gcpPtr.p->gcpPageNo[Ti] = ZNIL;
     gcpPtr.p->gcpSyncReady[Ti] = false;
     gcpPtr.p->gcpWordNo[Ti] = ZNIL;
+  }
+  /**
+   * A log part whose file has already written its position is done now:
+   * that write completed before the GCP record was set up, and
+   * timeSup() does not write an empty page, so no later write would
+   * report it and the GCP save would wait until the next log record. It
+   * happens when logging has just moved to a new file; the position is
+   * then the end of page 0, written by the file change. While the file
+   * change goes on, writePageZeroLab() checks at its end instead.
+   */
+  for (logPartPtr.i = 0; logPartPtr.i < clogPartFileSize; logPartPtr.i++) {
+    jam();
+    ptrAss(logPartPtr, logPartRecord);
+    lock_log_part(logPartPtr.p);
+    logFilePtr.i = gcpPtr.p->gcpFilePtr[logPartPtr.i];
+    ptrCheckGuard(logFilePtr, clogFileFileSize, logFileRecord);
+    if (logPartPtr.p->gcprec != RNIL &&
+        logFilePtr.p->fileChangeState == LogFileRecord::NOT_ONGOING) {
+      jam();
+      checkGcpCompleted(signal, logFilePtr.p->lastPageWritten,
+                        logFilePtr.p->lastWordWritten, logFilePtr,
+                        logPartPtr.p);
+    }
+    unlock_log_part(logPartPtr.p);
   }
 }  // Dblqh::initGcpRecLab()
 
@@ -35640,6 +35669,10 @@ void Dblqh::writeLogfileLab(Signal *signal, LogFileOperationRecordPtr lfoPtr,
   switch (logFilePtr.p->fileChangeState) {
     case LogFileRecord::NOT_ONGOING:
       jam();
+      /* For a GCP record set up after this write, initGcpRecLab() */
+      logFilePtr.p->lastPageWritten =
+          (lfoPtr.p->lfoPageNo + lfoPtr.p->noPagesRw) - 1;
+      logFilePtr.p->lastWordWritten = lfoPtr.p->lfoWordWritten;
       checkGcpCompleted(signal,
                         ((lfoPtr.p->lfoPageNo + lfoPtr.p->noPagesRw) - 1),
                         lfoPtr.p->lfoWordWritten, logFilePtr, logPartPtrP);
@@ -36146,6 +36179,7 @@ void Dblqh::initLogfile(LogFileRecordPtr logFilePtr, Uint32 partNo,
   logFilePtr.p->firstFilledPage = RNIL;
   logFilePtr.p->lastFilledPage = RNIL;
   logFilePtr.p->lastPageWritten = 0;
+  logFilePtr.p->lastWordWritten = ZPAGE_SIZE - 1;
   logFilePtr.p->logPageZero = RNIL;
   logFilePtr.p->currentMbyte = 0;
   for (tilIndex = 0; tilIndex < clogFileSize; tilIndex++) {
@@ -44777,7 +44811,15 @@ void Dblqh::writeNextLog(Signal *signal, LogPageRecordPtr &logPagePtr,
   seizeLogpage(logPagePtr, logPartPtrP);
   if (logFilePtr.p->currentMbyte == 0) {
     jam();
+    /**
+     * Page 0 is the file descriptor, written by the file change. The
+     * word too: writePageZeroLab() and initGcpRecLab() compare a GCP
+     * position at the end of page 0 with it, and a value left from the
+     * last lap would make the GCP save wait for a write that may never
+     * come.
+     */
     logFilePtr.p->lastPageWritten = 0;
+    logFilePtr.p->lastWordWritten = ZPAGE_SIZE - 1;
     if (logFilePtr.p->fileNo == 0) {
       jam();
       releaseLogpage(logPagePtr, logPartPtrP);
