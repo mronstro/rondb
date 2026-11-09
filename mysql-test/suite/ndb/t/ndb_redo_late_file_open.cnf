@@ -1,0 +1,11 @@
+!include ../my.cnf
+
+# Small REDO files, so that a log part gets to file 4 after 16 MB; 64 MB
+# per log part, so that the REDO log does not force an LCP before 43 MB,
+# with room for a second run under --repeat; no LCP on the number of
+# words written, so that the system restart executes all of the REDO log
+# of the test.
+[cluster_config.1]
+NoOfFragmentLogFiles=16
+FragmentLogFileSize=4M
+TimeBetweenLocalCheckpoints=31

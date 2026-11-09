@@ -1,0 +1,22 @@
+CREATE TABLE t1 (a INT PRIMARY KEY, b VARBINARY(14000), c INT)
+ENGINE=NDB PARTITION BY KEY(a) PARTITIONS 1;
+INSERT INTO t1 VALUES (0, '', 0);
+== 1 == transactions that take a log part to file 4
+SELECT COUNT(*), MIN(c), MAX(c), SUM(c) FROM t1 WHERE a > 0;
+COUNT(*)	MIN(c)	MAX(c)	SUM(c)
+1300	1	1300	845650
+SELECT c, LENGTH(b), LEFT(b, 1) FROM t1 WHERE a = 0;
+c	LENGTH(b)	LEFT(b, 1)
+1300	14000	A
+== 2 == logging moved to a file before it was open
+Node 1: yes
+Node 2: yes
+== 3 == the system restart executes the REDO log
+# System restart:
+SELECT COUNT(*), MIN(c), MAX(c), SUM(c) FROM t1 WHERE a > 0;
+COUNT(*)	MIN(c)	MAX(c)	SUM(c)
+1300	1	1300	845650
+SELECT c, LENGTH(b), LEFT(b, 1) FROM t1 WHERE a = 0;
+c	LENGTH(b)	LEFT(b, 1)
+1300	14000	A
+DROP TABLE t1;
