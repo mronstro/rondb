@@ -1,0 +1,60 @@
+--source include/have_ndb.inc
+
+# RONDB-1150 phase 9 (impl_step1_lqh_write.md S5.6-S5.8, Q-A11): 3 LDM
+# threads write in 4 REDO log parts in PMEM mode, so a log part is also
+# written by LDMs that do not own it, under the log part mutex, and every
+# store to the mapping must be fenced before the part is unlocked. Each
+# persist waits 3000 ns after its fence (__RedoLogPmemPersistDelayNs).
+# The writes go with the benchmark switch off, on (DUMP 2368 1: a persist
+# at every COMMIT, which a debug build checks before each signal that
+# depends on it), and off again. DUMP 2368 2 prints the counters of each
+# log part, and DUMP 2368 3 reads each log part back through the mapping.
+
+let $cluster = $MYSQLTEST_VARDIR/mysql_cluster.1;
+
+--echo == 1 == the log parts are shared under a mutex
+--exec grep -q "need to use a mutex to access REDO log parts" $cluster/ndbd.1/ndbd.log
+--exec grep -q "need to use a mutex to access REDO log parts" $cluster/ndbd.2/ndbd.log
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT, c VARCHAR(100)) ENGINE=NDB;
+
+--echo == 2 == writes with the benchmark switch off
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+                            WHERE n < 500)
+  SELECT n, n, REPEAT('x', 100) FROM seq;
+UPDATE t1 SET b = b + 1;
+
+--echo == 3 == writes with the benchmark switch on
+--exec $NDB_MGM -e "all dump 2368 1" >> $NDB_TOOLS_OUTPUT
+--sleep 1
+UPDATE t1 SET b = b + 1;
+DELETE FROM t1 WHERE a > 400;
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 401 UNION ALL SELECT n + 1 FROM seq
+                            WHERE n < 500)
+  SELECT n, n, REPEAT('y', 100) FROM seq;
+--exec $NDB_MGM -e "all dump 2368 2" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "all dump 2368 0" >> $NDB_TOOLS_OUTPUT
+--sleep 1
+
+--echo == 4 == writes with the benchmark switch off again
+UPDATE t1 SET b = b + 1 WHERE a <= 100;
+SELECT COUNT(*), SUM(b) FROM t1;
+
+--exec $NDB_MGM -e "all dump 2368 3" >> $NDB_TOOLS_OUTPUT
+--sleep 2
+--echo == 5 == the counters of each log part, printed with the switch on
+--exec grep -c "PMEM REDO log part .*persist at commit on" $cluster/ndbd.1/ndbd.log
+--exec grep -c "PMEM REDO log part .*persist at commit on" $cluster/ndbd.2/ndbd.log
+--echo == 6 == no persist took less than the delay
+--exec grep -c "<=250ns 0, <=500ns 0, <=1us 0, <=2us 0," $cluster/ndbd.1/ndbd.log
+--exec grep -c "<=250ns 0, <=500ns 0, <=1us 0, <=2us 0," $cluster/ndbd.2/ndbd.log
+--echo == 7 == every log part reads back through the mapping to its end
+--exec grep -c "PMEM REDO verify ok" $cluster/ndbd.1/ndbd.log
+--exec grep -c "PMEM REDO verify ok" $cluster/ndbd.2/ndbd.log
+--error 1
+--exec grep "PMEM REDO verify failed" $cluster/ndbd.1/ndbd.log $cluster/ndbd.2/ndbd.log
+
+DROP TABLE t1;
+--remove_file $NDB_TOOLS_OUTPUT

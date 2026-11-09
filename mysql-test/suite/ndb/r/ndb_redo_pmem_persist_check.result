@@ -1,0 +1,17 @@
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=NDB;
+INSERT INTO t1 VALUES (1,1), (2,2), (3,3);
+== 1 == the benchmark switch on, the checks pass
+UPDATE t1 SET b = b + 1;
+== 2 == node 1 skips its next barrier, and the check stops it
+== 3 == node 1 comes back by a node restart
+== 4 == every log part reads back through the mapping to its end
+4
+4
+SELECT a, b FROM t1 WHERE a > 1 ORDER BY a;
+a	b
+2	3
+3	4
+SELECT b IN (2, 3) AS committed_or_not FROM t1 WHERE a = 1;
+committed_or_not
+1
+DROP TABLE t1;

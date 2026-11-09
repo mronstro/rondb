@@ -7,10 +7,10 @@
 # Node 1: FileSystemPathRedoLog in file mode, a warning.
 # Node 2: PMEM mode without FileSystemPathRedoLog, a warning.
 # Node 3: PMEM mode, one path per NUMA node; sparse becomes full.
-# Node 4: the three test settings, a warning each.
+# Node 4: the four test settings, a warning each.
 echo == 1 == accepted;
 --replace_regex /.*\[ndb_config\]//
---exec $NDB_CONFIG --config-file=$MYSQL_TEST_DIR/suite/ndb/ndb_redo_pmem_config.ini --query=NodeId,RedoLogMode,InitFragmentLogFiles,__RedoLogPmemTestMode,__RedoLogPmemPowerLossEmulation,__RedoLogPmemCopyMethod --type=ndbd 2>&1
+--exec $NDB_CONFIG --config-file=$MYSQL_TEST_DIR/suite/ndb/ndb_redo_pmem_config.ini --query=NodeId,RedoLogMode,InitFragmentLogFiles,__RedoLogPmemTestMode,__RedoLogPmemPowerLossEmulation,__RedoLogPmemCopyMethod,__RedoLogPmemPersistDelayNs --type=ndbd 2>&1
 
 echo == 2 == FileSystemPathRedoLog;
 --exec $NDB_CONFIG --config-file=$MYSQL_TEST_DIR/suite/ndb/ndb_redo_pmem_config.ini --query=FileSystemPathRedoLog --nodeid=1 2> /dev/null

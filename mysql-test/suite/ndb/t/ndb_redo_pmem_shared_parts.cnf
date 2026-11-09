@@ -1,0 +1,12 @@
+!include ../my.cnf
+
+# RONDB-1150 phase 9 (S5.6, S5.8, Q-A11): PMEM mode with 3 LDM threads
+# and 4 REDO log parts, so that a log part is also written by LDMs that do
+# not own it, under the log part mutex; each persist waits 3000 ns after
+# its fence. A cluster of its own for the counts of the DUMP 2368 lines.
+[cluster_config.1]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+__RedoLogPmemPersistDelayNs=3000
+NoOfFragmentLogParts=4
+ThreadConfig=main={count=1},tc={count=3},ldm={count=3},io={count=1},rep={count=1},recv={count=2},send={count=2}

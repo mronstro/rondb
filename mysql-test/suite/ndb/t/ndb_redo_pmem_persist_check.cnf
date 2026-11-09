@@ -1,0 +1,9 @@
+!include ../my.cnf
+
+# RONDB-1150 phase 9 (S5.7): PMEM mode, and a data node that the check
+# of a dependent signal stops comes back by a node restart, as its angel
+# starts it again with StopOnError=0.
+[cluster_config.1]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+StopOnError=0
