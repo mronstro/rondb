@@ -1,0 +1,77 @@
+--source include/have_ndb.inc
+--source have_ndb_error_insert.inc
+
+# Error insert 5090 holds the open of REDO file 4 of the first log part
+# that gets to file 3, until logging moves to file 4: the log part then
+# writes to a file that is not open yet. Page 0 of the file is its file
+# descriptor, written when the open completes; the log records written
+# before that must go on page 1 and after, and not be lost under the
+# file descriptor. A system restart then executes the REDO log of the
+# test, as no LCP has got to t1 (TimeBetweenLocalCheckpoints=31). Under
+# --repeat, the log part goes on from where the last run left it, and
+# the file opened late is a later one, which no restart has opened.
+
+# One fragment: all the writes go to one log part in each data node
+CREATE TABLE t1 (a INT PRIMARY KEY, b VARBINARY(14000), c INT)
+  ENGINE=NDB PARTITION BY KEY(a) PARTITIONS 1;
+INSERT INTO t1 VALUES (0, '', 0);
+
+# The ends of the data node logs, so that only lines of this run count
+--perl
+  use strict;
+  my $cluster = "$ENV{MYSQLTEST_VARDIR}/mysql_cluster.1";
+  my $file = "$ENV{MYSQLTEST_VARDIR}/tmp/ndb_redo_late_file_open.offsets";
+  open(my $out, '>', $file) or die "Cannot open $file: $!\n";
+  foreach my $node (1, 2) {
+    print $out ((-s "$cluster/ndbd.$node/ndbd.log") || 0), "\n";
+  }
+  close($out);
+EOF
+--exec $NDB_MGM -e "all error 5090" >> $NDB_TOOLS_OUTPUT
+
+# Each transaction logs about 14 KB: 1300 of them take the log part past
+# the 16 MB of files 0-3. A row a = i for each, which a lost record of
+# the transaction would be missing after the system restart.
+--echo == 1 == transactions that take a log part to file 4
+--disable_query_log
+let $i = 1;
+while ($i <= 1300) {
+  BEGIN;
+  eval UPDATE t1 SET b = REPEAT(CHAR(65 + $i % 26), 14000), c = $i
+    WHERE a = 0;
+  eval INSERT INTO t1 VALUES ($i, NULL, $i);
+  COMMIT;
+  inc $i;
+}
+--enable_query_log
+SELECT COUNT(*), MIN(c), MAX(c), SUM(c) FROM t1 WHERE a > 0;
+SELECT c, LENGTH(b), LEFT(b, 1) FROM t1 WHERE a = 0;
+
+--echo == 2 == logging moved to a file before it was open
+--perl
+  use strict;
+  my $cluster = "$ENV{MYSQLTEST_VARDIR}/mysql_cluster.1";
+  my $file = "$ENV{MYSQLTEST_VARDIR}/tmp/ndb_redo_late_file_open.offsets";
+  open(my $in, '<', $file) or die "Cannot open $file: $!\n";
+  chomp(my @offsets = <$in>);
+  close($in);
+  foreach my $node (1, 2) {
+    my $log = "$cluster/ndbd.$node/ndbd.log";
+    open(my $fh, '<', $log) or die "Cannot open $log: $!\n";
+    seek($fh, $offsets[$node - 1], 0);
+    my $found = grep { /moved to file \d+ before the file was open/ } <$fh>;
+    close($fh);
+    print "Node $node: ", ($found ? "yes" : "no"), "\n";
+  }
+EOF
+--remove_file $MYSQLTEST_VARDIR/tmp/ndb_redo_late_file_open.offsets
+--exec $NDB_MGM -e "all error 0" >> $NDB_TOOLS_OUTPUT
+
+--echo == 3 == the system restart executes the REDO log
+--source suite/ndb/include/restart_cluster.inc
+--source include/ndb_not_readonly.inc
+SELECT COUNT(*), MIN(c), MAX(c), SUM(c) FROM t1 WHERE a > 0;
+SELECT c, LENGTH(b), LEFT(b, 1) FROM t1 WHERE a = 0;
+
+DROP TABLE t1;
+--remove_file $NDB_TOOLS_OUTPUT

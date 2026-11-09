@@ -2557,6 +2557,10 @@ class Dblqh : public SimulatedBlock {
     /**
      *       A reference to page zero in this file.
      *       This page is written before the file is closed.
+     *       In another file than file 0, page zero only while logging
+     *       has moved to the file before it was open: it is written
+     *       when the open completes (writeFileHeaderOpen()). RNIL
+     *       otherwise.
      */
     UintR logPageZero;
     /**

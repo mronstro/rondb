@@ -34539,12 +34539,9 @@ void Dblqh::initGcpRecLab(Signal *signal) {
       /*       IF NO WORD HAS BEEN WRITTEN ON THE CURRENT */
       /*       FILEPAGE.                                  */
       /*--------------------------------------------------*/
-      /* Page 0 of a file that was not open in time (it gets the file
-         descriptor when opened) has no page before it: the end of
-         page 0, which writePageZeroLab() reaches */
-      const Uint32 currentFilepage = logFilePtr.p->currentFilepage;
-      gcpPtr.p->gcpPageNo[logPartPtr.i] =
-          currentFilepage > 0 ? currentFilepage - 1 : 0;
+      /* Page 0 is the file descriptor, never the current page */
+      ndbassert(logFilePtr.p->currentFilepage > 0);
+      gcpPtr.p->gcpPageNo[logPartPtr.i] = logFilePtr.p->currentFilepage - 1;
       gcpPtr.p->gcpWordNo[logPartPtr.i] = ZPAGE_SIZE - 1;
     } else {
       jam();
@@ -35423,11 +35420,21 @@ void Dblqh::initFsopenconf(Signal *signal, LogFileRecordPtr &logFilePtr,
     jam();
     /* The PMEM format switches file at once, all files mapped (S5.3) */
     ndbassert(!c_redo_pmem_format);
+    /**
+     * Logging moved to this file before it was open: page 0 with the file
+     * descriptor waits in logPageZero (writeFileHeaderOpen()), the log
+     * records written since are on page 1 and after.
+     */
     LogPageRecordPtr logPagePtr;
-    logPagePtr.i = logFilePtr.p->currentLogpage;
+    logPagePtr.i = logFilePtr.p->logPageZero;
     ptrCheckGuard(logPagePtr, logPartPtr.p->logPageFileSize,
                   logPartPtr.p->logPageRecord);
-    writeFileHeaderOpen(signal, ZNORMAL, logPagePtr, logFilePtr, logPartPtr.p);
+    logFilePtr.p->logPageZero = RNIL;
+    LogFileOperationRecordPtr lfoPtr;
+    writeSinglePage(signal, 0, ZPAGE_SIZE - 1, __LINE__, true, lfoPtr,
+                    logPagePtr, logFilePtr, logPartPtr.p);
+    lfoPtr.p->lfoState = LogFileOperationRecord::FIRST_PAGE_WRITE_IN_LOGFILE;
+    logFilePtr.p->filePosition = 1;
     openNextLogfile(signal, logFilePtr.p, logPartPtr.p);
 
     if (logFilePtr.p->fileChangeState == LogFileRecord::WAIT_FOR_OPEN_NEXT_FILE)
@@ -36169,6 +36176,13 @@ void Dblqh::initLogfile(LogFileRecordPtr logFilePtr, Uint32 partNo,
    */
   logFilePtr.p->fileNo = fileNo;
   logFilePtr.p->filePosition = 0;
+  /**
+   * Not open: writeNextLog() takes RNIL for a file whose open has not
+   * completed. A file that a restart does not open would otherwise
+   * keep the 0 of the allocation, and logging could move to it before
+   * it was open with writes to file pointer 0.
+   */
+  logFilePtr.p->fileRef = RNIL;
   logFilePtr.p->m_pmem_base = nullptr;
   logFilePtr.p->m_pmem_fileRef = RNIL;
   logFilePtr.p->firstLfo = RNIL;
@@ -36834,11 +36848,23 @@ void Dblqh::writeFileHeaderOpen(Signal *signal, Uint32 wmoType,
     writeSinglePage(signal, 0, ZPAGE_SIZE - 1, __LINE__, false, lfoPtr,
                     logPagePtr, logFilePtr, logPartPtrP);
     lfoPtr.p->lfoState = LogFileOperationRecord::INIT_FIRST_PAGE;
-  } else {
+  } else if (logFilePtr.p->fileRef != RNIL) {
     jam();
     writeSinglePage(signal, 0, ZPAGE_SIZE - 1, __LINE__, true, lfoPtr,
                     logPagePtr, logFilePtr, logPartPtrP);
     lfoPtr.p->lfoState = LogFileOperationRecord::FIRST_PAGE_WRITE_IN_LOGFILE;
+  } else {
+    /**
+     * Logging moved to a file that is not open yet (writeNextLog()).
+     * Page 0 gets the file descriptor now all the same, and the log
+     * records go on page 1 and after; page 0 waits in logPageZero until
+     * initFsopenconf() writes it. Records put in page 0 meanwhile would
+     * be lost under the file descriptor written at the open.
+     */
+    jam();
+    ndbrequire(logFilePtr.p->fileNo != 0 &&
+               logFilePtr.p->logPageZero == RNIL);
+    logFilePtr.p->logPageZero = logPagePtr.i;
   }  // if
   logFilePtr.p->filePosition = 1;
   if (wmoType == ZNORMAL) {
@@ -44862,8 +44888,14 @@ void Dblqh::writeNextLog(Signal *signal, LogPageRecordPtr &logPagePtr,
       delayOpenFilePtrI = 0;
     }
 #endif
-    if (logFilePtr.p->fileRef == RNIL) {
+    const bool fileOpen = (logFilePtr.p->fileRef != RNIL);
+    writeFileHeaderOpen(signal, ZNORMAL, logPagePtr, logFilePtr, logPartPtrP);
+    if (!fileOpen) {
       jam();
+      g_eventLogger->info(
+          "LDM(%u): REDO log part %u moved to file %u before the file was"
+          " open",
+          instance(), logPartPtrP->logPartNo, logFilePtr.p->fileNo);
       logFilePtr.p->fileChangeState = LogFileRecord::WAIT_FOR_OPEN_NEXT_FILE;
       update_log_problem(signal, logPartPtrP,
                          LogPartRecord::P_FILE_CHANGE_PROBLEM,
@@ -44871,7 +44903,6 @@ void Dblqh::writeNextLog(Signal *signal, LogPageRecordPtr &logPagePtr,
       // This problem will be cleared by writePageZeroLab() when the file
       // is opened and the zero page is written.
     } else {
-      writeFileHeaderOpen(signal, ZNORMAL, logPagePtr, logFilePtr, logPartPtrP);
       openNextLogfile(signal, logFilePtr.p, logPartPtrP);
       logFilePtr.p->fileChangeState = LogFileRecord::BOTH_WRITES_ONGOING;
     }
