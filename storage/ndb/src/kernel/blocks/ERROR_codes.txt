@@ -293,7 +293,13 @@ Insert system error in GCP participant when receiving GCP_SAVEREQ.
 Delay GCP_SAVEREQ by 10 secs
 
 5090:
-Delay opening next redo log file.
+Delay opening next redo log file, until the log part waits at the
+end of the file before it.
+
+5173:
+Delay opening next redo log file until the error insert is cleared:
+the log part waits at the end of the file before it, and its commit,
+abort and GCI records wait there as if the file were full.
 
 RONDB-1150, RedoLogMode=pmem: crash error inserts of the REDO log on
 persistent memory (impl_step1_recovery_test.md S7.1). Each stops the

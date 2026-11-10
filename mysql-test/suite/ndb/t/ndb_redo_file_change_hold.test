@@ -1,0 +1,119 @@
+--source include/have_ndb.inc
+--source have_ndb_error_insert.inc
+
+# A REDO log part may go to the next file only once the change to its
+# file is done and the next file is open. Error insert 5173 in data node
+# 1 holds the open of the next REDO file until it is cleared, and makes
+# the commit, abort and GCI records wait at the end of the file before it
+# as if the file were full. Updates of a 14 KB row take the log part of
+# node 1 to the end of that file, where it waits: the prepare records are
+# queued, the commit records wait in the log queue, and the COMMIT of a
+# transaction of 1000 rows waits with them.
+#
+# 1: the error insert is cleared, the open completes, the records go on
+#    in the next file and the COMMIT returns. A system restart finds all
+#    the rows.
+# 2: both data nodes stop while the commit records wait. The GCI of the
+#    transaction was never saved: the system restart finds the REDO log
+#    of every saved GCI, and none of the rows of the transaction.
+
+# One fragment: all the writes go to one log part in each data node
+CREATE TABLE t1 (a INT PRIMARY KEY, b VARBINARY(14000), c INT)
+  ENGINE=NDB PARTITION BY KEY(a) PARTITIONS 1;
+INSERT INTO t1 VALUES (0, '', 0);
+# Updates of row 0 until an update fails or the user lock is taken
+delimiter |;
+CREATE PROCEDURE fill()
+BEGIN
+  DECLARE i INT DEFAULT 0;
+  DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN END;
+  WHILE i < 1500 AND IS_FREE_LOCK('ndb_redo_file_change_hold') DO
+    UPDATE t1 SET b = REPEAT(CHAR(65 + i % 26), 14000), c = c + 1
+      WHERE a = 0;
+    SET i = i + 1;
+  END WHILE;
+END|
+delimiter ;|
+
+--echo == 1 == the commit records wait at the end of a file, then go on
+connect (con1,localhost,root,,test);
+connect (con2,localhost,root,,test);
+--connection con1
+let REDO_HOLD_STEP = save;
+--source suite/ndb/include/redo_file_change_hold.inc
+BEGIN;
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+                            WHERE n < 1000)
+  SELECT n, NULL, n FROM seq;
+--exec $NDB_MGM -e "1 error 5173" >> $NDB_TOOLS_OUTPUT
+# The update that waits may fail, with warnings that vary
+--disable_warnings
+--connection con2
+send CALL fill();
+--connection default
+let REDO_HOLD_STEP = check;
+--source suite/ndb/include/redo_file_change_hold.inc
+--connection con1
+send COMMIT;
+--connection default
+# Time for the commit records to get to the log queue
+--sleep 2
+SELECT GET_LOCK('ndb_redo_file_change_hold', 0);
+--exec $NDB_MGM -e "1 error 0" >> $NDB_TOOLS_OUTPUT
+--connection con1
+reap;
+--connection con2
+reap;
+--enable_warnings
+--disconnect con1
+--disconnect con2
+--connection default
+SELECT RELEASE_LOCK('ndb_redo_file_change_hold');
+SELECT COUNT(*), MAX(a), SUM(c - a) FROM t1 WHERE a > 0;
+--source suite/ndb/include/restart_cluster.inc
+--source include/ndb_not_readonly.inc
+SELECT COUNT(*), MAX(a), SUM(c - a) FROM t1 WHERE a > 0;
+
+--echo == 2 == both data nodes stop while the commit records wait
+connect (con1,localhost,root,,test);
+connect (con2,localhost,root,,test);
+--connection con1
+let REDO_HOLD_STEP = save;
+--source suite/ndb/include/redo_file_change_hold.inc
+BEGIN;
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1001 UNION ALL SELECT n + 1 FROM seq
+                            WHERE n < 2000)
+  SELECT n, NULL, n FROM seq;
+--exec $NDB_MGM -e "1 error 5173" >> $NDB_TOOLS_OUTPUT
+--disable_warnings
+--connection con2
+send CALL fill();
+--connection default
+let REDO_HOLD_STEP = check;
+--source suite/ndb/include/redo_file_change_hold.inc
+--connection con1
+send COMMIT;
+--connection default
+--sleep 2
+--exec $NDB_MGM -e "all restart -n -a" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "all start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+--source include/ndb_not_readonly.inc
+--connection con1
+--error 1180,1205,1296,1297
+reap;
+--connection con2
+reap;
+--enable_warnings
+--disconnect con1
+--disconnect con2
+--connection default
+SELECT COUNT(*), MAX(a), SUM(c - a) FROM t1 WHERE a > 0;
+
+DROP PROCEDURE fill;
+DROP TABLE t1;
+--remove_file $MYSQLTEST_VARDIR/tmp/ndb_redo_file_change_hold.offset
+--remove_file $NDB_TOOLS_OUTPUT

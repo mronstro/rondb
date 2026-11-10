@@ -1,0 +1,50 @@
+CREATE TABLE t1 (a INT PRIMARY KEY, b VARBINARY(14000), c INT)
+ENGINE=NDB PARTITION BY KEY(a) PARTITIONS 1;
+INSERT INTO t1 VALUES (0, '', 0);
+CREATE PROCEDURE fill()
+BEGIN
+DECLARE i INT DEFAULT 0;
+DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN END;
+WHILE i < 1500 AND IS_FREE_LOCK('ndb_redo_file_change_hold') DO
+UPDATE t1 SET b = REPEAT(CHAR(65 + i % 26), 14000), c = c + 1
+WHERE a = 0;
+SET i = i + 1;
+END WHILE;
+END|
+== 1 == the commit records wait at the end of a file, then go on
+BEGIN;
+INSERT INTO t1
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+WHERE n < 1000)
+SELECT n, NULL, n FROM seq;
+CALL fill();
+Node 1: waited at the end of a file yes, records waited yes
+COMMIT;
+SELECT GET_LOCK('ndb_redo_file_change_hold', 0);
+GET_LOCK('ndb_redo_file_change_hold', 0)
+1
+SELECT RELEASE_LOCK('ndb_redo_file_change_hold');
+RELEASE_LOCK('ndb_redo_file_change_hold')
+1
+SELECT COUNT(*), MAX(a), SUM(c - a) FROM t1 WHERE a > 0;
+COUNT(*)	MAX(a)	SUM(c - a)
+1000	1000	0
+# System restart:
+SELECT COUNT(*), MAX(a), SUM(c - a) FROM t1 WHERE a > 0;
+COUNT(*)	MAX(a)	SUM(c - a)
+1000	1000	0
+== 2 == both data nodes stop while the commit records wait
+BEGIN;
+INSERT INTO t1
+WITH RECURSIVE seq(n) AS (SELECT 1001 UNION ALL SELECT n + 1 FROM seq
+WHERE n < 2000)
+SELECT n, NULL, n FROM seq;
+CALL fill();
+Node 1: waited at the end of a file yes, records waited yes
+COMMIT;
+Got one of the listed errors
+SELECT COUNT(*), MAX(a), SUM(c - a) FROM t1 WHERE a > 0;
+COUNT(*)	MAX(a)	SUM(c - a)
+1000	1000	0
+DROP PROCEDURE fill;
+DROP TABLE t1;
