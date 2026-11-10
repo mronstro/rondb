@@ -1,0 +1,13 @@
+!include ../my.cnf
+
+# RONDB-1150 phase 10: small REDO files, so that the load of the NDBT
+# tests crosses mbytes and files; LCPs all the time, so that the tail
+# moves; GCP saves twice a second, so that a COMPLETED_GCI soon starts an
+# mbyte (error insert 5051).
+[cluster_config.1]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+NoOfFragmentLogFiles=6
+FragmentLogFileSize=4M
+TimeBetweenLocalCheckpoints=6
+TimeBetweenGlobalCheckpoints=500

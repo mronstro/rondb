@@ -1,0 +1,39 @@
+CREATE TABLE t1 (a INT PRIMARY KEY, b VARCHAR(255)) ENGINE=NDB;
+SET SESSION cte_max_recursion_depth = 4000;
+INSERT INTO t1
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+WHERE n < 4000)
+SELECT n, REPEAT('a', 250) FROM seq;
+SET SESSION cte_max_recursion_depth = DEFAULT;
+== 1 == updates that switch mbyte and file in every log part
+== 2 == node 2 stops at once; the reader finds the end of each log
+== 3 == the reader checks every record of each file of log part 0
+File 0: control area 1, valid slots 2, last file 1
+--transid: only the records of the transaction
+== 4 == options that the PMEM format does not take
+Error: PART0/S0.FragLog is in the PMEM format, which --file-key and --twiddle do not apply to
+Error: --transid takes two numbers, T1,T2
+== 5 == node 2 restarts; phase 1 finds the same end of each log
+Node 2 log part 0: the restart found the reader's end
+Node 2 log part 1: the restart found the reader's end
+Node 2 log part 2: the restart found the reader's end
+Node 2 log part 3: the restart found the reader's end
+SELECT COUNT(*), SUM(LENGTH(b)), MIN(b) = MAX(b) AS same, LEFT(MIN(b), 1) AS c
+FROM t1;
+COUNT(*)	SUM(LENGTH(b))	same	c
+4000	1000000	1	B
+== 6 == all data nodes stop at once; the reader finds each end
+== 7 == system restart; phase 1 finds the same end of each log
+Node 1 log part 0: the restart found the reader's end
+Node 1 log part 1: the restart found the reader's end
+Node 1 log part 2: the restart found the reader's end
+Node 1 log part 3: the restart found the reader's end
+Node 2 log part 0: the restart found the reader's end
+Node 2 log part 1: the restart found the reader's end
+Node 2 log part 2: the restart found the reader's end
+Node 2 log part 3: the restart found the reader's end
+SELECT COUNT(*), SUM(LENGTH(b)), MIN(b) = MAX(b) AS same, LEFT(MIN(b), 1) AS c
+FROM t1;
+COUNT(*)	SUM(LENGTH(b))	same	c
+4000	1000000	1	b
+DROP TABLE t1;

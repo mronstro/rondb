@@ -38,6 +38,7 @@
 #include "my_dir.h"
 
 #include "kernel/signaldata/FsOpenReq.hpp"
+#include "pmem_reader.hpp"
 #include "portlib/ndb_file.h"
 #include "records.hpp"
 #include "util/ndb_openssl_evp.h"
@@ -73,6 +74,9 @@ Uint32 startAtMbyte = 0;
 Uint32 startAtPage = 0;
 Uint32 startAtPageIndex = 0;
 Uint32 *redoLogPage;
+// RONDB-1150: options of the PMEM format only
+static const char *opt_find_end = nullptr;
+static const char *opt_transid = nullptr;
 
 unsigned NO_MBYTE_IN_FILE = 16;
 
@@ -98,6 +102,11 @@ static struct my_option my_long_options[] = {
     {"filedescriptors", NDB_OPT_NOSHORT, "Print file descriptors only",
      &onlyFileDesc, nullptr, nullptr, GET_BOOL, NO_ARG, 0, 0, 0, nullptr, 0,
      nullptr},
+    {"find-end", NDB_OPT_NOSHORT,
+     "PMEM format: print the end of the log of a log part as a restart "
+     "finds it, from the files S0.FragLog .. in this directory",
+     &opt_find_end, nullptr, nullptr, GET_STR, REQUIRED_ARG, 0, 0, 0, nullptr,
+     0, nullptr},
     {"lap", NDB_OPT_NOSHORT,
      "Provide lap info, with max GCI started and completed", &onlyLap, nullptr,
      nullptr, GET_BOOL, NO_ARG, 0, 0, 0, nullptr, 0, nullptr},
@@ -119,6 +128,10 @@ static struct my_option my_long_options[] = {
      8191, nullptr, 0, nullptr},
     {"print", NDB_OPT_NOSHORT, "Print records", &thePrintFlag, nullptr, nullptr,
      GET_BOOL, NO_ARG, 1, 0, 0, nullptr, 0, nullptr},
+    {"transid", NDB_OPT_NOSHORT,
+     "PMEM format: print only the records of this transaction, T1,T2",
+     &opt_transid, nullptr, nullptr, GET_STR, REQUIRED_ARG, 0, 0, 0, nullptr,
+     0, nullptr},
     {"twiddle", NDB_OPT_NOSHORT, "Bit-shifted dump", &theTwiddle, nullptr,
      nullptr, GET_BOOL, NO_ARG, 0, 0, 0, nullptr, 0, nullptr},
     NdbStdOpt::end_of_options};
@@ -143,6 +156,7 @@ static bool get_one_option(int optid, const struct my_option *opt,
 static void print_utility_help() {
   ndbout << "\nThis command reads a redo log file, checking it for errors, "
             "printing its contents in a human-readable format, or both.";
+  ndbout << "\nA file written with RedoLogMode=pmem is read in that format.";
 }
 
 [[noreturn]] inline void ndb_end_and_exit(int exitcode) {
@@ -199,12 +213,60 @@ int main(int argc, char **argv) {
   NextMbyteRecord *nmRecord;
   AbortTransactionRecord *atRecord;
 
+  if (opt_find_end != nullptr) {
+    if (argc != 0) {
+      print_utility_help();
+      opts.usage();
+      ndb_end_and_exit(1);
+    }
+    ndb_end_and_exit(pmem_find_end_main(opt_find_end));
+  }
+
   if (argc != 1 || strlen(argv[0]) >= sizeof(fileName)) {
     print_utility_help();
     opts.usage();
     ndb_end_and_exit(1);
   }
   strcpy(fileName, argv[0]);
+
+  PmemReaderOptions pmemOpts = {thePrintFlag,     theCheckFlag,
+                                theDumpFlag,      onlyPageHeaders,
+                                onlyMbyteHeaders, onlyFileDesc,
+                                onlyLap,          startAtMbyte,
+                                false,            {0, 0}};
+  if (opt_transid != nullptr) {
+    char *end = nullptr;
+    const unsigned long long t1 = strtoull(opt_transid, &end, 0);
+    unsigned long long t2 = 0;
+    bool ok = end != opt_transid && *end == ',';
+    if (ok) {
+      const char *second = end + 1;
+      t2 = strtoull(second, &end, 0);
+      ok = end != second && *end == '\0';
+    }
+    if (!ok || t1 > 0xFFFFFFFF || t2 > 0xFFFFFFFF) {
+      fprintf(stderr, "Error: --transid takes two numbers, T1,T2\n");
+      ndb_end_and_exit(1);
+    }
+    pmemOpts.transidFilter = true;
+    pmemOpts.transid[0] = Uint32(t1);
+    pmemOpts.transid[1] = Uint32(t2);
+  }
+  if (pmem_redo_file(fileName)) {
+    // RONDB-1150: a file of RedoLogMode=pmem, never encrypted
+    if (opt_file_key_state.get_key() != nullptr || theTwiddle) {
+      fprintf(stderr,
+              "Error: %s is in the PMEM format, which --file-key and "
+              "--twiddle do not apply to\n",
+              fileName);
+      ndb_end_and_exit(RETURN_ERROR);
+    }
+    ndb_end_and_exit(pmem_reader_main(fileName, pmemOpts));
+  }
+  if (opt_transid != nullptr) {
+    fprintf(stderr, "Error: --transid applies to the PMEM format only\n");
+    ndb_end_and_exit(RETURN_ERROR);
+  }
 
   int r;
   r = file.open(fileName, FsOpenReq::OM_READONLY);

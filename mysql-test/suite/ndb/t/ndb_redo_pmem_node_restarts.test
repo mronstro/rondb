@@ -1,0 +1,66 @@
+--source include/have_ndb.inc
+--source have_ndb_error_insert.inc
+
+# RONDB-1150 phase 10 (recovery plan S6.7, part of test A2): node
+# restarts from the REDO log in the PMEM format. A node restart reads its
+# own log with the code of a system restart (phase 8c), up to the node's
+# own GCI. Bug44952 crashes a node where a COMPLETED_GCI starts an mbyte
+# (error insert 5051) while the other node takes updates, then crashes it
+# three times in its restart, at its first GCP save after the log is read
+# (5052). RestartRandomNodeError crashes a node (9999) and restarts it;
+# RestartAllNodesAbort stops both at once, a system restart.
+
+# NDBT creates TEST_DB.T1 directly through the NDB API. Keep both
+# mysqlds stopped so metadata discovery cannot import the API table;
+# on a case-insensitive file system it retries CREATE DATABASE TEST_DB
+# after each system restart and fails.
+--connect(s2,127.0.0.1,root,,test,$MASTER_MYPORT1,)
+--connection default
+--echo # Shutting down mysqld 1
+--let $mysqld_name=mysqld.1.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld1_file_name= $_expect_file_name
+
+--connection s2
+--echo # Shutting down mysqld 2
+--let $mysqld_name=mysqld.2.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld2_file_name= $_expect_file_name
+
+let NDBAPITEST_CLEANUP_QUERY=;
+let NDBAPITEST_NAME=testNodeRestart;
+
+--echo == 1 == a crash where an mbyte starts, then crashes in the restart
+let NDBAPITEST_ARGS=-n Bug44952 -l 1 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+--echo == 2 == a node crashes and restarts, twice
+let NDBAPITEST_ARGS=-n RestartRandomNodeError -l 2 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+--echo == 3 == both nodes stop at once
+let NDBAPITEST_ARGS=-n RestartAllNodesAbort -l 1 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+--echo == 4 == the restarts read the log in the PMEM format
+--exec grep -q "PMEM REDO log part 0: last file" $MYSQLTEST_VARDIR/mysql_cluster.1/ndbd.1/ndbd.log
+--exec grep -q "PMEM REDO log part 0: last file" $MYSQLTEST_VARDIR/mysql_cluster.1/ndbd.2/ndbd.log
+--error 1
+--exec grep -E "Error while reading (the )?REDO log" $MYSQLTEST_VARDIR/mysql_cluster.1/ndbd.1/ndbd.log $MYSQLTEST_VARDIR/mysql_cluster.1/ndbd.2/ndbd.log
+
+# NDBT drops T1 before reporting success. With no metadata discovery
+# during the test, there is no SQL TEST_DB schema to clean up.
+--connection default
+--echo # Starting mysqld 1
+--let $_expect_file_name= $expect_mysqld1_file_name
+--let $mysqld_name=mysqld.1.1
+--source include/start_mysqld.inc
+
+--connection s2
+--echo # Starting mysqld 2
+--let $_expect_file_name= $expect_mysqld2_file_name
+--let $mysqld_name=mysqld.2.1
+--source include/start_mysqld.inc
+
+--connection default
+--disconnect s2

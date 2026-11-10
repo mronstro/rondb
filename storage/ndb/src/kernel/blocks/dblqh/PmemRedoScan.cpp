@@ -207,6 +207,18 @@ LastMbyte findLastMbyte(const PartView &v, Uint32 fileNo, Uint32 lap) {
   return res;
 }
 
+void formatEnd(char *buf, size_t size, Uint32 logPartNo, Uint32 lastFileNo,
+               Uint32 lap, Uint64 slotSeq, Uint32 lastMbyte,
+               const ScanResult &scan) {
+  snprintf(buf, size,
+           "PMEM REDO log part %u: last file %u in lap %u (slot seq %llu), "
+           "last mbyte %u; end of the log at file %u page %u word %u in lap "
+           "%u (%s) after %u records",
+           logPartNo, lastFileNo, lap, (unsigned long long)slotSeq, lastMbyte,
+           scan.end.fileNo, scan.end.pageNo, scan.end.pageIndex, scan.end.lap,
+           reasonName(scan.reason), scan.records);
+}
+
 Uint32 checkCtrlConfig(const Uint32 *line, const Geom &g, Uint32 noParts,
                        Uint32 nodeId, char *msg, size_t size) {
   if (line[CTRL_W_MAGIC] != CTRL_MAGIC) {
