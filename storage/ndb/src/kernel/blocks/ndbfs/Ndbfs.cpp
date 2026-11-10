@@ -356,9 +356,24 @@ void Ndbfs::read_redo_pmem_config(const ndb_mgm_configuration_iterator *p,
     }
   }
   if (power_loss_emul != 0) {
-    ERROR_SET(fatal, NDBD_EXIT_INVALID_CONFIG,
-              "__RedoLogPmemPowerLossEmulation is not implemented yet",
-              "__RedoLogPmemPowerLossEmulation");
+    /**
+     * RONDB-1150 (platform plan S1.5, recovery plan S7.3), before the
+     * first mapping: every stop of this process but a graceful shutdown
+     * loses the REDO writes that are not persistent (NdbShutdown()). 16384
+     * pending lines per thread are 1 MB of the log, the most that a
+     * restart zeroes between two drains.
+     */
+    constexpr Uint32 EMUL_MAX_PENDING = 16384;
+    if (ndb_pmem_emul_enable(EMUL_MAX_PENDING) != 0) {
+      ERROR_SET(fatal, NDBD_EXIT_INVALID_CONFIG,
+                "__RedoLogPmemPowerLossEmulation could not be turned on",
+                "__RedoLogPmemPowerLossEmulation");
+    }
+    g_eventLogger->warning(
+        "RedoLogMode=pmem: __RedoLogPmemPowerLossEmulation=1, a test "
+        "setting: every crash or abort restart of this data node loses the "
+        "REDO log writes that are not yet persistent, as a power loss "
+        "would");
   }
   if (ndb_pmem_init(ndb_pmem_copy_method(copy_method)) != 0) {
     BaseString msg;

@@ -1,0 +1,92 @@
+--source include/have_ndb.inc
+--source have_ndb_error_insert.inc
+
+# RONDB-1150 phase 11a (platform plan S1.5, recovery plan S7.3): the
+# power-loss emulation of the REDO log in PMEM mode. Every write to a
+# mapping keeps the old bytes of its lines until a drain of the writing
+# thread makes them persistent. Every stop of a data node but a graceful
+# shutdown is then a power loss: of the lines not yet persistent some
+# are kept, some torn and the rest restored. DUMP 2370 stops both data
+# nodes so, and an abort restart stops one so, while updates run. A
+# restart must find each GCP that was saved before, and every UPDATE
+# is one transaction, so that all rows hold the same value.
+
+let $cluster = $MYSQLTEST_VARDIR/mysql_cluster.1;
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b VARCHAR(255)) ENGINE=NDB;
+SET SESSION cte_max_recursion_depth = 4000;
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+                            WHERE n < 4000)
+  SELECT n, REPEAT('a', 250) FROM seq;
+SET SESSION cte_max_recursion_depth = DEFAULT;
+delimiter |;
+CREATE PROCEDURE upd(n INT)
+BEGIN
+  DECLARE i INT DEFAULT 0;
+  WHILE i < n DO
+    UPDATE t1 SET b = REPEAT(CHAR(65 + i % 26), 250);
+    SET i = i + 1;
+  END WHILE;
+END|
+delimiter ;|
+
+# The node logs from here on
+--perl
+  use strict;
+  my $cluster = "$ENV{MYSQLTEST_VARDIR}/mysql_cluster.1";
+  my $file = "$ENV{MYSQLTEST_VARDIR}/tmp/ndb_redo_pmem_power_loss.offsets";
+  open(my $out, '>', $file) or die "Cannot open $file: $!\n";
+  foreach my $node (1, 2) {
+    print $out ((-s "$cluster/ndbd.$node/ndbd.log") || 0), "\n";
+  }
+  close($out);
+EOF
+
+--echo == 1 == a power loss of both data nodes while updates run
+--exec_in_background $MYSQL test -e "CALL upd(200)" > /dev/null 2>&1
+--sleep 3
+# Stop at the power loss, so that both nodes are down before the start
+--exec $NDB_MGM -e "all dump 2602 1" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "all dump 2370 0 500 100" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "all start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+--source include/ndb_not_readonly.inc
+SELECT COUNT(*), SUM(LENGTH(b)), MIN(b) = MAX(b) AS same FROM t1;
+
+--echo == 2 == an abort restart of node 1 while updates run
+--exec_in_background $MYSQL test -e "CALL upd(40)" > /dev/null 2>&1
+--sleep 2
+--exec $NDB_MGM -e "1 restart -n -a" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --wait-nodes=1 --not-started >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "1 start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+SELECT COUNT(*), SUM(LENGTH(b)), MIN(b) = MAX(b) AS same FROM t1;
+
+# Node 1 lost the power twice, node 2 once
+--echo == 3 == each stop was a power loss of the REDO log
+--perl
+  use strict;
+  my $cluster = "$ENV{MYSQLTEST_VARDIR}/mysql_cluster.1";
+  my $file = "$ENV{MYSQLTEST_VARDIR}/tmp/ndb_redo_pmem_power_loss.offsets";
+  open(my $in, '<', $file) or die "Cannot open $file: $!\n";
+  chomp(my @offsets = <$in>);
+  close($in);
+  unlink($file);
+  foreach my $node (1, 2) {
+    my $log = "$cluster/ndbd.$node/ndbd.log";
+    open(my $fh, '<', $log) or die "Cannot open $log: $!\n";
+    seek($fh, $offsets[$node - 1], 0);
+    my $losses = grep { /Power loss of the REDO log \(__RedoLogPmemPowerLossEmulation\)/ } <$fh>;
+    close($fh);
+    print "Node $node: $losses\n";
+  }
+EOF
+
+let $wait_condition = SELECT COUNT(*) = 0 FROM information_schema.processlist
+  WHERE info LIKE 'CALL upd%';
+--source include/wait_condition.inc
+DROP PROCEDURE upd;
+DROP TABLE t1;
+--remove_file $NDB_TOOLS_OUTPUT

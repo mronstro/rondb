@@ -32,6 +32,7 @@
 #include <NdbEnv.h>
 #include <NdbSleep.h>
 #include <portlib/NdbNuma.h>
+#include <portlib/ndb_pmem.h>
 #include <NdbAutoPtr.hpp>
 #include <portlib/NdbDir.hpp>
 
@@ -1442,6 +1443,24 @@ extern Uint32 g_currentStartPhase;
 
 void NdbShutdown(int error_code, NdbShutdownType type,
                  NdbRestartType restartType) {
+  /**
+   * RONDB-1150 (recovery plan S7.3): with __RedoLogPmemPowerLossEmulation
+   * every stop but a graceful shutdown is a power loss of the REDO log.
+   * Every error, the signal handler, a restart, an abort and the watchdog
+   * come here. The writes to persistent memory stop, and those that no
+   * drain made persistent are restored, kept or torn.
+   */
+  if (type != NST_Normal && ndb_pmem_emul_active()) {
+    ndb_pmem_emul_on_crash();
+    ndb_pmem_emul_stats st;
+    ndb_pmem_emul_get_stats(&st);
+    g_eventLogger->info(
+        "Power loss of the REDO log (__RedoLogPmemPowerLossEmulation): of "
+        "the lines not persistent %llu restored, %llu torn, %llu kept; %u "
+        "of %u writing threads not stopped",
+        (unsigned long long)st.reverted, (unsigned long long)st.torn,
+        (unsigned long long)st.kept, st.not_parked, st.threads);
+  }
   globalData.theStopFlag = true;
   if (type == NST_ErrorInsert) {
     type = NST_Restart;

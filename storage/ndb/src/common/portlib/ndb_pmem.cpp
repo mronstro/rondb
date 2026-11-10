@@ -28,8 +28,13 @@
 #include <assert.h>
 #include <errno.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <atomic>
+#include <chrono>
+#include <thread>
+#include <unordered_map>
+#include <vector>
 
 #ifndef _WIN32
 #include <sys/mman.h>
@@ -344,6 +349,192 @@ inline void drain_cpu() { std::atomic_thread_fence(std::memory_order_seq_cst); }
 
 #endif
 
+/*
+ * Power-loss emulation (platform plan S1.5). Each thread that writes has a
+ * list of its pending lines, oldest first, with the pre-image of each and
+ * an index by address. The thread locks its own list during a write, so
+ * that a freeze, which takes every list's lock, waits for the writes under
+ * way and stops all later ones. The locks are spin locks that a signal
+ * handler can try. The lists are never freed; the registry only grows.
+ */
+
+struct EmulLine {
+  uintptr_t addr;
+  bool flushed;  // written back: persistent at this thread's next drain
+  Uint8 pre[NDB_PMEM_LINE];
+};
+
+class EmulLock {
+ public:
+  bool try_lock() { return !m_held.exchange(true, std::memory_order_acquire); }
+  void lock() {
+    while (!try_lock()) std::this_thread::yield();
+  }
+  /* At least one try, then until the deadline */
+  bool lock_until(std::chrono::steady_clock::time_point deadline) {
+    while (!try_lock()) {
+      if (std::chrono::steady_clock::now() >= deadline) return false;
+      std::this_thread::yield();
+    }
+    return true;
+  }
+  void unlock() { m_held.store(false, std::memory_order_release); }
+
+ private:
+  std::atomic<bool> m_held{false};
+};
+
+struct EmulList {
+  EmulLock lock;
+  bool frozen = false;  // its lock is held by the freeze
+  std::vector<EmulLine> lines;
+  size_t first = 0;  // lines before it are no longer pending
+  std::unordered_map<uintptr_t, size_t> index;
+  ndb_pmem_emul_stats stats{};
+
+  size_t pending() const { return lines.size() - first; }
+};
+
+constexpr Uint32 EMUL_MAX_THREADS = 1024;
+std::atomic<bool> g_emul_active{false};
+std::atomic<bool> g_emul_frozen{false};
+Uint32 g_emul_max_pending = 0;
+EmulList *g_emul_lists[EMUL_MAX_THREADS];
+std::atomic<Uint32> g_emul_list_count{0};
+EmulLock g_emul_register_lock;
+std::atomic<Uint32> g_emul_not_parked{0};
+std::atomic<Uint64> g_emul_crash_seed{0};
+std::atomic<Uint32> g_emul_crash_keep{0};
+std::atomic<Uint32> g_emul_crash_tear{0};
+std::atomic<int> g_emul_crash_state{0};  // 1: under way, 2: done
+
+/* Small, as libndbclient has static TLS */
+thread_local EmulList *t_emul_list = nullptr;
+thread_local bool t_emul_in_write = false;
+
+inline bool emul_on() {
+  return unlikely(g_emul_active.load(std::memory_order_relaxed));
+}
+
+Uint64 emul_rand(Uint64 *state) {
+  Uint64 z = (*state += 0x9E3779B97F4A7C15ULL);
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+  return z ^ (z >> 31);
+}
+
+Uint32 emul_list_count() {
+  return g_emul_list_count.load(std::memory_order_acquire);
+}
+
+/* This thread's list, registered at its first write */
+EmulList *emul_list() {
+  EmulList *l = t_emul_list;
+  if (likely(l != nullptr)) return l;
+  l = new EmulList();
+  l->lines.reserve(g_emul_max_pending + 1);
+  l->index.reserve(2 * size_t(g_emul_max_pending));
+  g_emul_register_lock.lock();
+  const Uint32 n = g_emul_list_count.load(std::memory_order_relaxed);
+  if (n < EMUL_MAX_THREADS) {
+    g_emul_lists[n] = l;
+    g_emul_list_count.store(n + 1, std::memory_order_release);
+  } else {
+    fprintf(stderr,
+            "ndb_pmem: power-loss emulation: more than %u threads write, "
+            "the writes of this one are not emulated\n",
+            EMUL_MAX_THREADS);
+  }
+  g_emul_register_lock.unlock();
+  t_emul_list = l;
+  return l;
+}
+
+/* This thread's list, locked for a write; waits forever once frozen */
+EmulList *emul_begin() {
+  EmulList *l = emul_list();
+  l->lock.lock();
+  while (g_emul_frozen.load(std::memory_order_acquire) && !l->frozen) {
+    /* A list that the freeze did not take: registered after it */
+    l->lock.unlock();
+    std::this_thread::yield();
+    l->lock.lock();
+  }
+  t_emul_in_write = true;
+  return l;
+}
+
+void emul_end(EmulList *l) {
+  t_emul_in_write = false;
+  l->lock.unlock();
+}
+
+/* Debug aid: a line pending in two threads, two writers between fences */
+void emul_check_shared(EmulList *l, uintptr_t addr) {
+  const Uint32 n = emul_list_count();
+  for (Uint32 i = 0; i < n; i++) {
+    EmulList *o = g_emul_lists[i];
+    if (o == l || !o->lock.try_lock()) continue;
+    const bool found = o->index.find(addr) != o->index.end();
+    o->lock.unlock();
+    if (found) {
+      static std::atomic<bool> reported{false};
+      if (!reported.exchange(true)) {
+        fprintf(stderr,
+                "ndb_pmem: power-loss emulation: line %p is pending in two "
+                "threads\n",
+                (void *)addr);
+      }
+      l->stats.shared++;
+      return;
+    }
+  }
+}
+
+/* The lines of [start, end) are written; flushed: they are written back */
+void emul_record(EmulList *l, uintptr_t start, uintptr_t end, bool flushed) {
+  for (uintptr_t a = line_down(start); a < end; a += NDB_PMEM_LINE) {
+    const auto it = l->index.find(a);
+    if (it != l->index.end()) {
+      l->lines[it->second].flushed = flushed;
+      continue;
+    }
+    if (l->pending() >= g_emul_max_pending) {
+      l->index.erase(l->lines[l->first].addr);
+      l->first++;
+      l->stats.evicted_early++;
+    }
+    emul_check_shared(l, a);
+    EmulLine e;
+    e.addr = a;
+    e.flushed = flushed;
+    memcpy(e.pre, (const void *)a, NDB_PMEM_LINE);
+    l->index.emplace(a, l->lines.size());
+    l->lines.push_back(e);
+    l->stats.written++;
+  }
+}
+
+/* The pending lines that drop() selects are no longer pending */
+template <class Drop>
+Uint64 emul_compact(EmulList *l, Drop drop) {
+  Uint64 dropped = 0;
+  size_t out = 0;
+  for (size_t i = l->first; i < l->lines.size(); i++) {
+    if (drop(l->lines[i])) {
+      dropped++;
+      continue;
+    }
+    if (out != i) l->lines[out] = l->lines[i];
+    out++;
+  }
+  l->lines.resize(out);
+  l->first = 0;
+  l->index.clear();
+  for (size_t i = 0; i < out; i++) l->index.emplace(l->lines[i].addr, i);
+  return dropped;
+}
+
 }  // namespace
 
 int ndb_pmem_init(ndb_pmem_copy_method m) {
@@ -442,6 +633,21 @@ int ndb_pmem_map(int fd, size_t len, unsigned flags, ndb_pmem_mapping *out) {
 
 int ndb_pmem_unmap(ndb_pmem_mapping *m) {
   int res = 0;
+  if (emul_on() && m->addr != nullptr) {
+    /* The pending lines of the mapping stay as they are: persistent */
+    const uintptr_t start = (uintptr_t)m->addr;
+    const uintptr_t end = start + m->len;
+    const Uint32 n = emul_list_count();
+    for (Uint32 i = 0; i < n; i++) {
+      EmulList *l = g_emul_lists[i];
+      if (l->frozen) continue;
+      l->lock.lock();
+      l->stats.persisted += emul_compact(l, [&](const EmulLine &e) {
+        return e.addr >= start && e.addr < end;
+      });
+      l->lock.unlock();
+    }
+  }
 #ifndef _WIN32
   if (m->addr != nullptr && munmap(m->addr, m->len) != 0) res = errno;
 #endif
@@ -490,11 +696,19 @@ int ndb_pmem_lock(void *addr, size_t len) {
 void ndb_pmem_copy_nt(void *dst, const void *src, size_t len) {
   assert(((uintptr_t)dst % NDB_PMEM_LINE) == 0);
   assert((len % NDB_PMEM_LINE) == 0);
+  if (emul_on()) {
+    EmulList *l = emul_begin();
+    emul_record(l, (uintptr_t)dst, (uintptr_t)dst + len, true);
+    method()->copy(dst, src, len);
+    emul_end(l);
+    return;
+  }
   method()->copy(dst, src, len);
 }
 
-void ndb_pmem_store32(Uint32 *dst, Uint32 v) {
-  assert(((uintptr_t)dst % sizeof(Uint32)) == 0);
+namespace {
+
+inline void store32(Uint32 *dst, Uint32 v) {
 #ifdef __GNUC__
   __atomic_store_n(dst, v, __ATOMIC_RELAXED);
 #else
@@ -502,8 +716,7 @@ void ndb_pmem_store32(Uint32 *dst, Uint32 v) {
 #endif
 }
 
-void ndb_pmem_store64(Uint64 *dst, Uint64 v) {
-  assert(((uintptr_t)dst % sizeof(Uint64)) == 0);
+inline void store64(Uint64 *dst, Uint64 v) {
 #ifdef __GNUC__
   __atomic_store_n(dst, v, __ATOMIC_RELAXED);
 #else
@@ -511,8 +724,7 @@ void ndb_pmem_store64(Uint64 *dst, Uint64 v) {
 #endif
 }
 
-void ndb_pmem_zero(void *dst, size_t len) {
-  if (len == 0) return;
+void zero(void *dst, size_t len) {
   const uintptr_t start = (uintptr_t)dst;
   const uintptr_t end = start + len;
   const uintptr_t first = line_up(start);
@@ -534,9 +746,246 @@ void ndb_pmem_zero(void *dst, size_t len) {
   }
 }
 
-void ndb_pmem_flush(const void *addr, size_t len) { flush(addr, len); }
+}  // namespace
 
-void ndb_pmem_drain() { drain_cpu(); }
+void ndb_pmem_store32(Uint32 *dst, Uint32 v) {
+  assert(((uintptr_t)dst % sizeof(Uint32)) == 0);
+  if (emul_on()) {
+    EmulList *l = emul_begin();
+    emul_record(l, (uintptr_t)dst, (uintptr_t)dst + sizeof(v), false);
+    store32(dst, v);
+    emul_end(l);
+    return;
+  }
+  store32(dst, v);
+}
+
+void ndb_pmem_store64(Uint64 *dst, Uint64 v) {
+  assert(((uintptr_t)dst % sizeof(Uint64)) == 0);
+  if (emul_on()) {
+    EmulList *l = emul_begin();
+    emul_record(l, (uintptr_t)dst, (uintptr_t)dst + sizeof(v), false);
+    store64(dst, v);
+    emul_end(l);
+    return;
+  }
+  store64(dst, v);
+}
+
+void ndb_pmem_zero(void *dst, size_t len) {
+  if (len == 0) return;
+  if (emul_on()) {
+    EmulList *l = emul_begin();
+    emul_record(l, (uintptr_t)dst, (uintptr_t)dst + len, true);
+    zero(dst, len);
+    emul_end(l);
+    return;
+  }
+  zero(dst, len);
+}
+
+void ndb_pmem_flush(const void *addr, size_t len) {
+  if (emul_on() && len > 0) {
+    /* This thread's lines; a flush of another thread's line is not seen */
+    EmulList *l = emul_begin();
+    const uintptr_t end = (uintptr_t)addr + len;
+    for (uintptr_t a = line_down((uintptr_t)addr); a < end;
+         a += NDB_PMEM_LINE) {
+      const auto it = l->index.find(a);
+      if (it != l->index.end()) l->lines[it->second].flushed = true;
+    }
+    flush(addr, len);
+    emul_end(l);
+    return;
+  }
+  flush(addr, len);
+}
+
+void ndb_pmem_drain() {
+  drain_cpu();
+  if (emul_on()) {
+    EmulList *l = emul_begin();
+    if (l->pending() > 0) {
+      l->stats.persisted +=
+          emul_compact(l, [](const EmulLine &e) { return e.flushed; });
+    }
+    emul_end(l);
+  }
+}
+
+int ndb_pmem_emul_enable(Uint32 max_pending) {
+  if (max_pending == 0) return EINVAL;
+  if (g_emul_active.load()) {
+    return max_pending == g_emul_max_pending ? 0 : EBUSY;
+  }
+  g_emul_max_pending = max_pending;
+  g_emul_active.store(true);
+  return 0;
+}
+
+bool ndb_pmem_emul_active() { return emul_on(); }
+
+Uint32 ndb_pmem_emul_pending() {
+  if (!emul_on() || t_emul_list == nullptr) return 0;
+  EmulList *l = emul_begin();
+  const Uint32 n = Uint32(l->pending());
+  emul_end(l);
+  return n;
+}
+
+bool ndb_pmem_emul_range_pending(const void *addr, size_t len) {
+  if (!emul_on() || len == 0) return false;
+  const uintptr_t start = line_down((uintptr_t)addr);
+  const uintptr_t end = (uintptr_t)addr + len;
+  const size_t range_lines = (line_up(end) - start) / NDB_PMEM_LINE;
+  bool found = false;
+  const Uint32 n = emul_list_count();
+  for (Uint32 i = 0; i < n && !found; i++) {
+    EmulList *l = g_emul_lists[i];
+    if (l->frozen) continue;
+    l->lock.lock();
+    if (range_lines <= l->pending()) {
+      for (uintptr_t a = start; a < end && !found; a += NDB_PMEM_LINE) {
+        found = l->index.find(a) != l->index.end();
+      }
+    } else {
+      for (size_t k = l->first; k < l->lines.size() && !found; k++) {
+        found = l->lines[k].addr >= start && l->lines[k].addr < end;
+      }
+    }
+    l->lock.unlock();
+  }
+  return found;
+}
+
+Uint32 ndb_pmem_emul_freeze() {
+  if (!emul_on()) return 0;
+  g_emul_frozen.store(true, std::memory_order_release);
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(1);
+  Uint32 not_parked = 0;
+  const Uint32 n = emul_list_count();
+  for (Uint32 i = 0; i < n; i++) {
+    EmulList *l = g_emul_lists[i];
+    if (l->frozen) continue;
+    if (l == t_emul_list && t_emul_in_write) {
+      /* This thread crashed inside a write: its list may be half updated */
+      not_parked++;
+      continue;
+    }
+    if (l->lock.lock_until(deadline)) {
+      l->frozen = true;
+    } else {
+      not_parked++;
+    }
+  }
+  g_emul_not_parked.store(not_parked);
+  return not_parked;
+}
+
+void ndb_pmem_emul_power_fail(Uint64 seed, Uint32 keep_permille,
+                              Uint32 tear_permille) {
+  if (!emul_on()) return;
+  ndb_pmem_emul_freeze();
+  Uint64 state = seed != 0 ? seed
+                           : Uint64(std::chrono::steady_clock::now()
+                                        .time_since_epoch()
+                                        .count());
+  const Uint32 n = emul_list_count();
+  for (Uint32 i = 0; i < n; i++) {
+    EmulList *l = g_emul_lists[i];
+    if (!l->frozen) continue;
+    for (size_t k = l->first; k < l->lines.size(); k++) {
+      const EmulLine &e = l->lines[k];
+      const Uint64 r = emul_rand(&state);
+      const Uint32 p = Uint32(r % 1000);
+      if (p < keep_permille) {
+        l->stats.kept++;
+      } else if (p < keep_permille + tear_permille) {
+        const Uint32 words = Uint32(r >> 32) & 0xFF;
+        for (Uint32 w = 0; w < NDB_PMEM_LINE / 8; w++) {
+          if (words & (1u << w)) {
+            memcpy((void *)(e.addr + 8 * w), e.pre + 8 * w, 8);
+          }
+        }
+        l->stats.torn++;
+      } else {
+        memcpy((void *)e.addr, e.pre, NDB_PMEM_LINE);
+        l->stats.reverted++;
+      }
+    }
+    /* Nothing is pending; the index is stale until a reset */
+    l->first = l->lines.size();
+  }
+}
+
+void ndb_pmem_emul_set_crash(Uint64 seed, Uint32 keep_permille,
+                             Uint32 tear_permille) {
+  g_emul_crash_seed.store(seed);
+  g_emul_crash_keep.store(keep_permille);
+  g_emul_crash_tear.store(tear_permille);
+}
+
+void ndb_pmem_emul_on_crash() {
+  if (!emul_on()) return;
+  int expected = 0;
+  if (g_emul_crash_state.compare_exchange_strong(expected, 1)) {
+    ndb_pmem_emul_power_fail(g_emul_crash_seed.load(),
+                             g_emul_crash_keep.load(),
+                             g_emul_crash_tear.load());
+    g_emul_crash_state.store(2, std::memory_order_release);
+    return;
+  }
+  /* Another thread loses the power: exit only once it is done */
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (g_emul_crash_state.load(std::memory_order_acquire) != 2 &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+}
+
+void ndb_pmem_emul_get_stats(ndb_pmem_emul_stats *out) {
+  *out = ndb_pmem_emul_stats{};
+  const Uint32 n = emul_list_count();
+  for (Uint32 i = 0; i < n; i++) {
+    EmulList *l = g_emul_lists[i];
+    /* A frozen list is held by the freeze, which has stopped its writer */
+    const bool lock = !l->frozen;
+    if (lock) l->lock.lock();
+    const ndb_pmem_emul_stats &s = l->stats;
+    out->written += s.written;
+    out->persisted += s.persisted;
+    out->evicted_early += s.evicted_early;
+    out->kept += s.kept;
+    out->reverted += s.reverted;
+    out->torn += s.torn;
+    out->shared += s.shared;
+    if (lock) l->lock.unlock();
+  }
+  out->threads = n;
+  out->not_parked = g_emul_not_parked.load();
+}
+
+void ndb_pmem_emul_reset() {
+  const Uint32 n = emul_list_count();
+  for (Uint32 i = 0; i < n; i++) {
+    EmulList *l = g_emul_lists[i];
+    if (l->frozen) {
+      l->frozen = false;
+    } else {
+      l->lock.lock();
+    }
+    l->lines.clear();
+    l->first = 0;
+    l->index.clear();
+    l->stats = ndb_pmem_emul_stats{};
+    l->lock.unlock();
+  }
+  g_emul_not_parked.store(0);
+  g_emul_crash_state.store(0);
+  g_emul_frozen.store(false, std::memory_order_release);
+}
 
 #ifdef TEST_NDB_PMEM
 
@@ -943,6 +1392,171 @@ void test_concurrent_maps(const char *dir) {
   OK(failures.load() == 0);
 }
 
+constexpr size_t LINE_BYTES = NDB_PMEM_LINE;
+
+/* The lines [line, line + n) of base hold the byte v */
+bool lines_hold(const Uint8 *base, size_t line, size_t n, Uint8 v) {
+  for (size_t i = line * LINE_BYTES; i < (line + n) * LINE_BYTES; i++) {
+    if (base[i] != v) return false;
+  }
+  return true;
+}
+
+/* n lines at line, of the byte v, each copied and drained: persistent */
+void persist_lines(Uint8 *base, size_t line, size_t n, Uint8 v) {
+  alignas(NDB_PMEM_LINE) Uint8 src[LINE_BYTES];
+  memset(src, v, LINE_BYTES);
+  for (size_t i = 0; i < n; i++) {
+    ndb_pmem_copy_nt(base + (line + i) * LINE_BYTES, src, LINE_BYTES);
+    ndb_pmem_drain();
+  }
+}
+
+/* n lines at line, of the byte v, copied and not drained */
+void write_lines(Uint8 *base, size_t line, size_t n, Uint8 v) {
+  alignas(NDB_PMEM_LINE) Uint8 src[LINE_BYTES];
+  memset(src, v, LINE_BYTES);
+  for (size_t i = 0; i < n; i++) {
+    ndb_pmem_copy_nt(base + (line + i) * LINE_BYTES, src, LINE_BYTES);
+  }
+}
+
+/**
+ * The power-loss emulation (S1.5) on a file in dir: what a drain made
+ * persistent stays and the rest is restored, kept or torn; a store needs
+ * its flush; a full list makes its oldest line persistent early; a line
+ * pending in two threads is seen; a write waits while frozen. Runs last,
+ * as the emulation stays on.
+ */
+void test_emulation(const char *dir) {
+  constexpr Uint32 MAX_PENDING = 64;
+  OK(ndb_pmem_emul_enable(0) == EINVAL);
+  OK(ndb_pmem_emul_enable(MAX_PENDING) == 0);
+  OK(ndb_pmem_emul_enable(MAX_PENDING) == 0);
+  OK(ndb_pmem_emul_enable(MAX_PENDING + 1) == EBUSY);
+  OK(ndb_pmem_emul_active());
+  TestFile f;
+  OK(create_file(dir, &f));
+  ndb_pmem_mapping m;
+  OK(ndb_pmem_map(f.fd, TEST_FILE_SIZE, NDB_PMEM_MAP_SYNC_OPTIONAL, &m) == 0);
+  Uint8 *const base = static_cast<Uint8 *>(m.addr);
+  ndb_pmem_emul_stats st;
+
+  /* 3 lines drained, 2 not: the power loss restores the 2 */
+  persist_lines(base, 0, 5, 0x11);
+  OK(ndb_pmem_emul_pending() == 0);
+  persist_lines(base, 0, 3, 0x22);
+  write_lines(base, 3, 2, 0x22);
+  OK(ndb_pmem_emul_pending() == 2);
+  OK(lines_hold(base, 3, 2, 0x22));
+  OK(ndb_pmem_emul_range_pending(base + 3 * LINE_BYTES + 8, 8));
+  OK(!ndb_pmem_emul_range_pending(base, 3 * LINE_BYTES));
+  ndb_pmem_emul_power_fail(1, 0, 0);
+  OK(lines_hold(base, 0, 3, 0x22));
+  OK(lines_hold(base, 3, 2, 0x11));
+  ndb_pmem_emul_get_stats(&st);
+  OK(st.reverted == 2 && st.persisted == 8 && st.written == 10);
+  ndb_pmem_emul_reset();
+
+  /* A store with no flush stays pending after the drain */
+  Uint32 *const w32 = reinterpret_cast<Uint32 *>(base + 8 * LINE_BYTES);
+  ndb_pmem_store32(w32, 7);
+  ndb_pmem_flush(w32, sizeof(Uint32));
+  ndb_pmem_drain();
+  OK(ndb_pmem_emul_pending() == 0);
+  ndb_pmem_store32(w32, 8);
+  ndb_pmem_drain();
+  OK(ndb_pmem_emul_pending() == 1);
+  ndb_pmem_emul_power_fail(2, 0, 0);
+  OK(*w32 == 7);
+  ndb_pmem_emul_reset();
+  Uint64 *const w64 = reinterpret_cast<Uint64 *>(base + 9 * LINE_BYTES);
+  ndb_pmem_store64(w64, 9);
+  ndb_pmem_flush(w64, sizeof(Uint64));
+  ndb_pmem_drain();
+  OK(ndb_pmem_emul_pending() == 0);
+
+  /* keep 1000: every pending line stays new */
+  persist_lines(base, 16, 8, 0x11);
+  write_lines(base, 16, 8, 0x22);
+  ndb_pmem_emul_power_fail(3, 1000, 0);
+  OK(lines_hold(base, 16, 8, 0x22));
+  ndb_pmem_emul_get_stats(&st);
+  OK(st.kept == 8 && st.reverted == 0);
+  ndb_pmem_emul_reset();
+
+  /* tear 1000: each 8-byte word whole, old or new */
+  persist_lines(base, 24, 8, 0x11);
+  write_lines(base, 24, 8, 0x22);
+  ndb_pmem_emul_power_fail(4, 0, 1000);
+  Uint32 old_words = 0;
+  bool whole = true;
+  for (size_t i = 24 * LINE_BYTES; i < 32 * LINE_BYTES; i += 8) {
+    const bool is_old =
+        memcmp(base + i, "\x11\x11\x11\x11\x11\x11\x11\x11", 8) == 0;
+    const bool is_new =
+        memcmp(base + i, "\x22\x22\x22\x22\x22\x22\x22\x22", 8) == 0;
+    whole = whole && (is_old || is_new);
+    old_words += is_old;
+  }
+  OK(whole);
+  ndb_pmem_emul_get_stats(&st);
+  OK(st.torn == 8);
+  printf("ndb_pmem: emulation: 8 torn lines kept %u of 64 words old\n",
+         old_words);
+  ndb_pmem_emul_reset();
+
+  /* A zeroing that starts and ends inside lines restores both lines */
+  persist_lines(base, 32, 2, 0x22);
+  ndb_pmem_zero(base + 32 * LINE_BYTES + 24, 80);
+  OK(ndb_pmem_emul_pending() == 2);
+  ndb_pmem_emul_power_fail(5, 0, 0);
+  OK(lines_hold(base, 32, 2, 0x22));
+  ndb_pmem_emul_reset();
+
+  /* A full list makes its oldest line persistent early */
+  persist_lines(base, 64, MAX_PENDING + 16, 0x11);
+  write_lines(base, 64, MAX_PENDING + 16, 0x22);
+  OK(ndb_pmem_emul_pending() == MAX_PENDING);
+  ndb_pmem_emul_power_fail(6, 0, 0);
+  OK(lines_hold(base, 64, 16, 0x22));
+  OK(lines_hold(base, 80, MAX_PENDING, 0x11));
+  ndb_pmem_emul_get_stats(&st);
+  OK(st.evicted_early == 16 && st.reverted == MAX_PENDING);
+  ndb_pmem_emul_reset();
+
+  /* A line pending in two threads is seen */
+  std::thread other([&] { write_lines(base, 200, 1, 0x33); });
+  other.join();
+  write_lines(base, 200, 1, 0x44);
+  ndb_pmem_emul_get_stats(&st);
+  OK(st.shared == 1);
+  ndb_pmem_emul_reset();
+
+  /* Frozen, a write waits; nothing under way, the freeze stops all */
+  OK(ndb_pmem_emul_freeze() == 0);
+  std::atomic<bool> done{false};
+  std::thread writer([&] {
+    write_lines(base, 210, 1, 0x55);
+    done = true;
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  OK(!done.load());
+  ndb_pmem_emul_reset();
+  writer.join();
+  OK(done.load());
+  OK(lines_hold(base, 210, 1, 0x55));
+  ndb_pmem_emul_reset();
+
+  /* An unmap leaves nothing pending */
+  write_lines(base, 220, 1, 0x66);
+  OK(ndb_pmem_emul_pending() == 1);
+  OK(ndb_pmem_unmap(&m) == 0);
+  OK(ndb_pmem_emul_pending() == 0);
+  remove_file(&f);
+  printf("ndb_pmem: power-loss emulation tested\n");
+}
+
 #endif
 
 }  // namespace
@@ -963,6 +1577,8 @@ TAPTEST(ndb_pmem) {
   } else {
     printf("ndb_pmem: set NDB_PMEM_DIR to a DAX directory to test MAP_SYNC\n");
   }
+  /* Last: the emulation stays on */
+  test_emulation(tmp_dir);
 #endif
   return 1;
 }

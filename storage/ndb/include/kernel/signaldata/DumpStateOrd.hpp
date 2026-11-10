@@ -208,6 +208,10 @@ class DumpStateOrd {
     // persist the REDO log and check it through the mappings, 4 = skip
     // the next barrier at commit (debug builds)
     LqhRedoPmem = 2368,
+    // RONDB-1150 (recovery plan S7.1, S7.3), with
+    // __RedoLogPmemPowerLossEmulation: [seed [keep [tear]]], a power loss
+    // of the REDO log now, then the node stops as after a crash
+    LqhPmemPowerLoss = 2370,
 
     TupDumpOneScanRec = 2380,
     TupSaveCopyTupleCount = 2381,

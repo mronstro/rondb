@@ -34927,6 +34927,16 @@ void Dblqh::sendGcpSaveConf(Signal *signal) {
   saveConf->gci = localGcpPtr.p->gcpId;
   ndbrequire(refToMain(localGcpPtr.p->gcpBlockref) == DBDIH ||
              refToMain(localGcpPtr.p->gcpBlockref) == DBLQH);
+#if defined(VM_TRACE) || defined(ERROR_INSERT)
+  if (c_redo_pmem_format && ndb_pmem_emul_active()) {
+    jam();
+    LogPartRecordPtr logPartPtr;
+    for (logPartPtr.i = 0; logPartPtr.i < clogPartFileSize; logPartPtr.i++) {
+      ptrAss(logPartPtr, logPartRecord);
+      redoPmemCheckGcpPersisted(logPartPtr.p);
+    }
+  }
+#endif
   sendSignal(localGcpPtr.p->gcpBlockref, GSN_GCP_SAVECONF, signal,
              GCPSaveConf::SignalLength, JBA);
   ccurrentGcprec = RNIL;
@@ -39939,7 +39949,7 @@ void Dblqh::execSr(Signal *signal) {
         if (c_redo_pmem_format && logPartPtr.p->m_pmem_inval_pending > 0) {
           /* S6.5: the COMMITs that this round invalidated */
           jam();
-          ndb_pmem_drain();
+          redoPmemDrain();
           logPartPtr.p->m_pmem_inval_pending = 0;
         }
         releaseMmPages(logPartPtr.p);
@@ -43426,6 +43436,7 @@ void Dblqh::initLogpart(Signal *signal, LogPartRecordPtr logPartPtr) {
   std::memset(&logPartPtr.p->m_pmem_stats, 0,
               sizeof(logPartPtr.p->m_pmem_stats));
   logPartPtr.p->m_pmem_persisted_lsn = 0;
+  logPartPtr.p->m_pmem_gcp_checked_lsn = 0;
   logPartPtr.p->m_pmem_unfenced = 0;
   logPartPtr.p->m_pmem_slot_seq = 0;
   logPartPtr.p->m_pmem_dsc_recorded = 0;
@@ -45641,6 +45652,64 @@ Uint32 Dblqh::redoCopyPage(LogPartRecord *logPartPtrP,
 }
 
 /**
+ * The drain of this thread's stores to the mappings. With the power-loss
+ * emulation nothing of this thread is pending after it (recovery plan
+ * S7.3): a store left pending was not flushed.
+ */
+void Dblqh::redoPmemDrain() {
+  ndb_pmem_drain();
+  ndbassert(ndb_pmem_emul_pending() == 0);
+}
+
+/**
+ * S7.3, with the power-loss emulation in debug builds, before
+ * GCP_SAVECONF: no thread has a line pending in the log that this part
+ * made persistent since the last check, [checked, persisted). A drain
+ * missing in another thread, as in a log part shared by LDMs, shows
+ * here, before a power loss could lose a GCP that was saved.
+ */
+void Dblqh::redoPmemCheckGcpPersisted(LogPartRecord *logPartPtrP) {
+  Dblqh *const owner = logPartPtrP->my_block;
+  const Uint32 noFiles = logPartPtrP->noLogFiles;
+  const Uint64 fileBytes = Uint64(clogFileSize) << 20;
+  lock_log_part(logPartPtrP);
+  const Uint64 to = logPartPtrP->m_pmem_persisted_lsn;
+  Uint64 at = logPartPtrP->m_pmem_gcp_checked_lsn;
+  if (to > at + noFiles * fileBytes) at = to - noFiles * fileBytes;
+  Uint64 pendingAt = 0;
+  bool pending = false;
+  while (at < to && !pending) {
+    const Uint32 fileNo = Uint32((at / fileBytes) % noFiles);
+    const Uint64 off = at % fileBytes;
+    const Uint64 n = std::min(to - at, fileBytes - off);
+    LogFileRecordPtr filePtr;
+    filePtr.i = logPartPtrP->firstLogfile;
+    for (Uint32 f = 0; f <= fileNo; f++) {
+      ptrCheckGuard(filePtr, owner->clogFileFileSize, owner->logFileRecord);
+      if (f < fileNo) filePtr.i = filePtr.p->nextLogFile;
+    }
+    ndbrequire(filePtr.p->fileNo == fileNo &&
+               filePtr.p->m_pmem_base != nullptr);
+    pending = ndb_pmem_emul_range_pending(filePtr.p->m_pmem_base + off, n);
+    pendingAt = at;
+    at += n;
+  }
+  logPartPtrP->m_pmem_gcp_checked_lsn = to;
+  unlock_log_part(logPartPtrP);
+  if (pending) {
+    char buf[200];
+    BaseString::snprintf(buf, sizeof(buf),
+                         "PMEM REDO log part %u: a line persisted for "
+                         "GCP_SAVECONF is not persistent, in file %u from "
+                         "LSN %llu",
+                         logPartPtrP->logPartNo,
+                         Uint32((pendingAt / fileBytes) % noFiles),
+                         (unsigned long long)pendingAt);
+    progError(__LINE__, NDBD_EXIT_SR_REDOLOG, buf);
+  }
+}
+
+/**
  * S5.2, S5.6: the fence after the write path's stores to the mapping, by
  * the thread that made them and before the log part is unlocked. Then
  * __RedoLogPmemPersistDelayNs (Q-A11): the persist takes as long as it
@@ -45648,7 +45717,7 @@ Uint32 Dblqh::redoCopyPage(LogPartRecord *logPartPtrP,
  * latency and throughput can be measured for it on DRAM.
  */
 void Dblqh::redoPmemFence(LogPartRecord *logPartPtrP) {
-  ndb_pmem_drain();
+  redoPmemDrain();
   logPartPtrP->m_pmem_unfenced = 0;
   const Uint32 delayNs = c_redo_pmem_persist_delay_ns;
   if (delayNs != 0) {
@@ -46281,7 +46350,7 @@ void Dblqh::redoPmemSrPhase1(Signal *signal, LogPartRecordPtr logPartPtr) {
   }
   const Uint64 mbyteBytes = Uint64(1) << 20;
   redoPmemZero(partP, from, (from / mbyteBytes + 1) * mbyteBytes);
-  ndb_pmem_drain();
+  redoPmemDrain();
 
   partP->logLap = lap;
   partP->lastLogfile = lastFilePtr.i;
@@ -46488,7 +46557,7 @@ void Dblqh::redoPmemInvalidateCommit(LogPartRecord *logPartPtrP,
  * restart finds no record after the head. At an initial start E is H.
  */
 void Dblqh::redoPmemSrFourth(Signal *signal, LogPartRecord *logPartPtrP) {
-  ndb_pmem_drain();
+  redoPmemDrain();
   logPartPtrP->m_pmem_inval_pending = 0;
   const PmemRedo::Geom g = {logPartPtrP->noLogFiles, clogFileSize,
                             logPartPtrP->logPartNo};
@@ -46537,7 +46606,7 @@ void Dblqh::redoPmemSrZero(Signal *signal, Uint32 logPartPtrI) {
     const Uint64 to = partP->m_pmem_zero_to;
     const Uint64 lo = std::max(from, ((to - 1) / mbyteBytes) * mbyteBytes);
     redoPmemZero(partP, lo, to);
-    ndb_pmem_drain();
+    redoPmemDrain();
     partP->m_pmem_zero_to = lo;
     if (lo > from) {
       jam();
@@ -46853,6 +46922,47 @@ void Dblqh::execDUMP_STATE_ORD(Signal *signal) {
         break;
     }
     return;
+  }
+  if (arg == DumpStateOrd::LqhPmemPowerLoss) {
+    jam();
+    /**
+     * RONDB-1150 (recovery plan S7.1, S7.3), with
+     * __RedoLogPmemPowerLossEmulation: DUMP 2370 [seed [keep [tear]]]. A
+     * power loss of the REDO log now: of the lines not yet persistent,
+     * keep and tear per mille are kept and torn (default 500 and 100),
+     * the rest restored; seed 0 takes the time. Then the node stops as
+     * after a crash, and restarts as RestartOnErrorInsert says. Sent to
+     * every data node, it stops the cluster at once.
+     */
+    if (m_is_query_block || instance() > 1) return;
+    if (!ndb_pmem_emul_active()) {
+      infoEvent("DUMP 2370: __RedoLogPmemPowerLossEmulation is not set on "
+                "node %u",
+                getOwnNodeId());
+      return;
+    }
+    const Uint32 len = signal->getLength();
+    Uint32 seed = len >= 2 ? signal->theData[1] : 0;
+    if (seed == 0) {
+      /* From the time, and in the log, so that a run can be repeated */
+      seed = Uint32(NdbTick_CurrentMillisecond()) | 1;
+    }
+    const Uint32 keep = len >= 3 ? signal->theData[2] : 500;
+    const Uint32 tear = len >= 4 ? signal->theData[3] : 100;
+    if (keep > 1000 || tear > 1000 - keep) {
+      infoEvent("DUMP 2370 %u %u %u: keep and tear are per mille, at most "
+                "1000 together",
+                seed, keep, tear);
+      return;
+    }
+    ndb_pmem_emul_set_crash(seed, keep, tear);
+    char buf[128];
+    BaseString::snprintf(buf, sizeof(buf),
+                         "DUMP 2370: power loss of the REDO log, seed %u, "
+                         "keep %u, tear %u",
+                         seed, keep, tear);
+    g_eventLogger->info("LDM(%u): %s", instance(), buf);
+    progError(__LINE__, NDBD_EXIT_ERROR_INSERT, buf);
   }
   if (arg == DumpStateOrd::LqhGroupTableSizeHints) {
     jam();

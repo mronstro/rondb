@@ -136,6 +136,75 @@ void ndb_pmem_flush(const void *addr, size_t len);
 void ndb_pmem_drain();
 
 /**
+ * Power-loss emulation for tests (platform plan S1.5, recovery plan S7.3).
+ * Every write above keeps the 64-byte pre-image of each line it touches,
+ * once until the line is persistent, in a list of the writing thread, and
+ * then writes the mapping, so that every thread sees the new bytes. Lines
+ * of a copy or a zeroing are written back; a store's line is written back
+ * by ndb_pmem_flush(). ndb_pmem_drain() makes this thread's written-back
+ * lines persistent; a line stored but not flushed stays pending, as on
+ * the hardware. A power loss then keeps, restores or tears each pending
+ * line. A full list makes its oldest line persistent early, which the
+ * hardware also may do. Any file works, DAX or not.
+ */
+struct ndb_pmem_emul_stats {
+  Uint64 written;        // lines that became pending
+  Uint64 persisted;      // pending lines that a drain made persistent
+  Uint64 evicted_early;  // made persistent early: the list was full
+  Uint64 kept;           // a power loss kept the new line
+  Uint64 reverted;       // a power loss restored the old line
+  Uint64 torn;           // a power loss restored some of its 8-byte words
+  Uint64 shared;         // became pending while pending in another thread
+  Uint32 threads;        // threads that wrote with the emulation on
+  Uint32 not_parked;     // threads that the last freeze could not stop
+};
+
+/**
+ * Turn the emulation on, before the first write to a mapping, with at
+ * most max_pending pending lines per thread. 0, EINVAL for 0, or EBUSY if
+ * it is on with another limit.
+ */
+int ndb_pmem_emul_enable(Uint32 max_pending);
+bool ndb_pmem_emul_active();
+
+/* The pending lines of this thread */
+Uint32 ndb_pmem_emul_pending();
+
+/* Whether any thread has a pending line in [addr, addr + len) */
+bool ndb_pmem_emul_range_pending(const void *addr, size_t len);
+
+/**
+ * Stop every write: a write that starts later waits forever, and the call
+ * returns when no thread is inside one, or after 1 s. A thread that
+ * crashed inside a write is not waited for. The threads that did not stop.
+ */
+Uint32 ndb_pmem_emul_freeze();
+
+/**
+ * The power loss: freeze, then keep each pending line of every stopped
+ * thread with probability keep_permille / 1000, tear it (restore a random
+ * subset of its 8-byte words) with probability tear_permille / 1000, else
+ * restore it. The caller then exits. seed 0 takes the time.
+ */
+void ndb_pmem_emul_power_fail(Uint64 seed, Uint32 keep_permille,
+                              Uint32 tear_permille);
+
+/**
+ * The power loss of a crash, once per process: the values of
+ * ndb_pmem_emul_set_crash(), by default the time as seed and every
+ * pending line restored. Another thread that crashes meanwhile waits
+ * until it is done.
+ */
+void ndb_pmem_emul_on_crash();
+void ndb_pmem_emul_set_crash(Uint64 seed, Uint32 keep_permille,
+                             Uint32 tear_permille);
+
+void ndb_pmem_emul_get_stats(ndb_pmem_emul_stats *out);
+
+/* Tests: no line pending, no thread stopped, counts at 0; still on */
+void ndb_pmem_emul_reset();
+
+/**
  * Platform queries for the start-up checks (E17, E20), from sysfs on
  * Linux (ndb_pmem_region.cpp). Elsewhere every answer is "unknown".
  */
