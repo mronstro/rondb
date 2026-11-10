@@ -2,11 +2,10 @@
 --source have_ndb_error_insert.inc
 
 # Error insert 5090 holds the open of REDO file 4 of the first log part
-# that gets to file 3, until logging moves to file 4: the log part then
-# writes to a file that is not open yet. Page 0 of the file is its file
-# descriptor, written when the open completes; the log records written
-# before that must go on page 1 and after, and not be lost under the
-# file descriptor. A system restart then executes the REDO log of the
+# that gets to file 3, until the log part gets to the end of file 3. A
+# log part may not go to a file that is not open: it waits at the end of
+# file 3 until the open completes, and its log records wait or are
+# queued meanwhile. A system restart then executes the REDO log of the
 # test, as no LCP has got to t1 (TimeBetweenLocalCheckpoints=31). Under
 # --repeat, the log part goes on from where the last run left it, and
 # the file opened late is a later one, which no restart has opened.
@@ -47,7 +46,7 @@ while ($i <= 1300) {
 SELECT COUNT(*), MIN(c), MAX(c), SUM(c) FROM t1 WHERE a > 0;
 SELECT c, LENGTH(b), LEFT(b, 1) FROM t1 WHERE a = 0;
 
---echo == 2 == logging moved to a file before it was open
+--echo == 2 == logging waited at the end of a file for the open of the next
 --perl
   use strict;
   my $cluster = "$ENV{MYSQLTEST_VARDIR}/mysql_cluster.1";
@@ -59,9 +58,13 @@ SELECT c, LENGTH(b), LEFT(b, 1) FROM t1 WHERE a = 0;
     my $log = "$cluster/ndbd.$node/ndbd.log";
     open(my $fh, '<', $log) or die "Cannot open $log: $!\n";
     seek($fh, $offsets[$node - 1], 0);
-    my $found = grep { /moved to file \d+ before the file was open/ } <$fh>;
+    my @lines = <$fh>;
     close($fh);
-    print "Node $node: ", ($found ? "yes" : "no"), "\n";
+    my $waited =
+      grep { /waits at the end of file \d+ until file \d+ is open/ } @lines;
+    my $moved = grep { /moved to file \d+ before the file was open/ } @lines;
+    print "Node $node: waited ", ($waited ? "yes" : "no"),
+          ", moved before the open ", ($moved ? "yes" : "no"), "\n";
   }
 EOF
 --remove_file $MYSQLTEST_VARDIR/tmp/ndb_redo_late_file_open.offsets

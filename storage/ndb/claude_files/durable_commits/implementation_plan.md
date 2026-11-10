@@ -164,7 +164,7 @@ design changes are recorded in `pmem_redo_design.md` §6.
 | R14 | Checksum functions | `ndb_xxh3_64(buf, len)` and `ndb_xxh3_64_seed(buf, len, seed)` give the results of `XXH3_64bits` and `XXH3_64bits_withSeed`. A record that crosses a page header chains its body hash through the seed (E4) | platform |
 | R15 | Base-path fallback | `get_base_path()` falls back to the main file system path when the REDO path is unset. Cleanup at initial start must never act on an unset REDO path, or it wipes the whole node file system. PMEM mode only, by R18 | platform |
 | R16 | `secondFileFlags` | Never initialised by DBLQH; zero it before the new use | platform issue 4 |
-| R17 | Numbers | DUMP 2368 (benchmark), 2369 (state), 2370 (power loss now). DBLQH error inserts 5155–5159 and 5161–5172 for step 1 (5160 is taken; next free becomes 5173); 5180–5199 for later steps | write, recovery, next steps |
+| R17 | Numbers | DUMP 2368 (benchmark), 2369 (state), 2370 (power loss now). DBLQH error inserts 5155–5159 and 5161–5172 for step 1 (5160 and 5173 are taken; next free becomes 5174); 5180–5199 for later steps | write, recovery, next steps |
 | R18 | REDO path in file mode (**answered, Q-A2**) | `FileSystemPathRedoLog` is used **only in PMEM mode**. File mode keeps its REDO files exactly where they are today, under `FileSystemPath`; NDBFS treats the parameter as unset there. If it is set in file mode, the management server warns that it has no effect. Switching a node back from PMEM mode to file mode leaves the old files under the REDO path; the user removes them | architect |
 
 ### 2.4 Testing without CI

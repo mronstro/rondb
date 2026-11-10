@@ -642,7 +642,9 @@ journal is off) or M2 (if it is on) to the persist in flight.
 5160 is in use (`:548`); 5155–5159 and 5161–5199 are free in `src/kernel`,
 `test` and `mysql-test/suite/ndb*` [V by grep]. The write plan leaves the
 numbers from 5155 to this plan (W F16, Q5) and the platform plan takes none.
-**Proposal:** 5155–5159 and 5161–5172 (5160 is skipped), then `Next DBLQH 5173`.
+**Proposal:** 5155–5159 and 5161–5172 (5160 is skipped), then `Next DBLQH 5174`:
+5173 holds the open of the next REDO log file (file mode, the hold at the
+end of a file, `ndb_redo_file_change_hold`).
 
 | Code | Site (today's code where S5 or S6 places it) | Effect |
 |---|---|---|
@@ -1068,7 +1070,7 @@ S7.2, S7.1 (after S5 and S6.6) ── S7.3 (after S1 journal) ─┴── S7.5
 | `CommitLogRecord` fields | `flags`, `gci_lo`, `transid1`, `transid2`, `opCount` | `Dblqh.hpp:3357` |
 | Block fields | `c_redo_pmem_unsafe_shutdown` | `Dblqh.hpp` |
 | CONTINUEB | `ZPMEM_SR_PHASE1` (62), `ZPMEM_SR_ZERO` (63) | `Dblqh.hpp` |
-| Error inserts | 5155–5159, 5161–5172 (§S7.1); `Next DBLQH 5173` | `ERROR_codes.txt` |
+| Error inserts | 5155–5159, 5161–5172 (§S7.1); `Next DBLQH 5174` (5173 is taken) | `ERROR_codes.txt` |
 | DUMP | `LqhPmemRedoInfo` 2369, `LqhPmemPowerLoss` 2370 | `DumpStateOrd.hpp` |
 | Hook | power loss at `NdbShutdown` entry | `src/kernel/ndbd.cpp:1443` |
 | Tests | `pmem_redo_format-t`, `pmem_redo_scan-t`, `pmem_redo_slot-t`; `testRestartGci` cases `GciLedger*`; `testSystemRestart -n PmemRedoModeSwitch`; MTR `ndb_pmem_*`; `pmem_redo*.cnf`, `pmem_redo.skip`; `pmem-redo-tests.txt`, `pmem-redo-long-tests.txt`; `ConfigFactory.pm` rule `fix_redo_log_path` | — |

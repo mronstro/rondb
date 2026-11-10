@@ -1110,6 +1110,23 @@ void Dblqh::queued_log_write(Signal *signal, LogPartRecord *logPartPtrP) {
         sendSignalWithDelay(cownref, GSN_CONTINUEB, signal, 10, 2);
         return;
       }
+    } else {
+      const TcConnectionrec *firstPtrP =
+          logPartPtrP->m_log_complete_queue.firstElement;
+      const Uint32 words =
+          firstPtrP->transactionState == TcConnectionrec::LOG_ABORT_QUEUED
+              ? ZABORT_LOG_SIZE
+              : ZCOMMIT_LOG_SIZE;
+      if (redoMustWaitForFileChange(logPartPtrP, words)) {
+        /**
+         * The commit or abort record would leave a file that the head
+         * may not leave yet. It will be restarted when the problem is
+         * cleared (redoUpdateFileChangeProblem()).
+         */
+        jam();
+        unlock_log_part(logPartPtrP);
+        return;
+      }
     }
     {
       TcConnectionrec *tcPtrP = 0;
@@ -13885,7 +13902,8 @@ void Dblqh::update_log_problem(Signal *signal, LogPartRecord *partPtrP,
 
       if (partPtrP->LogLqhKeyReqSent == ZFALSE &&
           (!partPtrP->m_log_prepare_queue.isEmpty() ||
-           !partPtrP->m_log_complete_queue.isEmpty())) {
+           !partPtrP->m_log_complete_queue.isEmpty() ||
+           partPtrP->waitWriteGciLog == LogPartRecord::WWGL_TRUE)) {
         jam();
 
         partPtrP->LogLqhKeyReqSent = ZTRUE;
@@ -13896,6 +13914,129 @@ void Dblqh::update_log_problem(Signal *signal, LogPartRecord *partPtrP,
     }
   }
   partPtrP->m_log_problems = problems;
+}
+
+/**
+ * The head may leave its file only when the change to the file is done
+ * and the next file is open. A file change overlapping the one before
+ * it writes the last file number into page 0 of file 0 twice, the newer
+ * one usually first: page 0 ends with the older file, and a system
+ * restart stops the log there, without the GCIs saved in the newer
+ * file. A file not open has no room for the log either.
+ *
+ * The head is held:
+ * - in the last mbyte of its file while the change to the file goes on
+ *   or the next file is not open, and
+ * - in a file that logging moved to before it was open (writeNextLog(),
+ *   with only P_FILE_CHANGE_PROBLEM set before the hold here).
+ */
+bool Dblqh::redoHeadMayNotLeaveFile(const LogPartRecord *logPartPtrP) {
+  /* The PMEM format changes file at once, all files mapped (S5.3) */
+  if (c_redo_pmem_format) return false;
+  LogFileRecordPtr headPtr;
+  headPtr.i = logPartPtrP->currentLogfile;
+  ptrCheckGuard(headPtr, clogFileFileSize, logFileRecord);
+  if (headPtr.p->fileRef == RNIL) return true;
+  if (headPtr.p->currentMbyte != clogFileSize - 1) return false;
+  if (headPtr.p->fileChangeState != LogFileRecord::NOT_ONGOING) return true;
+  LogFileRecordPtr nextPtr;
+  nextPtr.i = headPtr.p->nextLogFile;
+  ptrCheckGuard(nextPtr, clogFileFileSize, logFileRecord);
+  return nextPtr.p->fileRef == RNIL;
+}
+
+/**
+ * P_FILE_CHANGE_PROBLEM while the head may not leave its file: the
+ * prepare records are queued or refused with 1220, setLogTail() and
+ * timeSup() do not change mbyte, and the commit, abort and COMPLETED_GCI
+ * records that would not fit before the end of the file wait in the log
+ * queues (redoMustWaitForFileChange()). Set when the head moves; cleared
+ * when the change to the file is done (writePageZeroLab()) or the next
+ * file is open (execFSOPENCONF()), which restarts the log queues.
+ */
+void Dblqh::redoUpdateFileChangeProblem(Signal *signal,
+                                        LogPartRecord *logPartPtrP) {
+  if (c_redo_pmem_format) return;
+  const bool hold = redoHeadMayNotLeaveFile(logPartPtrP);
+  const bool held =
+      (logPartPtrP->m_log_problems & LogPartRecord::P_FILE_CHANGE_PROBLEM) !=
+      0;
+  if (hold) {
+    LogFileRecordPtr headPtr;
+    headPtr.i = logPartPtrP->currentLogfile;
+    ptrCheckGuard(headPtr, clogFileFileSize, logFileRecord);
+    LogFileRecordPtr nextPtr;
+    nextPtr.i = headPtr.p->nextLogFile;
+    ptrCheckGuard(nextPtr, clogFileFileSize, logFileRecord);
+    if (headPtr.p->fileRef != RNIL && nextPtr.p->fileRef == RNIL) {
+      jam();
+      if (!held) {
+        jam();
+        g_eventLogger->info(
+            "LDM(%u): REDO log part %u waits at the end of file %u until"
+            " file %u is open",
+            instance(), logPartPtrP->logPartNo, headPtr.p->fileNo,
+            nextPtr.p->fileNo);
+#ifdef ERROR_INSERT
+        if (delayOpenFilePtrI == nextPtr.i && !c_delay_open_until_cleared) {
+          /* Error insert 5090 held the open until the head got here */
+          jam();
+          delayOpenFilePtrI = 0;
+        }
+#endif
+      }
+      if (nextPtr.p->logFileStatus == LogFileRecord::CLOSED) {
+        /* The open starts when the head enters the file before it */
+        jam();
+        openNextLogfile(signal, headPtr.p, logPartPtrP);
+      }
+    }
+  } else if (held) {
+    jam();
+    logPartPtrP->m_logged_file_change_wait = false;
+  }
+  if (hold != held) {
+    jam();
+    update_log_problem(signal, logPartPtrP,
+                       LogPartRecord::P_FILE_CHANGE_PROBLEM, hold);
+  }
+}
+
+/**
+ * A commit, abort or COMPLETED_GCI record of this many words waits in
+ * the log queues: the head may not leave its file and the record would
+ * not fit before its end. The words booked for records that other LDM
+ * threads are to write count as written, so that those fit as well.
+ */
+bool Dblqh::redoMustWaitForFileChange(LogPartRecord *logPartPtrP,
+                                      Uint32 words) {
+  if ((logPartPtrP->m_log_problems & LogPartRecord::P_FILE_CHANGE_PROBLEM) ==
+      0) {
+    return false;
+  }
+  LogFileRecordPtr headPtr;
+  headPtr.i = logPartPtrP->currentLogfile;
+  ptrCheckGuard(headPtr, clogFileFileSize, logFileRecord);
+  if (headPtr.p->currentMbyte != clogFileSize - 1) return false;
+  bool fits = (Uint64(words) + ZNEXT_LOG_SIZE +
+               logPartPtrP->m_booked_redo_log_space) <=
+              headPtr.p->remainingWordsInMbyte;
+#ifdef ERROR_INSERT
+  /* 5173: the records wait as if the rest of the file were full */
+  if (ERROR_INSERTED(5173)) fits = false;
+#endif
+  if (fits) return false;
+  jam();
+  if (!logPartPtrP->m_logged_file_change_wait) {
+    jam();
+    logPartPtrP->m_logged_file_change_wait = true;
+    g_eventLogger->info(
+        "LDM(%u): REDO log part %u: commit, abort and GCI records wait at the"
+        " end of file %u until the log part may go to file %u",
+        instance(), logPartPtrP->logPartNo, headPtr.p->fileNo,
+        (headPtr.p->fileNo + 1) % logPartPtrP->noLogFiles);
+  }
+  return true;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -15523,10 +15664,12 @@ void Dblqh::execLQH_WRITELOG_REQ(Signal *signal) {
     lock_log_part(regLogPartPtr);
     Uint32 noOfFreeLogPages = count_free_log_pages(regLogPartPtr);
     if (!regLogPartPtr->m_log_complete_queue.isEmpty() ||
-        (noOfFreeLogPages == 0)) {
+        (noOfFreeLogPages == 0) ||
+        redoMustWaitForFileChange(regLogPartPtr, ZCOMMIT_LOG_SIZE)) {
       /**
        * There is no space in the REDO log buffer OR there is queued entries
-       * to write COMMIT/ABORT REDO log messages. In this case we write only
+       * to write COMMIT/ABORT REDO log messages OR the record would leave
+       * a file that the head may not leave yet. In this case we write only
        * through the REDO log queue.
        */
       /*---------------------------------------------------------------------------*/
@@ -17359,13 +17502,16 @@ void Dblqh::continueAbortLab(Signal *signal,
     initLogPointers(signal, tcConnectptr, logPagePtr, logFilePtr, logPartPtr);
     Uint32 noOfFreeLogPages = count_free_log_pages(logPartPtr.p);
     if (noOfFreeLogPages == 0 ||
-        !logPartPtr.p->m_log_complete_queue.isEmpty()) {
+        !logPartPtr.p->m_log_complete_queue.isEmpty() ||
+        redoMustWaitForFileChange(logPartPtr.p, ZABORT_LOG_SIZE)) {
       jam();
       /* --------------------------------------------------------------------
        * A PREPARE OPERATION IS CURRENTLY WRITING IN THE LOG.
        * WE MUST WAIT ON OUR TURN TO WRITE THE LOG.
        * IT IS NECESSARY TO WRITE ONE LOG RECORD COMPLETELY
        * AT A TIME OTHERWISE WE WILL SCRAMBLE THE LOG.
+       * The record may also wait for the end of a file change
+       * (redoMustWaitForFileChange()).
        * ------------------------------------------------------------------ */
       linkWaitLog(signal, logPartPtr.p, logPartPtr.p->m_log_complete_queue,
                   tcConnectptr.p);
@@ -34085,6 +34231,17 @@ void Dblqh::setLogTail(Signal *signal, Uint32 keepGci) {
           goto next;
         }
 
+        if ((sltLogPartPtr.p->m_log_problems &
+             LogPartRecord::P_FILE_CHANGE_PROBLEM) != 0) {
+          jam();
+          /**
+           * The head may not leave its file (redoHeadMayNotLeaveFile()),
+           * and timeSup() waits for the same reason. The next cut tries
+           * again, after the LCP that force_lcp() asked for above.
+           */
+          goto next;
+        }
+
         TcConnectionrec *tmpPtrP;
         tmpPtrP = sltLogPartPtr.p->firstLogTcrec;
         if (tmpPtrP != nullptr) {
@@ -34381,6 +34538,17 @@ void Dblqh::start_synch_gcp(Signal *signal) {
         signal->theData[1] = logPartPtr.i;
         sendSignal(cownref, GSN_CONTINUEB, signal, 2, JBB);
       }
+    } else if (redoMustWaitForFileChange(logPartPtr.p,
+                                         ZCOMPLETED_GCI_LOG_SIZE)) {
+      /**
+       * The COMPLETED_GCI record would leave a file that the head may not
+       * leave yet: logNextStart() writes it once the problem is cleared
+       * (redoUpdateFileChangeProblem() restarts the queue).
+       */
+      jam();
+      logPartPtr.p->logPartState = LogPartRecord::ACTIVE;
+      logPartPtr.p->waitWriteGciLog = LogPartRecord::WWGL_TRUE;
+      tlogActive = true;
     } else {
       jam();
       logPartPtr.p->waitWriteGciLog = LogPartRecord::WWGL_FALSE;
@@ -34889,6 +35057,12 @@ void Dblqh::execFSOPENCONF(Signal *signal) {
   LogPartRecordPtr logPartPtr;
 
 #ifdef ERROR_INSERT
+  if (c_delay_open_until_cleared && signal->theData[0] == delayOpenFilePtrI &&
+      !ERROR_INSERTED(5173)) {
+    jam();
+    delayOpenFilePtrI = 0;
+    c_delay_open_until_cleared = false;
+  }
   if (delayOpenFilePtrI > 0 && signal->theData[0] == delayOpenFilePtrI) {
     /* ERROR_INSERT 5090 : delay executing FSOPENCONF by sending
      * GSN_CONTINUEB in order to simulate a delay in opening a redo log file.
@@ -34989,6 +35163,8 @@ void Dblqh::execFSOPENCONF(Signal *signal) {
     case LogFileRecord::OPENING_WRITE_LOG:
       jam();
       logFilePtr.p->logFileStatus = LogFileRecord::OPEN;
+      /* A head held at the end of the file before this one goes on */
+      redoUpdateFileChangeProblem(signal, logPartPtr.p);
       unlock_log_part(logPartPtr.p);
       return;
     case LogFileRecord::OPENING_PMEM_MAP_ALL:
@@ -35569,11 +35745,16 @@ void Dblqh::timeSup(Signal *signal) {
      * the original page with redo entries.
      * If the current file is not available to write due to a file
      * change problem, then we must wait until it is available,
-     * supervised by some higher level timing mechanism.
+     * supervised by some higher level timing mechanism. The same if
+     * the page is the last one of the mbyte while the head may not
+     * leave its file (redoHeadMayNotLeaveFile()): the write below
+     * would change mbyte.
      */
-
+    const bool lastPageInMbyte =
+        ((logFilePtr.p->currentFilepage + 1) & (ZPAGES_IN_MBYTE - 1)) == 0;
     if ((logPartPtr.p->m_log_problems & LogPartRecord::P_FILE_CHANGE_PROBLEM) !=
-        0) {
+            0 &&
+        (logFilePtr.p->fileRef == RNIL || lastPageInMbyte)) {
       jam();
       unlock_log_part(logPartPtr.p);
       g_eventLogger->info(
@@ -35923,15 +36104,9 @@ void Dblqh::writePageZeroLab(Signal *signal, Uint32 from,
                              LogPartRecord *logPartPtrP) {
   /* Not in the PMEM format, which writes the log through the mappings */
   ndbassert(!c_redo_pmem_format);
-  if ((logPartPtrP->m_log_problems & LogPartRecord::P_FILE_CHANGE_PROBLEM) !=
-      0) {
-    jam();
-    update_log_problem(signal, logPartPtrP,
-                       LogPartRecord::P_FILE_CHANGE_PROBLEM,
-                       /* clear */ false);
-  }
-
   logFilePtr.p->fileChangeState = LogFileRecord::NOT_ONGOING;
+  /* The head may leave the file now, unless the next one is not open */
+  redoUpdateFileChangeProblem(signal, logPartPtrP);
 
   /*---------------------------------------------------------------------------*/
   /* IT COULD HAVE ARRIVED PAGE WRITES TO THE CURRENT FILE WHILE WE WERE */
@@ -36512,6 +36687,13 @@ void Dblqh::openNextLogfile(Signal *signal, LogFileRecord *logFilePtrP,
        * to the log part being filled by the test will be delayed).
        */
       delayOpenFilePtrI = logFilePtrP->nextLogFile;
+    }
+    if (delayOpenFilePtrI == 0 && ERROR_INSERTED(5173) &&
+        onlLogFilePtr.p->logFileStatus == LogFileRecord::CLOSED) {
+      /* The next open waits until 5173 is cleared */
+      jam();
+      delayOpenFilePtrI = logFilePtrP->nextLogFile;
+      c_delay_open_until_cleared = true;
     }
 #endif
 
@@ -43236,6 +43418,7 @@ void Dblqh::initLogpart(Signal *signal, LogPartRecordPtr logPartPtr) {
   logPartPtr.p->firstInvalidatePageFound = false;
   logPartPtr.p->m_log_problems = 0;
   logPartPtr.p->m_logged_buffer_full = 0;
+  logPartPtr.p->m_logged_file_change_wait = false;
   logPartPtr.p->m_redo_path_no = c_redo_path_no;
   logPartPtr.p->m_redo_path_warned = false;
   logPartPtr.p->m_pmem_mem_numa_node = -1;
@@ -43512,6 +43695,20 @@ void Dblqh::logNextStart(Signal *signal, LogPartRecord *regLogPartPtr) {
     unlock_log_part(regLogPartPtr);
     return;
   }  // if
+
+  if (regLogPartPtr->waitWriteGciLog == LogPartRecord::WWGL_TRUE &&
+      redoMustWaitForFileChange(regLogPartPtr, ZCOMPLETED_GCI_LOG_SIZE)) {
+    /**
+     * The COMPLETED_GCI record would leave a file that the head may not
+     * leave yet, and the queued records would not fit either: all wait
+     * until the problem is cleared (redoUpdateFileChangeProblem()), which
+     * restarts the queue. The GCP save waits for the file change anyway.
+     */
+    jam();
+    regLogPartPtr->logPartState = LogPartRecord::ACTIVE;
+    unlock_log_part(regLogPartPtr);
+    return;
+  }
 
   if (!regLogPartPtr->m_log_prepare_queue.isEmpty() ||
       !regLogPartPtr->m_log_complete_queue.isEmpty()) {
@@ -44791,6 +44988,21 @@ void Dblqh::writeNextLog(Signal *signal, LogPageRecordPtr &logPagePtr,
     /*       WE HAVE TO CHANGE LOG FILE                   */
     /* -------------------------------------------------- */
     if (!c_redo_pmem_format) {
+      if (logFilePtr.p->fileChangeState != LogFileRecord::NOT_ONGOING) {
+        /**
+         * Two file changes at once: page 0 of file 0 could end with the
+         * older file, and a system restart would not find the log after
+         * it (redoHeadMayNotLeaveFile()). Stop the node instead.
+         */
+        jam();
+        char buf[128];
+        BaseString::snprintf(buf, sizeof(buf),
+                             "REDO log part %u left file %u before the"
+                             " change to it was done (state %u)",
+                             logPartPtrP->logPartNo, logFilePtr.p->fileNo,
+                             Uint32(logFilePtr.p->fileChangeState));
+        progError(__LINE__, NDBD_EXIT_PRGERR, buf);
+      }
       LogFileOperationRecordPtr lfoPtr;
       completedLogPage(signal, ZLAST_WRITE_IN_FILE, __LINE__, true, lfoPtr,
                        logPagePtr, logFilePtr, logPartPtrP);
@@ -44880,28 +45092,20 @@ void Dblqh::writeNextLog(Signal *signal, LogPageRecordPtr &logPagePtr,
 /*       ALSO OPEN THE NEXT LOG FILE TO ENSURE THAT   */
 /*       THIS FILE IS OPEN WHEN ITS TURN COMES.       */
 /* -------------------------------------------------- */
-#ifdef ERROR_INSERT
-    if (delayOpenFilePtrI > 0 && logFilePtr.i == delayOpenFilePtrI) {
-      // Error insertion (the required file is not opened) is seen.
-      ndbassert(logFilePtr.p->fileRef == RNIL);
-      // Clear the inserted error 5090.
-      delayOpenFilePtrI = 0;
-    }
-#endif
     const bool fileOpen = (logFilePtr.p->fileRef != RNIL);
     writeFileHeaderOpen(signal, ZNORMAL, logPagePtr, logFilePtr, logPartPtrP);
     if (!fileOpen) {
+      /**
+       * The head waits at the end of the file before it until this file
+       * is open (redoHeadMayNotLeaveFile()); kept for safety, the log
+       * records then wait in memory. P_FILE_CHANGE_PROBLEM is set below.
+       */
       jam();
       g_eventLogger->info(
           "LDM(%u): REDO log part %u moved to file %u before the file was"
           " open",
           instance(), logPartPtrP->logPartNo, logFilePtr.p->fileNo);
       logFilePtr.p->fileChangeState = LogFileRecord::WAIT_FOR_OPEN_NEXT_FILE;
-      update_log_problem(signal, logPartPtrP,
-                         LogPartRecord::P_FILE_CHANGE_PROBLEM,
-                         /* set */ true);
-      // This problem will be cleared by writePageZeroLab() when the file
-      // is opened and the zero page is written.
     } else {
       openNextLogfile(signal, logFilePtr.p, logPartPtrP);
       logFilePtr.p->fileChangeState = LogFileRecord::BOTH_WRITES_ONGOING;
@@ -44935,18 +45139,14 @@ void Dblqh::writeNextLog(Signal *signal, LogPageRecordPtr &logPagePtr,
   if (logFilePtr.p->currentMbyte == (logPartPtrP->my_block->clogFileSize - 1)) {
     jam();
     twnlNextMbyte = 0;
-    if (logFilePtr.p->fileChangeState != LogFileRecord::NOT_ONGOING) {
-      jam();
-      update_log_problem(signal, logPartPtrP,
-                         LogPartRecord::P_FILE_CHANGE_PROBLEM,
-                         /* set */ true);
-    }  // if
     twnlNextFileNo = wnlNextLogFilePtr.p->fileNo;
   } else {
     jam();
     twnlNextMbyte = logFilePtr.p->currentMbyte + 1;
     twnlNextFileNo = logFilePtr.p->fileNo;
   }  // if
+  /* The last mbyte of a file, or a file not open: hold the head there */
+  redoUpdateFileChangeProblem(signal, logPartPtrP);
 
   LogPosition head = {twnlNextFileNo, twnlNextMbyte};
   LogPosition tail = {logPartPtrP->logTailFileNo, logPartPtrP->logTailMbyte};

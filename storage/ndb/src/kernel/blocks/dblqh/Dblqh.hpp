@@ -2058,7 +2058,7 @@ class Dblqh : public SimulatedBlock {
     enum {
       P_TAIL_PROBLEM = 0x1,        // 410
       P_REDO_IO_PROBLEM = 0x2,     // 1234
-      P_FILE_CHANGE_PROBLEM = 0x4  // 1220
+      P_FILE_CHANGE_PROBLEM = 0x4  // 1220, redoUpdateFileChangeProblem()
     };
     Uint32 m_log_problems;
 
@@ -2066,6 +2066,13 @@ class Dblqh : public SimulatedBlock {
      * Log part has logged about buffer full
      */
     Uint32 m_logged_buffer_full;
+
+    /**
+     * Log part has logged that log records wait for the head to be
+     * allowed to leave its file (redoMustWaitForFileChange()), once for
+     * each P_FILE_CHANGE_PROBLEM
+     */
+    bool m_logged_file_change_wait;
 
     /**
      * RONDB-1150, PMEM mode: the REDO path its files are opened under
@@ -4514,6 +4521,9 @@ private:
                                 bool out_of_log_buffer);
   void doWritePrepareLog(Signal *signal, TcConnectionrecPtr);
   void update_log_problem(Signal *, LogPartRecord *, Uint32 problem, bool);
+  bool redoHeadMayNotLeaveFile(const LogPartRecord *logPartPtrP);
+  void redoUpdateFileChangeProblem(Signal *signal, LogPartRecord *logPartPtrP);
+  bool redoMustWaitForFileChange(LogPartRecord *logPartPtrP, Uint32 words);
   void takeOverErrorLab(Signal *signal, TcConnectionrecPtr);
   bool checkTransporterOverloaded(Signal *signal, const NodeBitmask &all,
                                   const class LqhKeyReq *req);
@@ -4998,6 +5008,8 @@ public:
 
 #if defined ERROR_INSERT
   Uint32 delayOpenFilePtrI;
+  /* 5173: the open of delayOpenFilePtrI waits until the insert is cleared */
+  bool c_delay_open_until_cleared;
   /**
    * ERROR_INSERT 5113 (timing only, see ZDELAY_NEXT_COPY_ROW): true while
    * the delayed CONTINUEB continuation executes the real nextRecordCopy

@@ -288,7 +288,13 @@ Insert system error in GCP participant when receiving GCP_SAVEREQ.
 Delay GCP_SAVEREQ by 10 secs
 
 5090:
-Delay opening next redo log file.
+Delay opening next redo log file, until the log part waits at the
+end of the file before it.
+
+5173:
+Delay opening next redo log file until the error insert is cleared:
+the log part waits at the end of the file before it, and its commit,
+abort and GCI records wait there as if the file were full.
 
 7165: Delay INCL_NODE_REQ in starting node yeilding error in GCP_PREPARE
 

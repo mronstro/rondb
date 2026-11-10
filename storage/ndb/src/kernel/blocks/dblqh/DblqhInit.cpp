@@ -193,6 +193,7 @@ void Dblqh::initData()
 
 #if defined ERROR_INSERT
   delayOpenFilePtrI = 0;
+  c_delay_open_until_cleared = false;
 #endif
 
   c_totalLogFiles = 0;

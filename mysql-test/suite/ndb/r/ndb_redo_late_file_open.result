@@ -8,9 +8,9 @@ COUNT(*)	MIN(c)	MAX(c)	SUM(c)
 SELECT c, LENGTH(b), LEFT(b, 1) FROM t1 WHERE a = 0;
 c	LENGTH(b)	LEFT(b, 1)
 1300	14000	A
-== 2 == logging moved to a file before it was open
-Node 1: yes
-Node 2: yes
+== 2 == logging waited at the end of a file for the open of the next
+Node 1: waited yes, moved before the open no
+Node 2: waited yes, moved before the open no
 == 3 == the system restart executes the REDO log
 # System restart:
 SELECT COUNT(*), MIN(c), MAX(c), SUM(c) FROM t1 WHERE a > 0;
