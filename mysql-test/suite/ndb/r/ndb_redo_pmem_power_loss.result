@@ -1,0 +1,28 @@
+CREATE TABLE t1 (a INT PRIMARY KEY, b VARCHAR(255)) ENGINE=NDB;
+SET SESSION cte_max_recursion_depth = 4000;
+INSERT INTO t1
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+WHERE n < 4000)
+SELECT n, REPEAT('a', 250) FROM seq;
+SET SESSION cte_max_recursion_depth = DEFAULT;
+CREATE PROCEDURE upd(n INT)
+BEGIN
+DECLARE i INT DEFAULT 0;
+WHILE i < n DO
+UPDATE t1 SET b = REPEAT(CHAR(65 + i % 26), 250);
+SET i = i + 1;
+END WHILE;
+END|
+== 1 == a power loss of both data nodes while updates run
+SELECT COUNT(*), SUM(LENGTH(b)), MIN(b) = MAX(b) AS same FROM t1;
+COUNT(*)	SUM(LENGTH(b))	same
+4000	1000000	1
+== 2 == an abort restart of node 1 while updates run
+SELECT COUNT(*), SUM(LENGTH(b)), MIN(b) = MAX(b) AS same FROM t1;
+COUNT(*)	SUM(LENGTH(b))	same
+4000	1000000	1
+== 3 == each stop was a power loss of the REDO log
+Node 1: 2
+Node 2: 1
+DROP PROCEDURE upd;
+DROP TABLE t1;

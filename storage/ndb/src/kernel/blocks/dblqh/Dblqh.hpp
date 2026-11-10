@@ -2110,6 +2110,12 @@ class Dblqh : public SimulatedBlock {
      */
     Uint64 m_pmem_persisted_lsn;
     /**
+     * RONDB-1150 (recovery plan S7.3), with the power-loss emulation in
+     * debug builds: the persisted LSN that the last GCP_SAVECONF checked
+     * (redoPmemCheckGcpPersisted()).
+     */
+    Uint64 m_pmem_gcp_checked_lsn;
+    /**
      * RONDB-1150, PMEM format (S5.6): bytes stored to the mapping by the
      * write path and not yet fenced. Every function that stores fences
      * before it returns, so it is 0 whenever the log part is unlocked,
@@ -4365,6 +4371,8 @@ private:
                       const LogPageRecord *logPagePtrP, Uint32 pageNo,
                       Uint32 from, Uint32 to);
   void redoPmemFence(LogPartRecord *logPartPtrP);
+  void redoPmemDrain();
+  void redoPmemCheckGcpPersisted(LogPartRecord *logPartPtrP);
   void redoCopyOut(LogPartRecord *logPartPtrP, bool filledOnly);
   void redoEndOfRecord(LogPartRecord *logPartPtrP,
                        const LogFileRecord *logFilePtrP);

@@ -1,0 +1,9 @@
+# RONDB-1150: the REDO log in PMEM mode on any file system, without
+# persistent memory (__RedoLogPmemTestMode=nodax), with the power-loss
+# emulation: every crash or abort restart of a data node loses the REDO
+# writes not yet persistent. Add it to a test run:
+#   ./mtr --defaults-extra-file=suite/ndb/pmem_redo_powerloss.cnf ndb.ndb_basic
+[cluster_config]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+__RedoLogPmemPowerLossEmulation=1

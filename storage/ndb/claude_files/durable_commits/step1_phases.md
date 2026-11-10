@@ -21,8 +21,8 @@ unchanged.
 | 7 | 8 | Record writers | S4.2–S4.7, S5.1 | Unit tests; file-mode regression | 6 | **In progress**: the PMEM record writers behind `c_redo_pmem_format` (false until phase 8), the reservation, the LSN helpers, `pmem_redo_writer-t`; passed on macOS ARM64 (2026-11-03), Linux x86_64 and Linux ARM64 to be tested |
 | 8 | 9 | PMEM REDO end to end: write path and recovery together (**M0.3**) | S4.8, S5.2–S5.5, S6.1, S6.3–S6.6 | Initial start, traffic, SR and NR in PMEM mode; the ledger in PMEM mode | 5, 7, ledger | **In progress**, in four parts (below): 8a-8d (control area and slots, write path, restart, the rest of S5.5) passed their commands on macOS ARM64 (reported 2026-11-05), the ledger too; Linux x86_64 and Linux ARM64 to be run |
 | 9 | 10 | Checks, benchmark switch, persist delay | S5.6–S5.9, Q-A11 | Shared log parts; debug send checks; `DUMP 2368` latency numbers | 8 | **In progress**: the fence check at unlock, the barriers at the C places of E8 behind the benchmark switch, the check of the dependent signals, `DUMP 2368 0`-`4`, `__RedoLogPmemPersistDelayNs`, `ndb_redo_pmem_shared_parts` and `ndb_redo_pmem_persist_check`; passed its commands on macOS ARM64 (reported 2026-11-07); the latency numbers to be measured; Linux x86_64 and Linux ARM64 to be run |
-| 10 | 11 | Node restart and `redoLogReader` | S6.7, S6.8 | testNodeRestart subset; reader on files from crash tests | 8 | **In progress**: the node restart reviewed (no change) with `ndb_redo_pmem_node_restarts`; `ndb_redo_log_reader` reads the PMEM format, with `--find-end` and `--transid`, and `ndb_redo_pmem_reader` compares its end with phase 1 after node and system crashes; to be run on the three platforms |
-| 11 | 12 | Power-loss emulation and crash inserts (**M0.4**) | S1.5, S7.1–S7.3, S7.5 | `pmem-redo-tests.txt` with power-loss emulation | 8, 10 | Not started |
+| 10 | 11 | Node restart and `redoLogReader` | S6.7, S6.8 | testNodeRestart subset; reader on files from crash tests | 8 | **In progress**: the node restart reviewed (no change) with `ndb_redo_pmem_node_restarts`; `ndb_redo_log_reader` reads the PMEM format, with `--find-end` and `--transid`, and `ndb_redo_pmem_reader` compares its end with phase 1 after node and system crashes; the full ndb suite passed on macOS ARM64 and Linux x86_64 (reported 2026-11-10) but for two tests, see Results; Linux ARM64 to be run |
+| 11 | 12 | Power-loss emulation and crash inserts (**M0.4**) | S1.5, S7.1–S7.3, S7.5 | `pmem-redo-tests.txt` with power-loss emulation | 8, 10 | **In progress**, in three parts (below): 11a, the power-loss emulation in portlib, the crash hook and `DUMP 2370`, committed, its commands to be run; 11b (crash inserts, torn-copy injector) and 11c (ledger cases, configurations, lists) to come |
 
 **Side tracks**, independent of the phases above:
 
@@ -1511,6 +1511,114 @@ cd mysql-test
 insert 5114 delays a file write that the PMEM format does not do, so it
 checks that GCP saves go on across the synchronous file switches. The
 last command is the file-mode regression.
+
+**Results.** The full ndb suite passed on macOS ARM64 and Linux x86_64
+(reported 2026-11-10) but for two tests, neither in the PMEM format:
+
+- `testNodeRestartGcpSaveAndFileChange` (macOS ARM64) failed in the
+  system restart at its end with 2310, "end of log wo/ having found last
+  GCI". A REDO log part had two file changes going on at once: error
+  insert 5114 held the change to file 1 when the forced mbyte change of
+  `setLogTail()` took the head from the last mbyte of file 1 to file 2,
+  and page 0 of file 0 ended with file 1, the older change completing
+  last. File mode, older than RONDB-1150, fixed in a commit of its own
+  (`60e9bf261e8`, test `ndb.ndb_redo_file_change_hold`): the head now
+  leaves a file only when the change to the file is done and the next
+  file is open, and the commit, abort and COMPLETED_GCI records that do
+  not fit before the end of the file wait in the log queues. Error insert
+  5173 holds the open of the next file for that test.
+- `ndb_restore_debug` (Linux x86_64) failed once and passed on retry:
+  the test sleeps 4 seconds for the data of the backup and then expects
+  its rows in the backup log.
+
+Before the suite: ClusterJ could not load `libndbclient` on Linux x86_64,
+as the TC release id generator took more static TLS than the library may
+use; fixed in `df2573822e3`. `ndb_secretsfile1` and
+`ndb_secretsfile_reader` failed once on Linux x86_64 and not in 40 runs
+after.
+
+---
+
+## Phase 11: power-loss emulation and crash inserts
+
+**Scope.** `implementation_plan.md` pull request 12, milestone M0.4;
+platform plan S1.5, recovery plan S7.1-S7.3 and S7.5. A power loss that
+loses exactly what persistent memory may lose, the crash points of the
+write path and the restart, and the tests that use them. File mode is
+unchanged. Written in three parts:
+
+| Part | Packages | Content | State |
+|---|---|---|---|
+| 11a | S1.5, S7.3 | The power-loss emulation in `ndb_pmem` and its unit tests; NDBFS turns it on; every stop but a graceful shutdown is a power loss (`NdbShutdown`); the checks after each DBLQH drain and before GCP_SAVECONF; `DUMP 2370`; `ndb_redo_pmem_power_loss`, `pmem_redo_powerloss.cnf` | Committed (2026-11-10); its commands below to be run |
+| 11b | S7.1, S7.2 | The crash error inserts 5155-5172 through `redoPmemCrashPoint()`, the torn-copy injector M1, the M3 checks, `DUMP 2369` | Not started |
+| 11c | S7.4 cases, S7.5 | `GciLedgerTornTail`, `GciLedgerCrashPoints`, `GciLedgerPowerLoss`; `pmem_redo_dax.cnf`, the `MTR_NDB_PMEM_DIR` rule, `pmem_redo.skip`, the atrt configurations and `pmem-redo-tests.txt` | Not started |
+
+**Changes in 11a.** File mode is unchanged: the emulation is on only with
+`__RedoLogPmemPowerLossEmulation=1`, which needs `RedoLogMode=pmem`.
+
+| File | Change |
+|---|---|
+| `include/portlib/ndb_pmem.h` | `ndb_pmem_emul_enable`, `_active`, `_pending`, `_range_pending`, `_freeze`, `_power_fail`, `_on_crash`, `_set_crash`, `_get_stats`, `_reset`; `ndb_pmem_emul_stats` |
+| `src/common/portlib/ndb_pmem.cpp` | Each thread that writes a mapping has a list of its pending lines with their 64-byte pre-images, oldest first, indexed by address, registered at its first write. `copy_nt` and `zero` record their lines as written back, `store32/64` as not, `flush` marks this thread's lines written back, `drain` drops the written-back ones; a full list drops its oldest line (persistent early); `unmap` drops the mapping's lines. A line that becomes pending while another thread has it pending is counted (`shared`). `freeze` takes every list's spin lock, which each write holds, with 1 s to wait; `power_fail` keeps, tears or restores every pending line of the stopped threads; `on_crash` does it once per process. Unit tests in `ndb_pmem-t`: drained lines stay, the others are restored; a store needs its flush; keep and tear; a zeroing inside lines; the full list; two threads on one line; a write waits while frozen; unmap |
+| `src/kernel/blocks/ndbfs/Ndbfs.cpp` | `__RedoLogPmemPowerLossEmulation=1` turns the emulation on at READ_CONFIG, 16384 lines per thread, with a warning at every start; it was refused since phase 3 |
+| `src/kernel/ndbd.cpp` | `NdbShutdown` loses the power for every type but `NST_Normal`, then logs what the power loss restored, tore and kept |
+| `include/kernel/signaldata/DumpStateOrd.hpp` | `LqhPmemPowerLoss = 2370` |
+| `src/kernel/blocks/dblqh/Dblqh.hpp`, `DblqhMain.cpp` | `redoPmemDrain()`: every drain of DBLQH, then nothing of the thread pending (debug builds). `redoPmemCheckGcpPersisted()` before GCP_SAVECONF, debug builds with the emulation: no thread has a line pending in the log each part of the LDM made persistent since the last check, `LogPartRecord::m_pmem_gcp_checked_lsn`. `DUMP 2370 [seed [keep [tear]]]`: the power-loss values (default the time, 500 and 100 per mille), then the node stops as after an error insert |
+| `mysql-test/suite/ndb/pmem_redo_powerloss.cnf` | New: `pmem_redo.cnf` with the emulation, for `--defaults-extra-file` |
+| `mysql-test/suite/ndb/t/ndb_redo_pmem_power_loss.{test,cnf}`, `r/` | New, needs error inserts: updates run in the background; `DUMP 2370` stops both data nodes (`DUMP 2602 1`: no start) and the system restart finds every row with one value; then an abort restart of node 1 under updates; each node log has its power losses |
+
+**Decisions taken in 11a.**
+
+1. **Phase 11 is written in three parts**, as phase 8 was, and is one
+   pull request; its gate runs after 11c.
+2. **One spin lock per thread's list, held by each write.** A freeze takes
+   them all, so a write under way finishes and every later one waits; a
+   list registered after the freeze waits too. A thread that crashed
+   inside a write is not waited for, and its pending lines stay as they
+   are. Spin locks, so that a signal handler can try them; the lists are
+   never freed and the registry only grows (1024 threads).
+3. **A copy or a zeroing writes its lines back, a store does not** until
+   `ndb_pmem_flush()`: a drain leaves a stored line that was not flushed
+   pending, as the hardware does. DBLQH asserts after each drain that
+   nothing of the thread is pending, which catches a missing flush at
+   once.
+4. **A crash restores every pending line by default** (keep 0, tear 0),
+   the contract of the platform plan and the harshest case for a missing
+   drain. `DUMP 2370` keeps 500 and tears 100 per mille by default, for
+   holes, orphans and torn records; its seed, from the time when 0, is in
+   the node log so that a run can be repeated.
+5. **The hook is at the entry of `NdbShutdown` for every type but
+   `NST_Normal`**, which covers errors, the signal handler, the watchdog,
+   abort restarts and graceful restarts; by a graceful restart nothing
+   should be pending.
+6. **16384 pending lines per thread**: 1 MB of the log, the most that a
+   restart zeroes between two drains. Beyond it lines become persistent
+   early, which the hardware may also do.
+7. **The checks are after each drain and before GCP_SAVECONF**, not at
+   `unlock_log_part`: there phase 9's `m_pmem_unfenced` already checks
+   the writer's stores, and the restart's COMMIT flag stores stay pending
+   across unlocks until the end of a round. The check before
+   GCP_SAVECONF reads all threads' lists, so it covers shared log parts.
+8. **`DUMP 2370` comes in 11a**, though S7.1 lists it, as the trigger of
+   the 11a test; `DUMP 2369` comes with 11b.
+
+**Commands for the pusher (11a).** On Linux x86_64, Linux ARM64 and macOS
+ARM64, in a build with error inserts:
+
+```
+cmake --build .
+ctest -R ndb_pmem --output-on-failure
+cd mysql-test
+./mtr ndb.ndb_redo_pmem_power_loss ndb.ndb_redo_pmem_config ndb.ndb_redo_pmem_restart
+./mtr --repeat=10 ndb.ndb_redo_pmem_power_loss
+./mtr --defaults-extra-file=suite/ndb/pmem_redo_powerloss.cnf ndb.ndb_basic ndb.ndb_redo_pmem_restarts ndb.ndb_redo_pmem_node_restarts ndb.ndb_gci_ledger
+./mtr --suite=ndb --parallel=auto
+```
+
+The repeated run takes a new seed for `DUMP 2370` each time, so other
+lines are kept, torn and restored. The third MTR line runs tests that
+restart with abort or crash on an error insert, each stop then a power
+loss. The last command is the file-mode regression.
 
 ---
 

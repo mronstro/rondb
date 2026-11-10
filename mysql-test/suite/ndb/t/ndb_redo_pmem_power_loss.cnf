@@ -1,0 +1,13 @@
+!include ../my.cnf
+
+# RONDB-1150 phase 11a: the REDO log in PMEM mode on any file system, with
+# the power-loss emulation; small REDO files, so that the writes cross
+# mbytes and files; GCP saves twice a second.
+[cluster_config.1]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+__RedoLogPmemPowerLossEmulation=1
+NoOfFragmentLogFiles=5
+FragmentLogFileSize=4M
+TimeBetweenLocalCheckpoints=6
+TimeBetweenGlobalCheckpoints=500
