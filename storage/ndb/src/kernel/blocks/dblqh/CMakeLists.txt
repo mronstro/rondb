@@ -24,6 +24,9 @@
 MYSQL_ADD_EXECUTABLE(ndb_redo_log_reader
   redoLogReader/records.cpp
   redoLogReader/reader.cpp
+  # RONDB-1150: the files of RedoLogMode=pmem, with the restart's checks
+  redoLogReader/pmem_reader.cpp
+  PmemRedoScan.cpp
   COMPONENT ClusterTools
   ENABLE_EXPORTS
   LINK_LIBRARIES

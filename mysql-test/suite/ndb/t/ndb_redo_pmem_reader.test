@@ -1,0 +1,137 @@
+--source include/have_ndb.inc
+
+# RONDB-1150 phase 10 (recovery plan S6.8, test M3): ndb_redo_log_reader
+# on the REDO log of RedoLogMode=pmem. On the files of a log part,
+# --find-end must find the end of the log that phase 1 of the next
+# restart finds. On one file it checks every record as the restart does,
+# and exits with 1 on a corrupt log. The data nodes stop at once, so the
+# logs end where the writes stopped.
+
+let $cluster = $MYSQLTEST_VARDIR/mysql_cluster.1;
+let PART0=$cluster/ndbd.2/ndb_2_fs/D8/DBLQH;
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b VARCHAR(255)) ENGINE=NDB;
+SET SESSION cte_max_recursion_depth = 4000;
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+                            WHERE n < 4000)
+  SELECT n, REPEAT('a', 250) FROM seq;
+SET SESSION cte_max_recursion_depth = DEFAULT;
+
+# Each round logs about 0.35 MB per log part: 24 rounds switch mbyte and
+# file twice in every log part. The last round writes 'B'.
+--echo == 1 == updates that switch mbyte and file in every log part
+--disable_query_log
+let $i = 24;
+while ($i) {
+  eval UPDATE t1 SET b = REPEAT(CHAR(65 + $i % 26), 250);
+  --sleep 0.25
+  dec $i;
+}
+--enable_query_log
+
+--echo == 2 == node 2 stops at once; the reader finds the end of each log
+--exec $NDB_MGM -e "2 restart -n -a" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --wait-nodes=2 --not-started >> $NDB_TOOLS_OUTPUT
+let REDO_PMEM_NODES=2;
+let $redo_pmem_find_end_save = 1;
+--source suite/ndb/include/redo_pmem_find_end.inc
+
+# Exit code 0: every file of log part 0 holds a log that a restart reads
+--echo == 3 == the reader checks every record of each file of log part 0
+--exec $NDB_REDO_LOG_READER $PART0/S0.FragLog >> $NDB_TOOLS_OUTPUT
+--exec $NDB_REDO_LOG_READER $PART0/S1.FragLog >> $NDB_TOOLS_OUTPUT
+--exec $NDB_REDO_LOG_READER $PART0/S2.FragLog >> $NDB_TOOLS_OUTPUT
+--exec $NDB_REDO_LOG_READER $PART0/S3.FragLog >> $NDB_TOOLS_OUTPUT
+--exec $NDB_REDO_LOG_READER $PART0/S4.FragLog >> $NDB_TOOLS_OUTPUT
+--exec $NDB_REDO_LOG_READER --noprint --dump $PART0/S1.FragLog >> $NDB_TOOLS_OUTPUT
+--exec $NDB_REDO_LOG_READER --lap $PART0/S0.FragLog >> $NDB_TOOLS_OUTPUT
+--exec $NDB_REDO_LOG_READER --pageheaders $PART0/S1.FragLog >> $NDB_TOOLS_OUTPUT
+--exec $NDB_REDO_LOG_READER --mbyteheaders $PART0/S1.FragLog >> $NDB_TOOLS_OUTPUT
+--exec $NDB_REDO_LOG_READER --filedescriptors $PART0/S2.FragLog >> $NDB_TOOLS_OUTPUT
+--exec $NDB_REDO_LOG_READER --mbyte=1 $PART0/S0.FragLog >> $NDB_TOOLS_OUTPUT
+
+# File 0 holds the control area and the two last-file slots
+--perl
+  use strict;
+  my $reader = $ENV{NDB_REDO_LOG_READER};
+  my $file = "$ENV{PART0}/S0.FragLog";
+  my @out = `$reader --noprint $file`;
+  die "ndb_redo_log_reader $file failed\n" if $? != 0;
+  my $ctrl = grep { /^control area: 4 log parts, log part 0, 5 files of 4 MB, write unit 64 bytes, node 2$/ } @out;
+  my $slots = grep { /^slot [01]: seq \d+, file \d, lap \d+/ } @out;
+  my $last = grep { /^last file: \d in lap \d+ \(slot [01], seq \d+\)$/ } @out;
+  print "File 0: control area $ctrl, valid slots $slots, last file $last\n";
+EOF
+
+# --transid prints the records of one transaction, here the first COMMIT
+--perl
+  use strict;
+  my $reader = $ENV{NDB_REDO_LOG_READER};
+  my $file = "$ENV{PART0}/S0.FragLog";
+  my @all = `$reader $file`;
+  die "ndb_redo_log_reader $file failed\n" if $? != 0;
+  my ($t1, $t2);
+  foreach (@all) {
+    if (/^\d+:\d+:\d+ COMMIT .* transid (0x[0-9a-f]+) (0x[0-9a-f]+) /) {
+      ($t1, $t2) = ($1, $2);
+      last;
+    }
+  }
+  die "No COMMIT in $file\n" unless defined $t1;
+  my @one = `$reader --transid=$t1,$t2 $file`;
+  die "ndb_redo_log_reader --transid=$t1,$t2 $file failed\n" if $? != 0;
+  my @records = grep { /^\d+:\d+:\d+ / } @one;
+  my $commits = grep { / COMMIT / } @records;
+  my $others = grep { !/ transid \Q$t1\E \Q$t2\E/ } @records;
+  print "--transid: ", ($commits > 0 && $others == 0 ?
+        "only the records of the transaction" :
+        "$commits COMMITs, $others records of other transactions"), "\n";
+EOF
+
+--echo == 4 == options that the PMEM format does not take
+--replace_result $PART0 PART0
+--error 1
+--exec $NDB_REDO_LOG_READER --twiddle $PART0/S0.FragLog 2>&1
+--error 1
+--exec $NDB_REDO_LOG_READER --transid=5 $PART0/S0.FragLog 2>&1
+--error 1
+--exec $NDB_REDO_LOG_READER --find-end=$MYSQLTEST_VARDIR/tmp >> $NDB_TOOLS_OUTPUT 2>&1
+
+--echo == 5 == node 2 restarts; phase 1 finds the same end of each log
+--exec $NDB_MGM -e "2 start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+let $redo_pmem_find_end_save = 0;
+--source suite/ndb/include/redo_pmem_find_end.inc
+SELECT COUNT(*), SUM(LENGTH(b)), MIN(b) = MAX(b) AS same, LEFT(MIN(b), 1) AS c
+  FROM t1;
+
+# The last round writes 'b'; its GCP is saved long before the data nodes
+# stop at once, without a graceful shutdown.
+--echo == 6 == all data nodes stop at once; the reader finds each end
+--disable_query_log
+let $i = 8;
+while ($i) {
+  eval UPDATE t1 SET b = REPEAT(CHAR(97 + $i % 26), 250);
+  --sleep 0.25
+  dec $i;
+}
+--enable_query_log
+--sleep 3
+--exec $NDB_MGM -e "all restart -n -a" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started >> $NDB_TOOLS_OUTPUT
+let REDO_PMEM_NODES=1,2;
+let $redo_pmem_find_end_save = 1;
+--source suite/ndb/include/redo_pmem_find_end.inc
+
+--echo == 7 == system restart; phase 1 finds the same end of each log
+--exec $NDB_MGM -e "all start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+--source include/ndb_not_readonly.inc
+let $redo_pmem_find_end_save = 0;
+--source suite/ndb/include/redo_pmem_find_end.inc
+SELECT COUNT(*), SUM(LENGTH(b)), MIN(b) = MAX(b) AS same, LEFT(MIN(b), 1) AS c
+  FROM t1;
+
+DROP TABLE t1;
+--remove_file $NDB_TOOLS_OUTPUT

@@ -1,0 +1,19 @@
+# Shutting down mysqld 1
+# Shutting down mysqld 2
+== 1 == a crash where an mbyte starts, then crashes in the restart
+Running command
+Result of command: 0
+Test program success!
+== 2 == a node crashes and restarts, twice
+Running command
+Result of command: 0
+Test program success!
+== 3 == both nodes stop at once
+Running command
+Result of command: 0
+Test program success!
+== 4 == the restarts read the log in the PMEM format
+# Starting mysqld 1
+# restart
+# Starting mysqld 2
+# restart

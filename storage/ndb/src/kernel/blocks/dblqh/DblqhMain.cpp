@@ -46069,13 +46069,10 @@ void Dblqh::redoPmemSrPhase1(Signal *signal, LogPartRecordPtr logPartPtr) {
       PmemRedo::findEnd(v, lastFileNo, last.mbyte, lap);
   partP->m_pmem_end = scan.end;
   partP->m_pmem_end_reason = scan.reason;
-  g_eventLogger->info(
-      "LDM(%u): PMEM REDO log part %u: last file %u in lap %u (slot seq "
-      "%llu), last mbyte %u; end of the log at file %u page %u word %u in "
-      "lap %u (%s) after %u records",
-      instance(), partNo, lastFileNo, lap, (unsigned long long)slot.seq,
-      last.mbyte, scan.end.fileNo, scan.end.pageNo, scan.end.pageIndex,
-      scan.end.lap, PmemRedo::reasonName(scan.reason), scan.records);
+  /* ndb_redo_log_reader --find-end prints the same line */
+  PmemRedo::formatEnd(buf, sizeof(buf), partNo, lastFileNo, lap, slot.seq,
+                      last.mbyte, scan);
+  g_eventLogger->info("LDM(%u): %s", instance(), buf);
 
   /* E. From the page start when no record of E's page is valid */
   Uint64 from = PmemRedo::posLsn(v.g, scan.end);

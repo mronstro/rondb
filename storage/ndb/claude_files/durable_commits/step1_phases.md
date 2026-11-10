@@ -21,7 +21,7 @@ unchanged.
 | 7 | 8 | Record writers | S4.2–S4.7, S5.1 | Unit tests; file-mode regression | 6 | **In progress**: the PMEM record writers behind `c_redo_pmem_format` (false until phase 8), the reservation, the LSN helpers, `pmem_redo_writer-t`; passed on macOS ARM64 (2026-11-03), Linux x86_64 and Linux ARM64 to be tested |
 | 8 | 9 | PMEM REDO end to end: write path and recovery together (**M0.3**) | S4.8, S5.2–S5.5, S6.1, S6.3–S6.6 | Initial start, traffic, SR and NR in PMEM mode; the ledger in PMEM mode | 5, 7, ledger | **In progress**, in four parts (below): 8a-8d (control area and slots, write path, restart, the rest of S5.5) passed their commands on macOS ARM64 (reported 2026-11-05), the ledger too; Linux x86_64 and Linux ARM64 to be run |
 | 9 | 10 | Checks, benchmark switch, persist delay | S5.6–S5.9, Q-A11 | Shared log parts; debug send checks; `DUMP 2368` latency numbers | 8 | **In progress**: the fence check at unlock, the barriers at the C places of E8 behind the benchmark switch, the check of the dependent signals, `DUMP 2368 0`-`4`, `__RedoLogPmemPersistDelayNs`, `ndb_redo_pmem_shared_parts` and `ndb_redo_pmem_persist_check`; passed its commands on macOS ARM64 (reported 2026-11-07); the latency numbers to be measured; Linux x86_64 and Linux ARM64 to be run |
-| 10 | 11 | Node restart and `redoLogReader` | S6.7, S6.8 | testNodeRestart subset; reader on files from crash tests | 8 | Not started |
+| 10 | 11 | Node restart and `redoLogReader` | S6.7, S6.8 | testNodeRestart subset; reader on files from crash tests | 8 | **In progress**: the node restart reviewed (no change) with `ndb_redo_pmem_node_restarts`; `ndb_redo_log_reader` reads the PMEM format, with `--find-end` and `--transid`, and `ndb_redo_pmem_reader` compares its end with phase 1 after node and system crashes; to be run on the three platforms |
 | 11 | 12 | Power-loss emulation and crash inserts (**M0.4**) | S1.5, S7.1–S7.3, S7.5 | `pmem-redo-tests.txt` with power-loss emulation | 8, 10 | Not started |
 
 **Side tracks**, independent of the phases above:
@@ -1424,7 +1424,93 @@ with `__RedoLogPmemPersistDelayNs` at 0, 200 and 2000.
 GCP stop while MTR stopped the cluster after
 `testNodeRestartGcpSaveAndFileChange`, the last test of its worker. The
 GCP save of one LDM waited for page 0 of a new REDO file; file mode,
-older than phase 9, fixed in a commit of its own.
+older than phase 9, fixed in a commit of its own (`9a15776c3cd`). Looking
+into it found a second file-mode bug, fixed in another commit
+(`845fdb0dae4`, test `ndb.ndb_redo_late_file_open`): when logging moved to
+a REDO file whose open had not completed, the records written before the
+open were lost under the file descriptor written at the open.
+
+---
+
+## Phase 10: node restart and `redoLogReader`
+
+**Scope.** `implementation_plan.md` pull request 11; recovery plan S6.7
+and S6.8. The node restart from the PMEM format, reviewed and tested, and
+`ndb_redo_log_reader` for the PMEM format: every record checked as the
+restart checks it, the control area, and the end of the log that phase 1
+finds. File mode is unchanged.
+
+| File | Change |
+|---|---|
+| `src/kernel/blocks/dblqh/PmemRedoScan.hpp`, `.cpp` | `formatEnd()`: the line of phase 1 for a log part |
+| `src/kernel/blocks/dblqh/DblqhMain.cpp` | `redoPmemSrPhase1` logs its line through `formatEnd()`; the text is unchanged |
+| `src/kernel/blocks/dblqh/redoLogReader/pmem_reader.hpp`, `.cpp` | New: `pmem_redo_file()` (the format magic in page 0); `pmem_reader_main()` for one file: the config line and both slots of file 0 and the slot a restart takes, the page headers (`--pageheaders`, `--mbyteheaders`, `--lap` with restartGen), the FD (`--filedescriptors`), and the records of each mbyte, checked with `checkRecord` and printed one per line (COMMIT unpacked with its flags, ABORT with `AF_AFTER_COMMIT`, FILLER with `--dump`), `--mbyte`, `--transid`, the check; `pmem_find_end_main()` for `--find-end` |
+| `src/kernel/blocks/dblqh/redoLogReader/reader.cpp` | Options `--find-end=<dir>` and `--transid=T1,T2`; a PMEM file goes to `pmem_reader_main()` before the old path opens it; a line in the help |
+| `src/kernel/blocks/dblqh/CMakeLists.txt` | `ndb_redo_log_reader` also builds `pmem_reader.cpp` and `PmemRedoScan.cpp` |
+| `mysql-test/suite/ndb/include/redo_pmem_find_end.inc` | New: `--find-end` on every log part of the stopped data nodes; after their start, the line of phase 1 must be the reader's |
+| `mysql-test/suite/ndb/t/ndb_redo_pmem_reader.{test,cnf}`, `r/` | New (M3): 5 files of 4 MB per log part; updates that switch mbyte and file; node 2 stops at once (`-a`) and the reader finds the end of each log part, reads every file of log part 0 (exit code 0) and with each option, shows the control area of file 0, `--transid` on the first COMMIT, and refuses `--twiddle` and a bad `--transid`; node 2 restarts and phase 1 finds the reader's ends; then both nodes stop at once and the system restart finds the reader's ends on both |
+| `mysql-test/suite/ndb/t/ndb_redo_pmem_node_restarts.{test,cnf}`, `r/` | New (S6.7, part of A2), needs error inserts: `testNodeRestart` `Bug44952` (a crash where a COMPLETED_GCI starts an mbyte, 5051, under updates, then three crashes at the first GCP save of the restart, 5052), `RestartRandomNodeError -l 2` and `RestartAllNodesAbort` in PMEM mode, 6 files of 4 MB, the mysqlds stopped; both nodes read the PMEM format and no read of the log failed |
+
+**Decisions taken in phase 10.**
+
+1. **The node restart needs no change.** It runs phases 1, 3 and 4 of 8c
+   with `ST_NODE_RESTART`, from `startphase3Lab` through
+   `openAllRedoFilesPmem`, to the GCI of `execSTART_RECREQ`. Phase 4 goes
+   from `readSrFourthZeroLab` to `redoPmemSrFourth` and never enters
+   `readFileInInvalidate`, so the special case of step 7 for a
+   non-initial start is not reached; E is exact. The atrt list A2 comes
+   with S7.5 in phase 11, as decision 7 of phase 9 left S5.9.
+2. **One line for the restart and the reader.** `PmemRedo::formatEnd`
+   builds the line of phase 1. DBLQH logs it and `--find-end` prints it,
+   so the test compares the two strings, the count of records included.
+3. **`--find-end` runs A, B and D of phase 1**: the control area, checked
+   against itself as the reader has no configuration; the slot with the
+   higher seq; the last mbyte of the last file and its page 0; `findEnd`.
+   Not C, the GCIs from the FDs, which does not move E, and not E, the
+   zeroing: the reader maps the files read-only (read into memory on
+   Windows) and changes nothing.
+4. **One file is read mbyte by mbyte**, each from its first record
+   position with the lap of its first page header, up to its NEXT_MBYTE or
+   to the end of the valid log in that lap, printed as "END OF VALID LOG
+   at mb:page:word reason=...". The file's number, log part and number of
+   files come from the header of page 0, its size in MB from the file.
+   Positions are mbyte:page:word with the page counted in the mbyte; a
+   COMMIT names the page of its PREPARE in the file, as it is stored.
+5. **`--check`, on by default as in file mode, fails a file in which the
+   log of a lap goes on in a later mbyte after it ended**: a restart
+   zeroes the log after its end and the writer leaves no gap. Page headers
+   of the lap after the end, in the mbyte where the log ended, are
+   reported and not failed: copies that persisted out of order before a
+   crash leave them, and the next restart zeroes them. One file cannot
+   tell whether its end is the end of the log.
+6. **The format is told by the magic in the header of page 0**, read
+   before the old path opens the file. Without it the old path runs
+   unchanged, its output byte for byte (`ndb_redo_log_reader` guards it).
+   A PMEM file refuses `--file-key` (never encrypted) and `--twiddle`; a
+   file-mode file refuses `--transid`. `--page` and `--pageindex` stay
+   unused, as in file mode. `--in-doubt` is left for X5 (open question
+   12).
+7. **The test is `ndb_redo_pmem_reader`**, not the plan's
+   `ndb_pmem_redo_reader`, as the other PMEM tests are named
+   `ndb_redo_pmem_*`.
+
+**Commands for the pusher.** On Linux x86_64, Linux ARM64 and macOS
+ARM64; `ndb_redo_pmem_node_restarts` needs a build with error inserts:
+
+```
+cmake --build .
+ctest -R pmem_redo --output-on-failure
+cd mysql-test
+./mtr ndb.ndb_redo_pmem_reader ndb.ndb_redo_pmem_node_restarts ndb.ndb_redo_log_reader
+./mtr ndb.ndb_redo_pmem_restart ndb.ndb_redo_pmem_restarts
+./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.testNodeRestartGcpSaveAndFileChange ndb.ndb_gci_ledger
+./mtr --suite=ndb --parallel=auto
+```
+
+`testNodeRestartGcpSaveAndFileChange` with `pmem_redo.cnf` is M6: error
+insert 5114 delays a file write that the PMEM format does not do, so it
+checks that GCP saves go on across the synchronous file switches. The
+last command is the file-mode regression.
 
 ---
 

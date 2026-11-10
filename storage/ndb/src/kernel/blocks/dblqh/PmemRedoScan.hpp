@@ -178,6 +178,15 @@ ScanResult findEnd(const PartView &v, Uint32 fileNo, Uint32 mbyte,
  */
 LastMbyte findLastMbyte(const PartView &v, Uint32 fileNo, Uint32 lap);
 
+/**
+ * The line that phase 1 of a restart logs for a log part, and that
+ * ndb_redo_log_reader --find-end prints from the files of the part: the
+ * same text, so that a test can compare them.
+ */
+void formatEnd(char *buf, size_t size, Uint32 logPartNo, Uint32 lastFileNo,
+               Uint32 lap, Uint64 slotSeq, Uint32 lastMbyte,
+               const ScanResult &scan);
+
 /* The config line of the control area against the node's configuration */
 enum CtrlCheck : Uint32 {
   CTRL_VALID = 0,
