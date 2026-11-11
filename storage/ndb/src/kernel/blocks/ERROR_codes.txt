@@ -198,7 +198,7 @@ the request. Codes below 5128 stay on the LDM instances. Clearing (code
       node-failure protocol); emits [JOIN_AGG_MERGE_HELD node=N iteration=I
       coordinator=C] (extra = iteration, top bit = event sent). NF-14: the
       host record's ZNODE_DOWN must stop it
-Next DBLQH 5155
+Next DBLQH 5174
 Next DBDICT 6229
 Next DBDIH 7251
 Next DBTC 8135
@@ -295,6 +295,83 @@ end of the file before it.
 Delay opening next redo log file until the error insert is cleared:
 the log part waits at the end of the file before it, and its commit,
 abort and GCI records wait there as if the file were full.
+
+RONDB-1150, RedoLogMode=pmem: crash error inserts of the REDO log on
+persistent memory (impl_step1_recovery_test.md S7.1). Each stops the
+node with NDBD_EXIT_ERROR_INSERT. A torn copy stores each 64-byte line,
+some of its 8-byte words, or none of it, as a crash in the middle of the
+copy may leave it; with __RedoLogPmemPowerLossEmulation the copy is done
+and the power loss of the crash keeps, tears or restores each line not
+yet persistent. The extra value is the seed of the random choices (0:
+from the time), but for 5169 and 5171. The seed is in the node log.
+Inserts 5167-5172 act in a restart: set them while the node is not
+started.
+
+5155:
+Tear the next persist of the REDO log (copy-out), then crash.
+
+5156:
+Crash after the NEXT_MBYTE of an mbyte is persistent, before the next
+mbyte of the file is written.
+
+5157:
+Tear the first persist in an mbyte after the first of a file, which
+stores the header of its first page, then crash.
+
+5158:
+Crash after the end of a file is persistent, before page 0 of the next
+file is written.
+
+5159:
+Tear the copy of page 0 of the next file at a file switch, then crash.
+
+5161:
+Crash at a file switch after page 0 of the new file is persistent,
+before the last-file slot is written.
+
+5162:
+Tear the copy of the last-file slot at a file switch or at the end of
+a restart, then crash.
+
+5163:
+Crash after the last-file slot is persistent, before the first record
+of the new file or before the end of the restart of the REDO log.
+
+5164:
+Crash at a GCP save after the COMPLETED_GCI is written in a log part,
+before it is persisted.
+
+5165:
+Tear the persist of a log part at a GCP save, then crash.
+
+5166:
+Crash at a GCP save after every log part is persistent, before
+GCP_SAVECONF.
+
+5167:
+Restart: crash in phase 1 after a random prefix of the zeroing after the
+end of the log, without its drain.
+
+5168:
+Restart: crash in phase 4 after the zeroing of a random number of pages
+after the head (from the end), without the drain of the last ones.
+
+5169:
+Restart: crash after the N-th COMMIT invalidated in phase 3, before the
+drain of its flag; N is the extra value, default 1.
+
+5170:
+Restart: crash in phase 4 after the zeroing, before the write unit of
+the head is closed.
+
+5171:
+Crash before the K-th drain of a thread to the REDO log mappings; K is
+the extra value, default random from 1 to 1000. With the power-loss
+emulation the lines not yet persistent are lost, kept or torn.
+
+5172:
+Restart: crash in phase 1 when the end of the log is found, before the
+zeroing after it; the next restart must find the same end.
 
 7165: Delay INCL_NODE_REQ in starting node yeilding error in GCP_PREPARE
 

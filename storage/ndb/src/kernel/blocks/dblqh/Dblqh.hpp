@@ -2156,6 +2156,15 @@ class Dblqh : public SimulatedBlock {
     Uint64 m_pmem_zero_from;
     Uint64 m_pmem_zero_to;
     bool m_pmem_unsafe_shutdown;
+    /**
+     * RONDB-1150, PMEM format: the end LSN of the last COMPLETED_GCI of
+     * the part, logPartNewestCompletedGCI, which GCP_SAVECONF claims
+     * persistent (recovery plan S7.2) and DUMP 2369 prints. Error insert
+     * 5168: the LSN where the zeroing of phase 4 stops the node, 0 for
+     * none (S7.1).
+     */
+    Uint64 m_pmem_gci_end_lsn;
+    Uint64 m_pmem_zero_crash;
 
     /**
      *       A timer that is set every time a log page is sent to disk.
@@ -4443,6 +4452,27 @@ private:
                                 Uint32 pageNo, Uint32 pageIndex, Uint32 w0);
   void redoPmemSrFourth(Signal *signal, LogPartRecord *logPartPtrP);
   void redoPmemSrZero(Signal *signal, Uint32 logPartPtrI);
+  /**
+   * RONDB-1150, PMEM format: the crash error inserts 5155-5172, the
+   * torn-copy injector M1, the debug checks M3 (recovery plan S7.1,
+   * S7.2) and DUMP 2369.
+   */
+  void redoPmemCopy(void *dst, const void *src, size_t len);
+  void redoPmemCopyTorn(Uint8 *dst, const Uint8 *src, size_t len);
+  void redoPmemSeed(Uint32 code);
+  Uint64 redoPmemRand();
+  void redoPmemArmTear(Uint32 code);
+  bool redoPmemCountTo(Uint32 code);
+  [[noreturn]] void redoPmemCrashPoint(Uint32 code,
+                                       const LogPartRecord *logPartPtrP,
+                                       const char *what);
+  void redoPmemAssertPersisted(const LogPartRecord *logPartPtrP, Uint64 lsn,
+                               const char *what);
+  void redoPmemAssertEnd(LogPartRecord *logPartPtrP, const char *what);
+  void redoPmemVerifyCopy(LogPartRecord *logPartPtrP,
+                          const LogFileRecord *logFilePtrP, Uint64 from,
+                          Uint64 to);
+  void redoPmemPrintInfo(LogPartRecord *logPartPtrP);
   void writeDbgInfoPageHeader(LogPageRecordPtr logPagePtr,
                               LogFileRecord *logFilePtrP,
                               LogPartRecord *logPartPtrP, Uint32 place,
@@ -5690,6 +5720,25 @@ public:
   Uint32 c_redo_pmem_persist_commit;
   bool c_redo_pmem_skip_barrier;
   Uint32 c_redo_pmem_persist_delay_ns;
+  /**
+   * RONDB-1150, PMEM format, the crash error inserts (recovery plan S7.1,
+   * S7.2), used in error insert builds only:
+   *   c_redo_pmem_tear   the insert whose persist is in flight: the
+   *                      copies of this thread are torn (M1) until its
+   *                      fence, which stops the node instead
+   *   c_redo_pmem_seed   the seed of c_redo_pmem_rand, the PRNG of the
+   *                      torn copy and of the random crash points, in
+   *                      the node log at the crash
+   *   c_redo_pmem_count  flag stores (5169) or drains (5171) since the
+   *                      insert c_redo_pmem_count_code was set; it stops
+   *                      the node at c_redo_pmem_count_to
+   */
+  Uint32 c_redo_pmem_tear;
+  Uint32 c_redo_pmem_seed;
+  Uint64 c_redo_pmem_rand;
+  Uint32 c_redo_pmem_count_code;
+  Uint32 c_redo_pmem_count;
+  Uint32 c_redo_pmem_count_to;
   /**
    * PMEM mode: the NUMA node of this LDM thread (-1 if its CPUs span
    * nodes or it is not known) and the REDO path of its log parts,

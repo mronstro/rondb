@@ -2926,6 +2926,12 @@ void Dblqh::execREAD_CONFIG_REQ(Signal *signal) {
     c_redo_pmem_persist_commit = 0;
     c_redo_pmem_skip_barrier = false;
     c_redo_pmem_persist_delay_ns = 0;
+    c_redo_pmem_tear = 0;
+    c_redo_pmem_seed = 0;
+    c_redo_pmem_rand = 0;
+    c_redo_pmem_count_code = 0;
+    c_redo_pmem_count = 0;
+    c_redo_pmem_count_to = 0;
     if (c_redo_pmem) {
       ndb_mgm_get_int_parameter(p, CFG_DB_REDO_PMEM_PERSIST_DELAY_NS,
                                 &c_redo_pmem_persist_delay_ns);
@@ -34560,7 +34566,14 @@ void Dblqh::start_synch_gcp(Signal *signal) {
       writeCompletedGciLog(signal, logPagePtr, logFilePtr, logPartPtr.p);
       if (c_redo_pmem_format) {
         jam();
+        /* S7.1: error inserts 5164 and 5165 at the GCP save */
+        if (ERROR_INSERTED(5164)) {
+          redoPmemCrashPoint(5164, logPartPtr.p,
+                             "the COMPLETED_GCI written, before its persist");
+        }
+        if (ERROR_INSERTED(5165)) redoPmemArmTear(5165);
         redoPersist(signal, logPartPtr.p);
+        c_redo_pmem_tear = 0;
       }
     }  // if
     unlock_log_part(logPartPtr.p);
@@ -34672,7 +34685,9 @@ void Dblqh::initGcpRecLab(Signal *signal) {
     for (logPartPtr.i = 0; logPartPtr.i < clogPartFileSize; logPartPtr.i++) {
       ptrAss(logPartPtr, logPartRecord);
       lock_log_part(logPartPtr.p);
+      if (ERROR_INSERTED(5165)) redoPmemArmTear(5165);
       redoPersist(signal, logPartPtr.p);
+      c_redo_pmem_tear = 0;
       unlock_log_part(logPartPtr.p);
     }
     sendGcpSaveConf(signal);
@@ -34928,15 +34943,29 @@ void Dblqh::sendGcpSaveConf(Signal *signal) {
   ndbrequire(refToMain(localGcpPtr.p->gcpBlockref) == DBDIH ||
              refToMain(localGcpPtr.p->gcpBlockref) == DBLQH);
 #if defined(VM_TRACE) || defined(ERROR_INSERT)
-  if (c_redo_pmem_format && ndb_pmem_emul_active()) {
+  if (c_redo_pmem_format) {
+    /* S7.2, M3: the COMPLETED_GCI of the GCI persistent in every part */
     jam();
     LogPartRecordPtr logPartPtr;
     for (logPartPtr.i = 0; logPartPtr.i < clogPartFileSize; logPartPtr.i++) {
       ptrAss(logPartPtr, logPartRecord);
-      redoPmemCheckGcpPersisted(logPartPtr.p);
+      lock_log_part(logPartPtr.p);
+      ndbrequire(logPartPtr.p->logPartNewestCompletedGCI ==
+                 localGcpPtr.p->gcpId);
+      redoPmemAssertPersisted(logPartPtr.p, logPartPtr.p->m_pmem_gci_end_lsn,
+                              "GCP_SAVECONF");
+      unlock_log_part(logPartPtr.p);
+      if (ndb_pmem_emul_active()) {
+        jam();
+        redoPmemCheckGcpPersisted(logPartPtr.p);
+      }
     }
   }
 #endif
+  if (c_redo_pmem_format && ERROR_INSERTED(5166)) {
+    redoPmemCrashPoint(5166, nullptr,
+                       "every log part persisted, before GCP_SAVECONF");
+  }
   sendSignal(localGcpPtr.p->gcpBlockref, GSN_GCP_SAVECONF, signal,
              GCPSaveConf::SignalLength, JBA);
   ccurrentGcprec = RNIL;
@@ -43449,6 +43478,8 @@ void Dblqh::initLogpart(Signal *signal, LogPartRecordPtr logPartPtr) {
   logPartPtr.p->m_pmem_zero_from = 0;
   logPartPtr.p->m_pmem_zero_to = 0;
   logPartPtr.p->m_pmem_unsafe_shutdown = false;
+  logPartPtr.p->m_pmem_gci_end_lsn = 0;
+  logPartPtr.p->m_pmem_zero_crash = 0;
   NdbLogPartInfo lpinfo(instance());
   ndbrequire(lpinfo.partCount == clogPartFileSize);
   logPartPtr.p->logPartNo = lpinfo.partNo[logPartPtr.i];
@@ -44976,6 +45007,17 @@ void Dblqh::writeNextLog(Signal *signal, LogPageRecordPtr &logPagePtr,
     jam();
     writeNextMbytePmem(logPartPtrP, logFilePtr.p, logPagePtr.p);
     redoCopyOut(logPartPtrP, false);
+    const bool lastMbyte = logFilePtr.p->currentMbyte ==
+                           logPartPtrP->my_block->clogFileSize - 1;
+    if (ERROR_INSERTED(5156) && !lastMbyte) {
+      redoPmemCrashPoint(5156, logPartPtrP,
+                         "the NEXT_MBYTE persistent, before the next mbyte");
+    }
+    if (ERROR_INSERTED(5158) && lastMbyte) {
+      redoPmemCrashPoint(5158, logPartPtrP,
+                         "the end of a file persistent, before page 0 of "
+                         "the next file");
+    }
     releaseLogpage(logPagePtr, logPartPtrP);
   } else {
     logPagePtr.p->logPageWord[logPagePtr.p->logPageWord[ZCURR_PAGE_INDEX]] =
@@ -45411,6 +45453,8 @@ void Dblqh::writeCompletedGciLogPmem(Signal *signal,
   redoAppendFixed(signal, logPartPtrP, logPagePtr, logFilePtr, rec,
                   PmemRedo::COMPLETED_GCI_LEN);
   logPartPtrP->logPartNewestCompletedGCI = cnewestCompletedGci;
+  logPartPtrP->m_pmem_gci_end_lsn =
+      redoPosLsn(logPartPtrP, logFilePtr.p, logPagePtr.p);
 }
 
 /**
@@ -45638,13 +45682,13 @@ Uint32 Dblqh::redoCopyPage(LogPartRecord *logPartPtrP,
     alignas(PmemRedo::W_BYTES) Uint32 img[ZPAGE_HEADER_SIZE];
     redoPmemHeaderImage(img, logPagePtrP, logFilePtrP->fileNo, pageNo,
                         logPartPtrP);
-    ndb_pmem_copy_nt(redoPmemAddr(logFilePtrP, pageNo, 0), img, sizeof(img));
+    redoPmemCopy(redoPmemAddr(logFilePtrP, pageNo, 0), img, sizeof(img));
     bytes += sizeof(img);
     from = ZPAGE_HEADER_SIZE;
   }
   if (to > from) {
-    ndb_pmem_copy_nt(redoPmemAddr(logFilePtrP, pageNo, from),
-                     &logPagePtrP->logPageWord[from], 4 * (to - from));
+    redoPmemCopy(redoPmemAddr(logFilePtrP, pageNo, from),
+                 &logPagePtrP->logPageWord[from], 4 * (to - from));
     bytes += 4 * (to - from);
   }
   logPartPtrP->m_pmem_unfenced += bytes;
@@ -45654,9 +45698,13 @@ Uint32 Dblqh::redoCopyPage(LogPartRecord *logPartPtrP,
 /**
  * The drain of this thread's stores to the mappings. With the power-loss
  * emulation nothing of this thread is pending after it (recovery plan
- * S7.3): a store left pending was not flushed.
+ * S7.3): a store left pending was not flushed. Error insert 5171 stops
+ * the node before the K-th drain, K its extra value or random up to 1000.
  */
 void Dblqh::redoPmemDrain() {
+  if (ERROR_INSERTED(5171) && redoPmemCountTo(5171)) {
+    redoPmemCrashPoint(5171, nullptr, "before a drain");
+  }
   ndb_pmem_drain();
   ndbassert(ndb_pmem_emul_pending() == 0);
 }
@@ -45717,6 +45765,13 @@ void Dblqh::redoPmemCheckGcpPersisted(LogPartRecord *logPartPtrP) {
  * latency and throughput can be measured for it on DRAM.
  */
 void Dblqh::redoPmemFence(LogPartRecord *logPartPtrP) {
+#if defined(VM_TRACE) || defined(ERROR_INSERT)
+  if (unlikely(c_redo_pmem_tear != 0)) {
+    /* S7.1: the persist of a crash error insert ends torn, unfenced */
+    redoPmemCrashPoint(c_redo_pmem_tear, logPartPtrP,
+                       "a copy to the mapping torn before its fence");
+  }
+#endif
   redoPmemDrain();
   logPartPtrP->m_pmem_unfenced = 0;
   const Uint32 delayNs = c_redo_pmem_persist_delay_ns;
@@ -45774,6 +45829,24 @@ void Dblqh::redoCopyOut(LogPartRecord *logPartPtrP, bool filledOnly) {
   Uint32 word = Uint32((persisted - fileStart) % PmemRedo::PAGE_BYTES) / 4;
   ndbrequire(pageNo + filePtrP->noLogpagesInBuffer ==
              filePtrP->currentFilepage);
+  LogPageRecordPtr curPagePtr;
+  curPagePtr.i = filePtrP->currentLogpage;
+  ptrCheckGuard(curPagePtr, logPartPtrP->logPageFileSize,
+                logPartPtrP->logPageRecord);
+
+  /**
+   * S7.1: error insert 5155 tears this persist, 5157 the first one into
+   * an mbyte after the first, which stores the mbyte's header. Each
+   * stops the node at the fence.
+   */
+  if (ERROR_INSERTED(5155)) redoPmemArmTear(5155);
+  if (ERROR_INSERTED(5157) && word == 0 && pageNo != 0 &&
+      pageNo % ZPAGES_IN_MBYTE == 0 &&
+      (filePtrP->firstFilledPage != RNIL ||
+       (!filledOnly &&
+        curPagePtr.p->logPageWord[ZCURR_PAGE_INDEX] > ZPAGE_HEADER_SIZE))) {
+    redoPmemArmTear(5157);
+  }
 
   const bool timed = (logPartPtrP->m_pmem_stats.barriers % 16) == 0;
   NDB_TICKS start;
@@ -45791,16 +45864,19 @@ void Dblqh::redoCopyOut(LogPartRecord *logPartPtrP, bool filledOnly) {
     pageNo++;
     word = 0;
   }
-  LogPageRecordPtr curPagePtr;
-  curPagePtr.i = filePtrP->currentLogpage;
-  ptrCheckGuard(curPagePtr, logPartPtrP->logPageFileSize,
-                logPartPtrP->logPageRecord);
   if (!filledOnly) {
     bytes += redoCopyPage(logPartPtrP, filePtrP, curPagePtr.p, pageNo, word,
                           curPagePtr.p->logPageWord[ZCURR_PAGE_INDEX]);
   }
   redoPmemFence(logPartPtrP);
   redoCountPersist(logPartPtrP, bytes, timed ? &start : nullptr);
+  const Uint64 to =
+      filledOnly
+          ? redoLsn(logPartPtrP, filePtrP->fileNo, filePtrP->currentFilepage, 0)
+          : redoPosLsn(logPartPtrP, filePtrP, curPagePtr.p);
+#if defined(VM_TRACE) || defined(ERROR_INSERT)
+  redoPmemVerifyCopy(logPartPtrP, filePtrP, persisted, to);
+#endif
 
   pagePtr.i = filePtrP->firstFilledPage;
   while (pagePtr.i != RNIL) {
@@ -45813,10 +45889,7 @@ void Dblqh::redoCopyOut(LogPartRecord *logPartPtrP, bool filledOnly) {
   filePtrP->firstFilledPage = RNIL;
   filePtrP->lastFilledPage = RNIL;
   filePtrP->noLogpagesInBuffer = 0;
-  logPartPtrP->m_pmem_persisted_lsn =
-      filledOnly
-          ? redoLsn(logPartPtrP, filePtrP->fileNo, filePtrP->currentFilepage, 0)
-          : redoPosLsn(logPartPtrP, filePtrP, curPagePtr.p);
+  logPartPtrP->m_pmem_persisted_lsn = to;
 }
 
 /**
@@ -45960,9 +46033,21 @@ void Dblqh::writeFileHeaderOpenPmem(LogPageRecordPtr &logPagePtr,
              logFilePtr.p->currentFilepage == 0 &&
              logFilePtr.p->firstFilledPage == RNIL);
   redoBuildPageZero(logPagePtr, logFilePtr, logPartPtrP);
+  /* S7.1: error inserts 5159, 5161-5163 at the file switch */
+  if (ERROR_INSERTED(5159)) redoPmemArmTear(5159);
   redoCopyPageZero(logPagePtr, logFilePtr, logPartPtrP);
+  if (ERROR_INSERTED(5161)) {
+    redoPmemCrashPoint(5161, logPartPtrP,
+                       "page 0 of a new file persistent, before the slot");
+  }
+  if (ERROR_INSERTED(5162)) redoPmemArmTear(5162);
   redoWriteLastFileSlot(logPartPtrP, logFilePtr.p->fileNo,
                         logPartPtrP->logLap);
+  if (ERROR_INSERTED(5163)) {
+    redoPmemCrashPoint(5163, logPartPtrP,
+                       "the slot of a new file persistent, before its first "
+                       "record");
+  }
   if (logPagePtr.i != logFilePtr.p->logPageZero) {
     jam();
     releaseLogpage(logPagePtr, logPartPtrP);
@@ -46073,8 +46158,8 @@ void Dblqh::redoWriteLastFileSlot(LogPartRecord *logPartPtrP, Uint32 fileNo,
   PmemRedo::buildSlot(line, seq, fileNo, lap, logPartPtrP->logPartNo,
                       logPartPtrP->m_pmem_dsc_recorded,
                       logPartPtrP->m_pmem_dsc_flags);
-  ndb_pmem_copy_nt(redoPmemAddr(file0Ptr.p, 0, PmemRedo::slotWord(seq)), line,
-                   sizeof(line));
+  redoPmemCopy(redoPmemAddr(file0Ptr.p, 0, PmemRedo::slotWord(seq)), line,
+               sizeof(line));
   logPartPtrP->m_pmem_unfenced += sizeof(line);
   redoPmemFence(logPartPtrP);
   redoCountPersist(logPartPtrP, sizeof(line), nullptr);
@@ -46349,7 +46434,24 @@ void Dblqh::redoPmemSrPhase1(Signal *signal, LogPartRecordPtr logPartPtr) {
     from -= 4 * ZPAGE_HEADER_SIZE;
   }
   const Uint64 mbyteBytes = Uint64(1) << 20;
-  redoPmemZero(partP, from, (from / mbyteBytes + 1) * mbyteBytes);
+  const Uint64 to = (from / mbyteBytes + 1) * mbyteBytes;
+  /**
+   * S7.1: error insert 5172 stops the node before the zeroing, so that
+   * the next start must find the same E; 5167 after a random prefix of
+   * it, not drained.
+   */
+  if (ERROR_INSERTED(5172)) {
+    redoPmemCrashPoint(5172, partP,
+                       "phase 1 found the end of the log, before its zeroing");
+  }
+  if (ERROR_INSERTED(5167)) {
+    redoPmemSeed(5167);
+    const Uint64 prefix = 8 * (redoPmemRand() % ((to - from) / 8 + 1));
+    if (prefix > 0) redoPmemZero(partP, from, from + prefix);
+    redoPmemCrashPoint(5167, partP,
+                       "phase 1 zeroed a prefix of the log after its end");
+  }
+  redoPmemZero(partP, from, to);
   redoPmemDrain();
 
   partP->logLap = lap;
@@ -46435,7 +46537,14 @@ void Dblqh::redoPmemZero(LogPartRecord *logPartPtrP, Uint64 from, Uint64 to) {
   const Uint64 end = begin + (to - from);
   if (begin < PmemRedo::PAGE_BYTES) begin = PmemRedo::PAGE_BYTES;
   if (begin < end) {
-    ndb_pmem_zero(logPartPtrP->m_pmem_file_base[fileNo] + begin, end - begin);
+    Uint8 *const at = logPartPtrP->m_pmem_file_base[fileNo] + begin;
+    ndb_pmem_zero(at, end - begin);
+#if defined(VM_TRACE) || defined(ERROR_INSERT)
+    /* S7.2, M3: the range reads as zero */
+    Uint8 bits = 0;
+    for (Uint64 i = 0; i < end - begin; i++) bits |= at[i];
+    ndbrequire(bits == 0);
+#endif
   }
 }
 
@@ -46546,6 +46655,11 @@ void Dblqh::redoPmemInvalidateCommit(LogPartRecord *logPartPtrP,
   ndb_pmem_store32(addr, w0 | PmemRedo::RF_INVALIDATED);
   ndb_pmem_flush(addr, sizeof(Uint32));
   logPartPtrP->m_pmem_inval_pending++;
+  /* S7.1: error insert 5169 after the N-th store, N its extra value or 1 */
+  if (ERROR_INSERTED(5169) && redoPmemCountTo(5169)) {
+    redoPmemCrashPoint(5169, logPartPtrP,
+                       "a COMMIT invalidated, before the drain of its flag");
+  }
 }
 
 /**
@@ -46576,6 +46690,17 @@ void Dblqh::redoPmemSrFourth(Signal *signal, LogPartRecord *logPartPtrP) {
   if (end.pageIndex == ZPAGE_HEADER_SIZE) to -= 4 * ZPAGE_HEADER_SIZE;
   logPartPtrP->m_pmem_zero_from = from;
   logPartPtrP->m_pmem_zero_to = std::max(from, to);
+  logPartPtrP->m_pmem_zero_crash = 0;
+  if (ERROR_INSERTED(5168)) {
+    /* S7.1: stop the node after a random number of pages, from the end */
+    redoPmemSeed(5168);
+    const Uint64 bytes = logPartPtrP->m_pmem_zero_to - from;
+    const Uint64 pages =
+        (bytes + PmemRedo::PAGE_BYTES - 1) / PmemRedo::PAGE_BYTES;
+    const Uint64 zeroed = PmemRedo::PAGE_BYTES * (redoPmemRand() % (pages + 1));
+    logPartPtrP->m_pmem_zero_crash =
+        std::max(from, logPartPtrP->m_pmem_zero_to - std::min(bytes, zeroed));
+  }
   g_eventLogger->info(
       "LDM(%u): PMEM REDO log part %u: head at file %u page %u word %u in "
       "lap %u, %llu bytes to zero after it",
@@ -46605,6 +46730,13 @@ void Dblqh::redoPmemSrZero(Signal *signal, Uint32 logPartPtrI) {
     const Uint64 mbyteBytes = Uint64(1) << 20;
     const Uint64 to = partP->m_pmem_zero_to;
     const Uint64 lo = std::max(from, ((to - 1) / mbyteBytes) * mbyteBytes);
+    if (unlikely(partP->m_pmem_zero_crash >= lo)) {
+      /* Error insert 5168: the batch zeroed down to the crash, no drain */
+      const Uint64 crash = partP->m_pmem_zero_crash;
+      if (crash < to) redoPmemZero(partP, crash, to);
+      redoPmemCrashPoint(5168, partP,
+                         "phase 4 zeroed a part of the log after the head");
+    }
     redoPmemZero(partP, lo, to);
     redoPmemDrain();
     partP->m_pmem_zero_to = lo;
@@ -46615,6 +46747,15 @@ void Dblqh::redoPmemSrZero(Signal *signal, Uint32 logPartPtrI) {
       sendSignal(cownref, GSN_CONTINUEB, signal, 2, JBB);
       return;
     }
+  }
+  /* S7.1: error inserts 5168 (nothing to zero), 5170, 5162 and 5163 */
+  if (unlikely(partP->m_pmem_zero_crash != 0)) {
+    redoPmemCrashPoint(5168, partP, "phase 4 had nothing to zero");
+  }
+  if (ERROR_INSERTED(5170)) {
+    redoPmemCrashPoint(5170, partP,
+                       "phase 4 zeroed the log after the head, before the "
+                       "close of its write unit");
   }
 
   lock_log_part(partP);
@@ -46630,12 +46771,358 @@ void Dblqh::redoPmemSrZero(Signal *signal, Uint32 logPartPtrI) {
   LogFileRecordPtr logFilePtr;
   logFilePtr.i = partP->currentLogfile;
   ptrCheckGuard(logFilePtr, clogFileFileSize, logFileRecord);
+  if (ERROR_INSERTED(5162)) redoPmemArmTear(5162);
   redoWriteLastFileSlot(partP, logFilePtr.p->fileNo, partP->logLap);
+  if (ERROR_INSERTED(5163)) {
+    redoPmemCrashPoint(5163, partP,
+                       "the slot of phase 4 persistent, before the end of "
+                       "phase 4");
+  }
+#if defined(VM_TRACE) || defined(ERROR_INSERT)
+  /* S7.2, M3: a later restart finds the end of the log at the head */
+  redoPmemAssertEnd(partP, "the end of phase 4");
+#endif
   delete[] partP->m_pmem_file_base;
   partP->m_pmem_file_base = nullptr;
   signal->theData[0] = ZSR_FOURTH_COMP;
   signal->theData[1] = logPartPtrI;
   sendSignal(cownref, GSN_CONTINUEB, signal, 2, JBB);
+}
+
+/* ==========================================================================
+ * RONDB-1150: the crash error inserts of the PMEM format and their torn
+ * copy (recovery plan S7.1, S7.2 M1), the debug checks of what is claimed
+ * persistent (S7.2 M3), and DUMP 2369
+ *
+ * A crash point stops the node with NDBD_EXIT_ERROR_INSERT, so that it
+ * restarts as RestartOnErrorInsert says. A torn persist is armed before
+ * its copies (redoPmemArmTear()) and stops the node at its fence, with
+ * the copies torn by redoPmemCopyTorn(), or, with the power-loss
+ * emulation (S7.3), copied and torn by the power loss of the crash.
+ * ========================================================================== */
+
+/**
+ * A copy of the write path to the mapping. Torn while a crash error
+ * insert has armed it and the power-loss emulation is off, which then
+ * tears it at the crash.
+ */
+void Dblqh::redoPmemCopy(void *dst, const void *src, size_t len) {
+#if defined(VM_TRACE) || defined(ERROR_INSERT)
+  if (unlikely(c_redo_pmem_tear != 0) && !ndb_pmem_emul_active()) {
+    redoPmemCopyTorn(static_cast<Uint8 *>(dst),
+                     static_cast<const Uint8 *>(src), len);
+    return;
+  }
+#endif
+  ndb_pmem_copy_nt(dst, src, len);
+}
+
+/**
+ * M1: a copy as a crash in the middle of it may leave it. Each 64-byte
+ * line is copied with probability 500 per mille, torn (each 8-byte word
+ * old or new) with 100, else left as it was, the values of DUMP 2370.
+ * No flush and no fence: the crash follows at the fence. The stores stay
+ * in the mapping after the crash on every host (memmap=, nodax), so the
+ * restart finds what persistent memory may keep of a persist: holes
+ * before valid data, orphans, torn records and torn page headers.
+ */
+void Dblqh::redoPmemCopyTorn(Uint8 *dst, const Uint8 *src, size_t len) {
+  size_t done = 0;
+  while (done < len) {
+    const UintPtr at = reinterpret_cast<UintPtr>(dst + done);
+    const size_t n =
+        std::min<size_t>(len - done, NDB_PMEM_LINE - at % NDB_PMEM_LINE);
+    const Uint64 r = redoPmemRand();
+    const Uint32 p = Uint32(r % 1000);
+    if (p < 500) {
+      std::memcpy(dst + done, src + done, n);
+    } else if (p < 600) {
+      for (size_t w = 0; w < n; w += 8) {
+        if ((r >> (32 + w / 8)) & 1) {
+          std::memcpy(dst + done + w, src + done + w,
+                      std::min<size_t>(8, n - w));
+        }
+      }
+    }
+    done += n;
+  }
+}
+
+/**
+ * The PRNG of a crash error insert: its seed is the insert's extra value
+ * (a count for 5169 and 5171), else from the time. The crash writes it to
+ * the node log, so that a run can be repeated.
+ */
+void Dblqh::redoPmemSeed(Uint32 code) {
+  Uint32 seed = (code == 5169 || code == 5171) ? 0 : ERROR_INSERT_EXTRA;
+  if (seed == 0) seed = Uint32(NdbTick_CurrentMillisecond()) | 1;
+  c_redo_pmem_seed = seed;
+  c_redo_pmem_rand = seed;
+}
+
+/* SplitMix64, as the power-loss emulation */
+Uint64 Dblqh::redoPmemRand() {
+  Uint64 z = (c_redo_pmem_rand += 0x9E3779B97F4A7C15ULL);
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+  return z ^ (z >> 31);
+}
+
+/* The copies of this thread torn and its next fence a crash */
+void Dblqh::redoPmemArmTear(Uint32 code) {
+  if (c_redo_pmem_tear != 0) return;
+  redoPmemSeed(code);
+  c_redo_pmem_tear = code;
+}
+
+/**
+ * 5169 and 5171: true at the K-th event since the insert was set, K its
+ * extra value, else 1 for 5169 and random up to 1000 for 5171.
+ */
+bool Dblqh::redoPmemCountTo(Uint32 code) {
+  if (c_redo_pmem_count_code != code) {
+    redoPmemSeed(code);
+    Uint32 count = ERROR_INSERT_EXTRA;
+    if (count == 0) {
+      count = code == 5169 ? 1 : 1 + Uint32(redoPmemRand() % 1000);
+    }
+    c_redo_pmem_count_code = code;
+    c_redo_pmem_count = 0;
+    c_redo_pmem_count_to = count;
+  }
+  return ++c_redo_pmem_count >= c_redo_pmem_count_to;
+}
+
+/**
+ * The crash of an error insert. With the power-loss emulation the lines
+ * not yet persistent are kept with probability 500 per mille, torn with
+ * 100 and restored otherwise, from the insert's seed, the values of the
+ * torn copy.
+ */
+void Dblqh::redoPmemCrashPoint(Uint32 code, const LogPartRecord *logPartPtrP,
+                               const char *what) {
+  if (c_redo_pmem_seed == 0) redoPmemSeed(code);
+  const bool emul = ndb_pmem_emul_active();
+  if (emul) ndb_pmem_emul_set_crash(c_redo_pmem_seed, 500, 100);
+  char part[32] = "";
+  if (logPartPtrP != nullptr) {
+    BaseString::snprintf(part, sizeof(part), " in REDO log part %u",
+                         logPartPtrP->logPartNo);
+  }
+  char buf[256];
+  BaseString::snprintf(buf, sizeof(buf),
+                       "PMEM REDO error insert %u: %s%s, seed %u%s", code,
+                       what, part, c_redo_pmem_seed,
+                       emul ? ", power loss keep 500 tear 100"
+                       : c_redo_pmem_tear == code ? ", copy torn"
+                                                  : "");
+  g_eventLogger->info("LDM(%u): %s", instance(), buf);
+  progError(__LINE__, NDBD_EXIT_ERROR_INSERT, buf);
+}
+
+/**
+ * M3: the log of the part persistent up to lsn and nothing stored without
+ * its fence, where it is claimed: GCP_SAVECONF.
+ */
+void Dblqh::redoPmemAssertPersisted(const LogPartRecord *logPartPtrP,
+                                    Uint64 lsn, const char *what) {
+  if (logPartPtrP->m_pmem_persisted_lsn >= lsn &&
+      logPartPtrP->m_pmem_unfenced == 0) {
+    return;
+  }
+  char buf[256];
+  BaseString::snprintf(
+      buf, sizeof(buf),
+      "PMEM REDO log part %u: %s claims the log persistent up to LSN %llu; "
+      "persisted LSN %llu, %u bytes not fenced",
+      logPartPtrP->logPartNo, what, (unsigned long long)lsn,
+      (unsigned long long)logPartPtrP->m_pmem_persisted_lsn,
+      logPartPtrP->m_pmem_unfenced);
+  progError(__LINE__, NDBD_EXIT_PRGERR, buf);
+}
+
+/**
+ * M3 at the end of phase 4: the restart's scan from the start of the
+ * head's mbyte ends at the persisted position, the head with its unit
+ * closed, as in redoPmemVerify(). A later restart then finds E there.
+ * An initial start runs phase 4 without phase 1, so the view is built
+ * from the mappings of the files, which every file has from its first
+ * open.
+ */
+void Dblqh::redoPmemAssertEnd(LogPartRecord *logPartPtrP, const char *what) {
+  const Uint32 noFiles = logPartPtrP->noLogFiles;
+  const Uint8 **bases = new const Uint8 *[noFiles];
+  LogFileRecordPtr filePtr;
+  filePtr.i = logPartPtrP->firstLogfile;
+  for (Uint32 f = 0; f < noFiles; f++) {
+    ptrCheckGuard(filePtr, clogFileFileSize, logFileRecord);
+    ndbrequire(filePtr.p->fileNo == f && filePtr.p->m_pmem_base != nullptr);
+    bases[f] = filePtr.p->m_pmem_base;
+    filePtr.i = filePtr.p->nextLogFile;
+  }
+  filePtr.i = logPartPtrP->currentLogfile;
+  ptrCheckGuard(filePtr, clogFileFileSize, logFileRecord);
+  const PmemRedo::Geom g = {noFiles, clogFileSize, logPartPtrP->logPartNo};
+  const PmemRedo::PartView v = {g, bases};
+  const PmemRedo::ScanResult r = PmemRedo::findEnd(
+      v, filePtr.p->fileNo, filePtr.p->currentMbyte, logPartPtrP->logLap);
+  delete[] bases;
+  Uint64 end = PmemRedo::posLsn(g, r.end);
+  if (r.end.pageIndex == ZPAGE_HEADER_SIZE) end -= 4 * ZPAGE_HEADER_SIZE;
+  const Uint64 persisted = logPartPtrP->m_pmem_persisted_lsn;
+  if (end == persisted && logPartPtrP->m_pmem_unfenced == 0) return;
+  char buf[256];
+  BaseString::snprintf(
+      buf, sizeof(buf),
+      "PMEM REDO log part %u: at %s the log ends at file %u page %u word %u "
+      "(%s), LSN %llu, not at the persisted LSN %llu",
+      logPartPtrP->logPartNo, what, r.end.fileNo, r.end.pageNo,
+      r.end.pageIndex, PmemRedo::reasonName(r.reason),
+      (unsigned long long)end, (unsigned long long)persisted);
+  progError(__LINE__, NDBD_EXIT_PRGERR, buf);
+}
+
+/**
+ * M3 after the fence of redoCopyOut(): the log of the current file in
+ * [from, to) reads in the mapping as in the log pages that hold it, the
+ * filled pages and then the current page up to its index, a page header
+ * as its image. It finds a persisted LSN moved over bytes that were never
+ * copied, which the power-loss emulation cannot see.
+ */
+void Dblqh::redoPmemVerifyCopy(LogPartRecord *logPartPtrP,
+                               const LogFileRecord *logFilePtrP, Uint64 from,
+                               Uint64 to) {
+  const Uint64 fileStart = redoLsn(logPartPtrP, logFilePtrP->fileNo, 0, 0);
+  ndbrequire(from >= fileStart && from <= to);
+  const Uint32 toPage = Uint32((to - fileStart) / PmemRedo::PAGE_BYTES);
+  const Uint32 toWord = Uint32((to - fileStart) % PmemRedo::PAGE_BYTES) / 4;
+  Uint32 pageNo = Uint32((from - fileStart) / PmemRedo::PAGE_BYTES);
+  Uint32 word = Uint32((from - fileStart) % PmemRedo::PAGE_BYTES) / 4;
+  LogPageRecordPtr pagePtr;
+  pagePtr.i = logFilePtrP->firstFilledPage != RNIL
+                  ? logFilePtrP->firstFilledPage
+                  : logFilePtrP->currentLogpage;
+  bool ok = true;
+  while (ok && (pageNo < toPage || (pageNo == toPage && word < toWord))) {
+    ptrCheckGuard(pagePtr, logPartPtrP->logPageFileSize,
+                  logPartPtrP->logPageRecord);
+    const Uint32 *const page = pagePtr.p->logPageWord;
+    const Uint32 end = pageNo < toPage ? ZPAGE_SIZE : toWord;
+    ok = end <= page[ZCURR_PAGE_INDEX];
+    if (ok && word == 0) {
+      alignas(PmemRedo::W_BYTES) Uint32 img[ZPAGE_HEADER_SIZE];
+      redoPmemHeaderImage(img, pagePtr.p, logFilePtrP->fileNo, pageNo,
+                          logPartPtrP);
+      ok = std::memcmp(redoPmemAddr(logFilePtrP, pageNo, 0), img,
+                       sizeof(img)) == 0;
+      word = ZPAGE_HEADER_SIZE;
+    }
+    if (ok && end > word) {
+      ok = std::memcmp(redoPmemAddr(logFilePtrP, pageNo, word), &page[word],
+                       4 * (end - word)) == 0;
+    }
+    if (!ok) break;
+    pageNo++;
+    word = 0;
+    pagePtr.i = pagePtr.i == logFilePtrP->lastFilledPage
+                    ? logFilePtrP->currentLogpage
+                    : page[ZNEXT_PAGE];
+  }
+  if (ok) return;
+  char buf[256];
+  BaseString::snprintf(
+      buf, sizeof(buf),
+      "PMEM REDO log part %u: file %u page %u in the mapping is not the log "
+      "page copied to it, persist from LSN %llu to %llu",
+      logPartPtrP->logPartNo, logFilePtrP->fileNo, pageNo,
+      (unsigned long long)from, (unsigned long long)to);
+  progError(__LINE__, NDBD_EXIT_PRGERR, buf);
+}
+
+/**
+ * DUMP 2369 (S7.1): the state of a log part to the node and cluster logs:
+ * the config line and the last-file slot of the control area, the end E
+ * that the last restart found, the head, the persisted LSN, the last
+ * COMPLETED_GCI and whether it is persistent, and the COMMIT flag stores
+ * of a restart not yet fenced.
+ */
+void Dblqh::redoPmemPrintInfo(LogPartRecord *logPartPtrP) {
+  const Uint32 partNo = logPartPtrP->logPartNo;
+  const PmemRedo::Geom g = {logPartPtrP->noLogFiles, clogFileSize, partNo};
+  LogFileRecordPtr file0Ptr;
+  file0Ptr.i = logPartPtrP->firstLogfile;
+  ptrCheckGuard(file0Ptr, clogFileFileSize, logFileRecord);
+  char ctrl[160] = "not mapped";
+  char slot[96] = "";
+  lock_log_part(logPartPtrP);
+  if (file0Ptr.p->m_pmem_base != nullptr) {
+    const Uint32 *const page00 =
+        reinterpret_cast<const Uint32 *>(file0Ptr.p->m_pmem_base);
+    char msg[128];
+    if (PmemRedo::checkCtrlConfig(page00 + PmemRedo::CTRL_CONFIG_WORD, g,
+                                  globalData.ndbLogParts, getOwnNodeId(), msg,
+                                  sizeof(msg)) == PmemRedo::CTRL_VALID) {
+      BaseString::snprintf(ctrl, sizeof(ctrl), "valid");
+    } else {
+      BaseString::snprintf(ctrl, sizeof(ctrl), "not valid: %s", msg);
+    }
+    PmemRedo::Slot s;
+    const int index = PmemRedo::pickSlot(page00 + PmemRedo::SLOT0_WORD,
+                                         page00 + PmemRedo::SLOT1_WORD, g, &s);
+    if (index < 0) {
+      BaseString::snprintf(slot, sizeof(slot), ", no valid last-file slot");
+    } else {
+      BaseString::snprintf(slot, sizeof(slot),
+                           ", slot %d seq %llu names file %u in lap %u",
+                           index, (unsigned long long)s.seq, s.fileNo, s.lap);
+    }
+  }
+  LogFileRecordPtr filePtr;
+  filePtr.i = logPartPtrP->currentLogfile;
+  ptrCheckGuard(filePtr, clogFileFileSize, logFileRecord);
+  LogPageRecordPtr pagePtr;
+  pagePtr.i = filePtr.p->currentLogpage;
+  ptrCheckGuard(pagePtr, logPartPtrP->logPageFileSize,
+                logPartPtrP->logPageRecord);
+  const Uint32 headFileNo = filePtr.p->fileNo;
+  const Uint32 headPageNo = filePtr.p->currentFilepage;
+  const Uint32 headIndex = pagePtr.p->logPageWord[ZCURR_PAGE_INDEX];
+  const Uint32 lap = logPartPtrP->logLap;
+  const Uint64 persisted = logPartPtrP->m_pmem_persisted_lsn;
+  const Uint32 gci = logPartPtrP->logPartNewestCompletedGCI;
+  const Uint64 gciEnd = logPartPtrP->m_pmem_gci_end_lsn;
+  unlock_log_part(logPartPtrP);
+
+  char buf[400];
+  const PmemRedo::Pos &e = logPartPtrP->m_pmem_end;
+  char end[160] = "none since an initial start";
+  if (e.lap != 0) {
+    BaseString::snprintf(
+        end, sizeof(end), "file %u page %u word %u lap %u (%s)", e.fileNo,
+        e.pageNo, e.pageIndex, e.lap,
+        PmemRedo::reasonName(logPartPtrP->m_pmem_end_reason));
+  }
+  BaseString::snprintf(buf, sizeof(buf),
+                       "PMEM REDO log part %u: control area %s%s; end of the "
+                       "log at the last restart %s",
+                       partNo, ctrl, slot, end);
+  g_eventLogger->info("LDM(%u): %s", instance(), buf);
+  infoEvent("%s", buf);
+  char gciText[64] = "none since the start";
+  if (gciEnd != 0) {
+    BaseString::snprintf(gciText, sizeof(gciText), "%u, %s", gci,
+                         persisted >= gciEnd ? "persistent" : "not persistent");
+  }
+  BaseString::snprintf(
+      buf, sizeof(buf),
+      "PMEM REDO log part %u: head at file %u page %u word %u lap %u, "
+      "persisted LSN %llu; last COMPLETED_GCI %s; %u COMMIT flag stores not "
+      "fenced",
+      partNo, headFileNo, headPageNo, headIndex, lap,
+      (unsigned long long)persisted, gciText,
+      logPartPtrP->m_pmem_inval_pending);
+  g_eventLogger->info("LDM(%u): %s", instance(), buf);
+  infoEvent("%s", buf);
 }
 
 bool Dblqh::validate_filter(Signal *signal) {
@@ -46920,6 +47407,35 @@ void Dblqh::execDUMP_STATE_ORD(Signal *signal) {
                     cmd);
         }
         break;
+    }
+    return;
+  }
+  if (arg == DumpStateOrd::LqhPmemRedoInfo) {
+    /**
+     * RONDB-1150 (recovery plan S7.1): DUMP 2369, the state of each REDO
+     * log part of this LDM in the PMEM format (redoPmemPrintInfo())
+     */
+    jam();
+    if (m_is_query_block) return;
+    if (!c_redo_pmem_format) {
+      if (instance() <= 1) {
+        infoEvent("DUMP 2369: RedoLogMode=pmem is not used on node %u",
+                  getOwnNodeId());
+      }
+      return;
+    }
+    if (cstartRecReq < SRR_REDO_COMPLETE) {
+      /* The head is set when the restart of the REDO log is done */
+      if (instance() <= 1) {
+        infoEvent("DUMP 2369: the REDO log of node %u is not started yet",
+                  getOwnNodeId());
+      }
+      return;
+    }
+    LogPartRecordPtr logPartPtr;
+    for (logPartPtr.i = 0; logPartPtr.i < clogPartFileSize; logPartPtr.i++) {
+      ptrAss(logPartPtr, logPartRecord);
+      redoPmemPrintInfo(logPartPtr.p);
     }
     return;
   }

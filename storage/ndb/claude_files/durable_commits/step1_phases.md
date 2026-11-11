@@ -21,8 +21,8 @@ unchanged.
 | 7 | 8 | Record writers | S4.2–S4.7, S5.1 | Unit tests; file-mode regression | 6 | **In progress**: the PMEM record writers behind `c_redo_pmem_format` (false until phase 8), the reservation, the LSN helpers, `pmem_redo_writer-t`; passed on macOS ARM64 (2026-11-03), Linux x86_64 and Linux ARM64 to be tested |
 | 8 | 9 | PMEM REDO end to end: write path and recovery together (**M0.3**) | S4.8, S5.2–S5.5, S6.1, S6.3–S6.6 | Initial start, traffic, SR and NR in PMEM mode; the ledger in PMEM mode | 5, 7, ledger | **In progress**, in four parts (below): 8a-8d (control area and slots, write path, restart, the rest of S5.5) passed their commands on macOS ARM64 (reported 2026-11-05), the ledger too; Linux x86_64 and Linux ARM64 to be run |
 | 9 | 10 | Checks, benchmark switch, persist delay | S5.6–S5.9, Q-A11 | Shared log parts; debug send checks; `DUMP 2368` latency numbers | 8 | **In progress**: the fence check at unlock, the barriers at the C places of E8 behind the benchmark switch, the check of the dependent signals, `DUMP 2368 0`-`4`, `__RedoLogPmemPersistDelayNs`, `ndb_redo_pmem_shared_parts` and `ndb_redo_pmem_persist_check`; passed its commands on macOS ARM64 (reported 2026-11-07); the latency numbers to be measured; Linux x86_64 and Linux ARM64 to be run |
-| 10 | 11 | Node restart and `redoLogReader` | S6.7, S6.8 | testNodeRestart subset; reader on files from crash tests | 8 | **In progress**: the node restart reviewed (no change) with `ndb_redo_pmem_node_restarts`; `ndb_redo_log_reader` reads the PMEM format, with `--find-end` and `--transid`, and `ndb_redo_pmem_reader` compares its end with phase 1 after node and system crashes; the full ndb suite passed on macOS ARM64 and Linux x86_64 (reported 2026-11-10) but for two tests, see Results; Linux ARM64 to be run |
-| 11 | 12 | Power-loss emulation and crash inserts (**M0.4**) | S1.5, S7.1–S7.3, S7.5 | `pmem-redo-tests.txt` with power-loss emulation | 8, 10 | **In progress**, in three parts (below): 11a, the power-loss emulation in portlib, the crash hook and `DUMP 2370`, committed, its commands to be run; 11b (crash inserts, torn-copy injector) and 11c (ledger cases, configurations, lists) to come |
+| 10 | 11 | Node restart and `redoLogReader` | S6.7, S6.8 | testNodeRestart subset; reader on files from crash tests | 8 | **In progress**: the node restart reviewed (no change) with `ndb_redo_pmem_node_restarts`; `ndb_redo_log_reader` reads the PMEM format, with `--find-end` and `--transid`, and `ndb_redo_pmem_reader` compares its end with phase 1 after node and system crashes; the full ndb suite passed on macOS ARM64 and Linux x86_64 (reported 2026-11-10) but for two tests, see Results; Linux ARM64 passed, and the fix on the three platforms (reported 2026-11-11) |
+| 11 | 12 | Power-loss emulation and crash inserts (**M0.4**) | S1.5, S7.1–S7.3, S7.5 | `pmem-redo-tests.txt` with power-loss emulation | 8, 10 | **In progress**, in three parts (below): 11a, the power-loss emulation in portlib, the crash hook and `DUMP 2370`, passed its commands (reported 2026-11-11); 11b, the crash inserts 5155-5172, the torn copy, the debug checks and `DUMP 2369`, written, its commands to be run; 11c (ledger cases, configurations, lists) to come |
 
 **Side tracks**, independent of the phases above:
 
@@ -1531,6 +1531,11 @@ last command is the file-mode regression.
   the test sleeps 4 seconds for the data of the backup and then expects
   its rows in the backup log.
 
+After the fix the suite passed on Linux ARM64, and
+`ndb_redo_file_change_hold`, `ndb_redo_late_file_open` and 20 runs of
+`testNodeRestartGcpSaveAndFileChange` passed on the three platforms
+(reported 2026-11-11).
+
 Before the suite: ClusterJ could not load `libndbclient` on Linux x86_64,
 as the TC release id generator took more static TLS than the library may
 use; fixed in `df2573822e3`. `ndb_secretsfile1` and
@@ -1549,8 +1554,8 @@ unchanged. Written in three parts:
 
 | Part | Packages | Content | State |
 |---|---|---|---|
-| 11a | S1.5, S7.3 | The power-loss emulation in `ndb_pmem` and its unit tests; NDBFS turns it on; every stop but a graceful shutdown is a power loss (`NdbShutdown`); the checks after each DBLQH drain and before GCP_SAVECONF; `DUMP 2370`; `ndb_redo_pmem_power_loss`, `pmem_redo_powerloss.cnf` | Committed (2026-11-10); its commands below to be run |
-| 11b | S7.1, S7.2 | The crash error inserts 5155-5172 through `redoPmemCrashPoint()`, the torn-copy injector M1, the M3 checks, `DUMP 2369` | Not started |
+| 11a | S1.5, S7.3 | The power-loss emulation in `ndb_pmem` and its unit tests; NDBFS turns it on; every stop but a graceful shutdown is a power loss (`NdbShutdown`); the checks after each DBLQH drain and before GCP_SAVECONF; `DUMP 2370`; `ndb_redo_pmem_power_loss`, `pmem_redo_powerloss.cnf` | Passed its commands (reported 2026-11-11) |
+| 11b | S7.1, S7.2 | The crash error inserts 5155-5172 through `redoPmemCrashPoint()`, the torn-copy injector M1, the M3 checks, `DUMP 2369`; `ndb_redo_pmem_crash_points`, `ndb_redo_pmem_crash_restart` | Written (2026-11-11); its commands below to be run |
 | 11c | S7.4 cases, S7.5 | `GciLedgerTornTail`, `GciLedgerCrashPoints`, `GciLedgerPowerLoss`; `pmem_redo_dax.cnf`, the `MTR_NDB_PMEM_DIR` rule, `pmem_redo.skip`, the atrt configurations and `pmem-redo-tests.txt` | Not started |
 
 **Changes in 11a.** File mode is unchanged: the emulation is on only with
@@ -1619,6 +1624,101 @@ The repeated run takes a new seed for `DUMP 2370` each time, so other
 lines are kept, torn and restored. The third MTR line runs tests that
 restart with abort or crash on an error insert, each stop then a power
 loss. The last command is the file-mode regression.
+
+**Changes in 11b.** File mode is unchanged: every insert and check sits
+in code of the PMEM format.
+
+| File | Change |
+|---|---|
+| `include/kernel/signaldata/DumpStateOrd.hpp` | `LqhPmemRedoInfo = 2369` |
+| `src/kernel/blocks/ERROR_codes.txt` | 5155-5159 and 5161-5172; `Next DBLQH 5174` |
+| `src/kernel/blocks/dblqh/Dblqh.hpp`, `DblqhMain.cpp` | `redoPmemCrashPoint()`: the node log line with the insert and its seed, with the emulation the power-loss values, then `progError(NDBD_EXIT_ERROR_INSERT)`. `redoPmemArmTear()`: the copies of the thread go through `redoPmemCopyTorn()` (M1) until the fence, which stops the node; `redoPmemCopy()` for the copy-out, page 0 and the slot. `redoPmemSeed()`, `redoPmemRand()` (SplitMix64), `redoPmemCountTo()`. The inserts at their sites: 5155 and 5157 in `redoCopyOut()`, 5156 and 5158 in `writeNextLog()`, 5159 and 5161-5163 in `writeFileHeaderOpenPmem()`, 5164 and 5165 in `start_synch_gcp()` and `initGcpRecLab()`, 5166 in `sendGcpSaveConf()`, 5167 and 5172 in `redoPmemSrPhase1()`, 5168, 5170, 5162 and 5163 in phase 4, 5169 in `redoPmemInvalidateCommit()`, 5171 in `redoPmemDrain()`. M3: `redoPmemVerifyCopy()` after each copy-out, `redoPmemAssertPersisted()` before GCP_SAVECONF with `LogPartRecord::m_pmem_gci_end_lsn`, `redoPmemAssertEnd()` at the end of phase 4, the zeroing read back. `m_pmem_zero_crash` for 5168. `DUMP 2369`: `redoPmemPrintInfo()` |
+| `mysql-test/suite/ndb/include/redo_pmem_crash.inc` | New: nodes stop at an insert (`DUMP 2602 1`), each node log names it, then they start; after 5167 and 5172 the line of phase 1 of every log part must be the same in the next start |
+| `mysql-test/suite/ndb/t/ndb_redo_pmem_crash_points.{test,cnf}`, `r/` | New, needs error inserts: updates run all the time; data node 2 stops at each insert of the write path (5155-5159, 5161-5166, 5171) and restarts; both nodes stop at 5155, 5165 and 5166 and the system restarts; every row has one value; `DUMP 2369` prints every log part with a valid control area |
+| `mysql-test/suite/ndb/t/ndb_redo_pmem_crash_restart.{test,cnf}`, `r/` | New, needs error inserts: data node 2 stops with abort under updates, then at 5172, 5167, 5168, 5170, 5162 and 5163 in its restart; after 5172 and 5167 the next start finds the same end of the log; then a system restart with abort under updates; every row has one value |
+
+**Decisions taken in 11b.**
+
+1. **A torn persist is armed before its copies and stops the node at
+   its fence.** `redoPmemArmTear()` sets `c_redo_pmem_tear`; every copy of
+   the thread through `redoPmemCopy()` is then torn, and `redoPmemFence()`
+   stops the node instead of draining. One mechanism serves 5155, 5157,
+   5159, 5162 and 5165, without a hook between the copies and the drain
+   of each function. `redoPmemCopyTorn()` takes its random choices from
+   the block's PRNG, not from a seed argument as in the plan.
+2. **M1 per 64-byte line: copied with 500 per mille, torn (each 8-byte
+   word old or new) with 100, else not stored**, the values of `DUMP
+   2370`, so that M1 and M2 leave the same kinds of state.
+3. **With the power-loss emulation every crash insert loses the power
+   with keep 500 and tear 100**, from the insert's seed, not only the
+   torn ones. After a fence the crashing thread has nothing pending; the
+   lines left are those of other threads, which a power loss also hits.
+   Other crashes keep the default of 11a, every line restored.
+4. **5155 is any copy-out (`redoCopyOut()`)**; page 0, the slot and the
+   initial images have inserts of their own or none. **5157 is the first
+   copy-out into mbyte 1 or later of a file that stores the header of the
+   mbyte's first page**; mbyte 0 starts with page 0, which is 5159.
+5. **5156 and 5158 split the mbyte switch**, 5158 when the mbyte is the
+   last of its file. **5164 stops before the persist of the first log
+   part that writes its COMPLETED_GCI in `start_synch_gcp()`**; a part that
+   was ACTIVE writes it later, in `logNextStart()`. **5165 arms the tear at
+   both persists of the GCP save**, in `start_synch_gcp()` and
+   `initGcpRecLab()`, and disarms it when the persist had nothing to copy.
+6. **5167 zeroes a random prefix of [E, end of E's mbyte) in 8-byte
+   steps; 5168 a random number of pages from the end of the zeroing of
+   phase 4**, chosen when phase 4 starts (`m_pmem_zero_crash`). With
+   nothing to zero, 5168 stops the node where the zeroing would be.
+   Neither drains.
+7. **5169 and 5171 count per LDM thread** (`c_redo_pmem_count`), from
+   zero when the insert changes; their seed comes from the time, as their
+   extra value is the count.
+8. **M3 is four checks in debug builds.** `redoPmemVerifyCopy()` compares
+   the mapping with the log pages after each copy-out's fence, a page
+   header with its image, up to the new persisted LSN, which must lie in
+   what the pages hold. Before GCP_SAVECONF the COMPLETED_GCI of the GCI
+   in each log part of the LDM ends below the persisted LSN, with nothing
+   unfenced. At the end of phase 4 the restart's scan from the start of
+   the head's mbyte must end at the persisted position
+   (`redoPmemAssertEnd()`): a later restart finds E at the head. The plan's
+   assert before ZSR_FOURTH_COMP is this scan, as phase 4 sets the
+   persisted LSN from the head. An initial start and an initial node
+   restart run phase 4 without phase 1 (`initFourth()`), so the scan
+   reads the mappings of the files, not the view that phase 1 builds;
+   the first run of `ndb_redo_pmem_crash_points` stopped both nodes in
+   the initial start on the view's `ndbrequire` (2026-11-11). Every
+   zeroing reads back as zero.
+9. **`DUMP 2369` prints two lines per log part** once the restart of the
+   REDO log is done: the control area, the slot with the higher seq, E of
+   the last restart; the head, the persisted LSN, the last COMPLETED_GCI
+   and whether it is persistent, and the COMMIT flag stores not fenced.
+10. **Two MTR tests, without and with `pmem_redo_powerloss.cnf`.** The
+    inserts of a restart stop data node 2 in a node restart only: in a
+    system restart a node that sees the other stop fails the restart
+    and, with StopOnError, does not start again, and which node stops
+    first is a race. 5169 needs a COMMIT after the restart's GCI, which
+    a test cannot be sure to find. `GciLedgerCrashPoints` (11c) takes
+    both: it drives each insert until it fires, in system restarts too.
+    The tests print the insert where each node stopped, not the site's
+    text: phase 4 may switch files, where 5162 and 5163 also act.
+
+**Commands for the pusher (11b).** On Linux x86_64, Linux ARM64 and macOS
+ARM64, in a build with error inserts:
+
+```
+cmake --build .
+cd mysql-test
+./mtr ndb.ndb_redo_pmem_crash_points ndb.ndb_redo_pmem_crash_restart
+./mtr --defaults-extra-file=suite/ndb/pmem_redo_powerloss.cnf ndb.ndb_redo_pmem_crash_points ndb.ndb_redo_pmem_crash_restart
+./mtr --repeat=5 ndb.ndb_redo_pmem_crash_points ndb.ndb_redo_pmem_crash_restart
+./mtr ndb.ndb_redo_pmem_restart ndb.ndb_redo_pmem_restarts ndb.ndb_redo_pmem_node_restarts ndb.ndb_redo_pmem_reader ndb.ndb_redo_pmem_write ndb.ndb_redo_pmem_queue ndb.ndb_redo_pmem_shared_parts ndb.ndb_redo_pmem_persist_check ndb.ndb_redo_pmem_power_loss
+./mtr --defaults-extra-file=suite/ndb/pmem_redo_powerloss.cnf ndb.ndb_basic ndb.ndb_redo_pmem_restarts ndb.ndb_redo_pmem_node_restarts ndb.ndb_gci_ledger
+./mtr --suite=ndb --parallel=auto
+```
+
+Each crash takes a new seed from the time, so the repeated run tears
+other lines. The M3 checks run at every copy-out, GCP save and restart of
+the PMEM format in a debug build, so the fourth and fifth lines are their
+regression. The last command is the file-mode regression.
 
 ---
 

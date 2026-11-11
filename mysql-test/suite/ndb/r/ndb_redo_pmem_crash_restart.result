@@ -1,0 +1,38 @@
+CREATE TABLE t1 (a INT PRIMARY KEY, b VARCHAR(255)) ENGINE=NDB;
+SET SESSION cte_max_recursion_depth = 4000;
+INSERT INTO t1
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+WHERE n < 4000)
+SELECT n, REPEAT('a', 250) FROM seq;
+SET SESSION cte_max_recursion_depth = DEFAULT;
+CREATE PROCEDURE upd()
+BEGIN
+DECLARE i INT DEFAULT 0;
+DECLARE CONTINUE HANDLER FOR SQLEXCEPTION DO SLEEP(0.1);
+WHILE IS_FREE_LOCK('ndb_redo_pmem_crash_restart') DO
+UPDATE t1 SET b = REPEAT(CHAR(65 + i % 26), 250);
+SET i = i + 1;
+END WHILE;
+END|
+CALL upd();
+== 1 == data node 2 stops at each insert in its restart
+Node 2: stopped at error insert 5172
+Node 2: the next start found the same end of the log
+Node 2: stopped at error insert 5167
+Node 2: the next start found the same end of the log
+Node 2: stopped at error insert 5168
+Node 2: stopped at error insert 5170
+Node 2: stopped at error insert 5162
+Node 2: stopped at error insert 5163
+== 2 == a system restart with abort while updates run
+SELECT GET_LOCK('ndb_redo_pmem_crash_restart', 0);
+GET_LOCK('ndb_redo_pmem_crash_restart', 0)
+1
+SELECT RELEASE_LOCK('ndb_redo_pmem_crash_restart');
+RELEASE_LOCK('ndb_redo_pmem_crash_restart')
+1
+SELECT COUNT(*), SUM(LENGTH(b)), MIN(b) = MAX(b) AS same FROM t1;
+COUNT(*)	SUM(LENGTH(b))	same
+4000	1000000	1
+DROP PROCEDURE upd;
+DROP TABLE t1;

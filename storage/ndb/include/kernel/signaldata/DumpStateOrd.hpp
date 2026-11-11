@@ -208,6 +208,11 @@ class DumpStateOrd {
     // persist the REDO log and check it through the mappings, 4 = skip
     // the next barrier at commit (debug builds)
     LqhRedoPmem = 2368,
+    // RONDB-1150 (recovery plan S7.1), RedoLogMode=pmem: the state of each
+    // REDO log part to the cluster log: the control area, the last-file
+    // slot, the end of the log at the last restart, the head, the persisted
+    // LSN and the last COMPLETED_GCI
+    LqhPmemRedoInfo = 2369,
     // RONDB-1150 (recovery plan S7.1, S7.3), with
     // __RedoLogPmemPowerLossEmulation: [seed [keep [tear]]], a power loss
     // of the REDO log now, then the node stops as after a crash

@@ -1,0 +1,143 @@
+--source include/have_ndb.inc
+--source have_ndb_error_insert.inc
+
+# RONDB-1150 phase 11b (recovery plan S7.1, S7.2): the crash error
+# inserts of the write path of the REDO log in PMEM mode, while updates
+# run. A torn insert leaves its copy as a crash in the middle of it may:
+# each line stored, partly stored or not; with the power-loss emulation
+# (pmem_redo_powerloss.cnf) the power loss of the crash does so. Data
+# node 2 stops at each insert and restarts; then both data nodes stop at
+# an insert of the GCP save and the system restarts. Every UPDATE is one
+# transaction, so all rows hold the same value. Last, DUMP 2369 prints
+# the state of each log part.
+#
+# 5155 a persist torn       5161 after page 0 of a new file, before its slot
+# 5156 after a NEXT_MBYTE   5162 the slot torn
+# 5157 an mbyte header torn 5163 after the slot, before the first record
+# 5158 after a file's end   5164 a GCP save, before its first persist
+# 5159 page 0 torn          5165 a persist of the GCP save torn
+# 5171 before a drain       5166 the GCP save, before GCP_SAVECONF
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b VARCHAR(255)) ENGINE=NDB;
+SET SESSION cte_max_recursion_depth = 4000;
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+                            WHERE n < 4000)
+  SELECT n, REPEAT('a', 250) FROM seq;
+SET SESSION cte_max_recursion_depth = DEFAULT;
+# Updates of all rows until the user lock is taken; a failed update,
+# while a data node stops or the cluster restarts, is retried
+delimiter |;
+CREATE PROCEDURE upd()
+BEGIN
+  DECLARE i INT DEFAULT 0;
+  DECLARE CONTINUE HANDLER FOR SQLEXCEPTION DO SLEEP(0.1);
+  WHILE IS_FREE_LOCK('ndb_redo_pmem_crash_points') DO
+    UPDATE t1 SET b = REPEAT(CHAR(65 + i % 26), 250);
+    SET i = i + 1;
+  END WHILE;
+END|
+delimiter ;|
+
+connect (con1,localhost,root,,test);
+--disable_warnings
+send CALL upd();
+--connection default
+
+--echo == 1 == data node 2 stops at each insert and restarts
+let REDO_PMEM_CRASH_NODES = 2;
+let $redo_pmem_crash_mgm = 2;
+let $redo_pmem_crash_wait = --wait-nodes=2;
+let $redo_pmem_crash_start = 0;
+let REDO_PMEM_CRASH_CODE = 5155;
+--source suite/ndb/include/redo_pmem_crash.inc
+let REDO_PMEM_CRASH_CODE = 5156;
+--source suite/ndb/include/redo_pmem_crash.inc
+let REDO_PMEM_CRASH_CODE = 5157;
+--source suite/ndb/include/redo_pmem_crash.inc
+let REDO_PMEM_CRASH_CODE = 5158;
+--source suite/ndb/include/redo_pmem_crash.inc
+let REDO_PMEM_CRASH_CODE = 5159;
+--source suite/ndb/include/redo_pmem_crash.inc
+let REDO_PMEM_CRASH_CODE = 5161;
+--source suite/ndb/include/redo_pmem_crash.inc
+let REDO_PMEM_CRASH_CODE = 5162;
+--source suite/ndb/include/redo_pmem_crash.inc
+let REDO_PMEM_CRASH_CODE = 5163;
+--source suite/ndb/include/redo_pmem_crash.inc
+let REDO_PMEM_CRASH_CODE = 5164;
+--source suite/ndb/include/redo_pmem_crash.inc
+let REDO_PMEM_CRASH_CODE = 5165;
+--source suite/ndb/include/redo_pmem_crash.inc
+let REDO_PMEM_CRASH_CODE = 5166;
+--source suite/ndb/include/redo_pmem_crash.inc
+let REDO_PMEM_CRASH_CODE = 5171;
+--source suite/ndb/include/redo_pmem_crash.inc
+
+--echo == 2 == both data nodes stop at an insert and the system restarts
+let REDO_PMEM_CRASH_NODES = 1,2;
+let $redo_pmem_crash_mgm = all;
+let $redo_pmem_crash_wait = ;
+let REDO_PMEM_CRASH_CODE = 5155;
+--source suite/ndb/include/redo_pmem_crash.inc
+let REDO_PMEM_CRASH_CODE = 5165;
+--source suite/ndb/include/redo_pmem_crash.inc
+let REDO_PMEM_CRASH_CODE = 5166;
+--source suite/ndb/include/redo_pmem_crash.inc
+--source include/ndb_not_readonly.inc
+
+SELECT GET_LOCK('ndb_redo_pmem_crash_points', 0);
+--connection con1
+reap;
+--enable_warnings
+--disconnect con1
+--connection default
+SELECT RELEASE_LOCK('ndb_redo_pmem_crash_points');
+SELECT COUNT(*), SUM(LENGTH(b)), MIN(b) = MAX(b) AS same FROM t1;
+
+--echo == 3 == DUMP 2369: the state of each log part
+--perl
+  use strict;
+  my $cluster = "$ENV{MYSQLTEST_VARDIR}/mysql_cluster.1";
+  my $file = "$ENV{MYSQLTEST_VARDIR}/tmp/ndb_redo_pmem_crash_points.offsets";
+  open(my $out, '>', $file) or die "Cannot open $file: $!\n";
+  foreach my $node (1, 2) {
+    print $out ((-s "$cluster/ndbd.$node/ndbd.log") || 0), "\n";
+  }
+  close($out);
+EOF
+--exec $NDB_MGM -e "all dump 2369" >> $NDB_TOOLS_OUTPUT
+--perl
+  use strict;
+  my $cluster = "$ENV{MYSQLTEST_VARDIR}/mysql_cluster.1";
+  my $file = "$ENV{MYSQLTEST_VARDIR}/tmp/ndb_redo_pmem_crash_points.offsets";
+  open(my $in, '<', $file) or die "Cannot open $file: $!\n";
+  chomp(my @offsets = <$in>);
+  close($in);
+  unlink($file);
+  foreach my $node (1, 2) {
+    my $log = "$cluster/ndbd.$node/ndbd.log";
+    my (%ctrl, %head);
+    for (my $i = 0; $i < 30; $i++) {
+      open(my $fh, '<', $log) or die "Cannot open $log: $!\n";
+      seek($fh, $offsets[$node - 1], 0);
+      while (my $l = <$fh>) {
+        $ctrl{$1} = $2 if $l =~ /PMEM REDO log part (\d+): control area (\S+)/;
+        $head{$1} = 1 if $l =~ /PMEM REDO log part (\d+): head at file /;
+      }
+      close($fh);
+      last if %ctrl && keys(%ctrl) == keys(%head);
+      sleep(1);
+    }
+    my $valid = grep { $_ eq 'valid' || $_ eq 'valid,' } values %ctrl;
+    print "Node $node: DUMP 2369 printed ",
+          (%ctrl && keys(%ctrl) == keys(%head) ? "every" : "not every"),
+          " log part, ",
+          ($valid == keys(%ctrl) ? "each" : "not each"),
+          " with a valid control area\n";
+  }
+EOF
+
+DROP PROCEDURE upd;
+DROP TABLE t1;
+--remove_file $NDB_TOOLS_OUTPUT
