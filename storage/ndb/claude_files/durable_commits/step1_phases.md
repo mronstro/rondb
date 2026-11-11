@@ -1700,6 +1700,15 @@ in code of the PMEM format.
     both: it drives each insert until it fires, in system restarts too.
     The tests print the insert where each node stopped, not the site's
     text: phase 4 may switch files, where 5162 and 5163 also act.
+    After each system restart `ndb_redo_pmem_crash_points` waits until
+    both mysqlds are writable (`ndb_not_readonly.inc` on each) before
+    the next stop; the fix was made on the Linux tree. On macOS with
+    `pmem_redo_powerloss.cnf` (2026-11-11), 5165 stopped the cluster
+    0.5 s after the restart from 5155, while mysqld 1 reinstalled
+    `mysql.ndb_schema` in its data dictionary. That left the table and
+    the schema UUID out of the dictionary, and after the next restart
+    `Ndb_binlog_setup::setup()` failed its debug assert on the UUID.
+    The data nodes stopped only at the inserts.
 
 **Commands for the pusher (11b).** On Linux x86_64, Linux ARM64 and macOS
 ARM64, in a build with error inserts:

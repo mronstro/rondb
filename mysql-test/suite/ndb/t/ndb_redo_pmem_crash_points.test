@@ -75,16 +75,34 @@ let REDO_PMEM_CRASH_CODE = 5171;
 --source suite/ndb/include/redo_pmem_crash.inc
 
 --echo == 2 == both data nodes stop at an insert and the system restarts
+# After a system restart each MySQL Server holds the global schema lock
+# while its binlog setup runs; the next stop of the cluster would fail
+# its release. So, before the next stop, both servers are out of read
+# only mode.
+connect (server2,127.0.0.1,root,,test,$MASTER_MYPORT1,);
+--connection default
 let REDO_PMEM_CRASH_NODES = 1,2;
 let $redo_pmem_crash_mgm = all;
 let $redo_pmem_crash_wait = ;
 let REDO_PMEM_CRASH_CODE = 5155;
 --source suite/ndb/include/redo_pmem_crash.inc
+--source include/ndb_not_readonly.inc
+--connection server2
+--source include/ndb_not_readonly.inc
+--connection default
 let REDO_PMEM_CRASH_CODE = 5165;
 --source suite/ndb/include/redo_pmem_crash.inc
+--source include/ndb_not_readonly.inc
+--connection server2
+--source include/ndb_not_readonly.inc
+--connection default
 let REDO_PMEM_CRASH_CODE = 5166;
 --source suite/ndb/include/redo_pmem_crash.inc
 --source include/ndb_not_readonly.inc
+--connection server2
+--source include/ndb_not_readonly.inc
+--disconnect server2
+--connection default
 
 SELECT GET_LOCK('ndb_redo_pmem_crash_points', 0);
 --connection con1
