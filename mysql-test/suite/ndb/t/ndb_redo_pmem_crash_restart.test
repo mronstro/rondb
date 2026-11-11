@@ -1,0 +1,85 @@
+--source include/have_ndb.inc
+--source have_ndb_error_insert.inc
+
+# RONDB-1150 phase 11b (recovery plan S7.1): the crash error inserts of
+# the restart of the REDO log in PMEM mode. Data node 2 stops with abort
+# while updates run, so that its log goes on after the last saved GCI;
+# it stops again at the insert in its start, and the start after that
+# completes. After a stop in phase 1 the next start must find the same
+# end of the log. Last, a system restart reads the logs that the stops
+# left. Every UPDATE is one transaction, so all rows hold the same value.
+#
+# Only one node stops at an insert of a restart: a node that sees the
+# other stop in a system restart fails that restart and, with
+# StopOnError, does not start again (GciLedgerCrashPoints, phase 11c,
+# runs these inserts in system restarts).
+#
+# 5172 phase 1, the end of the log found, before its zeroing
+# 5167 phase 1, a prefix of that zeroing done, not drained
+# 5168 phase 4, a part of the zeroing after the head done, not drained
+# 5170 phase 4, the zeroing done, before the head's unit is closed
+# 5162 phase 4, the slot torn
+# 5163 phase 4, the slot persistent, before the end of phase 4
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b VARCHAR(255)) ENGINE=NDB;
+SET SESSION cte_max_recursion_depth = 4000;
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+                            WHERE n < 4000)
+  SELECT n, REPEAT('a', 250) FROM seq;
+SET SESSION cte_max_recursion_depth = DEFAULT;
+# Updates of all rows until the user lock is taken; a failed update,
+# while a data node stops or the cluster restarts, is retried
+delimiter |;
+CREATE PROCEDURE upd()
+BEGIN
+  DECLARE i INT DEFAULT 0;
+  DECLARE CONTINUE HANDLER FOR SQLEXCEPTION DO SLEEP(0.1);
+  WHILE IS_FREE_LOCK('ndb_redo_pmem_crash_restart') DO
+    UPDATE t1 SET b = REPEAT(CHAR(65 + i % 26), 250);
+    SET i = i + 1;
+  END WHILE;
+END|
+delimiter ;|
+
+connect (con1,localhost,root,,test);
+--disable_warnings
+send CALL upd();
+--connection default
+
+--echo == 1 == data node 2 stops at each insert in its restart
+let REDO_PMEM_CRASH_NODES = 2;
+let $redo_pmem_crash_mgm = 2;
+let $redo_pmem_crash_wait = --wait-nodes=2;
+let $redo_pmem_crash_start = 1;
+let $codes = 5172 5167 5168 5170 5162 5163;
+while ($codes) {
+  let $code = `SELECT SUBSTRING_INDEX('$codes', ' ', 1)`;
+  let REDO_PMEM_CRASH_CODE = $code;
+  let $codes = `SELECT TRIM(SUBSTRING('$codes', 5))`;
+  --sleep 2
+  --exec $NDB_MGM -e "2 restart -n -a" >> $NDB_TOOLS_OUTPUT
+  --exec $NDB_WAITER --wait-nodes=2 --not-started >> $NDB_TOOLS_OUTPUT
+  --source suite/ndb/include/redo_pmem_crash.inc
+}
+
+--echo == 2 == a system restart with abort while updates run
+--sleep 2
+--exec $NDB_MGM -e "all restart -n -a" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "all start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+--source include/ndb_not_readonly.inc
+
+SELECT GET_LOCK('ndb_redo_pmem_crash_restart', 0);
+--connection con1
+reap;
+--enable_warnings
+--disconnect con1
+--connection default
+SELECT RELEASE_LOCK('ndb_redo_pmem_crash_restart');
+SELECT COUNT(*), SUM(LENGTH(b)), MIN(b) = MAX(b) AS same FROM t1;
+
+DROP PROCEDURE upd;
+DROP TABLE t1;
+--remove_file $NDB_TOOLS_OUTPUT
