@@ -889,6 +889,32 @@ void ledgerResume(NDBT_Context *ctx) {
   ctx->setProperty(LEDGER_PAUSE, Uint32(0));
 }
 
+/**
+ * The GCI that the last system restart restored. DBDIH knows it only on
+ * the nodes that took part in that restart (crestartGci); a node that
+ * joined by a node restart answers 0, as when one node stopped before the
+ * other and the other restarted the cluster alone. The API sends
+ * WAIT_GCP_REQ to the alive data nodes in turn, so each is asked twice
+ * and the highest answer is taken.
+ */
+bool ledgerRestartGci(Ndb *pNdb, NdbRestarter &restarter, Uint32 *gci) {
+  *gci = 0;
+  for (int i = 0; i < 2 * restarter.getNumDbNodes(); i++) {
+    Uint32 nodeGci = 0;
+    if (pNdb->getDictionary()->getRestartGCI(&nodeGci) != 0) {
+      ndbout << "ERR: ledger: no restart GCI: "
+             << pNdb->getDictionary()->getNdbError() << endl;
+      return false;
+    }
+    *gci = std::max(*gci, nodeGci);
+  }
+  if (*gci == 0) {
+    ndbout_c("ERR: ledger: no data node answered the restart GCI");
+    return false;
+  }
+  return true;
+}
+
 /* The check once a system restart is done, the writers parked */
 int ledgerCheckRestart(NDBT_Context *ctx, NDBT_Step *step, const char *what,
                        bool allKept) {
@@ -898,11 +924,7 @@ int ledgerCheckRestart(NDBT_Context *ctx, NDBT_Step *step, const char *what,
     return NDBT_FAILED;
   }
   Uint32 restartGci = 0;
-  if (pNdb->getDictionary()->getRestartGCI(&restartGci) != 0) {
-    ndbout << "ERR: ledger: no restart GCI: "
-           << pNdb->getDictionary()->getNdbError() << endl;
-    return NDBT_FAILED;
-  }
+  if (!ledgerRestartGci(pNdb, restarter, &restartGci)) return NDBT_FAILED;
   ndbout_c("Ledger: restart GCI %u", restartGci);
   return ledgerVerify(ctx, step, (Uint64(restartGci) << 32) | 0xffffffff,
                       what, allKept);
@@ -1114,8 +1136,9 @@ int ledgerStopAll(NDBT_Context *ctx, NDBT_Step *step, NdbRestarter &restarter,
     ledgerDisarm(restarter);
     return NDBT_FAILED;
   }
-  ndbout_c("Ledger: %d of %u data nodes stopped at %s", stopped,
-           Uint32(nodes.size()), what);
+  ndbout_c("Ledger: the data nodes stopped at %s, %d of %u back in NOSTART "
+           "so far",
+           what, stopped, Uint32(nodes.size()));
   if (!ledgerPause(ctx)) return NDBT_FAILED;
   const int res = ledgerRestartAfterStop(ctx, step, restarter, nodes, clean);
   ledgerResume(ctx);
@@ -1324,8 +1347,14 @@ int runLedgerWriter(NDBT_Context *ctx, NDBT_Step *step) {
     const int res = hugoOps.execute_Commit(pNdb);
     const NdbError err = hugoOps.getTransaction()->getNdbError();
     Uint64 gci = 0;
-    const bool committed =
-        res == 0 && hugoOps.getTransaction()->getGCI(&gci) == 0;
+    /**
+     * A commit that the takeover of a failed TC reports (TCKEY_FAILCONF)
+     * has no GCI: after a system restart it may be there or not, as a
+     * transaction with an unknown result.
+     */
+    const bool committed = res == 0 &&
+                           hugoOps.getTransaction()->getGCI(&gci) == 0 &&
+                           gci != 0;
     if (committed || err.status == NdbError::UnknownResult ||
         err.status == NdbError::Success) {
       /* Committed, or perhaps */
@@ -1341,7 +1370,11 @@ int runLedgerWriter(NDBT_Context *ctx, NDBT_Step *step) {
         }
         row.txns.push_back(t);
       }
-      if (!committed) {
+      if (!committed && res == 0) {
+        ndbout_c("Ledger: writer %u transaction %u, rows %u-%u: committed "
+                 "by a takeover, GCI unknown",
+                 writerNo, txnNo - 1, r0, r0 + nRows - 1);
+      } else if (!committed) {
         ndbout_c("Ledger: writer %u transaction %u, rows %u-%u: unknown "
                  "result, error %d",
                  writerNo, txnNo - 1, r0, r0 + nRows - 1, err.code);
