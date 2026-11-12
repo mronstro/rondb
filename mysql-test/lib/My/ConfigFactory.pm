@@ -30,6 +30,7 @@ use warnings;
 use Carp;
 use Cwd qw(abs_path);
 use File::Basename;
+use File::Path qw(mkpath);
 
 use My::Config;
 use My::Find;
@@ -465,6 +466,29 @@ sub fix_cluster_backup_dir {
   return "$vardir/mysql_cluster.$suffix/";
 }
 
+# RONDB-1150: with RedoLogMode=pmem and MTR_NDB_PMEM_DIR set, a directory
+# on a DAX file system (pmem_redo_dax.cnf), the REDO log of each data node
+# goes there, under the name of the vardir so that parallel workers each
+# have their own. Without them FileSystemPathRedoLog is not set.
+sub fix_redo_log_path {
+  my ($self, $config, $group_name, $group) = @_;
+  my $pmem_dir = $ENV{MTR_NDB_PMEM_DIR};
+  return undef unless defined $pmem_dir && $pmem_dir ne '';
+  my (undef, $process_type, $idx, $suffix) = split(/\./, $group_name);
+  my $mode;
+  foreach my $name ($group_name, "cluster_config.$suffix", 'cluster_config') {
+    my $section = $config->group($name);
+    $mode = $section->if_exist('RedoLogMode') if defined $section;
+    last if defined $mode;
+  }
+  return undef unless defined $mode && lc($mode) eq 'pmem';
+  my $vardir = $self->{ARGS}->{vardir};
+  my $dir = "$pmem_dir/" . basename($vardir) .
+    "/mysql_cluster.$suffix/$process_type.$idx";
+  mkpath($dir);
+  return $dir;
+}
+
 # Rules to run for each ndb_mgmd in the config
 #  - will be run in order listed here
 my @ndb_mgmd_rules =
@@ -476,6 +500,7 @@ my @ndb_mgmd_rules =
 #  - will be run in order listed here
 my @ndbd_rules = ({ 'BackupDataDir' => \&fix_cluster_backup_dir },
                   { 'DataDir'       => \&fix_cluster_dir },
+                  { 'FileSystemPathRedoLog' => \&fix_redo_log_path },
                   { 'HostName'      => \&fix_host },
                   { '#cpubind'      => \&fix_cpubind },);
 

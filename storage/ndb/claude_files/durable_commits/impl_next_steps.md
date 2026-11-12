@@ -6,7 +6,7 @@ parts plan step 1 (X2, the REDO on PMEM): `impl_step1_platform.md`,
 `impl_step1_lqh_write.md`, `impl_step1_recovery_test.md`.
 
 All paths are relative to `storage/ndb/`. Line numbers are for commit
-`bf6848d754f`. **[V]** = verified in the code at the cited line, **[I]** =
+`7128c75dca4`. **[V]** = verified in the code at the cited line, **[I]** =
 inferred. Sizes: S ≤ 4, M 5–12, L > 12 person-days (pd).
 
 ---

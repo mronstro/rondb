@@ -1,0 +1,10 @@
+# RONDB-1150: the REDO log in PMEM mode on a memmap= device mounted with
+# dax=always, mapped with MAP_SYNC (__RedoLogPmemTestMode=emulated: no
+# persistence domain needed). MTR_NDB_PMEM_DIR names a directory on that
+# file system; each data node's REDO log goes to
+# MTR_NDB_PMEM_DIR/<vardir name>/mysql_cluster.<n>/ndbd.<i>
+# (FileSystemPathRedoLog). One MTR run at a time per MTR_NDB_PMEM_DIR:
+#   MTR_NDB_PMEM_DIR=/mnt/pmem0/mtr ./mtr --defaults-extra-file=suite/ndb/pmem_redo_dax.cnf ndb.ndb_basic
+[cluster_config]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=emulated

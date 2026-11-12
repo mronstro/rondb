@@ -396,7 +396,7 @@ today's durability: a GCI is durable once it is GCP-saved.
   - Cost on x86-64 with AVX2: about 12 ns per COMMIT or COMPLETE, and 28 ns
     for a PREPARE of 1000 bytes. That is noise next to the barrier.
   - CRC32C was implemented first, as a port of InnoDB's (commit
-    77a146884ec), and removed when the timings favoured XXH3
+    5c44ef58420), and removed when the timings favoured XXH3
     (`step1_phases.md`, decision 5).
 - **Flush and fence:** PMDK was archived on 2025-11-12. Carry a small
   helper of our own (about 200 lines) with a power-loss emulation mode for

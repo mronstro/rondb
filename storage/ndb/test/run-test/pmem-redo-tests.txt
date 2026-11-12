@@ -1,0 +1,83 @@
+# Copyright (c) 2026, Hopsworks and/or its affiliates.
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License, version 2.0,
+# as published by the Free Software Foundation.
+#
+# This program is designed to work with certain software (including
+# but not limited to OpenSSL) that is licensed under separate terms,
+# as designated in a particular file or component or in included license
+# documentation.  The authors of MySQL hereby grant you an additional
+# permission to link the program and your derivative works with the
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License, version 2.0, for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+#
+# RONDB-1150: the autotest cases run before each push of PMEM code, in a
+# build with error inserts, on the .2node cluster of conf-pmem-nodax.cnf
+# (and of conf-pmem-emulated.cnf on memmap= hosts), and with the
+# power-loss emulation on .2node_powerloss. GciLedgerPowerLoss is skipped
+# without the emulation. The crash error inserts of a restart act in node
+# restarts here, as StopOnError=1; the MTR test
+# ndb_redo_pmem_ledger_crash runs them in system restarts.
+#
+
+# System restarts (recovery plan A1)
+cmd: testSystemRestart
+args: -n SR1 T1
+max-time: 4140
+
+cmd: testSystemRestart
+args: -n SR2 T1
+max-time: 3240
+
+# Node restarts (A2)
+cmd: testNodeRestart
+args: -n NoLoad T1
+max-time: 1080
+
+cmd: testNodeRestart
+args: -n GCPSaveAndFileChange --records=2000 T3
+max-time: 1800
+
+# The REDO log (A3)
+cmd: testRedo
+args: -n RestartOK T1
+max-time: 1440
+
+cmd: testRedo
+args: -n RestartFDSR T1
+max-time: 1440
+
+# The restart GCI and the GCP-saved ledger (A4, A6)
+cmd: testRestartGci
+args: -n InsertRestartGci T1
+max-time: 1800
+
+cmd: testRestartGci
+args: -n GciLedgerSR -l 5 T1
+max-time: 1800
+
+cmd: testRestartGci
+args: -n GciLedgerNR -l 2 T1
+max-time: 1800
+
+cmd: testRestartGci
+args: -n GciLedgerTornTail -l 5 T1
+max-time: 2700
+
+cmd: testRestartGci
+args: -n GciLedgerCrashPoints -l 1 T1
+max-time: 7200
+
+cmd: testRestartGci
+args: -n GciLedgerPowerLoss -l 10 T1
+max-time: 2700

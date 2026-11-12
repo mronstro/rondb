@@ -1,0 +1,36 @@
+##############################################################################
+#
+# RONDB-1150: the ndb tests that do not run with the REDO log in PMEM mode
+# (pmem_redo.cnf, pmem_redo_dax.cnf, pmem_redo_powerloss.cnf):
+#   ./mtr --suite=ndb --defaults-extra-file=suite/ndb/pmem_redo.cnf \
+#         --skip-test-list=suite/ndb/pmem_redo.skip --force --parallel=auto
+#
+# Format as collections/disabled_ndb.def:
+#   <suite>.<test> : RONDB-1150 <comment of at most 80 characters>
+#
+##############################################################################
+
+# RedoLogMode=pmem is refused with EncryptedFileSystem=1
+ndb.ndb_encrypted_filesystem_dd_disk2memory : RONDB-1150 EncryptedFileSystem=1
+ndb.ndb_encrypted_filesystem_dd_initial_lg : RONDB-1150 EncryptedFileSystem=1
+ndb.ndb_encrypted_filesystem_dd_restart : RONDB-1150 EncryptedFileSystem=1
+ndb.ndb_encrypted_filesystem_fragmented_redo_log_buffer : RONDB-1150 EncryptedFileSystem=1
+ndb.ndb_secretsfile1 : RONDB-1150 restarts the data nodes with EncryptedFileSystem=1
+ndb.ndb_secretsfile2 : RONDB-1150 EncryptedFileSystem=1
+ndb.ndb_secretsfile_reader : RONDB-1150 EncryptedFileSystem=1
+
+# RedoLogMode=pmem is refused with Diskless=1
+ndb.ndb_blob_big : RONDB-1150 Diskless=1
+
+# The REDO log of file mode: its file format, its REDO buffer, its file
+# switch; ndb_redo_pmem_reader reads the PMEM format
+ndb.ndb_redo_log_reader : RONDB-1150 reads the file format, and EncryptedFileSystem=1
+ndb.ndb_fragmented_redo_log_buffer : RONDB-1150 no REDO buffer in PMEM mode
+ndb.ndb_redo_file_change_hold : RONDB-1150 the file switch of file mode
+ndb.ndb_redo_late_file_open : RONDB-1150 the file switch of file mode
+ndb.ndb_redo_paths_file_mode : RONDB-1150 FileSystemPathRedoLog in file mode
+
+# ndbinfo logbuffers and logspaces differ in PMEM mode; their PMEM
+# results are to be recorded
+ndb.ndbinfo : RONDB-1150 logbuffers and logspaces differ in PMEM mode
+ndb.ndbinfo_backup : RONDB-1150 logbuffers and logspaces differ in PMEM mode
