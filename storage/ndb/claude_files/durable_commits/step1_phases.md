@@ -1634,6 +1634,7 @@ in code of the PMEM format.
 | `src/kernel/blocks/ERROR_codes.txt` | 5155-5159 and 5161-5172; `Next DBLQH 5174` |
 | `src/kernel/blocks/dblqh/Dblqh.hpp`, `DblqhMain.cpp` | `redoPmemCrashPoint()`: the node log line with the insert and its seed, with the emulation the power-loss values, then `progError(NDBD_EXIT_ERROR_INSERT)`. `redoPmemArmTear()`: the copies of the thread go through `redoPmemCopyTorn()` (M1) until the fence, which stops the node; `redoPmemCopy()` for the copy-out, page 0 and the slot. `redoPmemSeed()`, `redoPmemRand()` (SplitMix64), `redoPmemCountTo()`. The inserts at their sites: 5155 and 5157 in `redoCopyOut()`, 5156 and 5158 in `writeNextLog()`, 5159 and 5161-5163 in `writeFileHeaderOpenPmem()`, 5164 and 5165 in `start_synch_gcp()` and `initGcpRecLab()`, 5166 in `sendGcpSaveConf()`, 5167 and 5172 in `redoPmemSrPhase1()`, 5168, 5170, 5162 and 5163 in phase 4, 5169 in `redoPmemInvalidateCommit()`, 5171 in `redoPmemDrain()`. M3: `redoPmemVerifyCopy()` after each copy-out, `redoPmemAssertPersisted()` before GCP_SAVECONF with `LogPartRecord::m_pmem_gci_end_lsn`, `redoPmemAssertEnd()` at the end of phase 4, the zeroing read back. `m_pmem_zero_crash` for 5168. `DUMP 2369`: `redoPmemPrintInfo()` |
 | `mysql-test/suite/ndb/include/redo_pmem_crash.inc` | New: nodes stop at an insert (`DUMP 2602 1`), each node log names it, then they start; after 5167 and 5172 the line of phase 1 of every log part must be the same in the next start |
+| `mysql-test/suite/ndb/include/redo_pmem_updates.pl` | New: `start` detaches a loop of UPDATEs of all rows of `test.t1`, each in its own mysql client, until `stop` or the end of the mysqltest process; `stop` waits for the UPDATE that runs |
 | `mysql-test/suite/ndb/t/ndb_redo_pmem_crash_points.{test,cnf}`, `r/` | New, needs error inserts: updates run all the time; data node 2 stops at each insert of the write path (5155-5159, 5161-5166, 5171) and restarts; both nodes stop at 5155, 5165 and 5166 and the system restarts; every row has one value; `DUMP 2369` prints every log part with a valid control area |
 | `mysql-test/suite/ndb/t/ndb_redo_pmem_crash_restart.{test,cnf}`, `r/` | New, needs error inserts: data node 2 stops with abort under updates, then at 5172, 5167, 5168, 5170, 5162 and 5163 in its restart; after 5172 and 5167 the next start finds the same end of the log; then a system restart with abort under updates; every row has one value |
 
@@ -1709,6 +1710,17 @@ in code of the PMEM format.
     the schema UUID out of the dictionary, and after the next restart
     `Ndb_binlog_setup::setup()` failed its debug assert on the UUID.
     The data nodes stopped only at the inserts.
+    The updates run in `redo_pmem_updates.pl`, each UPDATE in its own
+    mysql client, not in a stored procedure that loops in one CALL with
+    a CONTINUE handler. On macOS (2026-11-11) data node 2 stopped at
+    5155 0.3 s after the CALL, in its first UPDATE, a scan whose TC was
+    on node 2 (`TCKEY_FAILREF` in mysqld 1). After that no row changed:
+    every LCP on both nodes wrote 0 records for 5 minutes, and the
+    connection's COM_QUIT at the end of the test was handled at once,
+    so the CALL had ended. The log never reached a new mbyte and 5156
+    did not fire within its 300 s. Why the handler did not keep the
+    loop going is not known; in the retry that passed, the same first
+    UPDATE was aborted the same way and the loop went on.
 
 **Commands for the pusher (11b).** On Linux x86_64, Linux ARM64 and macOS
 ARM64, in a build with error inserts:
