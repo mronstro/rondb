@@ -13,7 +13,7 @@ Paths are relative to `storage/ndb/`. Short names:
 `DblqhInit.cpp` = `src/kernel/blocks/dblqh/DblqhInit.cpp`,
 `ConfigInfo.cpp` = `src/common/mgmcommon/ConfigInfo.cpp`
 (the task text says `src/mgmsrv/`; the file lives in `src/common/mgmcommon/`).
-Line numbers are from commit a597bbd216f.
+Line numbers are from commit 7128c75dca4.
 
 Tags: **[V]** verified by reading the code at the cited lines.
 **[I]** inferred, or a published figure not measured here.

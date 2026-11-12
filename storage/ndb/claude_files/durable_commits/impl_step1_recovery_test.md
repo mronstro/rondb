@@ -10,7 +10,7 @@ rev 9, `pmem_redo_recovery.md`, `pmem_redo_format.md`,
 Conventions:
 - Paths are relative to `storage/ndb/`. `DblqhMain.cpp` and `Dblqh.hpp` are
   in `src/kernel/blocks/dblqh/`; `DbdihMain.cpp` in `src/kernel/blocks/dbdih/`.
-- [V] = verified by reading the code at `bf6848d754f`; [I] = inferred.
+- [V] = verified by reading the code at `7128c75dca4`; [I] = inferred.
 - Line numbers are those of today's tree; they move once S4/S5 land.
 - Position p = (fileNo, pageNo, pageIndex) in a log part. E = end of the
   valid log (E11). H = position right after `COMPLETED_GCI(R)` (today's head).

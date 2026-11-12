@@ -1,0 +1,55 @@
+--source include/big_test.inc
+--source include/have_ndb.inc
+--source have_ndb_error_insert.inc
+
+# RONDB-1150 phase 11c (recovery plan S7.4): the GCP-saved ledger of
+# testRestartGci at each crash error insert of the REDO log in PMEM mode.
+# One of the write path (5155-5159, 5161-5166, 5171) is set in every data
+# node while the writers write, and each node stops at it. One of a
+# restart (5172, 5167, 5168, 5169, 5170, 5162, 5163) is set in every data
+# node after a system restart with abort, and the next system restart
+# stops at it; a node that fails as the other stops starts again, as
+# StopOnError=0. After the system restart that follows every row holds the
+# last of its transactions with a GCI up to the restart's, and after a
+# graceful system restart every committed one. About 40 system restarts:
+#   ./mtr --big-test ndb.ndb_redo_pmem_ledger_crash
+#   ./mtr --big-test --defaults-extra-file=suite/ndb/pmem_redo_powerloss.cnf ndb.ndb_redo_pmem_ledger_crash
+
+# NDBT creates TEST_DB.T1 directly through the NDB API. Keep both
+# mysqlds stopped so metadata discovery cannot import the API table;
+# on a case-insensitive file system it retries CREATE DATABASE TEST_DB
+# after each system restart and fails.
+--connect(s2,127.0.0.1,root,,test,$MASTER_MYPORT1,)
+--connection default
+--echo # Shutting down mysqld 1
+--let $mysqld_name=mysqld.1.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld1_file_name= $_expect_file_name
+
+--connection s2
+--echo # Shutting down mysqld 2
+--let $mysqld_name=mysqld.2.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld2_file_name= $_expect_file_name
+
+let NDBAPITEST_CLEANUP_QUERY=;
+let NDBAPITEST_NAME=testRestartGci;
+
+--echo == 1 == the data nodes stop at each crash error insert
+let NDBAPITEST_ARGS=-n GciLedgerCrashPoints -l 1 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+--connection default
+--echo # Starting mysqld 1
+--let $_expect_file_name= $expect_mysqld1_file_name
+--let $mysqld_name=mysqld.1.1
+--source include/start_mysqld.inc
+
+--connection s2
+--echo # Starting mysqld 2
+--let $_expect_file_name= $expect_mysqld2_file_name
+--let $mysqld_name=mysqld.2.1
+--source include/start_mysqld.inc
+
+--connection default
+--disconnect s2

@@ -28,9 +28,11 @@
 #include <utility>
 #include <vector>
 
+#include <signaldata/DumpStateOrd.hpp>
 #include "HugoTransactions.hpp"
 #include "NDBT_ReturnCodes.h"
 #include "NDBT_Test.hpp"
+#include "NdbConfig.hpp"
 #include "NdbRestarter.hpp"
 #include "UtilTransactions.hpp"
 
@@ -757,11 +759,12 @@ void ledgerPrintRow(Uint32 r, const LedgerRow &row) {
 
 /**
  * Every row against its history, the writers parked; maxGci is the
- * highest GCI that the restart kept. The next round starts from the rows
+ * highest GCI that the restart kept, and with allKept no committed
+ * transaction may have a later one. The next round starts from the rows
  * as they are.
  */
 int ledgerVerify(NDBT_Context *ctx, NDBT_Step *step, Uint64 maxGci,
-                 const char *what) {
+                 const char *what, bool allKept = false) {
   HugoOperations hugoOps(*ctx->getTab());
   HugoCalculator hugoCalc(*ctx->getTab());
   std::map<Uint64, std::pair<Uint32, Uint32>> unknownTxns;  // with, without
@@ -782,6 +785,7 @@ int ledgerVerify(NDBT_Context *ctx, NDBT_Step *step, Uint64 maxGci,
     Uint32 expUpdates = row.updates;
     Uint64 expGci = row.gci;
     const LedgerTxn *unknown = nullptr;
+    bool rowLost = false;
     for (const LedgerTxn &t : row.txns) {
       if (t.state == LEDGER_UNKNOWN) {
         unknown = &t;
@@ -790,6 +794,7 @@ int ledgerVerify(NDBT_Context *ctx, NDBT_Step *step, Uint64 maxGci,
       if (t.gci > maxGci) {
         /* A later transaction on the row has a GCI at least this one's */
         lost++;
+        rowLost = true;
         break;
       }
       kept++;
@@ -815,7 +820,14 @@ int ledgerVerify(NDBT_Context *ctx, NDBT_Step *step, Uint64 maxGci,
       }
       ok = ok || asUnknown;
     }
-    if (!ok) {
+    if (allKept && rowLost) {
+      failures++;
+      ndbout_c(
+          "ERR: ledger after the %s: row %u lost a committed transaction "
+          "with a GCI after the restart's 0x%x",
+          what, r, Uint32(maxGci >> 32));
+      ledgerPrintRow(r, row);
+    } else if (!ok) {
       failures++;
       ndbout_c(
           "ERR: ledger after the %s: row %u %s, updates %u, GCI 0x%x/0x%x; "
@@ -877,16 +889,11 @@ void ledgerResume(NDBT_Context *ctx) {
   ctx->setProperty(LEDGER_PAUSE, Uint32(0));
 }
 
-/* A system restart with abort while the writers write, then the check */
-int ledgerSystemRestart(NDBT_Context *ctx, NDBT_Step *step) {
+/* The check once a system restart is done, the writers parked */
+int ledgerCheckRestart(NDBT_Context *ctx, NDBT_Step *step, const char *what,
+                       bool allKept) {
   Ndb *pNdb = GETNDB(step);
   NdbRestarter restarter;
-  ndbout_c("Ledger: system restart with abort");
-  if (restarter.restartAll(false, false, true) != 0) {
-    return NDBT_FAILED;
-  }
-  /* No transaction starts before the check; those under way fail */
-  if (!ledgerPause(ctx)) return NDBT_FAILED;
   if (restarter.waitClusterStarted(300) != 0 || pNdb->waitUntilReady() != 0) {
     return NDBT_FAILED;
   }
@@ -897,13 +904,351 @@ int ledgerSystemRestart(NDBT_Context *ctx, NDBT_Step *step) {
     return NDBT_FAILED;
   }
   ndbout_c("Ledger: restart GCI %u", restartGci);
-  const int res = ledgerVerify(
-      ctx, step, (Uint64(restartGci) << 32) | 0xffffffff, "system restart");
+  return ledgerVerify(ctx, step, (Uint64(restartGci) << 32) | 0xffffffff,
+                      what, allKept);
+}
+
+/* A system restart with abort while the writers write, then the check */
+int ledgerSystemRestart(NDBT_Context *ctx, NDBT_Step *step) {
+  NdbRestarter restarter;
+  ndbout_c("Ledger: system restart with abort");
+  if (restarter.restartAll(false, false, true) != 0) {
+    return NDBT_FAILED;
+  }
+  /* No transaction starts before the check; those under way fail */
+  if (!ledgerPause(ctx)) return NDBT_FAILED;
+  const int res = ledgerCheckRestart(ctx, step, "system restart", false);
+  ledgerResume(ctx);
+  return res;
+}
+
+/**
+ * The writers write for a while after the check of a crash, then, parked,
+ * a graceful system restart: the shutdown saves the GCI of every
+ * committed transaction (WaitGCPReq::ShutdownSync), so all of them stay.
+ * The writers are parked on entry and on return.
+ */
+int ledgerCleanRestart(NDBT_Context *ctx, NDBT_Step *step) {
+  const Uint32 seconds = ctx->getProperty("LedgerSeconds", Uint32(5));
+  NdbRestarter restarter;
+  ledgerResume(ctx);
+  if (!ledgerSleep(ctx, seconds) || !ledgerPause(ctx)) return NDBT_FAILED;
+  ndbout_c("Ledger: graceful system restart");
+  if (restarter.restartAll() != 0) return NDBT_FAILED;
+  return ledgerCheckRestart(ctx, step, "graceful system restart", true);
+}
+
+/**
+ * RONDB-1150 (recovery plan S7.1): the crash error inserts of the PMEM
+ * REDO log, those of the write path and those of a restart; 5162 and 5163
+ * act in both (5160 belongs to another test).
+ */
+const Uint32 LEDGER_WRITE_CODES[] = {5155, 5156, 5157, 5158, 5159, 5161,
+                                     5162, 5163, 5164, 5165, 5166, 5171};
+const Uint32 LEDGER_RESTART_CODES[] = {5172, 5167, 5168, 5169,
+                                       5170, 5162, 5163};
+/* Until the data nodes stop at an insert; a file switch takes the longest */
+constexpr Uint32 LEDGER_STOP_SECONDS = 600;
+/* Restarts until an insert of a restart acts (5169 needs a COMMIT to undo) */
+constexpr Uint32 LEDGER_RESTART_ATTEMPTS = 5;
+
+std::vector<int> ledgerDataNodes(NdbRestarter &restarter) {
+  std::vector<int> nodes;
+  for (int i = 0; i < restarter.getNumDbNodes(); i++) {
+    nodes.push_back(restarter.getDbNodeId(i));
+  }
+  return nodes;
+}
+
+/* StopOnError=0 on every data node */
+bool ledgerStartsAgainOnError() {
+  NdbConfig conf;
+  for (int i = 0; i < conf.getNumDbNodes(); i++) {
+    Uint32 stop = 1;
+    conf.getProperty(conf.getDbNodeId(i), NODE_TYPE_DB, CFG_DB_STOP_ON_ERROR,
+                     &stop);
+    if (stop != 0) return false;
+  }
+  return true;
+}
+
+/* The crash of an error insert, or of DUMP 2370, leaves the nodes in NOSTART */
+bool ledgerNoStartOnCrash(NdbRestarter &restarter,
+                          const std::vector<int> &nodes) {
+  const int noStart[] = {DumpStateOrd::CmvmiSetRestartOnErrorInsert,
+                         1 /* NRT_NoStart_Restart */};
+  for (int node : nodes) {
+    if (restarter.dumpStateOneNode(node, noStart, 2) != 0) {
+      ndbout_c("ERR: ledger: could not set RestartOnErrorInsert in node %d",
+               node);
+      return false;
+    }
+  }
+  return true;
+}
+
+/* Error insert code with its extra value (seed or count) in the nodes */
+bool ledgerArm(NdbRestarter &restarter, const std::vector<int> &nodes,
+               Uint32 code, Uint32 extra) {
+  if (!ledgerNoStartOnCrash(restarter, nodes)) return false;
+  for (int node : nodes) {
+    if (restarter.insertError2InNode(node, code, extra) != 0) {
+      ndbout_c("ERR: ledger: could not set error insert %u in node %d", code,
+               node);
+      return false;
+    }
+  }
+  return true;
+}
+
+/* No error insert, and RestartOnErrorInsert as configured */
+void ledgerDisarm(NdbRestarter &restarter) {
+  const int reset = DumpStateOrd::CmvmiSetRestartOnErrorInsert;
+  restarter.insertErrorInAllNodes(0);
+  restarter.dumpStateAllNodes(&reset, 1);
+}
+
+/**
+ * Waits until the nodes have stopped, one at least at its crash error
+ * insert: none of them runs, and one is in NOSTART again. Only the crash
+ * of an insert leaves a node in NOSTART, as ledgerArm() set; a node that
+ * fails as the cluster or its restart fails exits with StopOnError=1, and
+ * starts again with StopOnError=0. A node counts once it has stayed in
+ * NOSTART for 2 s, as one that starts again passes through it. Returns
+ * the number of nodes in NOSTART; 0 when they all started instead, if
+ * started; -1 at the timeout.
+ */
+int ledgerWaitStopped(NdbRestarter &restarter, const std::vector<int> &nodes,
+                      bool started, Uint32 seconds) {
+  std::vector<bool> away(nodes.size(), false);
+  std::vector<Uint32> noStartPolls(nodes.size(), 0);
+  for (Uint32 i = 0; i < 10 * seconds; i++) {
+    Uint32 running = 0;
+    Uint32 noStart = 0;
+    for (size_t n = 0; n < nodes.size(); n++) {
+      const int status = restarter.getNodeStatus(nodes[n]);
+      if (status != NDB_MGM_NODE_STATUS_NOT_STARTED) {
+        away[n] = true;
+        noStartPolls[n] = 0;
+      } else if (away[n] && ++noStartPolls[n] >= 20) {
+        noStart++;
+      }
+      if (status == NDB_MGM_NODE_STATUS_STARTED) running++;
+    }
+    if (started && running == nodes.size()) return 0;
+    if (noStart > 0 && running == 0) return int(noStart);
+    NdbSleep_MilliSleep(100);
+  }
+  return -1;
+}
+
+/**
+ * Every node in NOSTART for 2 s: those that did not stop there are
+ * restarted into it with abort. A node that exited (StopOnError=1) does
+ * not come back.
+ */
+bool ledgerAllNoStart(NdbRestarter &restarter, const std::vector<int> &nodes) {
+  std::vector<Uint32> nextRestart(nodes.size(), 0);  // one each 5 s
+  Uint32 stable = 0;
+  for (Uint32 i = 0; i < 1200; i++) {
+    bool all = true;
+    for (size_t n = 0; n < nodes.size(); n++) {
+      const int status = restarter.getNodeStatus(nodes[n]);
+      if (status == NDB_MGM_NODE_STATUS_NOT_STARTED) continue;
+      all = false;
+      if ((status == NDB_MGM_NODE_STATUS_STARTING ||
+           status == NDB_MGM_NODE_STATUS_STARTED) &&
+          i >= nextRestart[n]) {
+        ndbout_c("Ledger: node %d restarted with abort into NOSTART",
+                 nodes[n]);
+        restarter.restartOneDbNode(nodes[n], false, true, true);
+        nextRestart[n] = i + 50;
+      }
+    }
+    stable = all ? stable + 1 : 0;
+    if (stable >= 20) return true;
+    NdbSleep_MilliSleep(100);
+  }
+  for (int node : nodes) {
+    if (restarter.getNodeStatus(node) != NDB_MGM_NODE_STATUS_NOT_STARTED) {
+      ndbout_c("ERR: ledger: node %d is not in NOSTART (status %d)%s", node,
+               restarter.getNodeStatus(node),
+               ledgerStartsAgainOnError()
+                   ? ""
+                   : "; with StopOnError=1 a node that the stop of another "
+                     "fails does not start again");
+    }
+  }
+  return false;
+}
+
+/**
+ * After the data nodes stopped, one at least at a crash: every node in
+ * NOSTART, a system restart, the check, then with clean a graceful system
+ * restart and its check. The writers are parked.
+ */
+int ledgerRestartAfterStop(NDBT_Context *ctx, NDBT_Step *step,
+                           NdbRestarter &restarter,
+                           const std::vector<int> &nodes, bool clean) {
+  if (!ledgerAllNoStart(restarter, nodes) || restarter.startAll() != 0) {
+    return NDBT_FAILED;
+  }
+  int res = ledgerCheckRestart(ctx, step, "system restart", false);
+  if (res == NDBT_OK && clean) res = ledgerCleanRestart(ctx, step);
+  return res;
+}
+
+/**
+ * The data nodes stop while the writers write, by the crash error insert
+ * or the DUMP that the caller set (what), each node in NOSTART or as the
+ * cluster fails; then the restarts of ledgerRestartAfterStop().
+ */
+int ledgerStopAll(NDBT_Context *ctx, NDBT_Step *step, NdbRestarter &restarter,
+                  const std::vector<int> &nodes, const char *what,
+                  bool clean) {
+  const int stopped =
+      ledgerWaitStopped(restarter, nodes, false, LEDGER_STOP_SECONDS);
+  if (stopped <= 0) {
+    ndbout_c("ERR: ledger: the data nodes did not stop at %s in %u s", what,
+             LEDGER_STOP_SECONDS);
+    ledgerDisarm(restarter);
+    return NDBT_FAILED;
+  }
+  ndbout_c("Ledger: %d of %u data nodes stopped at %s", stopped,
+           Uint32(nodes.size()), what);
+  if (!ledgerPause(ctx)) return NDBT_FAILED;
+  const int res = ledgerRestartAfterStop(ctx, step, restarter, nodes, clean);
+  ledgerResume(ctx);
+  return res;
+}
+
+/* A crash error insert of the write path in every data node */
+int ledgerWriteCrash(NDBT_Context *ctx, NDBT_Step *step, Uint32 code,
+                     Uint32 extra, bool clean) {
+  NdbRestarter restarter;
+  const std::vector<int> nodes = ledgerDataNodes(restarter);
+  char what[64];
+  BaseString::snprintf(what, sizeof(what), "error insert %u", code);
+  ndbout_c("Ledger: %s in every data node while the writers write", what);
+  if (!ledgerArm(restarter, nodes, code, extra)) return NDBT_FAILED;
+  return ledgerStopAll(ctx, step, restarter, nodes, what, clean);
+}
+
+/**
+ * A crash error insert of a restart in a system restart: after a system
+ * restart with abort the insert is set in every data node in NOSTART, and
+ * the start stops at it. Then the restarts of ledgerRestartAfterStop().
+ * A node that sees another stop fails the system restart, so this needs
+ * StopOnError=0. If the insert did not act, the system restart is checked
+ * all the same, and *acted is false.
+ */
+int ledgerRestartCrashSR(NDBT_Context *ctx, NDBT_Step *step, Uint32 code,
+                         bool *acted) {
+  NdbRestarter restarter;
+  const std::vector<int> nodes = ledgerDataNodes(restarter);
+  *acted = false;
+  ndbout_c("Ledger: system restart with abort, then error insert %u in "
+           "every data node",
+           code);
+  if (restarter.restartAll(false, true, true) != 0) return NDBT_FAILED;
+  if (!ledgerPause(ctx)) return NDBT_FAILED;
+  int res = NDBT_FAILED;
+  if (restarter.waitClusterNoStart(300) == 0 &&
+      ledgerArm(restarter, nodes, code, 0) && restarter.startAll() == 0) {
+    const int stopped =
+        ledgerWaitStopped(restarter, nodes, true, LEDGER_STOP_SECONDS);
+    if (stopped < 0) {
+      ndbout_c("ERR: ledger: the system restart with error insert %u did "
+               "neither stop nor end in %u s",
+               code, LEDGER_STOP_SECONDS);
+    } else if (stopped == 0) {
+      ndbout_c("Ledger: error insert %u did not act in the system restart",
+               code);
+      ledgerDisarm(restarter);
+      res = ledgerCheckRestart(ctx, step, "system restart", false);
+    } else {
+      ndbout_c("Ledger: %d of %u data nodes stopped at error insert %u",
+               stopped, Uint32(nodes.size()), code);
+      *acted = true;
+      res = ledgerRestartAfterStop(ctx, step, restarter, nodes, true);
+    }
+  }
+  ledgerResume(ctx);
+  return res;
+}
+
+/**
+ * A crash error insert of a restart in a node restart, while the writers
+ * write: the node restarts with abort into NOSTART, the insert is set,
+ * and its start stops at it; the next start ends. Every committed
+ * transaction is there, and after a graceful system restart too. If the
+ * insert did not act, the node restart is checked all the same, and
+ * *acted is false.
+ */
+int ledgerRestartCrashNR(NDBT_Context *ctx, NDBT_Step *step, Uint32 code,
+                         bool *acted) {
+  NdbRestarter restarter;
+  const int node = restarter.getNode(NdbRestarter::NS_RANDOM);
+  const std::vector<int> nodes(1, node);
+  *acted = false;
+  ndbout_c("Ledger: node restart of node %d with abort, then error insert "
+           "%u in it",
+           node, code);
+  if (restarter.restartOneDbNode(node, false, true, true) != 0 ||
+      restarter.waitNodesNoStart(&node, 1, 300) != 0 ||
+      !ledgerArm(restarter, nodes, code, 0) ||
+      restarter.startNodes(&node, 1) != 0) {
+    return NDBT_FAILED;
+  }
+  const int stopped =
+      ledgerWaitStopped(restarter, nodes, true, LEDGER_STOP_SECONDS);
+  if (stopped < 0) {
+    ndbout_c("ERR: ledger: the restart of node %d with error insert %u did "
+             "neither stop nor end in %u s",
+             node, code, LEDGER_STOP_SECONDS);
+    return NDBT_FAILED;
+  }
+  if (stopped > 0) {
+    ndbout_c("Ledger: node %d stopped at error insert %u", node, code);
+    *acted = true;
+    if (restarter.startNodes(&node, 1) != 0) return NDBT_FAILED;
+  } else {
+    ndbout_c("Ledger: error insert %u did not act in the node restart", code);
+    ledgerDisarm(restarter);
+  }
+  if (restarter.waitClusterStarted(300) != 0 || !ledgerPause(ctx)) {
+    return NDBT_FAILED;
+  }
+  int res = ledgerVerify(ctx, step, ~Uint64(0), "node restart");
+  if (res == NDBT_OK && *acted) res = ledgerCleanRestart(ctx, step);
   ledgerResume(ctx);
   return res;
 }
 
 }  // namespace
+
+/**
+ * The crash error inserts and DUMP 2370 act in PMEM mode only, DUMP 2370
+ * with the power-loss emulation (property LedgerPowerLoss)
+ */
+int runLedgerNeedsPmem(NDBT_Context *ctx, NDBT_Step *step) {
+  const bool powerLoss = ctx->getProperty("LedgerPowerLoss", Uint32(0)) != 0;
+  NdbConfig conf;
+  for (int i = 0; i < conf.getNumDbNodes(); i++) {
+    const int node = conf.getDbNodeId(i);
+    Uint32 mode = NDB_REDO_LOG_MODE_FILE;
+    Uint32 emul = 0;
+    conf.getProperty(node, NODE_TYPE_DB, CFG_DB_REDO_LOG_MODE, &mode);
+    conf.getProperty(node, NODE_TYPE_DB, CFG_DB_REDO_PMEM_POWER_LOSS_EMUL,
+                     &emul);
+    if (mode != NDB_REDO_LOG_MODE_PMEM || (powerLoss && emul == 0)) {
+      ndbout_c("Node %d: this test needs RedoLogMode=pmem%s", node,
+               powerLoss ? " and __RedoLogPmemPowerLossEmulation=1" : "");
+      return NDBT_SKIPPED;
+    }
+  }
+  return NDBT_OK;
+}
 
 int runLedgerInit(NDBT_Context *ctx, NDBT_Step *step) {
   g_ledger.assign(ctx->getNumRecords(), LedgerRow());
@@ -1073,6 +1418,117 @@ int runLedgerNR(NDBT_Context *ctx, NDBT_Step *step) {
   return result;
 }
 
+/**
+ * RONDB-1150 (recovery plan S7.4): every data node stops at its next
+ * persist of the REDO log with the copies torn (error insert 5155; with
+ * the power-loss emulation the power loss of the stop tears them), then a
+ * system restart and the check, and a graceful system restart after which
+ * every committed transaction is there.
+ */
+int runLedgerTornTail(NDBT_Context *ctx, NDBT_Step *step) {
+  const Uint32 seconds = ctx->getProperty("LedgerSeconds", Uint32(5));
+  int result = NDBT_OK;
+  for (int l = 0; l < ctx->getNumLoops() && result == NDBT_OK; l++) {
+    if (!ledgerSleep(ctx, seconds)) {
+      result = NDBT_FAILED;
+      break;
+    }
+    ndbout_c("Ledger loop %d", l);
+    result = ledgerWriteCrash(ctx, step, 5155, 0, true);
+  }
+  ctx->stopTest();
+  return result;
+}
+
+/**
+ * Each crash error insert of the PMEM REDO log in turn. One of the write
+ * path is set in every data node while the writers write, and each node
+ * stops at it. One of a restart is set in NOSTART: with StopOnError=0 in
+ * every data node after a system restart with abort, else in one node
+ * after a node restart with abort, and the start stops at it. Then the
+ * next start, the check, a graceful system restart and its check. An
+ * insert of a restart that did not act (5169 needs a COMMIT after the
+ * restart's GCI) is tried again after more writes.
+ */
+int runLedgerCrashPoints(NDBT_Context *ctx, NDBT_Step *step) {
+  const Uint32 seconds = ctx->getProperty("LedgerSeconds", Uint32(5));
+  const bool systemRestarts = ledgerStartsAgainOnError();
+  ndbout_c("Ledger: the error inserts of a restart act in %s",
+           systemRestarts ? "system restarts (StopOnError=0)"
+                          : "node restarts (StopOnError=1)");
+  int result = NDBT_OK;
+  for (int l = 0; l < ctx->getNumLoops() && result == NDBT_OK; l++) {
+    for (Uint32 code : LEDGER_WRITE_CODES) {
+      if (!ledgerSleep(ctx, seconds)) {
+        result = NDBT_FAILED;
+        break;
+      }
+      ndbout_c("Ledger loop %d: error insert %u", l, code);
+      result = ledgerWriteCrash(ctx, step, code, 0, true);
+      if (result != NDBT_OK) break;
+    }
+    for (Uint32 code : LEDGER_RESTART_CODES) {
+      if (result != NDBT_OK) break;
+      bool acted = false;
+      for (Uint32 a = 0; a < LEDGER_RESTART_ATTEMPTS && !acted; a++) {
+        if (!ledgerSleep(ctx, seconds)) {
+          result = NDBT_FAILED;
+          break;
+        }
+        ndbout_c("Ledger loop %d: error insert %u, attempt %u", l, code,
+                 a + 1);
+        result = systemRestarts ? ledgerRestartCrashSR(ctx, step, code, &acted)
+                                : ledgerRestartCrashNR(ctx, step, code, &acted);
+        if (result != NDBT_OK) break;
+      }
+      if (result == NDBT_OK && !acted) {
+        ndbout_c("ERR: ledger: error insert %u did not act in %u restarts",
+                 code, LEDGER_RESTART_ATTEMPTS);
+        result = NDBT_FAILED;
+      }
+    }
+  }
+  ctx->stopTest();
+  return result;
+}
+
+/**
+ * With the power-loss emulation, every data node loses the power while
+ * the writers write: at once by DUMP 2370 in even loops, at a random drain
+ * of each LDM thread (error insert 5171, the count up to 1000) in odd
+ * ones. Then a system restart and the check.
+ */
+int runLedgerPowerLoss(NDBT_Context *ctx, NDBT_Step *step) {
+  const Uint32 seconds = ctx->getProperty("LedgerSeconds", Uint32(5));
+  int result = NDBT_OK;
+  for (int l = 0; l < ctx->getNumLoops() && result == NDBT_OK; l++) {
+    if (!ledgerSleep(ctx, seconds)) {
+      result = NDBT_FAILED;
+      break;
+    }
+    if (l % 2 == 1) {
+      const Uint32 count = 1 + ndb_rand() % 1000;
+      ndbout_c("Ledger loop %d: error insert 5171 at drain %u of each LDM "
+               "thread",
+               l, count);
+      result = ledgerWriteCrash(ctx, step, 5171, count, false);
+      continue;
+    }
+    ndbout_c("Ledger loop %d: DUMP 2370 in every data node", l);
+    NdbRestarter restarter;
+    const std::vector<int> nodes = ledgerDataNodes(restarter);
+    const int powerLoss = DumpStateOrd::LqhPmemPowerLoss;
+    if (!ledgerNoStartOnCrash(restarter, nodes) ||
+        restarter.dumpStateAllNodes(&powerLoss, 1) != 0) {
+      result = NDBT_FAILED;
+      break;
+    }
+    result = ledgerStopAll(ctx, step, restarter, nodes, "DUMP 2370", false);
+  }
+  ctx->stopTest();
+  return result;
+}
+
 NDBT_TESTSUITE(testRestartGci);
 TESTCASE("InsertRestartGci",
          "Verify that only expected records are still in NDB\n"
@@ -1146,6 +1602,44 @@ TESTCASE("GciLedgerNR",
   INITIALIZER(runLedgerInit);
   STEPS(runLedgerWriter, LEDGER_WRITERS);
   STEP(runLedgerNR);
+  FINALIZER(runDropTable);
+}
+TESTCASE("GciLedgerTornTail",
+         "RONDB-1150 (S7.4), PMEM mode: as GciLedgerSR, each data node "
+         "stopping at its next persist of the REDO log with the copies torn "
+         "(error insert 5155); after a graceful system restart every "
+         "committed transaction is there") {
+  TC_PROPERTY("LedgerSeconds", Uint32(5));
+  INITIALIZER(runLedgerNeedsPmem);
+  INITIALIZER(runCreateTable);
+  INITIALIZER(runLedgerInit);
+  STEPS(runLedgerWriter, LEDGER_WRITERS);
+  STEP(runLedgerTornTail);
+  FINALIZER(runDropTable);
+}
+TESTCASE("GciLedgerCrashPoints",
+         "RONDB-1150 (S7.4), PMEM mode: as GciLedgerTornTail with each crash "
+         "error insert of the REDO log, 5155-5172; those of a restart in "
+         "system restarts with StopOnError=0, else in node restarts") {
+  TC_PROPERTY("LedgerSeconds", Uint32(2));
+  INITIALIZER(runLedgerNeedsPmem);
+  INITIALIZER(runCreateTable);
+  INITIALIZER(runLedgerInit);
+  STEPS(runLedgerWriter, LEDGER_WRITERS);
+  STEP(runLedgerCrashPoints);
+  FINALIZER(runDropTable);
+}
+TESTCASE("GciLedgerPowerLoss",
+         "RONDB-1150 (S7.4), PMEM mode with __RedoLogPmemPowerLossEmulation: "
+         "as GciLedgerSR, each data node losing the power by DUMP 2370 or "
+         "at a random drain (error insert 5171)") {
+  TC_PROPERTY("LedgerSeconds", Uint32(5));
+  TC_PROPERTY("LedgerPowerLoss", Uint32(1));
+  INITIALIZER(runLedgerNeedsPmem);
+  INITIALIZER(runCreateTable);
+  INITIALIZER(runLedgerInit);
+  STEPS(runLedgerWriter, LEDGER_WRITERS);
+  STEP(runLedgerPowerLoss);
   FINALIZER(runDropTable);
 }
 NDBT_TESTSUITE_END(testRestartGci)

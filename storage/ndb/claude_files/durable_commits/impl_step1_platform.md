@@ -190,8 +190,8 @@ Total about 36–42 person-days.
   header's XXH3 for all lengths 0..2100 and some long ones, at every alignment, with and
   without seed; informational timing at the REDO record sizes (`step1_phases.md`,
   Timings). `rondb_hash-t` checks the hash of keys.
-- **History.** Phase 1 first ported InnoDB's CRC32C (`ndb_crc32c`, commits 77a146884ec and
-  4102f7f1c7a). It was removed when the timings favoured XXH3 (`step1_phases.md`,
+- **History.** Phase 1 first ported InnoDB's CRC32C (`ndb_crc32c`, commits 5c44ef58420 and
+  45192117c09). It was removed when the timings favoured XXH3 (`step1_phases.md`,
   decision 5).
 - **Depends** on S1.1. **Risk.** The AVX2 functions need `target("avx2")`. A build with
   `-mavx512f` uses the code the build chose instead of the run-time choice.

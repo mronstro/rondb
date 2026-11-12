@@ -8,7 +8,7 @@ tests) and `impl_next_steps.md`.
 
 Paths are relative to `storage/ndb/`. Short names: `DblqhMain.cpp`,
 `Dblqh.hpp`, `DblqhInit.cpp` are in `src/kernel/blocks/dblqh/`. Line numbers
-are from commit bf6848d754f and were checked by reading the code.
+are from commit 7128c75dca4 and were checked by reading the code.
 Tags: **[V]** verified in the code, **[I]** inferred.
 
 Scope: S4 (record writers) and S5 (write path). Step 1 ends with the REDO on
