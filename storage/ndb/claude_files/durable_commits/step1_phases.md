@@ -1806,7 +1806,20 @@ configurations and MTR's configuration rule.
    runs `GciLedgerSR` in PMEM mode, and `InsertRestartGci` is in the atrt
    list. `ndb_redo_pmem_ledger_crash` makes about 40 system restarts, so
    it is a big test.
-7. **`conf-pmem-emulated.cnf` names `/mnt/pmem0/atrt`**, the mount of the
+7. **Two traps of the NDB API, found by the first runs** (macOS ARM64 and
+   Linux, 2026-11-12). When one node stops before the other, the other
+   takes over the transactions whose TC was on it, and the API learns
+   their commit from TCKEY_FAILCONF, which carries no GCI: `getGCI()`
+   gives 0. The ledger had them as committed in GCI 0, so it expected
+   them after every restart; now such a commit counts as a transaction
+   with an unknown result, in all of its rows or none. And the node that
+   stopped last may restart the cluster alone ("num starting: 1"), the
+   other joining by a node restart; DBDIH knows the restart GCI
+   (`crestartGci`) only on the nodes that took part, and
+   `getRestartGCI()` asks any alive node, so it gave 0. The ledger asks
+   every node twice, as the API takes them in turn, and keeps the
+   highest answer (`ledgerRestartGci`).
+8. **`conf-pmem-emulated.cnf` names `/mnt/pmem0/atrt`**, the mount of the
    recovery plan §4.3, not a `CHOOSE_` value: `autotest-run.sh` replaces
    only the hosts, the directory, the base port and the clusters.
    `.2node_powerloss` serves the gate of phase 11, `pmem-redo-tests.txt`
