@@ -28,24 +28,10 @@ INSERT INTO t1
                             WHERE n < 4000)
   SELECT n, REPEAT('a', 250) FROM seq;
 SET SESSION cte_max_recursion_depth = DEFAULT;
-# Updates of all rows until the user lock is taken; a failed update,
-# while a data node stops or the cluster restarts, is retried
-delimiter |;
-CREATE PROCEDURE upd()
-BEGIN
-  DECLARE i INT DEFAULT 0;
-  DECLARE CONTINUE HANDLER FOR SQLEXCEPTION DO SLEEP(0.1);
-  WHILE IS_FREE_LOCK('ndb_redo_pmem_crash_restart') DO
-    UPDATE t1 SET b = REPEAT(CHAR(65 + i % 26), 250);
-    SET i = i + 1;
-  END WHILE;
-END|
-delimiter ;|
-
-connect (con1,localhost,root,,test);
---disable_warnings
-send CALL upd();
---connection default
+# Updates of all rows in the background, each in its own client; one
+# that fails, while a data node stops or the cluster restarts, is
+# followed by the next
+--exec perl $MYSQL_TEST_DIR/suite/ndb/include/redo_pmem_updates.pl start $MYSQLTEST_VARDIR
 
 --echo == 1 == data node 2 stops at each insert in its restart
 let REDO_PMEM_CRASH_NODES = 2;
@@ -71,15 +57,8 @@ while ($codes) {
 --exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
 --source include/ndb_not_readonly.inc
 
-SELECT GET_LOCK('ndb_redo_pmem_crash_restart', 0);
---connection con1
-reap;
---enable_warnings
---disconnect con1
---connection default
-SELECT RELEASE_LOCK('ndb_redo_pmem_crash_restart');
+--exec perl $MYSQL_TEST_DIR/suite/ndb/include/redo_pmem_updates.pl stop $MYSQLTEST_VARDIR
 SELECT COUNT(*), SUM(LENGTH(b)), MIN(b) = MAX(b) AS same FROM t1;
 
-DROP PROCEDURE upd;
 DROP TABLE t1;
 --remove_file $NDB_TOOLS_OUTPUT
