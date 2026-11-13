@@ -4459,6 +4459,153 @@ int runGCPSaveLagLcpSR(NDBT_Context *ctx, NDBT_Step *step) {
   return NDBT_OK;
 }
 
+/**
+ * REDO records of the largest size, then system restarts. A PREPARE holds
+ * the row's after-image: with its header and key it can be about 23100
+ * words (MAX_LOG_RECORD_SIZE_WORDS), and a page holds 8160 words of log
+ * records, so a large PREPARE spans 4 pages when it starts late in a page.
+ * The REDO execution of a restart reads the log ahead and steps over every
+ * PREPARE, so it must have all the pages of such a record read
+ * (ZMIN_READ_BUFFER_SIZE in DBLQH).
+ *
+ * The table holds about 17100 words a row: fixed columns in memory and on
+ * disk, each starting within the first 4096 words of its part
+ * (AttributeOffset in DBTUP), and a variable column in memory up to the
+ * limit of the variable part. When Hugo writes that column at its full
+ * length, half of the rows, a PREPARE spans 4 pages if it starts in the
+ * last 800 words of a page. DUMP 7018 stops new LCPs, so the restarts
+ * read every record written.
+ */
+static const char *MAX_REDO_TABLE = "MAX_REDO_RECORD";
+static const Uint32 MAX_REDO_MEM_COLS = 4;
+static const Uint32 MAX_REDO_MEM_BYTES = 3900;
+static const Uint32 MAX_REDO_DISK_COLS = 4;
+static const Uint32 MAX_REDO_DISK_BYTES = 5200;
+static const Uint32 MAX_REDO_VAR_BYTES = 32000;
+
+int runCreateMaxRedoTable(NDBT_Context *ctx, NDBT_Step *step) {
+  Ndb *pNdb = GETNDB(step);
+  NdbDictionary::Dictionary *dict = pNdb->getDictionary();
+  {
+    // The finalizer drops the tablespace only if this case created it
+    NdbDictionary::LogfileGroup lg = dict->getLogfileGroup("DEFAULT-LG");
+    ctx->setProperty("MaxRedoOwnTs",
+                     Uint32(strcmp(lg.getName(), "DEFAULT-LG") != 0));
+  }
+  if (NDBT_Tables::create_default_tablespace(pNdb) != 0) {
+    g_err << "Failed to create the default tablespace" << endl;
+    return NDBT_FAILED;
+  }
+  dict->dropTable(MAX_REDO_TABLE);  // left by an earlier run, if any
+
+  NdbDictionary::Table tab(MAX_REDO_TABLE);
+  tab.addColumn(
+      NDBT_Attribute("KEY", NdbDictionary::Column::Unsigned, 1, true));
+  char name[16];
+  for (Uint32 i = 0; i < MAX_REDO_MEM_COLS; i++) {
+    BaseString::snprintf(name, sizeof(name), "MEM%u", i);
+    tab.addColumn(NDBT_Attribute(name, NdbDictionary::Column::Binary,
+                                 MAX_REDO_MEM_BYTES));
+  }
+  for (Uint32 i = 0; i < MAX_REDO_DISK_COLS; i++) {
+    BaseString::snprintf(name, sizeof(name), "DISK%u", i);
+    tab.addColumn(NDBT_Attribute(name, NdbDictionary::Column::Binary,
+                                 MAX_REDO_DISK_BYTES, false, false, 0,
+                                 NdbDictionary::Column::StorageTypeDisk));
+  }
+  tab.addColumn(NDBT_Attribute("VAR", NdbDictionary::Column::Longvarbinary,
+                               MAX_REDO_VAR_BYTES));
+  // Hugo's id is the first Unsigned column, its update count the last one
+  tab.addColumn(NDBT_Attribute("UPDATES", NdbDictionary::Column::Unsigned));
+  tab.setTablespaceName("DEFAULT-TS");
+  if (dict->createTable(tab) != 0) {
+    g_err << "Failed to create " << MAX_REDO_TABLE << ": "
+          << dict->getNdbError() << endl;
+    return NDBT_FAILED;
+  }
+  return NDBT_OK;
+}
+
+/* The table, and the default tablespace and logfile group if the case
+ * created them, so that it leaves no data files behind */
+int runDropMaxRedoTable(NDBT_Context *ctx, NDBT_Step *step) {
+  NdbDictionary::Dictionary *dict = GETNDB(step)->getDictionary();
+  dict->dropTable(MAX_REDO_TABLE);
+  if (ctx->getProperty("MaxRedoOwnTs", Uint32(0)) == 0) return NDBT_OK;
+  NdbDictionary::Dictionary::List list;
+  if (dict->listObjects(list, NdbDictionary::Object::Datafile) == 0) {
+    for (unsigned i = 0; i < list.count; i++) {
+      NdbDictionary::Datafile df =
+          dict->getDatafile(0, list.elements[i].name);
+      if (strcmp(df.getTablespace(), "DEFAULT-TS") == 0 &&
+          dict->dropDatafile(df) != 0) {
+        g_err << "Failed to drop data file " << list.elements[i].name
+              << ": " << dict->getNdbError() << endl;
+      }
+    }
+  }
+  NdbDictionary::Tablespace ts = dict->getTablespace("DEFAULT-TS");
+  if (strcmp(ts.getName(), "DEFAULT-TS") == 0 &&
+      dict->dropTablespace(ts) != 0) {
+    g_err << "Failed to drop DEFAULT-TS: " << dict->getNdbError() << endl;
+  }
+  NdbDictionary::LogfileGroup lg = dict->getLogfileGroup("DEFAULT-LG");
+  if (strcmp(lg.getName(), "DEFAULT-LG") == 0 &&
+      dict->dropLogfileGroup(lg) != 0) {
+    g_err << "Failed to drop DEFAULT-LG: " << dict->getNdbError() << endl;
+  }
+  return NDBT_OK;
+}
+
+/* Every row there and as Hugo wrote it, after a restart */
+static int verifyMaxRedoTable(Ndb *pNdb, const NdbDictionary::Table *tab,
+                              int records) {
+  UtilTransactions utilTrans(*tab);
+  int count = 0;
+  if (utilTrans.selectCount(pNdb, 64, &count) != 0 || count != records) {
+    g_err << "ERR: " << count << " rows in " << MAX_REDO_TABLE
+          << " after the restart, expected " << records << endl;
+    return NDBT_FAILED;
+  }
+  HugoTransactions hugoTrans(*tab);
+  if (hugoTrans.pkReadRecords(pNdb, records, 1) != 0) {
+    g_err << "ERR: rows of " << MAX_REDO_TABLE << " differ after the restart"
+          << endl;
+    return NDBT_FAILED;
+  }
+  return NDBT_OK;
+}
+
+int runMaxRedoRecordSR(NDBT_Context *ctx, NDBT_Step *step) {
+  Ndb *pNdb = GETNDB(step);
+  NdbRestarter restarter;
+  const int records = ctx->getNumRecords();
+  const int lcpOff[] = {DumpStateOrd::DihMaxTimeBetweenLCP};
+
+  for (Uint32 loop = 0; loop < 2; loop++) {
+    const NdbDictionary::Table *tab =
+        pNdb->getDictionary()->getTable(MAX_REDO_TABLE);
+    CHK(tab != nullptr, "no table " << MAX_REDO_TABLE);
+    HugoTransactions hugoTrans(*tab);
+    CHK(restarter.dumpStateAllNodes(lcpOff, 1) == 0, "DUMP 7018 failed");
+    if (loop == 0) {
+      CHK(hugoTrans.loadTable(pNdb, records, 1) == 0, "load failed");
+    }
+    CHK(hugoTrans.pkUpdateRecords(pNdb, records, 1) == 0, "update failed");
+    CHK(hugoTrans.pkUpdateRecords(pNdb, records, 1) == 0, "update failed");
+
+    // A graceful system restart, then one with abort
+    const bool abort = loop == 1;
+    g_err << "System restart" << (abort ? " with abort" : "") << endl;
+    CHK(restarter.restartAll(false, false, abort) == 0, "restart failed");
+    CHK(restarter.waitClusterStarted(600) == 0, "cluster did not start");
+    CHK(pNdb->waitUntilReady(120) == 0, "API not ready");
+    CHK(verifyMaxRedoTable(pNdb, tab, records) == NDBT_OK,
+        "verify failed");
+  }
+  return NDBT_OK;
+}
+
 /**************************************************************************/
 
 NDBT_TESTSUITE(testSystemRestart);
@@ -4977,6 +5124,14 @@ TESTCASE("GCPSaveLagLcpSR",
   INITIALIZER(checkMultipleNGs);
   INITIALIZER(runWaitStarted);
   STEP(runGCPSaveLagLcpSR);
+}
+TESTCASE("MaxRedoRecordSR",
+         "REDO records of the largest size, a PREPARE over 4 pages, "
+         "then system restarts") {
+  INITIALIZER(runWaitStarted);
+  INITIALIZER(runCreateMaxRedoTable);
+  STEP(runMaxRedoRecordSR);
+  FINALIZER(runDropMaxRedoTable);
 }
 NDBT_TESTSUITE_END(testSystemRestart)
 
