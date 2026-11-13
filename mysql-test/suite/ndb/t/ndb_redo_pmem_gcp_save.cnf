@@ -1,0 +1,12 @@
+!include ../my.cnf
+
+# RONDB-1150 (recovery plan M6): the REDO log in PMEM mode on any file
+# system; REDO files of 16 MB, so that the writers switch files within the
+# minute of the test; a GCP save every 2 seconds, the default of a data
+# node.
+[cluster_config.1]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+NoOfFragmentLogFiles=6
+FragmentLogFileSize=16M
+TimeBetweenGlobalCheckpoints=2000

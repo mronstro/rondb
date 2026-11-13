@@ -31,7 +31,7 @@ this file are those after the rebase; line numbers cited at
 | 8 | 9 | PMEM REDO end to end: write path and recovery together (**M0.3**) | S4.8, S5.2–S5.5, S6.1, S6.3–S6.6 | Initial start, traffic, SR and NR in PMEM mode; the ledger in PMEM mode | 5, 7, ledger | **In progress**, in four parts (below): 8a-8d (control area and slots, write path, restart, the rest of S5.5) passed their commands on macOS ARM64 (reported 2026-11-05), the ledger too; Linux x86_64 and Linux ARM64 to be run |
 | 9 | 10 | Checks, benchmark switch, persist delay | S5.6–S5.9, Q-A11 | Shared log parts; debug send checks; `DUMP 2368` latency numbers | 8 | **In progress**: the fence check at unlock, the barriers at the C places of E8 behind the benchmark switch, the check of the dependent signals, `DUMP 2368 0`-`4`, `__RedoLogPmemPersistDelayNs`, `ndb_redo_pmem_shared_parts` and `ndb_redo_pmem_persist_check`; passed its commands on macOS ARM64 (reported 2026-11-07); the latency numbers to be measured; Linux x86_64 and Linux ARM64 to be run |
 | 10 | 11 | Node restart and `redoLogReader` | S6.7, S6.8 | testNodeRestart subset; reader on files from crash tests | 8 | **In progress**: the node restart reviewed (no change) with `ndb_redo_pmem_node_restarts`; `ndb_redo_log_reader` reads the PMEM format, with `--find-end` and `--transid`, and `ndb_redo_pmem_reader` compares its end with phase 1 after node and system crashes; the full ndb suite passed on macOS ARM64 and Linux x86_64 (reported 2026-11-10) but for two tests, see Results; Linux ARM64 passed, and the fix on the three platforms (reported 2026-11-11) |
-| 11 | 12 | Power-loss emulation and crash inserts (**M0.4**) | S1.5, S7.1–S7.3, S7.5 | `pmem-redo-tests.txt` with power-loss emulation | 8, 10 | **In progress**, in three parts (below): 11a, the power-loss emulation in portlib, the crash hook and `DUMP 2370`, passed its commands (reported 2026-11-11); 11b, the crash inserts 5155-5172, the torn copy, the debug checks and `DUMP 2369`, passed its commands on the three platforms (reported 2026-11-12); 11c, the ledger at the crash inserts and power losses, `pmem_redo_dax.cnf`, `pmem_redo.skip` and the autotest lists, written, its commands to be run |
+| 11 | 12 | Power-loss emulation and crash inserts (**M0.4**) | S1.5, S7.1–S7.3, S7.5 | `pmem-redo-tests.txt` with power-loss emulation | 8, 10 | **In progress**, in three parts (below): 11a, the power-loss emulation in portlib, the crash hook and `DUMP 2370`, passed its commands (reported 2026-11-11); 11b, the crash inserts 5155-5172, the torn copy, the debug checks and `DUMP 2369`, passed its commands on the three platforms (reported 2026-11-12); 11c, the ledger at the crash inserts and power losses, `pmem_redo_dax.cnf`, `pmem_redo.skip` and the autotest lists, its ledger tests passed on macOS ARM64 and Linux (reported 2026-11-12), the ndb suite in PMEM mode on macOS ARM64 but for two tests, fixed (reported 2026-11-13); the rest of the suites and the atrt lists to be run |
 
 **Side tracks**, independent of the phases above:
 
@@ -1516,9 +1516,9 @@ cd mysql-test
 ./mtr --suite=ndb --parallel=auto
 ```
 
-`testNodeRestartGcpSaveAndFileChange` with `pmem_redo.cnf` is M6: error
-insert 5114 delays a file write that the PMEM format does not do, so it
-checks that GCP saves go on across the synchronous file switches. The
+`testNodeRestartGcpSaveAndFileChange` with `pmem_redo.cnf` was taken here
+as M6, wrongly: the case fails unless the GCP save stalls, and its error
+insert 5114 cannot stall it in the PMEM format (11c, decision 9). The
 last command is the file-mode regression.
 
 **Results.** The full ndb suite passed on macOS ARM64 and Linux x86_64
@@ -1566,7 +1566,7 @@ unchanged. Written in three parts:
 |---|---|---|---|
 | 11a | S1.5, S7.3 | The power-loss emulation in `ndb_pmem` and its unit tests; NDBFS turns it on; every stop but a graceful shutdown is a power loss (`NdbShutdown`); the checks after each DBLQH drain and before GCP_SAVECONF; `DUMP 2370`; `ndb_redo_pmem_power_loss`, `pmem_redo_powerloss.cnf` | Passed its commands (reported 2026-11-11) |
 | 11b | S7.1, S7.2 | The crash error inserts 5155-5172 through `redoPmemCrashPoint()`, the torn-copy injector M1, the M3 checks, `DUMP 2369`; `ndb_redo_pmem_crash_points`, `ndb_redo_pmem_crash_restart` | Passed its commands on macOS ARM64, Linux x86_64 and Linux ARM64 (reported 2026-11-12), with the updates in a client per UPDATE (decision 10) |
-| 11c | S7.4 cases, S7.5 | `GciLedgerTornTail`, `GciLedgerCrashPoints`, `GciLedgerPowerLoss`; `pmem_redo_dax.cnf`, the `MTR_NDB_PMEM_DIR` rule, `pmem_redo.skip`, the atrt configurations and `pmem-redo-tests.txt` | Written (2026-11-12), on the branch rebased onto RONDB-1124-exec-fixes; its commands below to be run |
+| 11c | S7.4 cases, S7.5 | `GciLedgerTornTail`, `GciLedgerCrashPoints`, `GciLedgerPowerLoss`; `pmem_redo_dax.cnf`, the `MTR_NDB_PMEM_DIR` rule, `pmem_redo.skip`, the atrt configurations and `pmem-redo-tests.txt` | The ledger tests passed after the fix of decision 7 (reported 2026-11-12): `ndb_redo_pmem_ledger`, `ndb_redo_pmem_ledger_power_loss` and `ndb_gci_ledger` on macOS ARM64; on Linux also `ndb_redo_pmem_ledger` with `pmem_redo_powerloss.cnf` and `ndb_redo_pmem_ledger_crash`. The ndb suite in PMEM mode passed on macOS ARM64 but for two tests (reported 2026-11-13), fixed by decisions 9 and 10 and the error count of the base. `ndb_redo_pmem_gcp_save` (decision 11) passed on macOS ARM64. Still to run: `ndbinfo_plans` in both modes, `ndb_redo_pmem_gcp_save` on Linux and with the power-loss emulation, `ndb_redo_pmem_ledger_crash` on macOS ARM64, the ndb suite in PMEM mode on Linux, the file-mode suite on the rebased branch, and the atrt lists |
 
 **Changes in 11a.** File mode is unchanged: the emulation is on only with
 `__RedoLogPmemPowerLossEmulation=1`, which needs `RedoLogMode=pmem`.
@@ -1762,10 +1762,13 @@ configurations and MTR's configuration rule.
 | `mysql-test/suite/ndb/t/ndb_redo_pmem_ledger_power_loss.{test,cnf}`, `r/` | New, needs error inserts: `GciLedgerPowerLoss -l 4` with the emulation |
 | `mysql-test/suite/ndb/pmem_redo_dax.cnf` | New: `RedoLogMode=pmem`, `__RedoLogPmemTestMode=emulated`, for a `memmap=` device with `MTR_NDB_PMEM_DIR` |
 | `mysql-test/lib/My/ConfigFactory.pm` | `fix_redo_log_path`: with `MTR_NDB_PMEM_DIR` set and `RedoLogMode=pmem` in the node's, the cluster's or the default section, `FileSystemPathRedoLog` is `MTR_NDB_PMEM_DIR/<vardir name>/mysql_cluster.<n>/ndbd.<i>`, created here; a value in the test's `.cnf` wins |
-| `mysql-test/suite/ndb/pmem_redo.skip` | New, for `--skip-test-list`: the tests that set `EncryptedFileSystem=1` or `Diskless=1`, which PMEM mode refuses; those of the file format, the REDO buffer and the file switch of file mode; `ndbinfo` and `ndbinfo_backup` |
+| `mysql-test/suite/ndb/pmem_redo.skip` | New, for `--skip-test-list`: the tests that set `EncryptedFileSystem=1` or `Diskless=1`, which PMEM mode refuses; those of the file format, the REDO buffer and the file switch of file mode, `testNodeRestartGcpSaveAndFileChange` among them (decision 9); `ndbinfo` and `ndbinfo_backup` |
+| `mysql-test/suite/ndb/t/ndbinfo_plans.test`, `r/` | The list of tables whose estimate equals their row count leaves out `ndb$redo_log_pmem`, as it does `ndb$config_values` (decision 10) |
+| `test/ndbapi/testNodeRestart.cpp` | `PmemGcpSaveAndFileChange` (M6, decision 11): `runPmemGcpNeedsPmem` skips it outside PMEM mode and reads TimeBetweenGlobalCheckpoints and FragmentLogFileSize; `runPmemGcpSaveWatch` times each GCI, reads `bytes_copied` of ndbinfo `redo_log_pmem` every 5 s, and at a stall runs DUMP 7025, 2369 and 2368 2; `runGciWatcher` is quiet with `GciWatcherQuiet` |
+| `mysql-test/suite/ndb/t/ndb_redo_pmem_gcp_save.{test,cnf}`, `r/` | New (M6): `PmemGcpSaveAndFileChange --records=2000 T3` in PMEM mode, 6 files of 16 MB, TimeBetweenGlobalCheckpoints=2000, the mysqlds stopped as in `ndb_gci_ledger` (a mysqld that imported TEST_DB.T3 kept TEST_DB, and the check of the test case failed); no error inserts |
 | `test/run-test/conf-pmem-nodax.cnf` | New: `.2node` and `.4node` of `conf-autotest.cnf` in PMEM mode, `nodax`, 6 files of 64 MB; `.2node_powerloss` with the emulation |
 | `test/run-test/conf-pmem-emulated.cnf` | New: `.2node` and `.4node` with `emulated` and `FileSystemPathRedoLog=/mnt/pmem0/atrt` |
-| `test/run-test/pmem-redo-tests.txt`, `pmem-redo-long-tests.txt` | New: before each push of PMEM code, SR1, SR2, NoLoad, GCPSaveAndFileChange, RestartOK, RestartFDSR, InsertRestartGci and the five ledger cases; before each milestone, recovery plan A1-A4 and A6 |
+| `test/run-test/pmem-redo-tests.txt`, `pmem-redo-long-tests.txt` | New: before each push of PMEM code, SR1, SR2, NoLoad, PmemGcpSaveAndFileChange, RestartOK, RestartFDSR, InsertRestartGci and the five ledger cases; before each milestone, recovery plan A1-A4 and A6. PmemGcpSaveAndFileChange, not GCPSaveAndFileChange (decisions 9, 11) |
 
 **Decisions taken in 11c.**
 
@@ -1825,6 +1828,46 @@ configurations and MTR's configuration rule.
    `.2node_powerloss` serves the gate of phase 11, `pmem-redo-tests.txt`
    with the power-loss emulation. `testSystemRestart -n
    PmemRedoModeSwitch` (A5) is not written and not in the lists.
+9. **`GCPSaveAndFileChange` is file mode only.** It sets 5114 in one
+   node, which delays the FSWRITECONF of the last write in a REDO file
+   (`initFsrwconf`), and fails unless the GCI stays the same for 5 s in
+   the next 30 s. The PMEM format makes no such write, so the GCP saves
+   go on and the case failed twice in the first ndb suite in PMEM mode
+   (macOS ARM64, 2026-11-13). Its 20 writers of T3 rows, about 5 kB
+   each, also filled the REDO log while the GCP saves went on (410, a
+   temporary error the case retries). The case leaves A2 and the atrt
+   lists and goes into `pmem_redo.skip`; M6 (recovery plan §4.1) is now
+   `PmemGcpSaveAndFileChange` (decision 11). The GCP save at a file switch
+   is what 5158, 5159, 5161-5163 and 5164-5166 crash in
+   `GciLedgerCrashPoints`. Why the case passed with
+   `pmem_redo.cnf` in phases 9 and 10 is not known: their logs are gone,
+   and since phase 8 5114 has had no write to delay in the PMEM format.
+10. **`ndbinfo_plans` leaves `ndb$redo_log_pmem` out** of the tables whose
+    estimate (8, 4 log parts on 2 nodes) equals their row count: the
+    table has a row per log part in PMEM mode and none in file mode, so
+    the list would differ between the modes. Its other lists are the
+    same in both.
+11. **`PmemGcpSaveAndFileChange` checks that the GCP saves go on** (M6),
+    as `GCPSaveAndFileChange` checks that they stall in file mode: the
+    same 20 writers of T3 rows and the same GCI watcher, no error
+    insert. DBDIH starts a new GCI only when the GCP save before it is
+    done and TimeBetweenGlobalCheckpoints has passed
+    (`Dbdih::startGcpLab()`), so a GCI that stands still for twice that
+    and a second (the event poll of the watcher) is a GCP save that
+    waits; the case then runs DUMP 7025 (the GCP state of DBDIH), 2369
+    (each REDO log part, its last COMPLETED_GCI among them) and 2368 2
+    (the persist counters) while the save still waits, and fails. It
+    runs for 60 s and until every data node has a log part whose
+    `bytes_copied` in ndbinfo `redo_log_pmem` grew by twice the file
+    size, so that the GCP saves are measured across file switches, and
+    fails if that takes more than 300 s. Each GCI is printed with the
+    time since the one before, and the longest, so that a run that passes
+    shows its margin too. At TimeBetweenGlobalCheckpoints=2000, the
+    value of the MTR test and of atrt, the limit is 5 s, about the stall
+    that `GCPSaveAndFileChange` waits for, so the stalls that let that
+    case pass in phases 9 and 10 would fail this one. `runGciWatcher`
+    gets a quiet mode (`GciWatcherQuiet`), so that the case prints a line
+    per GCI, not per epoch.
 
 **Commands for the pusher (11c).** The branch is rebased onto
 RONDB-1124-exec-fixes, so first a full build. On Linux x86_64, Linux
@@ -1834,6 +1877,8 @@ ARM64 and macOS ARM64, in a build with error inserts:
 cmake --build .
 cd mysql-test
 ./mtr ndb.ndb_redo_pmem_ledger ndb.ndb_redo_pmem_ledger_power_loss ndb.ndb_gci_ledger
+./mtr ndb.ndb_redo_pmem_gcp_save ndb.ndbinfo_plans
+./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndbinfo_plans
 ./mtr --defaults-extra-file=suite/ndb/pmem_redo_powerloss.cnf ndb.ndb_redo_pmem_ledger
 ./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndb_gci_ledger
 ./mtr --big-test ndb.ndb_redo_pmem_ledger_crash
@@ -1858,6 +1903,23 @@ MTR_NDB_PMEM_DIR=/mnt/pmem0/mtr ./mtr --defaults-extra-file=suite/ndb/pmem_redo_
 The `ndb_redo_pmem_*` tests set `nodax` in their own `.cnf`, which wins
 over `pmem_redo_dax.cnf`; `ndb_basic` and `ndb_gci_ledger` take the
 `emulated` mode, and their REDO log goes under `MTR_NDB_PMEM_DIR`.
+
+**Results.** The ledger tests passed on macOS ARM64 and Linux after the
+fix of decision 7 (reported 2026-11-12). The ndb suite in PMEM mode
+passed on macOS ARM64 (reported 2026-11-13) but for two tests:
+
+- `testNodeRestartGcpSaveAndFileChange`, file mode only (decision 9).
+- `ndbinfo_plans`: `ndb$redo_log_pmem` in the list of exact estimates
+  (decision 10), and 946 error messages where the result has 943. The
+  count fails in file mode too: RONDB-1124-exec-fixes added the errors
+  604, 817 and 5071 after its last re-record of the result
+  (`d21ca4d24be`). Fixed in a commit of its own (`bf5d6baf5aa`).
+
+`ndb_redo_pmem_gcp_save` (decision 11) passed on macOS ARM64 (reported
+2026-11-13), once the mysqlds were stopped during the run. After it MTR
+killed ndb_mgmd, which did not stop at the end of the run; its log was
+overwritten before it could be read, and ndb_mgmd is the same as on
+RONDB-1124-exec-fixes, so it is left until it is seen again.
 
 ---
 

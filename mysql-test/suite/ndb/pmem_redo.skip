@@ -29,6 +29,7 @@ ndb.ndb_fragmented_redo_log_buffer : RONDB-1150 no REDO buffer in PMEM mode
 ndb.ndb_redo_file_change_hold : RONDB-1150 the file switch of file mode
 ndb.ndb_redo_late_file_open : RONDB-1150 the file switch of file mode
 ndb.ndb_redo_paths_file_mode : RONDB-1150 FileSystemPathRedoLog in file mode
+ndb.testNodeRestartGcpSaveAndFileChange : RONDB-1150 5114 delays a file-mode write
 
 # ndbinfo logbuffers and logspaces differ in PMEM mode; their PMEM
 # results are to be recorded
