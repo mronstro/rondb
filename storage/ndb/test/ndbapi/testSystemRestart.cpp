@@ -25,16 +25,21 @@
 */
 
 #include <NdbSleep.h>
+#include <NdbTick.h>
+#include <ndbd_exit_codes.h>
 #include <Bitmask.hpp>
 #include <HugoTransactions.hpp>
 #include <NDBT.hpp>
 #include <NDBT_Test.hpp>
 #include <NdbBackup.hpp>
+#include <NdbConfig.hpp>
+#include <NdbMgmd.hpp>
 #include <NdbRestarter.hpp>
 #include <UtilTransactions.hpp>
 #include <Vector.hpp>
 #include <cstring>
 #include <signaldata/DumpStateOrd.hpp>
+#include "../../src/ndbapi/NdbInfo.hpp"
 #include "SqlClient.hpp"
 #include "util/require.h"
 
@@ -4606,6 +4611,307 @@ int runMaxRedoRecordSR(NDBT_Context *ctx, NDBT_Step *step) {
   return NDBT_OK;
 }
 
+/**
+ * RONDB-1150 (recovery plan A5): RedoLogMode changes only with an initial
+ * node restart. A node whose REDO log was written in the other mode
+ * refuses to start (NDBD_EXIT_INVALID_CONFIG): in file mode DBLQH finds
+ * the PMEM format in page 0 of file 0, in PMEM mode it finds no control
+ * area. After an initial node restart the node runs in the new mode,
+ * restarts in it, and the cluster restarts with its nodes in different
+ * modes. The case switches one node from its configured mode to the other
+ * and back.
+ *
+ * The refused restarts are checked only when the angel of the node started
+ * with StopOnError=0, StartFailRetryDelay of 5 s or more and
+ * MaxStartFailRetries of 3 or more: the angel reads them when it starts,
+ * and with StopOnError=1 it stops for good after the refused start. The
+ * case then puts the old mode back, and the angel's next start of the node
+ * succeeds. The MTR test sets them; the autotest configurations keep
+ * StopOnError=1, so there the case only switches by initial node restarts.
+ */
+static const char *pmemModeName(Uint32 mode) {
+  return mode == NDB_REDO_LOG_MODE_PMEM ? "pmem" : "file";
+}
+
+/* Sets RedoLogMode of data node nodeId in ndb_mgmd's configuration */
+static bool pmemSwitchSetMode(int nodeId, Uint32 mode) {
+  NdbMgmd mgmd;
+  mgmd.use_tls(opt_tls_search_path, opt_mgm_tls);
+  if (!mgmd.connect()) {
+    g_err << "Failed to connect to ndb_mgmd" << endl;
+    return false;
+  }
+  Config conf;
+  if (!mgmd.get_config(conf)) {
+    g_err << "Failed to get the configuration from ndb_mgmd" << endl;
+    return false;
+  }
+  ConfigValues::Iterator iter(conf.m_configuration->m_config_values);
+  bool found = false;
+  for (int idx = 0; iter.openSection(CFG_SECTION_NODE, idx); idx++) {
+    Uint32 type = 0;
+    Uint32 id = 0;
+    Uint32 old = 0;
+    iter.get(CFG_TYPE_OF_SECTION, &type);
+    iter.get(CFG_NODE_ID, &id);
+    if (type == NODE_TYPE_DB && int(id) == nodeId &&
+        iter.get(CFG_DB_REDO_LOG_MODE, &old)) {
+      found = iter.set(CFG_DB_REDO_LOG_MODE, mode);
+    }
+    iter.closeSection();
+  }
+  if (!found) {
+    g_err << "No RedoLogMode for data node " << nodeId << endl;
+    return false;
+  }
+  if (!mgmd.set_config(conf)) {
+    g_err << "Failed to set the configuration in ndb_mgmd" << endl;
+    return false;
+  }
+  g_err << "Node " << nodeId << ": RedoLogMode=" << pmemModeName(mode)
+        << " in the configuration" << endl;
+  NdbSleep_SecSleep(3);  // Give ndb_mgmd time to take the new configuration
+  return true;
+}
+
+/* Rows of ndbinfo redo_log_pmem of nodeId (one per log part in PMEM mode,
+ * none in file mode), or -1 */
+static int pmemSwitchRows(Ndb_cluster_connection *connection, int nodeId) {
+  NdbInfo ndbinfo(connection, "ndbinfo/");
+  if (!ndbinfo.init()) {
+    g_err << "ndbinfo.init failed" << endl;
+    return -1;
+  }
+  const NdbInfo::Table *table;
+  if (ndbinfo.openTable("ndbinfo/redo_log_pmem", &table) != 0) {
+    g_err << "Failed to openTable(redo_log_pmem)" << endl;
+    return -1;
+  }
+  NdbInfoScanOperation *scanOp = nullptr;
+  if (ndbinfo.createScanOperation(table, &scanOp)) {
+    g_err << "No NdbInfoScanOperation" << endl;
+    ndbinfo.closeTable(table);
+    return -1;
+  }
+  int rows = -1;
+  if (scanOp->readTuples() == 0) {
+    const NdbInfoRecAttr *nodeCol = scanOp->getValue("node_id");
+    if (nodeCol != nullptr && scanOp->execute() == 0) {
+      int res;
+      int n = 0;
+      while ((res = scanOp->nextResult()) > 0) {
+        if (int(nodeCol->u_32_value()) == nodeId) n++;
+      }
+      if (res == 0) rows = n;
+    }
+  }
+  ndbinfo.releaseScanOperation(scanOp);
+  ndbinfo.closeTable(table);
+  return rows;
+}
+
+/* The node runs in mode: rows of redo_log_pmem in PMEM mode, none in file
+ * mode. Rows may come a little after the node started. */
+static bool pmemSwitchCheckMode(NDBT_Context *ctx, int nodeId, Uint32 mode) {
+  int rows = -1;
+  for (Uint32 i = 0; i < 60; i++) {
+    rows = pmemSwitchRows(&ctx->m_cluster_connection, nodeId);
+    if (rows >= 0 && (rows > 0) == (mode == NDB_REDO_LOG_MODE_PMEM)) {
+      g_err << "Node " << nodeId << " runs with RedoLogMode="
+            << pmemModeName(mode) << " (" << rows
+            << " rows in redo_log_pmem)" << endl;
+      return true;
+    }
+    NdbSleep_SecSleep(1);
+  }
+  g_err << "ERR: node " << nodeId << " has " << rows
+        << " rows in redo_log_pmem with RedoLogMode=" << pmemModeName(mode)
+        << endl;
+  return false;
+}
+
+/* The error of the next forced stop of nodeId, 0 if none in the time */
+static Uint32 pmemSwitchStopError(NdbLogEventHandle handle, int nodeId,
+                                  Uint32 seconds) {
+  const NDB_TICKS start = NdbTick_getCurrentTicks();
+  struct ndb_logevent event;
+  while (NdbTick_Elapsed(start, NdbTick_getCurrentTicks()).seconds() <
+         seconds) {
+    const int r = ndb_logevent_get_next(handle, &event, 1000);
+    if (r < 0) {
+      g_err << "Failed to read the cluster log events" << endl;
+      return 0;
+    }
+    if (r > 0 && event.type == NDB_LE_NDBStopForced &&
+        int(event.source_nodeid) == nodeId) {
+      g_err << "Node " << nodeId << " stopped with error "
+            << event.NDBStopForced.error << " in start phase "
+            << event.NDBStopForced.sphase << endl;
+      return event.NDBStopForced.error;
+    }
+  }
+  return 0;
+}
+
+/* One switch of nodeId from mode `from` to mode `to` */
+static bool pmemSwitchOnce(NDBT_Context *ctx, NDBT_Step *step,
+                           NdbRestarter &restarter, NdbLogEventHandle handle,
+                           int nodeId, Uint32 from, Uint32 to, bool refusal,
+                           bool mixedSR) {
+  Ndb *pNdb = GETNDB(step);
+  const int records = ctx->getNumRecords();
+  HugoTransactions hugoTrans(*ctx->getTab());
+  g_err << "Node " << nodeId << ": RedoLogMode " << pmemModeName(from)
+        << " to " << pmemModeName(to) << endl;
+
+  if (refusal) {
+    // REDO records in the old mode, then a restart without --initial
+    if (hugoTrans.pkUpdateRecords(pNdb, records) != 0) return false;
+    struct ndb_logevent event;
+    while (ndb_logevent_get_next(handle, &event, 100) > 0) {
+      // events of earlier restarts
+    }
+    if (!pmemSwitchSetMode(nodeId, to)) return false;
+    if (restarter.restartOneDbNode(nodeId, false, false, false) != 0) {
+      g_err << "Failed to restart node " << nodeId << endl;
+      return false;
+    }
+    const Uint32 error = pmemSwitchStopError(handle, nodeId, 300);
+    if (error != NDBD_EXIT_INVALID_CONFIG) {
+      g_err << "ERR: node " << nodeId
+            << " was not refused with RedoLogMode=" << pmemModeName(to)
+            << " on a REDO log written with RedoLogMode="
+            << pmemModeName(from) << ": stop error " << error
+            << ", expected " << NDBD_EXIT_INVALID_CONFIG << endl;
+      return false;
+    }
+    // The old mode again: the angel's next start of the node succeeds
+    if (!pmemSwitchSetMode(nodeId, from)) return false;
+    if (restarter.waitNodesStarted(&nodeId, 1, 600) != 0) {
+      g_err << "ERR: node " << nodeId << " did not start again with "
+            << "RedoLogMode=" << pmemModeName(from) << endl;
+      return false;
+    }
+    if (!pmemSwitchCheckMode(ctx, nodeId, from)) return false;
+  }
+
+  // The new mode with an initial node restart
+  if (!pmemSwitchSetMode(nodeId, to)) return false;
+  if (restarter.restartOneDbNode(nodeId, true, false, false) != 0 ||
+      restarter.waitNodesStarted(&nodeId, 1, 600) != 0) {
+    g_err << "ERR: node " << nodeId << " did not start with --initial and "
+          << "RedoLogMode=" << pmemModeName(to) << endl;
+    return false;
+  }
+  if (!pmemSwitchCheckMode(ctx, nodeId, to)) return false;
+
+  // A node restart in the new mode, over REDO records written in it
+  if (hugoTrans.pkUpdateRecords(pNdb, records) != 0) return false;
+  if (restarter.restartOneDbNode(nodeId, false, false, false) != 0 ||
+      restarter.waitNodesStarted(&nodeId, 1, 600) != 0) {
+    g_err << "ERR: node " << nodeId << " did not restart with RedoLogMode="
+          << pmemModeName(to) << endl;
+    return false;
+  }
+  if (!pmemSwitchCheckMode(ctx, nodeId, to)) return false;
+
+  // A system restart with the nodes in different modes
+  if (mixedSR) {
+    if (hugoTrans.pkUpdateRecords(pNdb, records) != 0) return false;
+    g_err << "System restart with the nodes in different modes" << endl;
+    if (restarter.restartAll(false, false, false) != 0 ||
+        restarter.waitClusterStarted(600) != 0 ||
+        pNdb->waitUntilReady(120) != 0) {
+      g_err << "ERR: the cluster did not restart with the nodes in "
+            << "different modes" << endl;
+      return false;
+    }
+    if (!pmemSwitchCheckMode(ctx, nodeId, to)) return false;
+  }
+  if (hugoTrans.pkReadRecords(pNdb, records) != 0) {
+    g_err << "ERR: rows differ after the switch" << endl;
+    return false;
+  }
+  return true;
+}
+
+int runPmemRedoModeSwitch(NDBT_Context *ctx, NDBT_Step *step) {
+  NdbRestarter restarter;
+  NdbConfig conf;
+  if (restarter.getNumDbNodes() < 2) {
+    g_err << "[SKIPPED] An initial node restart needs another data node"
+          << endl;
+    return NDBT_SKIPPED;
+  }
+  const int victim = restarter.getNode(NdbRestarter::NS_RANDOM);
+  Uint32 mode = NDB_REDO_LOG_MODE_FILE;
+  Uint32 testMode = NDB_REDO_PMEM_TEST_MODE_OFF;
+  Uint32 stopOnError = 1;
+  Uint32 retryDelay = 0;
+  Uint32 retries = 3;
+  conf.getProperty(victim, NODE_TYPE_DB, CFG_DB_REDO_LOG_MODE, &mode);
+  conf.getProperty(victim, NODE_TYPE_DB, CFG_DB_REDO_PMEM_TEST_MODE,
+                   &testMode);
+  conf.getProperty(victim, NODE_TYPE_DB, CFG_DB_STOP_ON_ERROR, &stopOnError);
+  conf.getProperty(victim, NODE_TYPE_DB, CFG_DB_START_FAIL_DELAY_SECS,
+                   &retryDelay);
+  conf.getProperty(victim, NODE_TYPE_DB, CFG_DB_MAX_START_FAIL, &retries);
+  if (mode == NDB_REDO_LOG_MODE_FILE &&
+      testMode == NDB_REDO_PMEM_TEST_MODE_OFF) {
+    g_err << "[SKIPPED] Node " << victim << " has RedoLogMode=file and no "
+          << "__RedoLogPmemTestMode: PMEM mode needs a DAX file system "
+          << "there" << endl;
+    return NDBT_SKIPPED;
+  }
+  const bool refusal = stopOnError == 0 && retryDelay >= 5 && retries >= 3;
+  if (!refusal) {
+    g_err << "Node " << victim << ": the refused restarts are not checked; "
+          << "they need StopOnError=0, StartFailRetryDelay >= 5 and "
+          << "MaxStartFailRetries >= 3" << endl;
+  }
+  ctx->setProperty("PmemSwitchNode", Uint32(victim));
+  ctx->setProperty("PmemSwitchMode", mode);
+
+  const int filter[] = {15, NDB_MGM_EVENT_CATEGORY_STARTUP, 0};
+  NdbLogEventHandle handle =
+      ndb_mgm_create_logevent_handle(restarter.handle, filter);
+  if (handle == nullptr) {
+    g_err << "Failed to subscribe to the cluster log events" << endl;
+    return NDBT_FAILED;
+  }
+  const Uint32 other = mode == NDB_REDO_LOG_MODE_PMEM
+                           ? Uint32(NDB_REDO_LOG_MODE_FILE)
+                           : Uint32(NDB_REDO_LOG_MODE_PMEM);
+  const bool ok = pmemSwitchOnce(ctx, step, restarter, handle, victim, mode,
+                                 other, refusal, true) &&
+                  pmemSwitchOnce(ctx, step, restarter, handle, victim, other,
+                                 mode, refusal, false);
+  ndb_mgm_destroy_logevent_handle(&handle);
+  return ok ? NDBT_OK : NDBT_FAILED;
+}
+
+/* After a failure: the node back in its configured mode */
+int runPmemRedoModeRestore(NDBT_Context *ctx, NDBT_Step *step) {
+  const Uint32 node = ctx->getProperty("PmemSwitchNode", Uint32(0));
+  if (node == 0) return NDBT_OK;
+  const Uint32 mode = ctx->getProperty("PmemSwitchMode", Uint32(0));
+  NdbConfig conf;  // a new one: NdbRestarter keeps the first config read
+  Uint32 now = mode;
+  conf.getProperty(node, NODE_TYPE_DB, CFG_DB_REDO_LOG_MODE, &now);
+  if (now == mode) return NDBT_OK;
+  g_err << "Restoring RedoLogMode=" << pmemModeName(mode) << " on node "
+        << node << endl;
+  NdbRestarter restarter;
+  const int nodeId = int(node);
+  if (!pmemSwitchSetMode(nodeId, mode) ||
+      restarter.restartOneDbNode(nodeId, true, false, true) != 0 ||
+      restarter.waitNodesStarted(&nodeId, 1, 600) != 0) {
+    g_err << "Failed to restore node " << node << endl;
+    return NDBT_FAILED;
+  }
+  return NDBT_OK;
+}
+
 /**************************************************************************/
 
 NDBT_TESTSUITE(testSystemRestart);
@@ -5132,6 +5438,15 @@ TESTCASE("MaxRedoRecordSR",
   INITIALIZER(runCreateMaxRedoTable);
   STEP(runMaxRedoRecordSR);
   FINALIZER(runDropMaxRedoTable);
+}
+TESTCASE("PmemRedoModeSwitch",
+         "RONDB-1150: RedoLogMode changes only with an initial node "
+         "restart, in both directions") {
+  INITIALIZER(runWaitStarted);
+  INITIALIZER(runLoadTable);
+  STEP(runPmemRedoModeSwitch);
+  FINALIZER(runPmemRedoModeRestore);
+  FINALIZER(runClearTable);
 }
 NDBT_TESTSUITE_END(testSystemRestart)
 
