@@ -1,0 +1,42 @@
+--source include/have_ndb.inc
+
+# REDO records of the largest size, then system restarts. A PREPARE of a
+# row of about 70 KB, part of it on disk, spans 4 pages when it starts late
+# in a page, and the REDO execution of a restart must have read all of
+# them (ZMIN_READ_BUFFER_SIZE in DBLQH). In the PMEM format:
+#   ./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndb_redo_max_record
+
+# NDBT creates its tables directly through the NDB API. Keep both mysqlds
+# stopped so that metadata discovery cannot import them.
+--connect(s2,127.0.0.1,root,,test,$MASTER_MYPORT1,)
+--connection default
+--echo # Shutting down mysqld 1
+--let $mysqld_name=mysqld.1.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld1_file_name= $_expect_file_name
+
+--connection s2
+--echo # Shutting down mysqld 2
+--let $mysqld_name=mysqld.2.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld2_file_name= $_expect_file_name
+
+let NDBAPITEST_CLEANUP_QUERY=;
+let NDBAPITEST_NAME=testSystemRestart;
+let NDBAPITEST_ARGS=-n MaxRedoRecordSR --records=200 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+--connection default
+--echo # Starting mysqld 1
+--let $_expect_file_name= $expect_mysqld1_file_name
+--let $mysqld_name=mysqld.1.1
+--source include/start_mysqld.inc
+
+--connection s2
+--echo # Starting mysqld 2
+--let $_expect_file_name= $expect_mysqld2_file_name
+--let $mysqld_name=mysqld.2.1
+--source include/start_mysqld.inc
+
+--connection default
+--disconnect s2

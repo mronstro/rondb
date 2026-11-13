@@ -40018,18 +40018,19 @@ void Dblqh::execSr(Signal *signal) {
     logPartPtr.p->savePageIndex = logPagePtr.p->logPageWord[ZCURR_PAGE_INDEX];
     if (logPartPtr.p->execSrPagesRead < ZMIN_READ_BUFFER_SIZE) {
       /* --------------------------------------------------------------------
-       *  THERE WERE LESS THAN 96 KBYTE OF LOG PAGES REMAINING. WE WAIT UNTIL
+       *  THERE WERE LESS THAN 128 KBYTE OF LOG PAGES REMAINING. WE WAIT UNTIL
        *  THE NEXT 256 KBYTE ARRIVES UNTIL WE CONTINUE AGAIN.
        *
        * ZMIN_READ_BUFFER_SIZE need to be set to the maximum number of pages
-       * that a log record can span. All log records can span 2 pages, but
-       * PREPARE operation records can span 3 pages. The maximum size of
-       * a PREPARE operation is header + 30000 bytes + 4096 bytes + 4 * 512
-       * bytes. This means it can span in the worst case 3 pages if it starts
-       * at the end of a page. By setting ZMIN_READ_BUFFER_SIZE to 3 we
-       * ensure that the stepAhead function won't step into pages not yet
-       * read from disk. When the row size increases potentially in the future
-       * this number need to increase as well.
+       * that a log record can span, so that stepAhead never steps into a
+       * page not yet read. All log records but PREPARE fit in 2 pages. TUP
+       * logs up to MAX_LOG_RECORD_SIZE_WORDS (MAX_TUPLE_SIZE_IN_WORDS +
+       * MAX_ATTRIBUTES_IN_TABLE) words, so with its header and key a
+       * PREPARE can be about 23100 words. A page holds 8160 words of log
+       * records, so such a PREPARE spans 4 pages when it starts late in a
+       * page. stepAhead checks that it stays inside the pages read. When
+       * the row size increases in the future this number needs to increase
+       * as well.
        * ------------------------------------------------------------------- */
       if ((logPartPtr.p->execSrPagesRead + logPartPtr.p->execSrPagesExecuted) <
           ZPAGES_IN_MBYTE) {
@@ -44683,6 +44684,12 @@ void Dblqh::stepAhead(Signal *signal, Uint32 stepAheadWords,
     jam();
     logPagePtr.p->logPageWord[ZCURR_PAGE_INDEX] = ZPAGE_SIZE;
     stepAheadWords = stepAheadWords - (ZPAGE_SIZE - tsaPos);
+    /**
+     * A record that goes on in the next page needs that page read
+     * (ZMIN_READ_BUFFER_SIZE). One that ends at the end of the last page
+     * read leaves the next page to the read-ahead check of the next record.
+     */
+    ndbrequire(stepAheadWords == 0 || logPartPtrP->execSrPagesRead > 1);
     logFilePtrP->currentLogpage = logPagePtr.p->logPageWord[ZNEXT_PAGE];
     logPagePtr.i = logPagePtr.p->logPageWord[ZNEXT_PAGE];
     logFilePtrP->currentFilepage++;

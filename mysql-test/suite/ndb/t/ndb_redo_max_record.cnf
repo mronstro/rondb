@@ -1,0 +1,7 @@
+!include ../my.cnf
+
+# Rows of about 68 KB, 47 KB of them in memory and 21 KB on disk, so that
+# a REDO PREPARE can span 4 pages (testSystemRestart -n MaxRedoRecordSR)
+[cluster_config.1]
+DataMemory=80M
+DiskPageBufferMemory=16M
