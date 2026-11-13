@@ -39,14 +39,17 @@ cmd: testSystemRestart
 args: -n SR2 T1
 max-time: 3240
 
-# Node restarts (A2)
+# Node restarts (A2). Not GCPSaveAndFileChange: its error insert 5114
+# delays the last write in a REDO file of file mode, which the PMEM
+# format does not make, so the GCP save never stalls as the case needs.
+# PmemGcpSaveAndFileChange checks that the GCP saves go on instead (M6).
 cmd: testNodeRestart
 args: -n NoLoad T1
 max-time: 1080
 
 cmd: testNodeRestart
-args: -n GCPSaveAndFileChange --records=2000 T3
-max-time: 1800
+args: -n PmemGcpSaveAndFileChange --records=2000 T3
+max-time: 900
 
 # The REDO log (A3)
 cmd: testRedo

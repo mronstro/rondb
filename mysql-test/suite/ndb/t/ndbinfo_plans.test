@@ -116,11 +116,13 @@ WHERE table_name = "ndb$config_values";
 
 ##
 ## List the tables where estimated size equals actual size.
-## (config_values excluded: its actual count depends on live config state)
+## (config_values excluded: its actual count depends on live config state;
+## redo_log_pmem excluded: one row per REDO log part with RedoLogMode=pmem,
+## none in file mode)
 SELECT count(*) from rowcounts WHERE est_rows = actual_rows
-  AND table_name != 'ndb$config_values';
+  AND table_name NOT IN ('ndb$config_values', 'ndb$redo_log_pmem');
 SELECT table_name from rowcounts WHERE est_rows = actual_rows
-  AND table_name != 'ndb$config_values'
+  AND table_name NOT IN ('ndb$config_values', 'ndb$redo_log_pmem')
   ORDER BY table_name;
 
 ## Check that no tables have zero estimates

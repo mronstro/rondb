@@ -43,6 +43,7 @@
 #include <Vector.hpp>
 #include <algorithm>
 #include <cstring>
+#include <map>
 #include <NdbAggregator.hpp>
 #include <ndbapi/NdbAggregationCommon.hpp>
 #include <signaldata/DbspjErr.hpp>
@@ -12424,11 +12425,15 @@ int runGciWatcher(NDBT_Context *ctx, NDBT_Step *step) {
   NdbEventOperation *eventOp = createEventOperation(pNdb, *systab_0);
 
   if (eventOp != nullptr) {
+    // GciWatcherQuiet: the step that reads ClusterGci prints the GCIs
+    const bool quiet = ctx->getProperty("GciWatcherQuiet", Uint32(0)) != 0;
     while (!ctx->isTestStopped()) {
       pNdb->pollEvents(1000);
       const Uint64 epoch = pNdb->getLatestGCI();
-      g_err << "Latest epoch is " << (epoch >> 32) << "/"
-            << (epoch & 0xffffffff) << endl;
+      if (!quiet) {
+        g_err << "Latest epoch is " << (epoch >> 32) << "/"
+              << (epoch & 0xffffffff) << endl;
+      }
       ctx->setProperty("ClusterGci", epoch >> 32);
     }
 
@@ -12583,6 +12588,221 @@ int runGCPSaveAndFileChange(NDBT_Context *ctx, NDBT_Step *step) {
   /* Clear error insertion */
   restarter.insertErrorInNode(victim, 0);
 
+  ctx->stopTest();
+  return result;
+}
+
+/* ------------------------------------------------------------------------
+ * RONDB-1150, RedoLogMode=pmem: the GCP saves go on while writers switch
+ * REDO log files (impl_step1_recovery_test.md M6). GCPSaveAndFileChange
+ * is file mode only: its error insert 5114 delays the last write in a REDO
+ * file, which the PMEM format does not make.
+ *
+ * DBDIH starts a new GCI only when the GCP save before it is done and
+ * TimeBetweenGlobalCheckpoints has passed (Dbdih::startGcpLab()). A GCI
+ * that stands still for twice that, and the second that the event poll of
+ * runGciWatcher may take, is a GCP save that waits. The case then writes
+ * the GCP state of DBDIH (DUMP 7025) and of every REDO log part (DUMP 2369,
+ * DUMP 2368 2) to the node logs while the save waits, and fails.
+ *
+ * The case runs for PmemGcpSeconds and until every data node has a log
+ * part that copied twice the size of a REDO file to its mapping
+ * (bytes_copied of ndbinfo redo_log_pmem); a write unit may be copied
+ * again, so twice the size makes sure that the log part switched files.
+ * It fails if that takes more than PmemGcpMaxSeconds.
+ * ------------------------------------------------------------------------ */
+int runPmemGcpNeedsPmem(NDBT_Context *ctx, NDBT_Step *step) {
+  NdbConfig conf;
+  Uint32 intervalMs = 0;
+  Uint32 fileBytes = 0;
+  for (int i = 0; i < conf.getNumDbNodes(); i++) {
+    const int node = conf.getDbNodeId(i);
+    Uint32 mode = NDB_REDO_LOG_MODE_FILE;
+    Uint32 interval = 2000;
+    Uint32 fileSize = 16 * 1024 * 1024;
+    conf.getProperty(node, NODE_TYPE_DB, CFG_DB_REDO_LOG_MODE, &mode);
+    conf.getProperty(node, NODE_TYPE_DB, CFG_DB_GCP_INTERVAL, &interval);
+    conf.getProperty(node, NODE_TYPE_DB, CFG_DB_REDOLOG_FILE_SIZE, &fileSize);
+    if (mode != NDB_REDO_LOG_MODE_PMEM) {
+      g_err << "Node " << node << ": this test needs RedoLogMode=pmem"
+            << endl;
+      return NDBT_SKIPPED;
+    }
+    intervalMs = std::max(intervalMs, interval);
+    fileBytes = std::max(fileBytes, fileSize);
+  }
+  ctx->setProperty("PmemGcpIntervalMs", intervalMs);
+  ctx->setProperty("PmemRedoFileBytes", fileBytes);
+  return NDBT_OK;
+}
+
+/* bytes_copied of ndbinfo redo_log_pmem, by (node id << 16) | log part */
+static bool readPmemBytesCopied(Ndb_cluster_connection *connection,
+                                std::map<Uint32, Uint64> *copied) {
+  NdbInfo ndbinfo(connection, "ndbinfo/");
+  if (!ndbinfo.init()) {
+    g_err << "ndbinfo.init failed" << endl;
+    return false;
+  }
+  const NdbInfo::Table *table;
+  if (ndbinfo.openTable("ndbinfo/redo_log_pmem", &table) != 0) {
+    g_err << "Failed to openTable(redo_log_pmem)" << endl;
+    return false;
+  }
+  NdbInfoScanOperation *scanOp = nullptr;
+  if (ndbinfo.createScanOperation(table, &scanOp)) {
+    g_err << "No NdbInfoScanOperation" << endl;
+    ndbinfo.closeTable(table);
+    return false;
+  }
+  bool ok = false;
+  if (scanOp->readTuples() == 0) {
+    const NdbInfoRecAttr *nodeCol = scanOp->getValue("node_id");
+    const NdbInfoRecAttr *partCol = scanOp->getValue("log_part");
+    const NdbInfoRecAttr *bytesCol = scanOp->getValue("bytes_copied");
+    if (nodeCol != nullptr && partCol != nullptr && bytesCol != nullptr &&
+        scanOp->execute() == 0) {
+      int res;
+      while ((res = scanOp->nextResult()) > 0) {
+        (*copied)[(nodeCol->u_32_value() << 16) | partCol->u_32_value()] =
+            bytesCol->u_64_value();
+      }
+      ok = (res == 0);
+    }
+  }
+  if (!ok) g_err << "Failed to scan ndbinfo redo_log_pmem" << endl;
+  ndbinfo.releaseScanOperation(scanOp);
+  ndbinfo.closeTable(table);
+  return ok;
+}
+
+/* Data nodes with a log part that copied minBytes or more since before */
+static Uint32 pmemNodesPastBytes(const std::map<Uint32, Uint64> &before,
+                                 const std::map<Uint32, Uint64> &now,
+                                 Uint64 minBytes, Uint64 *maxCopied) {
+  Uint32 count = 0;
+  Uint32 lastNode = 0;
+  for (const auto &[key, bytes] : now) {
+    const auto it = before.find(key);
+    const Uint64 start = it != before.end() ? it->second : 0;
+    const Uint64 copied = bytes >= start ? bytes - start : bytes;
+    *maxCopied = std::max(*maxCopied, copied);
+    const Uint32 node = key >> 16;
+    if (copied >= minBytes && node != lastNode) {
+      count++;
+      lastNode = node;
+    }
+  }
+  return count;
+}
+
+/* The GCP state of DBDIH and of every REDO log part, to the node logs */
+static void pmemGcpDumpState(NdbRestarter &restarter) {
+  const int gcpState[] = {7025};  // Dbdih::dumpGcpStop()
+  const int redoInfo[] = {DumpStateOrd::LqhPmemRedoInfo};
+  const int counters[] = {DumpStateOrd::LqhRedoPmem, 2};
+  restarter.dumpStateAllNodes(gcpState, 1);
+  restarter.dumpStateAllNodes(redoInfo, 1);
+  restarter.dumpStateAllNodes(counters, 2);
+}
+
+int runPmemGcpSaveWatch(NDBT_Context *ctx, NDBT_Step *step) {
+  NdbRestarter restarter;
+  const Uint32 minSeconds = ctx->getProperty("PmemGcpSeconds", Uint32(60));
+  const Uint32 maxSeconds = ctx->getProperty("PmemGcpMaxSeconds", Uint32(300));
+  const Uint32 intervalMs =
+      ctx->getProperty("PmemGcpIntervalMs", Uint32(2000));
+  const Uint64 fileBytes = ctx->getProperty("PmemRedoFileBytes", Uint32(0));
+  const Uint64 limitMs = 2 * Uint64(intervalMs) + 1000;
+  const Uint32 nodes = Uint32(restarter.getNumDbNodes());
+
+  std::map<Uint32, Uint64> before;
+  if (!readPmemBytesCopied(&ctx->m_cluster_connection, &before)) {
+    ctx->stopTest();
+    return NDBT_FAILED;
+  }
+
+  Uint32 gci = 0;
+  while ((gci = ctx->getProperty("ClusterGci", Uint32(0))) == 0 &&
+         !ctx->isTestStopped()) {
+    NdbSleep_MilliSleep(100);
+  }
+  g_err << "GCI " << gci << ": a GCI may stand still for " << limitMs
+        << " ms; every node to copy " << 2 * fileBytes
+        << " bytes in a REDO log part" << endl;
+
+  const NDB_TICKS start = NdbTick_getCurrentTicks();
+  NDB_TICKS lastChange = start;
+  NDB_TICKS lastScan = start;
+  Uint64 longestMs = 0;
+  Uint32 longestGci = gci;
+  Uint32 gcis = 0;
+  Uint32 switchedNodes = 0;
+  Uint64 maxCopied = 0;
+  int result = NDBT_OK;
+  while (!ctx->isTestStopped()) {
+    NdbSleep_MilliSleep(100);
+    const NDB_TICKS now = NdbTick_getCurrentTicks();
+    const Uint32 newGci = ctx->getProperty("ClusterGci", Uint32(0));
+    const Uint64 sinceMs = NdbTick_Elapsed(lastChange, now).milliSec();
+    if (newGci != gci) {
+      g_err << "GCI " << newGci << " after " << sinceMs << " ms" << endl;
+      if (sinceMs > longestMs) {
+        longestMs = sinceMs;
+        longestGci = gci;
+      }
+      gci = newGci;
+      lastChange = now;
+      gcis++;
+    } else if (sinceMs > limitMs) {
+      g_err << "ERR: GCI " << gci << " stands still for " << sinceMs
+            << " ms, more than twice TimeBetweenGlobalCheckpoints and a "
+               "second: a GCP save waits. DUMP 7025, 2369 and 2368 2 write "
+               "its state to the node logs"
+            << endl;
+      pmemGcpDumpState(restarter);
+      for (Uint32 i = 0;
+           i < 600 && ctx->getProperty("ClusterGci", Uint32(0)) == gci; i++) {
+        NdbSleep_MilliSleep(100);
+      }
+      const Uint64 stallMs =
+          NdbTick_Elapsed(lastChange, NdbTick_getCurrentTicks()).milliSec();
+      g_err << "ERR: GCI " << gci
+            << (ctx->getProperty("ClusterGci", Uint32(0)) == gci
+                    ? " still stands after "
+                    : " stood still for ")
+            << stallMs << " ms" << endl;
+      result = NDBT_FAILED;
+      break;
+    }
+
+    const Uint64 elapsedS = NdbTick_Elapsed(start, now).seconds();
+    if (switchedNodes < nodes &&
+        NdbTick_Elapsed(lastScan, now).seconds() >= 5) {
+      lastScan = now;
+      std::map<Uint32, Uint64> copied;
+      if (!readPmemBytesCopied(&ctx->m_cluster_connection, &copied)) {
+        result = NDBT_FAILED;
+        break;
+      }
+      switchedNodes =
+          pmemNodesPastBytes(before, copied, 2 * fileBytes, &maxCopied);
+    }
+    if (elapsedS >= minSeconds && switchedNodes == nodes) break;
+    if (elapsedS >= maxSeconds) {
+      g_err << "ERR: after " << elapsedS << " s, " << switchedNodes << " of "
+            << nodes << " data nodes copied " << 2 * fileBytes
+            << " bytes in a REDO log part (the most " << maxCopied
+            << "): no file switch to test" << endl;
+      result = NDBT_FAILED;
+      break;
+    }
+  }
+  g_err << "PMEM GCP saves: " << gcis << " GCIs in "
+        << NdbTick_Elapsed(start, NdbTick_getCurrentTicks()).seconds()
+        << " s, the longest GCI " << longestGci << " for " << longestMs
+        << " ms (limit " << limitMs << " ms), " << maxCopied
+        << " bytes copied in a log part at most" << endl;
   ctx->stopTest();
   return result;
 }
@@ -16062,6 +16282,17 @@ TESTCASE("GCPSaveAndFileChange",
   STEP(runGciWatcher);
   STEPS(runPkUpdatesUntilStopRequested, 20);
   STEP(runGCPSaveAndFileChange);
+  FINALIZER(runClearTable);
+}
+TESTCASE("PmemGcpSaveAndFileChange",
+         "RONDB-1150, RedoLogMode=pmem: the GCP saves go on while the "
+         "writers switch REDO log files") {
+  TC_PROPERTY("GciWatcherQuiet", Uint32(1));
+  INITIALIZER(runPmemGcpNeedsPmem);
+  INITIALIZER(runLoadTable);
+  STEP(runGciWatcher);
+  STEPS(runPkUpdatesUntilStopRequested, 20);
+  STEP(runPmemGcpSaveWatch);
   FINALIZER(runClearTable);
 }
 NDBT_TESTSUITE_END(testNodeRestart)

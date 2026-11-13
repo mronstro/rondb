@@ -129,7 +129,8 @@ cmd: testSystemRestart
 args: -n SR_DD_2b D2
 max-time: 1620
 
-# Node restarts (A2)
+# Node restarts (A2). PmemGcpSaveAndFileChange, not GCPSaveAndFileChange,
+# as in pmem-redo-tests.txt.
 cmd: testNodeRestart
 args: -n NoLoad T1
 max-time: 1080
@@ -139,8 +140,8 @@ args: -n Bug44952 T1
 max-time: 2700
 
 cmd: testNodeRestart
-args: -n GCPSaveAndFileChange --records=2000 T3
-max-time: 1800
+args: -n PmemGcpSaveAndFileChange --records=2000 T3
+max-time: 900
 
 cmd: testNodeRestart
 args: -n RestartRandomNode T6 T13

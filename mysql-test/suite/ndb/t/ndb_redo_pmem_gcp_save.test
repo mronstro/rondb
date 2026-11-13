@@ -1,0 +1,45 @@
+--source include/have_ndb.inc
+
+# RONDB-1150 (recovery plan M6): with the REDO log in PMEM mode the GCP
+# saves go on while 20 writers of T3 rows switch REDO log files. A GCI
+# that stands still for more than twice TimeBetweenGlobalCheckpoints and
+# a second fails the test, with the GCP state of DBDIH and of each REDO
+# log part in the node logs. testNodeRestartGcpSaveAndFileChange is the
+# test of file mode.
+
+# NDBT creates TEST_DB.T3 directly through the NDB API. Keep both
+# mysqlds stopped so that metadata discovery cannot import the API table:
+# a mysqld that did kept TEST_DB in its data dictionary after the table
+# was dropped, and the check of the test case failed.
+--connect(s2,127.0.0.1,root,,test,$MASTER_MYPORT1,)
+--connection default
+--echo # Shutting down mysqld 1
+--let $mysqld_name=mysqld.1.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld1_file_name= $_expect_file_name
+
+--connection s2
+--echo # Shutting down mysqld 2
+--let $mysqld_name=mysqld.2.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld2_file_name= $_expect_file_name
+
+let NDBAPITEST_CLEANUP_QUERY=;
+let NDBAPITEST_NAME=testNodeRestart;
+let NDBAPITEST_ARGS=-n PmemGcpSaveAndFileChange --records=2000 T3;
+--source suite/ndb/include/run_ndbapitest.inc
+
+--connection default
+--echo # Starting mysqld 1
+--let $_expect_file_name= $expect_mysqld1_file_name
+--let $mysqld_name=mysqld.1.1
+--source include/start_mysqld.inc
+
+--connection s2
+--echo # Starting mysqld 2
+--let $_expect_file_name= $expect_mysqld2_file_name
+--let $mysqld_name=mysqld.2.1
+--source include/start_mysqld.inc
+
+--connection default
+--disconnect s2
