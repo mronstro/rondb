@@ -1,5 +1,12 @@
 --source include/have_ndb.inc
 
+# A run on a DAX mount (MTR_NDB_PMEM_DIR with pmem_redo_dax.cnf or
+# pmem_redo_cxl.cnf) replaces the nodax test mode of this test's .cnf, and
+# the BackupDataDir used here is not on the DAX mount.
+if ($MTR_NDB_PMEM_DIR) {
+  --skip Needs __RedoLogPmemTestMode=nodax and its REDO log off the DAX mount
+}
+
 # RONDB-1150: with RedoLogMode=pmem the REDO log files go under
 # FileSystemPathRedoLog/ndb_<id>_fs/ (platform plan S3.3), here the
 # BackupDataDir of the cluster. __RedoLogPmemTestMode=nodax maps them
