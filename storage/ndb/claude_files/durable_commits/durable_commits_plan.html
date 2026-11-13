@@ -333,6 +333,54 @@ td code { font-size: 0.85em; }
 .chain .step b { display: block; font-size: 13px; color: var(--accent); letter-spacing: 0.04em; }
 .chain .step.indep { border-style: dashed; }
 
+/* tail-transaction explorer (section 8) */
+.ex-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; margin-top: 10px; font-family: var(--font-display); font-size: 14px; }
+.ex-ctl .lbl { color: var(--muted); font-size: 12px; font-weight: 650; letter-spacing: 0.07em; text-transform: uppercase; }
+.ex-ctl label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-weight: 600; }
+.ex-ctl input { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; }
+.ex-scroll { overflow-x: auto; margin-top: 10px; }
+.ex-scroll svg { min-width: 760px; }
+.ex .ng { fill: none; stroke: var(--rule); stroke-width: 1.2; }
+.ex .ng-t { font-size: 11px; font-weight: 650; letter-spacing: 0.06em; fill: var(--muted); }
+.ex .node { fill: var(--panel); stroke: var(--ink); stroke-width: 1.2; }
+.ex .off .node { fill: none; stroke: var(--muted); stroke-dasharray: 5 4; }
+.ex .off .cell { opacity: 0.45; }
+.ex .name { font-size: 15px; font-weight: 700; fill: var(--ink); }
+.ex .role { font-size: 11px; fill: var(--muted); }
+.ex .cell .rec { stroke-width: 1.5; }
+.ex .cell.none .rec { fill: none; stroke: var(--rule); stroke-dasharray: 4 3; }
+.ex .cell.C .rec { fill: color-mix(in srgb, var(--commit) 16%, var(--panel)); stroke: var(--commit); }
+.ex .cell.C.applied .rec { fill: var(--commit); }
+.ex .cell.C.invalid .rec { stroke: var(--abort); stroke-width: 2; }
+.ex .cell.X .rec { fill: color-mix(in srgb, var(--complete) 18%, var(--panel)); stroke: var(--complete); }
+.ex .cell .hatch { display: none; }
+.ex .cell.invalid .hatch { display: inline; }
+.ex .hatch-line { stroke: var(--abort); stroke-width: 2; }
+.ex .cell text { font-size: 10.5px; font-weight: 650; text-anchor: middle; fill: var(--ink); }
+.ex .cell.none text { fill: var(--muted); font-weight: 500; }
+.ex .cell.applied text { fill: var(--on-solid); }
+.ex .st { font-size: 11.5px; fill: var(--ink); }
+.ex .st.ok { fill: var(--complete); }
+.ex .st.bad { fill: var(--abort); }
+.ex .st.mut { fill: var(--muted); }
+.ex .phase { fill: var(--band); }
+.ex .phase-t { font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em; fill: var(--muted); text-anchor: middle; }
+.ex .axis { stroke: var(--rule); stroke-width: 2; }
+.ex .dot { fill: var(--panel); stroke: var(--ink); stroke-width: 1.4; }
+.ex .dot.past { fill: var(--ink); }
+.ex .ev { font-size: 11px; text-anchor: middle; fill: var(--ink); }
+.ex .ev.n { font-weight: 700; }
+.ex .ev.s { fill: var(--muted); font-size: 10.5px; }
+.ex .cut { opacity: 0.38; }
+.ex .crash { stroke: var(--abort); stroke-width: 2; stroke-dasharray: 4 3; }
+.ex .crash-t { fill: var(--abort); font-size: 11.5px; font-weight: 650; text-anchor: middle; }
+.ex .refused { fill: var(--abort); font-size: 13px; font-weight: 650; text-anchor: middle; }
+.sw.ghost { border-color: var(--rule); border-style: dashed; }
+.panel .note { font-size: 14.5px; line-height: 1.45; margin-top: 6px; }
+.verdict { font-family: var(--font-display); font-size: 15px; font-weight: 650; margin-top: 6px; }
+.verdict.ok { color: var(--complete); }
+.verdict.bad { color: var(--abort); }
+
 footer { margin-top: 4em; padding-top: 16px; border-top: 1px solid var(--rule); font-family: var(--font-display); font-size: 14px; color: var(--muted); }
 footer ul { list-style: none; padding: 0; margin-top: 8px; }
 footer code { background: none; padding: 0; }
@@ -351,13 +399,14 @@ footer code { background: none; padding: 0; }
 <main class="page">
 
 <header class="col">
-  <p class="eyebrow">RONDB-1150 · Plan, revision 11 · 28 October 2026</p>
+  <p class="eyebrow">RONDB-1150 · Plan, revision 13 · 13 November 2026</p>
   <h1>Durable commits across a cluster restart</h1>
   <p class="lede">Today a cluster restart brings the database back to the last GCI saved by the global checkpoint, so commits acknowledged in the last GCP interval can be lost. This plan makes every acknowledged commit survive a crash of all data nodes, power loss included, by putting the REDO log on persistent memory and logging one more record per operation.</p>
   <div class="chips">
     <span class="chip ok">Research done</span>
     <span class="chip ok">All decisions settled</span>
-    <span class="chip">No code changed</span>
+    <span class="chip open">Step 1 implemented, gates running</span>
+    <span class="chip">Steps X1, X3–X8 planned</span>
   </div>
 </header>
 
@@ -370,9 +419,10 @@ footer code { background: none; padding: 0; }
     <li><a href="#restart"><span class="n">5</span>Cluster restart</a></li>
     <li><a href="#order"><span class="n">6</span>Why log order is enough</a></li>
     <li><a href="#failures"><span class="n">7</span>Node failures</a></li>
-    <li><a href="#decisions"><span class="n">8</span>Decisions</a></li>
-    <li><a href="#work"><span class="n">9</span>Risks and work plan</a></li>
-    <li><a href="#pmem"><span class="n">10</span>First step: REDO on PMEM</a></li>
+    <li><a href="#atomic"><span class="n">8</span>All or nothing after R_gcp</a></li>
+    <li><a href="#decisions"><span class="n">9</span>Decisions</a></li>
+    <li><a href="#work"><span class="n">10</span>Risks and work plan</a></li>
+    <li><a href="#pmem"><span class="n">11</span>First step: REDO on PMEM</a></li>
   </ol>
 </nav>
 
@@ -532,7 +582,7 @@ footer code { background: none; padding: 0; }
   <p style="margin-top:1.2em">TC sends COMPLETE only after every COMMITTED. So a COMPLETE record anywhere means every live replica of every operation has a persistent COMMIT record pointing back to its PREPARE. A change that was visible or acknowledged has a COMPLETE record. If no COMPLETE record exists, nobody saw the transaction and aborting it is safe.</p>
   <div class="rule-box">
     <p class="eyebrow">Survival rule</p>
-    <p>A transaction survives the cluster restart if a COMPLETE record for it is found in some starting REDO log part. In a partial restart, a count fallback also applies (§7).</p>
+    <p>A transaction survives the cluster restart if a COMPLETE record for it is found in some starting REDO log part, or if the count rule finds a COMMIT record of each of its operations on every starting replica and no ABORT from rule F (§7). Otherwise it is aborted. §8 shows why this applies every transaction whole.</p>
   </div>
 
   <h3>Lock hold on the primary</h3>
@@ -830,7 +880,7 @@ footer code { background: none; padding: 0; }
     </tbody>
   </table>
   </div>
-  <p style="margin-top:1em">The hash table is then freed. A restart that crashes partway through is repeatable: nothing in the log changes before every part is done, and after that only the COMMITs of aborted transactions are rewritten, which a rerun aborts again.</p>
+  <p style="margin-top:1em">The hash table is then freed. A restart that crashes partway through is repeatable: nothing in the log changes before every part is done, and after that only the COMMITs of aborted transactions are rewritten, which a rerun aborts again. §8 shows why every part reaches the same verdict, and why it is the right one.</p>
   <h3>Phase 3: raise the restorable GCI</h3>
   <ul>
     <li>Set the restorable GCI to the highest GCI applied in phase 2, durably, before the restart LCP and the first new GCP. The sysfile, DIH, DBLQH, Backup, NDBCNTR and the DIH replica intervals must all see it.</li>
@@ -962,8 +1012,161 @@ footer code { background: none; padding: 0; }
 </figure>
 
 <!-- 8 -->
+<section class="col" id="atomic">
+  <h2><span class="num">8</span>All or nothing after R_gcp</h2>
+  <p>Up to R_gcp the restart brings back a consistent cut, as today: every transaction with a GCI at or below it is restored whole. A transaction T with a higher GCI was never covered by a GCP save. Its operations sit on fragments of several node groups, so its records are spread over the log parts of several LDMs and nodes, and each of those crashed at its own point. Some of the nodes may not start, and no coordinator survives the crash. This section puts §3 to §7 together to show that the restart still applies T whole or not at all, and on the right side.</p>
+  <div class="rule-box">
+    <p class="eyebrow">The guarantee for every T with a GCI above R_gcp</p>
+    <ol>
+      <li><strong>All or nothing.</strong> Every replica that takes part in the restart applies every operation of T, or none applies any. A node that takes no part gets T's rows by copy when it joins by node restart.</li>
+      <li><strong>The right side.</strong> T is applied if any of its rows was visible or the API was told that it committed. T is not applied if rule F aborted it and anyone could have learned that.</li>
+      <li><strong>The same answer every time.</strong> A crash during the restart, and every later restart, give the same verdict.</li>
+    </ol>
+  </div>
+
+  <h3>The evidence each replica leaves</h3>
+  <p>Each replica of each operation of T writes these records to the log part of its fragment. What the restart can conclude from them follows from the order in which they are written.</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Record</th><th>Written by a replica</th><th>What it tells the restart</th></tr></thead>
+    <tbody>
+      <tr><td>PREPARE</td><td>At prepare, with the row's after-image</td><td>Nothing by itself. It is read only through the back-reference of a COMMIT, so a PREPARE without a COMMIT is never applied.</td></tr>
+      <tr><td>COMMIT, with transaction id, GCI and <code>opCount</code></td><td>When it handles COMMIT; persistent before it sends COMMITTED or passes COMMIT on (C)</td><td>TC decided to commit, and this replica can apply the operation. A node's count of T's COMMIT records is the number of T's operations in its node group that it can apply.</td></tr>
+      <tr><td>COMPLETE, with transaction id</td><td>When it handles COMPLETE; persistent before the row is visible, before the lock is released and before COMPLETED (K, L)</td><td>Every replica that was live had already persisted its COMMIT (the first fact below).</td></tr>
+      <tr><td>ABORT, flagged <code>AF_AFTER_COMMIT</code></td><td>Under rule F, by a replica that has a COMMIT; persistent before it releases the lock and before ABORTCONF</td><td>T was aborted at run time, after its commit decision.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="margin-top:1em">Three facts follow, and the rest of the section rests on them:</p>
+  <ul>
+    <li><strong>A COMPLETE anywhere means a COMMIT everywhere.</strong> TC sends the first COMPLETE only after every COMMITTED, and a replica sends COMMITTED only after its COMMIT record is persistent (C). So every live replica of every operation of T has a persistent COMMIT record, which leads back to its PREPARE.</li>
+    <li><strong>Seen means complete.</strong> A row of T becomes visible only after its COMPLETE record is persistent (L), and the API is acked only after the last COMPLETED (A). If anybody saw T, a COMPLETE record of T exists.</li>
+    <li><strong>A COMPLETE and a rule-F ABORT exclude each other.</strong> Rule F aborts T only if no COMPLETE was sent.</li>
+  </ul>
+
+  <h3>Where the crash can cut T</h3>
+  <p>The crash can come at any point of T's commit. Where nobody saw T, either verdict is correct, as long as every log part reaches the same one.</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>The crash comes</th><th>The starting logs hold</th><th>Could anyone have seen T?</th><th>Verdict</th></tr></thead>
+    <tbody>
+      <tr><td>In the prepare phase, before the first COMMIT</td><td>PREPARE records at most</td><td>No: rows become visible only at COMPLETE (L), and the ack comes after the last COMPLETED (A)</td><td>Not applied. With no COMMIT, T is in no hash table, and a PREPARE is reached only through a COMMIT.</td></tr>
+      <tr><td>In the COMMIT phase</td><td>COMMIT records on some replicas, none on others. No COMPLETE anywhere: TC sends COMPLETE only after every COMMITTED</td><td>No</td><td>Abort: the counts differ within a node group, or add up to less than <code>opCount</code>. If every starting replica already has its COMMIT, the count rule commits T instead, which is also correct.</td></tr>
+      <tr><td>After the last COMMITTED, before any COMPLETE is persistent</td><td>A COMMIT on every replica of every operation, no COMPLETE</td><td>No</td><td>Commit, by the count rule. Abort would also be correct; what matters is that every part decides the same.</td></tr>
+      <tr><td>After the first COMPLETE is persistent</td><td>A COMMIT on every live replica of every operation (C), and at least one COMPLETE, perhaps only on a node that does not start</td><td>Possibly: the row is visible on that replica, and after the last COMPLETED the API has its ack</td><td>Commit: "T complete" from any part that has a COMPLETE, or else the count rule, which always passes now.</td></tr>
+      <tr><td>After rule F aborted T: a participant failed before any COMPLETE was sent</td><td>COMMITs, and an ABORT on each replica that persisted one before the crash. No COMPLETE anywhere. The failed node is stale and takes no part</td><td>Possibly the abort, but only once every live replica has persisted its ABORT</td><td>Abort: a "T aborted" from any part vetoes the count rule. With no ABORT in the starting parts nobody can have learned of the abort (below), and the count rule may commit T, which is also correct.</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<figure aria-labelledby="cap-f8">
+  <div class="stepper" id="f8" tabindex="0" aria-label="Crash one transaction and choose which nodes start. Move the crash with the Earlier and Later buttons or the arrow keys.">
+    <div class="stepper-bar">
+      <span class="stage" id="f8-stage"></span>
+      <span class="count" id="f8-count"></span>
+      <button type="button" id="f8-reset">Reset</button>
+      <button type="button" id="f8-prev">Earlier</button>
+      <button type="button" id="f8-next" class="primary">Later</button>
+    </div>
+    <div class="ex-ctl" role="group" aria-label="Nodes that start">
+      <span class="lbl">Nodes that start</span>
+      <label><input type="checkbox" id="f8-X" checked> X</label>
+      <label><input type="checkbox" id="f8-Y" checked> Y</label>
+      <label><input type="checkbox" id="f8-Z" checked> Z</label>
+      <label><input type="checkbox" id="f8-W" checked> W</label>
+    </div>
+    <div class="ex-scroll">
+      <svg class="ex" id="f8-svg" viewBox="0 0 900 336" role="img" aria-label="Transaction T writes row a on nodes X and Y in node group 0 and row b on nodes Z and W in node group 1. The upper part shows the COMMIT and COMPLETE records each node holds at the crash and what the restart does with them. The lower part shows the eight steps of the commit and where the crash falls."></svg>
+    </div>
+    <div class="panels">
+      <div class="panel"><h4>At the crash</h4><p class="msg" id="f8-msg" aria-live="polite"></p></div>
+      <div class="panel"><h4>Exchange and verdict</h4><div id="f8-verdict"></div></div>
+      <div class="panel"><h4>Who could have seen T</h4><div id="f8-seen"></div></div>
+    </div>
+    <div class="legend" aria-hidden="true">
+      <span><i class="sw C"></i>COMMIT record</span>
+      <span><i class="sw X"></i>COMPLETE record</span>
+      <span><i class="sw done"></i>COMMIT applied</span>
+      <span><i class="sw inv"></i>COMMIT invalidated</span>
+      <span><i class="sw ghost"></i>no record</span>
+    </div>
+  </div>
+  <figcaption id="cap-f8"><b>Crash one transaction, and choose which nodes start.</b> T writes row a in node group 0, where X is the primary and Y the backup, and row b in node group 1, on Z and W, so its <code>opCount</code> is 2. Each operation commits along its chain, backup first, and the two chains run side by side; the eight steps are one order they can take. No node fails before the crash, so there is no rule F and no stale node. Whatever the crash point and whichever nodes start, every starting replica applies T or none does, and T is applied whenever a row of it was visible.</figcaption>
+</figure>
+
+<section class="col">
+  <h3>One verdict, computed in every log part</h3>
+  <p>A log part that holds a COMMIT of T but no COMPLETE has T in doubt after step A. Step B gives every log part the same two inputs: <i>U</i>, the union of all in-doubt sets with each node's count of T's COMMIT records, and the <i>hits</i>, the "T complete" and "T aborted" reports from the rescans. The set of starting nodes and their node groups come with <code>START_RECREQ</code>, the same on every node, and <code>opCount</code> comes from T's own COMMIT records, which must agree. The verdict is a function of these inputs alone:</p>
+  <div class="rule-box">
+    <p class="eyebrow">Verdict for T, the same in every log part</p>
+    <ol>
+      <li><strong>Commit</strong> if some part reported "T complete".</li>
+      <li>Otherwise <strong>commit</strong> if no part reported "T aborted", every starting node of each node group counts the same number of T's COMMIT records (a node with none counts 0), and these per-node-group counts add up to <code>opCount</code>.</li>
+      <li>Otherwise <strong>abort</strong>.</li>
+    </ol>
+  </div>
+  <ul>
+    <li><strong>The inputs are complete before anyone decides.</strong> In-doubt sets travel in numbered batches whose totals are checked at DONE. Signals between two block instances keep their order, and each node's DBLQH proxy forwards in arrival order and sends its DONE only after all its workers' DONEs, so every hit reaches every part before the last DONE. A node failure during the restart stops the restart, as today, so no part decides on part of the data.</li>
+    <li><strong>A part that applied T in step A speaks for it.</strong> It found a COMPLETE, so T is not in its in-doubt set. In the rescan it finds that COMPLETE again and reports "T complete", so every other part commits T too. A COMPLETE also rules out a rule-F ABORT, so no part has a reason to abort.</li>
+    <li><strong>Only the tail counts.</strong> The rescan starts before the tail and can pass records of transactions at or below R_gcp. It counts a COMPLETE or ABORT of T only after a durable tail COMMIT of T in the same log part, so an old record of a transaction id used again cannot report.</li>
+  </ul>
+
+  <h3>Applying T, or wiping it, on every replica</h3>
+  <ul>
+    <li><strong>Commit.</strong> Each log part executes its own queued COMMITs of T in log order, each through its back-reference to its PREPARE, with T's exact GCI (<code>gci_lo</code> is in the record). No REDO is written, no lock is taken and no trigger fires. A node's log parts hold exactly the COMMITs of T's operations on that node's fragments, and when T commits every starting replica has all of them: by the first fact when there is a COMPLETE, by the count rule otherwise. So the replicas of every fragment end identical. Ordered indexes are rebuilt after the restore, as today.</li>
+    <li><strong>Abort.</strong> Each log part sets the invalidated flag on each of its COMMITs of T, one atomic store per record. The flag lies outside the checksum, so the record stays valid and the end of the log does not move. The stores are flushed in batches with one fence at the end. PREPAREs are left as they are.</li>
+    <li><strong>Order between transactions.</strong> Transactions decided in step C never share a row within a log part, because a later writer of a row needs the earlier writer's COMPLETE in that part. So the order within step C does not matter, and §6 shows that every row still ends as a serial execution of the survivors would leave it.</li>
+  </ul>
+
+  <h3>Nodes that do not take part</h3>
+  <ul>
+    <li><strong>A node that does not start.</strong> Its records are missing. If it held the only COMPLETE of T, the count rule still commits T, because a COMPLETE means every live replica has its COMMIT (D5). If it held ABORT records of T that the starting nodes lack, nobody can have learned of the abort: the API hears of it, and another writer can take one of T's rows, only after every live replica has persisted its ABORT, since a writer needs the row's lock on every replica. Committing T is then also correct.</li>
+    <li><strong>A stale node</strong> failed in the tail, or its device reported an unsafe shutdown. It may lack T's operations, so its records are not evidence: it takes no part in the restart, and copies T's rows when it joins by node restart (D3).</li>
+    <li><strong>At least one non-stale node per node group.</strong> Otherwise T's operations in that node group have no replica that can apply them, and the restart waits (D4). With a single node group, a stale node whose only witness is gone recovers alone: the commits on the missing node are lost, but nothing is half applied (§7).</li>
+  </ul>
+
+  <h3>A crash during the restart, and the restarts after it</h3>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>The restart crashes</th><th>The log then holds</th><th>The next restart</th></tr></thead>
+    <tbody>
+      <tr><td>In step A or step B</td><td>What it held before: step A applies rows in memory only and writes no REDO</td><td>The same scan, the same in-doubt sets, the same verdicts.</td></tr>
+      <tr><td>In step C</td><td>The invalidation flags of some aborted transactions</td><td>A flagged COMMIT is neither queued nor counted, so an aborted T fails the count rule again. A committed T changed nothing in the log and is decided the same way.</td></tr>
+      <tr><td>After step C, before G' is raised</td><td>Every flag of an aborted transaction, fenced; perhaps the SR-head record</td><td>Runs phase 2 again from the same R_gcp and reaches the same verdicts.</td></tr>
+      <tr><td>After G' is raised</td><td>The sysfile's restorable GCI is G'</td><td>Phase 1 replays the old tail as ordinary recovery up to G': the valid COMMITs execute, the flagged ones are skipped.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="margin-top:1em">The order that makes this hold: every invalidation flag is persistent before phase 4 writes the SR-head record and <code>COMPLETED_GCI(G')</code> at the end of the log, and before phase 3 raises the restorable GCI to G' in the sysfile. From then on the flags carry the verdicts. G' is the highest GCI applied in phase 2, computed by every part from the same exchanged data.</p>
+
+  <h3>What could break it, and the guard</h3>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Threat</th><th>Guard</th><th>Where</th></tr></thead>
+    <tbody>
+      <tr><td>Two transactions with the same transaction id in the tail would share one hash entry. An API process starts its counter at 0 again after it restarts</td><td>A failed API node id is not used again until the GCP has saved the GCI after the one in which it failed</td><td>X4.11, DI-5</td></tr>
+      <tr><td>A dirty write logs PREPARE, COMMIT and COMPLETE at once. Its COMPLETE would report "T complete" for operations whose COMMITs some replica lacks</td><td>Proposal: in durable mode dirty writes become normal writes (Q-B1)</td><td>DI-1, X4.13</td></tr>
+      <tr><td>A wrong <code>opCount</code> could pass or fail the count rule wrongly</td><td>Counted at LQHKEYCONF for every logged write, trigger operations included. Operations that fail with IgnoreError have no COMMIT and are not counted. A takeover TC rebuilds the count from LQH_TRANSCONF</td><td>X4.2, X4.9</td></tr>
+      <tr><td>A takeover TC must know whether any COMPLETE was sent, to choose between completing T and rule F</td><td>Seen from operations or replicas missing from the takeover reports. The race with a COMPLETE still in flight is checked in the TLA+ model first (Q-B9)</td><td>X4.9, DI-7</td></tr>
+      <tr><td>A durable transaction may depend on a non-durable one around the activation GCI <i>g</i></td><td>Phase 2 runs only for GCI ≥ <i>g</i> and only when R_gcp ≥ <i>g</i>−1, so everything below <i>g</i> is in the GCP-saved state</td><td>§2</td></tr>
+      <tr><td>A table dropped or changed in the tail</td><td>The replay skips records of a table version that no longer exists, as today; X5.9 tests that no transaction ends half applied</td><td>X5.9</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>How it is tested</h3>
+  <ul>
+    <li><strong>The acknowledged-commit ledger (X3).</strong> Each transaction writes the same sequence number into rows spread over every node group. After the restart all of them must hold the same number (all or nothing), at least the last acknowledged one (durability), a chain of transactions must be unbroken (closure), and every replica of every row must agree. Step 1's GCP-saved ledger already checks all or nothing at R_gcp, transactions with an unknown outcome included.</li>
+    <li><strong>Crash points in the restart</strong> (error inserts 5186–5189 and 7262): the next restart must reach the same verdicts. Error insert 5185 skips the COMPLETE records, so every verdict comes from the counts.</li>
+    <li><strong>Node failures:</strong> the D3, D4 and D5 cases of §7, with a replica check.</li>
+    <li><strong>A TLA+ model</strong> of C, K, L, A and F, takeover, the crash and steps A to C with the count rule, checked for two node groups of two replicas and two or three transactions before X5 is coded.</li>
+  </ul>
+</section>
+
+<!-- 9 -->
 <section class="col" id="decisions">
-  <h2><span class="num">8</span>Decisions</h2>
+  <h2><span class="num">9</span>Decisions</h2>
   <div class="table-wrap">
   <table>
     <thead><tr><th>#</th><th>Question</th><th>Status</th><th>Outcome</th></tr></thead>
@@ -980,17 +1183,20 @@ footer code { background: none; padding: 0; }
     </tbody>
   </table>
   </div>
-  <p style="margin-top:1em"><strong>Open for the later steps</strong> (found while planning the implementation; proposals in <code>implementation_plan.md</code>):</p>
+  <p style="margin-top:1em"><strong>Open for the later steps</strong> (found while planning the implementation; questions Q-B1 to Q-B12 in <code>implementation_plan.md</code> §5, each with a proposal):</p>
   <ul>
-    <li><strong>Dirty writes.</strong> A dirty write logs PREPARE, COMMIT and COMPLETE together and takes its GCI from DBLQH, so its COMPLETE record would wrongly tell the restart that the whole transaction is complete. Either flag such records or turn dirty writes into normal writes in durable mode.</li>
-    <li><strong>Read locks.</strong> Released at COMMIT, or held to COMPLETE like write locks.</li>
-    <li><strong>Takeover race.</strong> A COMPLETE sent by the failed TC may be executed after the takeover TC has collected the operation states, so its "was any COMPLETE sent?" decision must be checked in the code and in the TLA+ model.</li>
+    <li><strong>Dirty writes.</strong> A dirty write logs PREPARE, COMMIT and COMPLETE together and takes its GCI from DBLQH, so its COMPLETE record would wrongly tell the restart that the whole transaction is complete. Proposal: turn dirty writes into normal writes in durable mode, rather than flag their records (Q-B1).</li>
+    <li><strong>Read locks.</strong> Released at COMMIT, or held to COMPLETE like write locks. The implementation plan proposes COMPLETE (Q-B2); the work packages of X4 keep COMMIT (DI-9). To be settled.</li>
+    <li><strong>Takeover race.</strong> A COMPLETE sent by the failed TC may be executed after the takeover TC has collected the operation states, so its "was any COMPLETE sent?" decision must be checked in the code and in the TLA+ model before it is chosen (Q-B9).</li>
+    <li><strong>Forced start.</strong> No forced start to R_gcp when a node group has only stale nodes, in the first version (Q-B5).</li>
+    <li><strong>Memory of the step-A hash table.</strong> Sized from the number of transaction records; running out stops the restart with a clear message (Q-B11).</li>
+    <li><strong>The GCI of a commit learned through a takeover.</strong> TCKEY_FAILCONF carries no GCI, so the API reads GCI 0 for such a commit; step 1's ledger found this and counts such commits as having an unknown GCI. Proposal: no change to the signal (Q-B4).</li>
   </ul>
 </section>
 
-<!-- 9 -->
+<!-- 10 -->
 <section class="col" id="work">
-  <h2><span class="num">9</span>Risks and work plan</h2>
+  <h2><span class="num">10</span>Risks and work plan</h2>
   <h3>Risks</h3>
   <ul>
     <li><strong>Persist barriers.</strong> Several LDMs can share a log part, so a barrier must cover the part's whole unpersisted range. A missing barrier is a silent bug; a debug check and power-loss emulation that keeps only what was written up to the last barrier guard against it.</li>
@@ -998,7 +1204,7 @@ footer code { background: none; padding: 0; }
     <li><strong>Longer lock hold</strong> on the primary. Measure hot-row throughput and deadlock-timeout aborts.</li>
     <li><strong>Rule F</strong> needs an abort path from the committed state in DBLQH, and the takeover TC must know whether any COMPLETE was sent.</li>
     <li><strong><code>opCount</code></strong> must be right for trigger-generated operations, IgnoreError aborts and takeover.</li>
-    <li><strong>Transaction id reuse.</strong> The API's counter starts at 0 again when the API process restarts. A failed API node id is therefore not taken into use again until the GCI in which it failed has been saved by GCP, enforced in QMGR's API_REGREQ handling.</li>
+    <li><strong>Transaction id reuse.</strong> The API's counter starts at 0 again when the API process restarts. A failed API node id is therefore not taken into use again until the GCP has saved the GCI after the one in which it failed (a transaction of the dead process can get a GCI one higher through another node's TC), enforced in QMGR's API_REGREQ handling.</li>
     <li><strong>Activation boundary.</strong> Phase 2 applies only to GCI ≥ <i>g</i>, and only when R_gcp ≥ <i>g</i>−1.</li>
   </ul>
 
@@ -1024,7 +1230,7 @@ footer code { background: none; padding: 0; }
 <div class="col">
   <div class="chain">
     <div class="step indep"><b>X1 · independent</b>Takeover ack after COMPLETE; also fixes read-your-writes after takeover today.</div>
-    <div class="step"><b>X2 · first step</b>REDO log on PMEM, steps S1–S7: XXH3 checksum and PMEM helpers, config, NDBFS mapping, record writers, write path, recovery, power-loss tests.</div>
+    <div class="step"><b>X2 · first step · implemented</b>REDO log on PMEM, steps S1–S7: XXH3 checksum and PMEM helpers, config, NDBFS mapping, record writers, write path, recovery, power-loss tests. Its gates are being run (§11).</div>
     <div class="step"><b>X3</b>Test harness: ledger, crash of all nodes, power-loss emulation.</div>
     <div class="step"><b>X4</b>Commit path: barriers, primary commit at COMPLETE, late ack, rule F, <span class="mono">opCount</span>.</div>
     <div class="step"><b>X5</b>Restart phases 1 to 3. From here the ledger must show zero losses.</div>
@@ -1034,9 +1240,9 @@ footer code { background: none; padding: 0; }
   </div>
 </div>
 
-<!-- 10 -->
+<!-- 11 -->
 <section class="col" id="pmem">
-  <h2><span class="num">10</span>First step: the REDO log on persistent memory</h2>
+  <h2><span class="num">11</span>First step: the REDO log on persistent memory</h2>
   <p>The first implementation step puts the REDO log on persistent memory with today's durability: a GCI is durable once the global checkpoint has saved it. The durable-commit protocol and restart phase 2 build on it. The full design is <code>pmem_redo_design.md</code>; everything below is settled.</p>
   <div class="table-wrap">
   <table>
@@ -1122,12 +1328,32 @@ footer code { background: none; padding: 0; }
 
 <section class="col">
   <p style="margin-top:1.2em">Tests on emulated persistent memory (<code>memmap=</code>, or QEMU's emulated CXL memory device) prove the format, the write path and the recovery logic, and survive <code>kill -9</code>. They can never catch a missing barrier; only the power-loss emulation of S1 and S7 can. Performance needs real CXL modules.</p>
+
+  <h3>Status, 13 November 2026</h3>
+  <p>Step 1 is implemented on branch <code>RONDB-1150-durable-commits</code> in eleven phases, one pull request each; <code>step1_phases.md</code> records them. There is no CI: whoever pushes runs each phase's gate on the platforms that apply. The code is written; what remains is mostly those runs.</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Phase</th><th>Content</th><th>State</th></tr></thead>
+    <tbody>
+      <tr><td class="id">1</td><td>CPU features; XXH3, with AVX2 chosen at run time</td><td><span class="pill ok">Done</span> on Linux x86_64, Linux ARM64 and macOS ARM64</td></tr>
+      <tr><td class="id">2–3</td><td>PMEM helper and platform queries; configuration</td><td>Passed on macOS ARM64 and Linux x86_64; Linux ARM64 to run</td></tr>
+      <tr><td class="id">4</td><td>NDBFS maps, places and checks the REDO files (M0.2)</td><td>Passed on macOS ARM64 and Linux x86_64; <code>memmap=</code> and Linux ARM64 to run</td></tr>
+      <tr><td class="id">5–7</td><td>Every file kept mapped, ndbinfo <code>redo_log_pmem</code>; record format, reader and writers</td><td>Passed on macOS ARM64; Linux to run</td></tr>
+      <tr><td class="id">8</td><td>The new format end to end: write path and restart (M0.3)</td><td>Passed on macOS ARM64, with the GCP-saved ledger; Linux to run</td></tr>
+      <tr><td class="id">9</td><td>Persist checks, benchmark switch, persist delay</td><td>Passed on macOS ARM64; the <code>DUMP 2368</code> latency numbers to measure; Linux to run</td></tr>
+      <tr><td class="id">10</td><td>Node restart; <code>ndb_redo_log_reader</code> reads the PMEM format</td><td><span class="pill ok">Passed</span> with the full ndb suite on the three platforms</td></tr>
+      <tr><td class="id">11</td><td>Power-loss emulation, crash inserts 5155–5172, the ledger at crashes and power losses (M0.4)</td><td>The ledger tests passed on macOS ARM64 and Linux; the ndb suite in PMEM mode passed on macOS ARM64 after two fixes; the Linux suites and the autotest lists to run</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="margin-top:1em">Not yet written: the mode-switch test A5 (<code>testSystemRestart -n PmemRedoModeSwitch</code>), and pull request 0, <code>ZMIN_READ_BUFFER_SIZE</code> from 3 to 4 in both modes, under its own ticket. Bugs found on the way outside the PMEM code, three of them in today's REDO file switch and GCP save, were fixed in commits of their own.</p>
 </section>
 
 <footer class="col">
   Source documents in <code>storage/ndb/claude_files/durable_commits/</code>:
   <ul>
-    <li><code>durable_commits_plan.md</code>, the plan this page summarises (revision 11)</li>
+    <li><code>durable_commits_plan.md</code>, the plan this page summarises (revision 13); §8 of this page is its §5.6, which gathers §3.1, §5 and §6 with the work packages X4–X6 of <code>impl_next_steps.md</code></li>
+    <li><code>step1_phases.md</code>, the phases of step 1 and their state</li>
     <li><code>implementation_plan.md</code>, the implementation plan, with <code>impl_step1_platform.md</code>, <code>impl_step1_lqh_write.md</code>, <code>impl_step1_recovery_test.md</code>, <code>impl_next_steps.md</code></li>
     <li><code>pmem_redo_design.md</code>, the design of the first step, with <code>research_pmem_hardware.md</code>, <code>pmem_redo_format.md</code>, <code>pmem_redo_recovery.md</code>, <code>pmem_redo_write_path.md</code></li>
     <li><code>research_commit_protocol.md</code>, <code>research_redo_log.md</code>, <code>research_system_restart.md</code>, <code>research_micro_gcp.md</code>, <code>research_literature.md</code></li>
@@ -1358,6 +1584,247 @@ footer code { background: none; padding: 0; }
   document.getElementById('f3').addEventListener('keydown', function (e) {
     if (e.key === 'ArrowRight' && step < STEPS) { step++; render(); e.preventDefault(); }
     if (e.key === 'ArrowLeft' && step > 0) { step--; render(); e.preventDefault(); }
+  });
+  render();
+})();
+</script>
+<script>
+(function () {
+  var NS = 'http://www.w3.org/2000/svg';
+  var svg = document.getElementById('f8-svg');
+  if (!svg) return;
+
+  // T writes row a in node group 0 and row b in node group 1. c and x are
+  // the steps at which each node's COMMIT and COMPLETE become persistent.
+  var NODES = [
+    { id: 'X', ng: 0, role: 'primary of row a', c: 3, x: 7, bx: 24 },
+    { id: 'Y', ng: 0, role: 'backup of row a', c: 1, x: 5, bx: 230 },
+    { id: 'Z', ng: 1, role: 'primary of row b', c: 4, x: 8, bx: 474 },
+    { id: 'W', ng: 1, role: 'backup of row b', c: 2, x: 6, bx: 680 }
+  ];
+  var EVENTS = [
+    { n: 'Y', r: 'COMMIT a', s: '' },
+    { n: 'W', r: 'COMMIT b', s: '' },
+    { n: 'X', r: 'COMMIT a', s: 'COMMITTED' },
+    { n: 'Z', r: 'COMMIT b', s: 'COMMITTED' },
+    { n: 'Y', r: 'COMPLETE a', s: 'a visible on Y' },
+    { n: 'W', r: 'COMPLETE b', s: 'b visible on W' },
+    { n: 'X', r: 'COMPLETE a', s: 'COMPLETED' },
+    { n: 'Z', r: 'COMPLETE b', s: 'API acked' }
+  ];
+  var DESC = [
+    'The crash comes before TC sends the first COMMIT. The replicas hold PREPARE records at most.',
+    'Y, the backup of row a, has persisted its COMMIT record and passed COMMIT on to X.',
+    'W, the backup of row b, has persisted its COMMIT record and passed COMMIT on to Z.',
+    'X has persisted its COMMIT record of row a and sent COMMITTED to TC.',
+    'Z has persisted its COMMIT record of row b and sent COMMITTED. TC now has every COMMITTED and sends COMPLETE.',
+    'Y has persisted its COMPLETE record: row a is visible on Y, and Y has released its lock.',
+    'W has persisted its COMPLETE record: row b is visible on W.',
+    'X has persisted its COMPLETE record of row a and sent COMPLETED.',
+    'Z has persisted its COMPLETE record of row b and sent COMPLETED. TC acknowledges the commit to the API.'
+  ];
+  var OPCOUNT = 2, LAST = EVENTS.length, AY = 236;
+
+  function mk(tag, attrs, parent, text) {
+    var e = document.createElementNS(NS, tag);
+    for (var a in attrs) e.setAttribute(a, attrs[a]);
+    if (text != null) e.textContent = text;
+    parent.appendChild(e);
+    return e;
+  }
+
+  var defs = mk('defs', {}, svg);
+  var pat = mk('pattern', { id: 'f8-hatch', width: 6, height: 6, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' }, defs);
+  mk('line', { x1: 0, y1: 0, x2: 0, y2: 6, 'class': 'hatch-line' }, pat);
+
+  [0, 1].forEach(function (g) {
+    var x = g === 0 ? 10 : 460;
+    mk('rect', { 'class': 'ng', x: x, y: 8, width: 430, height: 170, rx: 5 }, svg);
+    mk('text', { 'class': 'ng-t', x: x + 14, y: 28 }, svg, 'NODE GROUP ' + g + ' · ROW ' + (g === 0 ? 'a' : 'b'));
+  });
+
+  NODES.forEach(function (n) {
+    var g = mk('g', {}, svg), y0 = 40;
+    mk('rect', { 'class': 'node', x: n.bx, y: y0, width: 196, height: 128, rx: 4 }, g);
+    mk('text', { 'class': 'name', x: n.bx + 14, y: y0 + 24 }, g, n.id);
+    mk('text', { 'class': 'role', x: n.bx + 34, y: y0 + 23 }, g, n.role);
+    n.cells = {};
+    [['C', 'COMMIT', 14], ['X', 'COMPLETE', 102]].forEach(function (d) {
+      var cg = mk('g', { 'class': 'cell' }, g), cx = n.bx + d[2];
+      mk('rect', { 'class': 'rec', x: cx, y: y0 + 38, width: 80, height: 32, rx: 3 }, cg);
+      mk('rect', { 'class': 'hatch', x: cx, y: y0 + 38, width: 80, height: 32, rx: 3, fill: 'url(#f8-hatch)' }, cg);
+      mk('text', { x: cx + 40, y: y0 + 58 }, cg, d[1]);
+      n.cells[d[0]] = cg;
+    });
+    n.st1 = mk('text', { 'class': 'st', x: n.bx + 14, y: y0 + 94 }, g, '');
+    n.st2 = mk('text', { 'class': 'st', x: n.bx + 14, y: y0 + 111 }, g, '');
+    n.g = g;
+  });
+
+  mk('rect', { 'class': 'phase', x: 55, y: 198, width: 390, height: 20, rx: 3 }, svg);
+  mk('rect', { 'class': 'phase', x: 455, y: 198, width: 390, height: 20, rx: 3 }, svg);
+  mk('text', { 'class': 'phase-t', x: 250, y: 212 }, svg, 'COMMIT PHASE');
+  mk('text', { 'class': 'phase-t', x: 650, y: 212 }, svg, 'COMPLETE PHASE');
+  mk('line', { 'class': 'axis', x1: 40, y1: AY, x2: 860, y2: AY }, svg);
+  EVENTS.forEach(function (e, i) {
+    var x = 100 + i * 100, g = mk('g', {}, svg);
+    e.dot = mk('circle', { 'class': 'dot', cx: x, cy: AY, r: 6 }, g);
+    mk('text', { 'class': 'ev n', x: x, y: AY + 24 }, g, (i + 1) + ' · ' + e.n);
+    mk('text', { 'class': 'ev', x: x, y: AY + 39 }, g, e.r);
+    if (e.s) mk('text', { 'class': 'ev s', x: x, y: AY + 53 }, g, e.s);
+    e.g = g;
+  });
+  var crash = mk('g', {}, svg);
+  mk('line', { 'class': 'crash', x1: 0, y1: AY - 14, x2: 0, y2: AY + 62 }, crash);
+  mk('text', { 'class': 'crash-t', x: 0, y: AY + 78 }, crash, 'crash');
+  var refusedT = mk('text', { 'class': 'refused', x: 450, y: 332 }, svg, '');
+
+  function compute(k, starts) {
+    var r = { nodes: {}, refused: null, seen: [], must: k >= 5 };
+    NODES.forEach(function (n) {
+      r.nodes[n.id] = { start: !!starts[n.id], C: k >= n.c, X: k >= n.x, fate: 'off' };
+    });
+    if (k >= 5) r.seen.push('row a is visible on Y');
+    if (k >= 6) r.seen.push('row b is visible on W');
+    if (k >= 7) r.seen.push('row a is visible on X');
+    if (k >= 8) r.seen.push('row b is visible on Z, and the API has its ack');
+    [0, 1].forEach(function (g) {
+      if (r.refused == null && !NODES.some(function (n) { return n.ng === g && starts[n.id]; })) r.refused = g;
+    });
+    var S = NODES.filter(function (n) { return starts[n.id]; });
+    if (r.refused != null) {
+      S.forEach(function (n) { r.nodes[n.id].fate = 'waits'; });
+      return r;
+    }
+    var any = S.some(function (n) { return r.nodes[n.id].C; });
+    r.hitFrom = S.filter(function (n) { return r.nodes[n.id].X; }).map(function (n) { return n.id; });
+    r.doubt = S.filter(function (n) { return r.nodes[n.id].C && !r.nodes[n.id].X; }).map(function (n) { return n.id; });
+    r.counts = [];
+    var same = true, sum = 0;
+    [0, 1].forEach(function (g) {
+      var ns = S.filter(function (n) { return n.ng === g; });
+      var cs = ns.map(function (n) { return r.nodes[n.id].C ? 1 : 0; });
+      var eq = cs.every(function (c) { return c === cs[0]; });
+      r.counts.push({ g: g, list: ns.map(function (n, i) { return n.id + ' ' + cs[i]; }), same: eq, c: cs[0] });
+      if (eq) sum += cs[0]; else same = false;
+    });
+    r.sameAll = same;
+    r.sum = sum;
+    if (!any) r.verdict = 'none';
+    else if (r.hitFrom.length) r.verdict = 'commit';
+    else r.verdict = same && sum === OPCOUNT ? 'commit' : 'abort';
+    S.forEach(function (n) {
+      var st = r.nodes[n.id];
+      if (st.X) st.fate = 'stepA';
+      else if (st.C) st.fate = r.verdict === 'commit' ? 'stepC' : 'invalid';
+      else st.fate = 'nothing';
+    });
+    return r;
+  }
+
+  var STATUS = {
+    off: [['does not start;', 'mut'], ['joins later by node restart', 'mut']],
+    waits: [['starts and waits for', 'mut'], ['the other node group', 'mut']],
+    stepA: [['applies T in step A,', 'ok'], ['at its own COMPLETE', 'ok']],
+    stepC: [['in doubt, then applies', 'ok'], ['T in step C', 'ok']],
+    invalid: [['in doubt, then its COMMIT', 'bad'], ['is invalidated', 'bad']],
+    nothing: [['no COMMIT of T:', 'mut'], ['nothing to apply', 'mut']]
+  };
+
+  var k = 0;
+  var boxes = {};
+  NODES.forEach(function (n) { boxes[n.id] = document.getElementById('f8-' + n.id); });
+  var elStage = document.getElementById('f8-stage');
+  var elCount = document.getElementById('f8-count');
+  var elMsg = document.getElementById('f8-msg');
+  var elVerdict = document.getElementById('f8-verdict');
+  var elSeen = document.getElementById('f8-seen');
+  var bPrev = document.getElementById('f8-prev');
+  var bNext = document.getElementById('f8-next');
+  var bReset = document.getElementById('f8-reset');
+
+  function li(t) { return '<li>' + t + '</li>'; }
+
+  function render() {
+    var starts = {};
+    NODES.forEach(function (n) { starts[n.id] = boxes[n.id].checked; });
+    var r = compute(k, starts);
+
+    NODES.forEach(function (n) {
+      var st = r.nodes[n.id];
+      n.g.setAttribute('class', st.start ? '' : 'off');
+      var applied = st.fate === 'stepA' || st.fate === 'stepC';
+      n.cells.C.setAttribute('class', 'cell ' + (st.C ? 'C' : 'none') + (applied ? ' applied' : '') + (st.fate === 'invalid' ? ' invalid' : ''));
+      n.cells.X.setAttribute('class', 'cell ' + (st.X ? 'X' : 'none'));
+      var s = STATUS[st.fate];
+      n.st1.textContent = s[0][0]; n.st1.setAttribute('class', 'st ' + s[0][1]);
+      n.st2.textContent = s[1][0]; n.st2.setAttribute('class', 'st ' + s[1][1]);
+    });
+    EVENTS.forEach(function (e, i) {
+      e.dot.setAttribute('class', 'dot' + (i < k ? ' past' : ''));
+      e.g.setAttribute('class', i < k ? '' : 'cut');
+    });
+    var cx = k === 0 ? 50 : 100 + (k - 1) * 100 + 50;
+    crash.setAttribute('transform', 'translate(' + cx + ',0)');
+    refusedT.textContent = r.refused != null ? 'No node of node group ' + r.refused + ' starts: the restart waits' : '';
+
+    elStage.textContent = k === 0 ? 'Crash before step 1' : 'Crash after step ' + k;
+    elCount.textContent = k + ' / ' + LAST;
+    var rest = k === LAST ? '' : (k + 1 === LAST ? ' Step ' + LAST + ' never happens.' : ' Steps ' + (k + 1) + ' to ' + LAST + ' never happen.');
+    elMsg.textContent = DESC[k] + rest;
+
+    var v;
+    if (r.refused != null) {
+      v = '<p class="verdict bad">No restart</p><p class="note">No node of node group ' + r.refused + ' starts, so its fragments have no replica to restore from. The restart waits for one of its nodes, as today.</p>';
+    } else if (r.verdict === 'none') {
+      v = '<p class="verdict">Nothing to decide</p><p class="note">No starting log part has a COMMIT record of T. T is in no hash table, and its PREPAREs are never read.</p>';
+    } else {
+      var items = ['in doubt: ' + (r.doubt.length ? r.doubt.join(', ') : 'none'),
+                   '"T complete": ' + (r.hitFrom.length ? 'from ' + r.hitFrom.join(', ') : 'none')];
+      if (!r.hitFrom.length) {
+        r.counts.forEach(function (c) { items.push('NG ' + c.g + ': ' + c.list.join(', ') + (c.same ? ' → ' + c.c : ' → differ')); });
+        items.push(r.sameAll ? 'sum ' + r.sum + (r.sum === OPCOUNT ? ' = opCount' : ' ≠ opCount ' + OPCOUNT) : 'counts differ in a node group');
+      }
+      v = '<ul>' + items.map(li).join('') + '</ul>';
+      if (r.verdict === 'commit') {
+        v += '<p class="verdict ok">Commit, ' + (r.hitFrom.length ? (r.doubt.length ? 'by "T complete"' : 'in step A in every part') : 'by the count rule') + '</p>';
+      } else {
+        v += '<p class="verdict bad">Abort: no COMPLETE, and the counts fall short</p>';
+      }
+    }
+    elVerdict.innerHTML = v;
+
+    var s = r.seen.length ? '<ul>' + r.seen.map(li).join('') + '</ul>' : '<p class="empty">Nobody: no row of T was visible, and the API has no answer.</p>';
+    if (r.refused == null) {
+      if (r.verdict === 'commit') {
+        s += r.must ? '<p class="verdict ok">Commit is required, and every starting replica applies T.</p>'
+                    : '<p class="note">Either verdict is correct, since nobody saw T. Every starting replica applies T.</p>';
+      } else if (r.verdict === 'abort') {
+        s += r.must ? '<p class="verdict bad">Wrong: T was seen.</p>'
+                    : '<p class="note">Either verdict is correct, since nobody saw T. No starting replica applies T.</p>';
+      } else {
+        s += '<p class="note">Correct: nobody saw T, and no replica applies it.</p>';
+      }
+    }
+    elSeen.innerHTML = s;
+
+    bPrev.disabled = k === 0;
+    bNext.disabled = k === LAST;
+    bReset.disabled = k === 0 && NODES.every(function (n) { return boxes[n.id].checked; });
+  }
+
+  bNext.addEventListener('click', function () { if (k < LAST) { k++; render(); } });
+  bPrev.addEventListener('click', function () { if (k > 0) { k--; render(); } });
+  bReset.addEventListener('click', function () {
+    k = 0;
+    NODES.forEach(function (n) { boxes[n.id].checked = true; });
+    render();
+  });
+  NODES.forEach(function (n) { boxes[n.id].addEventListener('change', render); });
+  document.getElementById('f8').addEventListener('keydown', function (e) {
+    if (e.target.tagName === 'INPUT') return;
+    if (e.key === 'ArrowRight' && k < LAST) { k++; render(); e.preventDefault(); }
+    if (e.key === 'ArrowLeft' && k > 0) { k--; render(); e.preventDefault(); }
   });
   render();
 })();

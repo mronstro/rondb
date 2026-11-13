@@ -1,11 +1,12 @@
 # RONDB-1150 — Durable commits across a cluster restart: master plan
 
-Status: **Revision 12, 2026-10-29. Decisions D0–D8 are settled (§11). The
+Status: **Revision 13, 2026-11-13. Decisions D0–D8 are settled (§11). The
 first implementation step, the REDO log on persistent memory, is designed in
-`pmem_redo_design.md` (planning subtask P2 done). The implementation plan
-for all phases is `implementation_plan.md`; progress on step 1 is in
-`step1_phases.md`.**
-Branch: `RONDB-1150-durable-commits` (base 26.10-main, commit 7128c75dca4).
+`pmem_redo_design.md` (planning subtask P2 done) and implemented; progress on
+it is in `step1_phases.md`. The implementation plan for all phases is
+`implementation_plan.md`. `durable_commits_plan.html` renders this plan.**
+Branch: `RONDB-1150-durable-commits` (base RONDB-1124-exec-fixes, commit
+e74c3fc82d5; until 2026-11-12 26.10-main, commit 7128c75dca4).
 All paths are relative to `storage/ndb/`.
 
 | Document | Content |
@@ -91,6 +92,12 @@ All paths are relative to `storage/ndb/`.
   (`pmem_redo_design.md` E4, `step1_phases.md` decision 5). XXH3 chooses
   AVX2 at run time on x86-64. That also speeds up the hash of keys over
   240 bytes, with the same results.
+- **Revision 13** (step 1 implemented). New §5.6 gathers the argument that
+  a transaction above R_gcp is applied whole or not at all, from §3.1, §5
+  and §6 and the work packages X4–X6 of `impl_next_steps.md`. The survival
+  rule of §3.1 now names the count rule, which step C applies with every
+  node starting too, not only in a partial SR. The API node-id hold-back
+  waits for the GCI after the failure (DI-5).
 
 ---
 
@@ -258,8 +265,13 @@ A and F:
 - **No COMPLETE ⇒ abort is safe.** Nobody saw T and the API was not told it
   committed.
 
-**Survival rule:** T survives iff a COMPLETE record for T is found in some
-starting REDO log part. In a partial SR the fallback of §5.5 also applies.
+**Survival rule:** T survives if a COMPLETE record for T is found in some
+starting REDO log part, or if the count rule of §5.5 finds a COMMIT record
+of each of T's operations on every starting replica and no ABORT from rule
+F. Otherwise it is aborted. Step C applies the count rule whether all nodes
+start or not; with all nodes starting it commits a T whose COMMITs are all
+persistent and which has no COMPLETE, which nobody saw. §5.6 shows that
+this applies every transaction whole.
 
 ### 3.2 When are locks released?
 
@@ -562,6 +574,116 @@ it, is not decided.
 With a single node group (X and Y only), nothing can reveal that X is
 stale: the only witness, Y, is gone. X recovers alone; only the commits on
 Y are lost, and nothing is half applied.
+
+### 5.6 All or nothing after R_gcp
+
+Up to R_gcp the SR restores a consistent cut, as today. A transaction T
+above it was never covered by a GCP save; its records are spread over the
+log parts of several LDMs, nodes and node groups, each crashed at its own
+point, some nodes may not start, and no coordinator survives. This section
+gathers why phase 2 still applies T whole or not at all.
+
+**Guarantee for every T with GCI > R_gcp:**
+1. **All or nothing.** Every replica in the SR applies every operation of
+   T, or none applies any. A node outside the SR gets T's rows by copy at
+   its node restart.
+2. **The right side.** T is applied if any of its rows was visible or the
+   API was told it committed; not applied if rule F aborted it and anyone
+   could have learned that.
+3. **The same answer every time.** A crash during the SR, and every later
+   SR, give the same verdict.
+
+**Evidence per replica and operation** (§3.1, §7):
+
+| Record | Persistent before | Tells the SR |
+|---|---|---|
+| PREPARE | — | Nothing by itself; read only through a COMMIT's back-reference (C5) |
+| COMMIT (transid, GCI, opCount) | COMMITTED is sent or COMMIT passed on (C) | TC decided to commit; this replica can apply the operation. A node's count is the number of T's operations in its node group it can apply |
+| COMPLETE (transid) | the row is visible, the lock released, COMPLETED sent (K, L) | Every live replica of every operation had persisted its COMMIT |
+| ABORT `AF_AFTER_COMMIT` (transid) | the lock is released and ABORTCONF sent (F) | T was aborted at run time after its commit decision |
+
+Three facts carry the argument: a COMPLETE anywhere means a persistent
+COMMIT on every live replica of every operation (TC sends COMPLETE only
+after every COMMITTED); seen or acknowledged means a COMPLETE exists (L,
+A); a COMPLETE and a rule-F ABORT exclude each other (F applies only if no
+COMPLETE was sent).
+
+**Where the crash can cut T:**
+
+| Crash | Starting logs hold | Seen? | Verdict |
+|---|---|---|---|
+| Prepare phase | PREPAREs at most | No | Not applied: T is in no hash table |
+| COMMIT phase | COMMITs on some replicas; no COMPLETE anywhere | No | Abort (counts differ or fall short); commit if every starting replica already has its COMMIT, also correct |
+| After the last COMMITTED, before any COMPLETE is persistent | A COMMIT on every replica, no COMPLETE | No | Commit by the count rule; abort would also be correct |
+| After the first COMPLETE is persistent | A COMMIT on every live replica; a COMPLETE, perhaps only on a node outside the SR | Possibly | Commit: "T complete", else the count rule, which always passes now |
+| After rule F | COMMITs, ABORTs on the replicas that persisted one; no COMPLETE; the failed node is stale | The abort, only once every live replica persisted its ABORT | Abort: "T aborted" vetoes the count rule. With no ABORT among the starting parts nobody can have learned of the abort, and the count rule may commit T, also correct |
+
+Where nobody saw T either verdict is correct, provided every part reaches
+the same one.
+
+**One verdict everywhere.** Step B gives every part the same inputs: U, the
+union of the in-doubt sets with each node's count, and the hits ("T
+complete", "T aborted"). The SR node set and node groups come with
+START_RECREQ and opCount from T's COMMIT records. The verdict is a function
+of these alone: commit on "T complete"; else commit if no "T aborted", every
+starting node of each node group counts the same (none = 0), and the node
+group counts add up to opCount; else abort.
+- The inputs are complete before anyone decides: numbered batches with
+  totals checked at DONE; signal order per pair of block instances; each
+  proxy forwards in arrival order and sends DONE after all its workers'
+  DONEs; a node failure stops the SR as today (X5.4).
+- A part that applied T in step A found its COMPLETE, does not list T, and
+  reports "T complete" from its rescan, so every other part commits T; a
+  COMPLETE rules out a rule-F ABORT.
+- The rescan counts a COMPLETE or ABORT of T only after a durable tail
+  COMMIT of T in the same part (DI-2), so an old record of a reused transid
+  cannot report.
+
+**Applying or wiping T.** Commit: each part executes its own queued COMMITs
+of T in log order through their back-references, with T's GCI64, writing no
+REDO, taking no lock, firing no trigger. A node's parts hold exactly the
+COMMITs of T's operations on its fragments, and when T commits every
+starting replica has all of them (first fact, or the count rule), so
+replicas end identical (G3). Abort: one atomic invalidation store per
+COMMIT of T, outside the checksum, flushed in batches, one fence at the
+end; PREPAREs untouched. Transactions decided in step C never share a row
+in a part, so their order does not matter (§6).
+
+**Nodes outside the SR.** A node that does not start: if it held the only
+COMPLETE, the count rule still commits T (D5); if it held ABORTs the
+starting nodes lack, nobody learned of the abort, since the API is told,
+and another writer can take one of T's rows, only after every live replica
+persisted its ABORT. A stale node is not evidence and copies T's rows at
+its node restart (D3). At least one non-stale node per node group, or the
+SR waits (D4).
+
+**A crash during the SR.**
+
+| The SR crashes | The log holds | The next SR |
+|---|---|---|
+| In step A or B | What it held before: step A applies rows in memory only | Same scan, same verdicts |
+| In step C | Invalidation flags of some aborted T | Flagged COMMITs are neither queued nor counted: an aborted T fails the count rule again; a committed T changed nothing in the log |
+| After step C, before G' is raised | Every flag, fenced; perhaps the SR-head record | Phase 2 again from the same R_gcp, same verdicts |
+| After G' is raised | Restorable GCI G' | Phase 1 replays the old tail up to G': valid COMMITs execute, flagged ones are skipped |
+
+So every invalidation flag is persistent before phase 4 writes SR_HEAD and
+`COMPLETED_GCI(G')` and before phase 3 raises the restorable GCI to G'.
+
+**Threats and guards:**
+
+| Threat | Guard |
+|---|---|
+| Two transactions with one transid in the tail share a hash entry (an API process restarts its counter at 0) | Failed API node id held back until the GCP save of the GCI after its failure (X4.11, DI-5) |
+| A dirty write's COMPLETE reports "T complete" for operations some replica lacks | Dirty writes become normal writes in durable mode, proposed (Q-B1, DI-1) |
+| A wrong opCount passes or fails the count rule wrongly | Counted at LQHKEYCONF for every logged write, trigger operations included; IgnoreError failures have no COMMIT; takeover rebuilds it from LQH_TRANSCONF (X4.2, X4.9) |
+| A takeover TC misjudges whether a COMPLETE was sent | Missing operations or replicas in the takeover reports; the in-flight COMPLETE race checked in TLA+ (DI-7, Q-B9) |
+| A durable T depends on a non-durable one around g | Phase 2 only for GCI ≥ g and only when R_gcp ≥ g − 1 (§2.2) |
+| A table dropped or changed in the tail | The replay's schema-version check, as today; tested in X5.9 |
+
+**Tests:** the X3 ledger (W1: one sequence number in rows over every node
+group, all equal after the SR; W2: closure; the replica check); SR crash
+points 5186–5189 and 7262 (same verdicts); 5185 (every verdict from the
+counts); the D3–D5 cases (X6.8); the TLA+ model (X3.4).
 
 ---
 
