@@ -1,0 +1,51 @@
+--source include/have_ndb.inc
+
+# A run on a DAX mount (MTR_NDB_PMEM_DIR) puts the REDO log of PMEM mode
+# under FileSystemPathRedoLog, away from file mode's under FileSystemPath.
+# File mode neither clears nor looks there, so the refusals checked here
+# need both modes' REDO logs in FileSystemPath.
+if ($MTR_NDB_PMEM_DIR) {
+  --skip Needs the REDO log of both modes under FileSystemPath
+}
+
+# RONDB-1150 (recovery plan A5): RedoLogMode changes only with an initial
+# node restart, in both directions. One data node is switched from PMEM
+# mode to file mode and back: a restart without --initial is refused, the
+# node starts again with its old mode, an initial node restart switches
+# it, it restarts in the new mode, and the cluster restarts with the nodes
+# in different modes.
+
+# NDBT creates TEST_DB.T1 directly through the NDB API. Keep both mysqlds
+# stopped so that metadata discovery cannot import the API table.
+--connect(s2,127.0.0.1,root,,test,$MASTER_MYPORT1,)
+--connection default
+--echo # Shutting down mysqld 1
+--let $mysqld_name=mysqld.1.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld1_file_name= $_expect_file_name
+
+--connection s2
+--echo # Shutting down mysqld 2
+--let $mysqld_name=mysqld.2.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld2_file_name= $_expect_file_name
+
+let NDBAPITEST_CLEANUP_QUERY=;
+let NDBAPITEST_NAME=testSystemRestart;
+let NDBAPITEST_ARGS=-n PmemRedoModeSwitch --records=1000 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+--connection default
+--echo # Starting mysqld 1
+--let $_expect_file_name= $expect_mysqld1_file_name
+--let $mysqld_name=mysqld.1.1
+--source include/start_mysqld.inc
+
+--connection s2
+--echo # Starting mysqld 2
+--let $_expect_file_name= $expect_mysqld2_file_name
+--let $mysqld_name=mysqld.2.1
+--source include/start_mysqld.inc
+
+--connection default
+--disconnect s2

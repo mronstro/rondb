@@ -228,6 +228,15 @@ cmd: testRedo
 args: -n CheckLCPStartsAfterNR T1
 max-time: 1440
 
+cmd: testSystemRestart
+args: -n MaxRedoRecordSR --records=200 T1
+max-time: 1800
+
+# The mode switch (A5), as in pmem-redo-tests.txt
+cmd: testSystemRestart
+args: -n PmemRedoModeSwitch --records=1000 T1
+max-time: 3600
+
 # The restart GCI and the GCP-saved ledger (A4)
 cmd: testRestartGci
 args: -n InsertRestartGci T1

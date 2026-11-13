@@ -1,0 +1,14 @@
+!include ../my.cnf
+
+# RONDB-1150 (recovery plan A5): the REDO log in PMEM mode on any file
+# system, small REDO files. With StopOnError=0 the angel starts a data node
+# again after its refused start, 10 seconds later and up to 10 times, so
+# the test can put the old RedoLogMode back in between.
+[cluster_config.1]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+NoOfFragmentLogFiles=4
+FragmentLogFileSize=16M
+StopOnError=0
+StartFailRetryDelay=10
+MaxStartFailRetries=10
