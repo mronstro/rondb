@@ -219,7 +219,11 @@ std::string find_region(const std::string &dev_dir) {
 /**
  * The summed dirty-shutdown counts of the DIMMs or memory devices of a
  * region, from its mapping<k> files. NFIT DIMMs have nfit/, PAPR ones
- * papr/; CXL memory devices have it directly, depending on the kernel.
+ * papr/, CXL memory devices cxl/ (cxl_pmem, Linux 6.15 and later). The
+ * kernel shows cxl/dirty_shutdown only when the device accepted the Set
+ * Shutdown State command and reports a count; QEMU's emulated CXL Type 3
+ * device does not, so there the count is not exposed. A dirty_shutdown
+ * file directly in the DIMM's directory is tried last.
  */
 bool region_dirty_shutdown(const std::string &region, Uint64 *sum) {
   *sum = 0;
@@ -234,7 +238,7 @@ bool region_dirty_shutdown(const std::string &region, Uint64 *sum) {
     const std::string nmem = line.substr(0, line.find(','));
     const std::string dimm = g_root + "/sys/bus/nd/devices/" + nmem;
     const char *files[] = {"nfit/dirty_shutdown", "papr/dirty_shutdown",
-                           "dirty_shutdown"};
+                           "cxl/dirty_shutdown", "dirty_shutdown"};
     long long v = -1;
     for (const char *file : files) {
       if (read_number(join(dimm, file), &v)) break;
@@ -660,6 +664,28 @@ void test_fixtures(const char *tmp) {
     OK(info.domain == NDB_PMEM_DOMAIN_MEMCTRL);
     OK(info.numa_node == -1);
     OK(ndb_pmem_dirty_shutdown(fd, &count) == ENOTSUP);
+  }
+  {
+    /* CXL with a count: cxl_pmem shows it in the nmem's cxl/ directory */
+    Fixture fx(base, "cxl_count", st.st_dev,
+               "platform/ACPI0017:00/root0/nvdimm-bridge0/ndbus5/region5/"
+               "namespace5.0/block/pmem5");
+    const std::string region =
+        fx.path("devices/platform/ACPI0017:00/root0/nvdimm-bridge0/ndbus5/"
+                "region5");
+    put(join(region, "persistence_domain"), "memory_controller\n");
+    put(join(region, "numa_node"), "0\n");
+    put(join(region, "target_node"), "1\n");
+    put(join(region, "mapping0"), "nmem5,0,4294967296,0\n");
+    put(fx.path("bus/nd/devices/nmem5/cxl/id"), "1\n");
+    put(fx.path("bus/nd/devices/nmem5/cxl/provider"), "pmem0\n");
+    put(fx.path("bus/nd/devices/nmem5/cxl/dirty_shutdown"), "2\n");
+    OK(ndb_pmem_get_region_info(fd, &info) == 0);
+    OK(info.domain == NDB_PMEM_DOMAIN_MEMCTRL);
+    OK(info.numa_node == 0);
+    OK(info.target_node == 1);
+    OK(info.dirty_shutdown == 2);
+    OK(ndb_pmem_dirty_shutdown(fd, &count) == 0 && count == 2);
   }
   {
     /* eADR, with the count directly in the memory device */

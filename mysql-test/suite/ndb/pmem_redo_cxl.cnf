@@ -1,0 +1,19 @@
+# RONDB-1150: the REDO log in PMEM mode on a CXL (or NVDIMM) fsdax region
+# mounted with dax=always, with the production checks
+# (__RedoLogPmemTestMode=off): the region must report a persistence domain
+# (memory_controller on CXL), so a memmap= device is refused. Used for the
+# QEMU CXL Type 3 test Q1 (claude_files/durable_commits/qemu_cxl_test.md).
+# MTR_NDB_PMEM_DIR as in pmem_redo_dax.cnf:
+#   MTR_NDB_PMEM_DIR=/mnt/pmem0/mtr ./mtr --defaults-extra-file=suite/ndb/pmem_redo_cxl.cnf ndb.ndb_redo_pmem_ledger ndb.ndb_redo_pmem_restart
+#
+# The test mode is also set in [cluster_config.1], to replace the
+# __RedoLogPmemTestMode=nodax of the PMEM tests' own .cnf (see
+# pmem_redo_dax.cnf).
+# ndb_redo_pmem_paths skips itself when MTR_NDB_PMEM_DIR is set: it needs
+# nodax, with its REDO log off the DAX mount.
+[cluster_config]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=off
+
+[cluster_config.1]
+__RedoLogPmemTestMode=off

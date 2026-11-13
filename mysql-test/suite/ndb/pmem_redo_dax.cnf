@@ -5,6 +5,17 @@
 # MTR_NDB_PMEM_DIR/<vardir name>/mysql_cluster.<n>/ndbd.<i>
 # (FileSystemPathRedoLog). One MTR run at a time per MTR_NDB_PMEM_DIR:
 #   MTR_NDB_PMEM_DIR=/mnt/pmem0/mtr ./mtr --defaults-extra-file=suite/ndb/pmem_redo_dax.cnf ndb.ndb_basic
+#
+# The test mode is also set in [cluster_config.1]: the .cnf of the PMEM
+# tests (ndb_redo_pmem_*.cnf) sets __RedoLogPmemTestMode=nodax there, and
+# a value in [cluster_config.1] wins over one in [cluster_config]. MTR
+# appends this file after the test's .cnf, so the value below replaces
+# theirs; without it those tests run in nodax mode, without the DAX checks.
+# ndb_redo_pmem_paths skips itself when MTR_NDB_PMEM_DIR is set: it needs
+# nodax, with its REDO log off the DAX mount.
 [cluster_config]
 RedoLogMode=pmem
+__RedoLogPmemTestMode=emulated
+
+[cluster_config.1]
 __RedoLogPmemTestMode=emulated
