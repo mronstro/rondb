@@ -305,7 +305,9 @@ Total about 36–42 person-days.
      counts as overlapping, and the result says so.
   6. Dirty shutdown: region `mapping<k>` files name `nmemX`; sum
      `/sys/bus/nd/devices/nmemX/nfit/dirty_shutdown` (NFIT), `nmemX/papr/dirty_shutdown`
-     (PAPR), else `nmemX/dirty_shutdown` (CXL via `cxl_pmem`, kernel-version dependent).
+     (PAPR), `nmemX/cxl/dirty_shutdown` (CXL via `cxl_pmem`, Linux 6.15 and later [V
+     7.3.4 `drivers/cxl/pmem.c`], shown only when the device accepted Set Shutdown State
+     and reports a count; QEMU's device does not), else `nmemX/dirty_shutdown`.
      `memmap=` has no mappings → `ENOTSUP`. **The meaning is device-specific**; verify per
      device in P6 (Q4).
   7. Thread node: parse `/sys/devices/system/node/node*/cpulist` with `parse_mask` (already

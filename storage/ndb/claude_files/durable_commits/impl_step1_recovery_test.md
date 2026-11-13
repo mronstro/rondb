@@ -933,7 +933,7 @@ Commands assume a build directory `$B` and `cd mysql-test` for MTR.
 | A5 | New `testSystemRestart -n PmemRedoModeSwitch` | A | Changing `RedoLogMode` without an initial restart is refused with the message, in both directions; with an initial node restart it works (config change as `testRedo` `resizeRedoLog` does) | as A1 | no |
 | A6 | `GciLedgerPowerLoss -l 200` (weekly) | A | No missing fence or flush (M2 assertions plus random power loss at drains) | as A1 plus `__RedoLogPmemPowerLossEmulation=1`, `--testcase-file=weekly-pmem--01-tests.txt` | no |
 | A7 | File-mode regression lists | A | Regression: the A1–A4 cases in file mode, from the existing `daily-basic--*` lists | run by the pusher | no |
-| Q1 | QEMU CXL Type 3 smoke | A | CXL region set-up, `persistence_domain` = `memory_controller` gives the ADR barrier mode, `MAP_SYNC` on CXL fsdax, region `numa_node` for the E20 warning; then `testRestartGci -n GciLedgerSR -l 3` | §4.4 | dax (QEMU) |
+| Q1 | QEMU CXL Type 3 smoke | M | CXL region set-up, `persistence_domain` = `memory_controller` accepted with `__RedoLogPmemTestMode=off` (the domain only feeds the verdict; the copy always writes back and fences, as ADR needs), `MAP_SYNC` on CXL fsdax, region `numa_node`; then `ndb_redo_pmem_ledger` (`GciLedgerTornTail -l 2`) and `ndb_redo_pmem_restart`. Passed 2026-11-13, see `qemu_cxl_test.md`; E20 not exercised (one NUMA node) | `qemu_cxl/run-mtr.sh $B` in the VM (§4.4) | dax (QEMU) |
 | H1 | Power cut with ledger | H | Real persistence: IPMI power-off of all data-node hosts under ledger load, then SR and verify (P6/X8) | `ipmitool -H <bmc> chassis power off` on every host, then A4 verify | real |
 | H2 | Dirty-shutdown semantics | H | What the device's count means after a GPF failure (Q4, device-specific) | per device (P6) | real |
 
@@ -980,28 +980,37 @@ xfs_io -f -c "truncate 4m" -c "mmap -S -rw 0 4m" /mnt/pmem0/probe  # -S = MAP_SY
 
 ### 4.4 QEMU emulated CXL Type 3 (the CXL set-up path)
 
+Run on 2026-11-13: see `qemu_cxl_test.md` for the result, the defects it
+found, the pitfalls and the steps, and `qemu_cxl/` for the scripts
+(`make-vm.sh`, `run-vm.sh`, `setup-region.sh`, `probe.sh`, `run-mtr.sh`).
+The command line that works with QEMU 10.1 (the guest's RAM shared for
+virtiofs, the disk, network and virtiofs devices left out):
 ```
-truncate -s 4G /var/tmp/cxl-pmem0.raw; truncate -s 256M /var/tmp/cxl-lsa0.raw
-qemu-system-x86_64 -machine q35,cxl=on -enable-kvm -smp 8 -m 8G,maxmem=16G,slots=4 \
-  -drive file=guest.qcow2,if=virtio \
+qemu-system-x86_64 -machine q35,cxl=on -accel tcg,thread=multi -cpu max -smp 8 -m 8G,maxmem=16G,slots=4 \
   -object memory-backend-file,id=cxl-pmem0,share=on,mem-path=/var/tmp/cxl-pmem0.raw,size=4G \
   -object memory-backend-file,id=cxl-lsa0,share=on,mem-path=/var/tmp/cxl-lsa0.raw,size=256M \
   -device pxb-cxl,bus_nr=12,bus=pcie.0,id=cxl.1 \
   -device cxl-rp,port=0,bus=cxl.1,id=root_port13,chassis=0,slot=2 \
-  -device cxl-type3,bus=root_port13,persistent-memdev=cxl-pmem0,lsa=cxl-lsa0,id=cxl-pmem0 \
+  -device cxl-type3,bus=root_port13,persistent-memdev=cxl-pmem0,lsa=cxl-lsa0,sn=0x1,id=cxl-pmem0 \
   -M cxl-fmw.0.targets.0=cxl.1,cxl-fmw.0.size=4G
-# guest: kernel >= 6.x with CXL_BUS, CXL_PCI, CXL_ACPI, CXL_MEM, CXL_PORT,
-#        CXL_PMEM, CXL_REGION, LIBNVDIMM, BLK_DEV_PMEM, FS_DAX; cxl-cli/ndctl >= 75
-cxl list -M -D
+# every other device needs bus=pcie.0, or it lands on pxb-cxl
+# guest: CXL_BUS, CXL_PCI, CXL_ACPI, CXL_MEM, CXL_PORT, CXL_PMEM, CXL_REGION,
+#        LIBNVDIMM, BLK_DEV_PMEM, FS_DAX and CXL_REGION_INVALIDATION_TEST;
+#        cxl-cli/ndctl >= 75
 cxl create-region -m -t pmem -d decoder0.0 -w 1 mem0
-ndctl create-namespace -m fsdax -r region0
-cat /sys/bus/nd/devices/region0/persistence_domain   # expect memory_controller [V hw §4.3]
-cat /sys/bus/nd/devices/region0/numa_node
+ndctl create-namespace -m fsdax -r region0      # first time only
+cat /sys/bus/nd/devices/region0/persistence_domain   # memory_controller [V]
+cat /sys/bus/nd/devices/region0/numa_node            # 0, target_node 1 [V]
 mkfs.xfs -f -m reflink=0 /dev/pmem0 && mount -o dax=always /dev/pmem0 /mnt/pmem0
 ```
-The property names (`persistent-memdev`, `cxl-fmw`) are those of QEMU 8
-and later [I]; check them against the QEMU in use. Whether QEMU emulates
-a dirty-shutdown count is [I].
+- `-enable-kvm` does not work: KVM cannot emulate the `clwb` to the CXL
+  memory (QEMU's MMIO) and stops the guest with "emulation failure".
+- `sn=` is needed, or `cxl_pmem` refuses the nd region.
+- Without `CXL_REGION_INVALIDATION_TEST` the region does not commit in a
+  VM ("Failed to synchronize CPU cache state"); no distribution kernel
+  sets it.
+- QEMU does not emulate a dirty-shutdown count (it rejects Set Shutdown
+  State) [V].
 
 ### 4.5 What emulation can and cannot prove
 
@@ -1011,7 +1020,7 @@ a dirty-shutdown count is [I].
 | Non-DAX test mode | Every DBLQH path; recovery after `kill -9` and after injected torn tails (M1); the ledger | The DAX and `MAP_SYNC` path; `persistence_domain` |
 | `memmap=` | The above, plus DAX, `MAP_SYNC`, prefault, fault cost and the empty-`persistence_domain` check | Power-fail durability; barrier placement (caches stay coherent); real latency |
 | M2 journal | No missing fence or flush in RonDB code under the model "8-byte atomic, any order between fences"; torn persists at every point | That `ndb_pmem` actually emits the fence; device and firmware behaviour; real ADR/eADR |
-| QEMU CXL | Region set-up, ADR mode on CXL, `MAP_SYNC` on CXL fsdax, NUMA attribution | Performance; real GPF and dirty shutdown |
+| QEMU CXL | Region set-up, a CXL region accepted with the production checks, `MAP_SYNC` on CXL fsdax, NUMA attribution | Performance; real GPF and dirty shutdown; the dirty-shutdown count (QEMU rejects Set Shutdown State, so the kernel hides it); the cache invalidation at region commit (bypassed by `CONFIG_CXL_REGION_INVALIDATION_TEST`) |
 | Real CXL/NVDIMM (H1, H2) | Durability across a real power cut; latency; dirty-shutdown meaning | — |
 
 ---
