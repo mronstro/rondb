@@ -84,7 +84,7 @@ write_files:
 runcmd:
   - dnf install -y https://www.elrepo.org/elrepo-release-9.el9.elrepo.noarch.rpm
   - dnf --enablerepo=elrepo-kernel install -y kernel-ml kernel-ml-devel
-  - dnf install -y cxl-cli ndctl xfsprogs numactl numactl-libs libaio perl perl-JSON perl-Time-HiRes gdb gcc make elfutils-libelf-devel bc flex bison xz tar
+  - dnf install -y cxl-cli ndctl xfsprogs numactl numactl-libs libaio perl perl-JSON perl-Time-HiRes bzip2 nftables gdb gcc make elfutils-libelf-devel bc flex bison xz tar
   - /usr/local/sbin/cxl-modules.sh > /var/log/cxl-modules.log 2>&1
   - grubby --set-default=\$(ls -t /boot/vmlinuz-*elrepo* | head -1)
   - grubby --update-kernel=ALL --args="console=ttyS0"

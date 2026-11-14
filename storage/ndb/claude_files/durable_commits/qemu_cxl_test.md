@@ -223,3 +223,55 @@ source tree, `$BLD` the build directory, `Q=$SRC/storage/ndb/claude_files/durabl
 7. **Stop:** `vm-ssh.sh sudo poweroff`. The CXL contents stay in
    `/var/tmp/cxlvm/cxl-pmem0.raw`. Delete `/var/tmp/cxlvm` to remove
    everything.
+
+## 6. The ndb suite on an emulated NVDIMM under KVM
+
+The CXL device runs only under TCG (§4 item 1), where the ndb suite
+would take days. For suites, start the same VM with an emulated NVDIMM
+instead: guest RAM backed by a host file, so `clwb` and the
+non-temporal stores run natively under KVM. With
+`nvdimm-persistence=mem-ctrl` the NFIT reports the memory-controller
+persistence domain, so `__RedoLogPmemTestMode=off` is accepted as on
+CXL; the region is `/sys/devices/platform/ACPI0012:00/ndbus0/region0`,
+NUMA node 0, no dirty-shutdown count (QEMU's NFIT has no health data).
+`ndb_redo_pmem_ledger` takes 110 s here, against 283 s under TCG.
+What it does not exercise: the CXL sysfs layout and region set-up (use
+the CXL VM for those, §5).
+
+1. Make the VM with `make-vm.sh` (§5 step 1), or use the CXL VM's.
+2. Start it in a terminal of its own; for the whole suite give it more:
+   ```
+   SHARE_DIR=/path/above/the/tree $Q/run-vm-nvdimm.sh                  # 12 GB RAM, 8 GB NVDIMM
+   MEM=24G PMEM_SIZE=16G SHARE_DIR=/path/above/the/tree $Q/run-vm-nvdimm.sh
+   ```
+   It uses `VM_DIR=/var/tmp/cxlvm` and port 2222 too, so stop the CXL
+   VM first, or set `VM_DIR` and `SSH_PORT` for a copy. Host RAM:
+   `MEM + PMEM_SIZE`; the NVDIMM file is on `/dev/shm` (`PMEM_FILE`).
+3. After each start: `vm-ssh.sh sudo $Q/setup-nvdimm.sh $BLD`. The first
+   time it makes the fsdax namespace and the XFS. At the end it lists the
+   build's libraries that the guest lacks; a build that links libraries
+   from the host's `/usr/local/lib64` (`rdrs2` and `libprometheus-cpp`,
+   for one) needs them copied into the guest through the share, then
+   `ldconfig` (with `/usr/local/lib64` in `/etc/ld.so.conf.d`). Without
+   them the first test that starts `rdrs2` stops MTR.
+4. `vm-ssh.sh $Q/probe.sh $BLD` as in §5.
+5. The suite, from a guest shell or detached (`setsid nohup`), one test
+   at a time:
+   ```
+   MTR_START_TIMEOUT=300 $Q/run-mtr.sh $BLD --suite=ndb --parallel=1 \
+     --skip-test-list=suite/ndb/pmem_redo.skip --max-test-fail=0 --retry=0 --suite-timeout=5000
+   ```
+   `$Q/stop-mtr.sh` stops it with everything it started.
+
+Notes:
+- `--skip-test-list=suite/ndb/pmem_redo.skip` is needed: the tests there
+  fail by design in PMEM mode.
+- Do not name a test of `collections/disabled_ndb.def` on the command
+  line: MTR runs a disabled test when it is named.
+- A relative `--defaults-extra-file` that does not exist makes MTR loop in
+  `get_bld_path` (`lib/My/File/Path.pm`) until `File name too long`: give
+  an absolute path, or check the name.
+- MTR waits 180 s for a server to start; under TCG that was too short for
+  some tests. `MTR_START_TIMEOUT` (seconds) is the only setting for it.
+
+The run of 2026-11-14 and what it found: `ndb_suite_nvdimm.md`.
