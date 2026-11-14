@@ -7,8 +7,8 @@
 # and exits with 1 on a corrupt log. The data nodes stop at once, so the
 # logs end where the writes stopped.
 
-let $cluster = $MYSQLTEST_VARDIR/mysql_cluster.1;
-let PART0=$cluster/ndbd.2/ndb_2_fs/D8/DBLQH;
+--source suite/ndb/include/redo_pmem_cluster_dir.inc
+let PART0=$redo_cluster/ndbd.2/ndb_2_fs/D8/DBLQH;
 
 CREATE TABLE t1 (a INT PRIMARY KEY, b VARCHAR(255)) ENGINE=NDB;
 SET SESSION cte_max_recursion_depth = 4000;

@@ -4171,6 +4171,23 @@ sub ndb_parse_config_info {
 # Generate a config.ini file from the my.cnf [cluster_config*] and [api]
 # sections, using %ndb_param_sections to route parameters to the correct
 # config.ini sections (ndbd default, tcp default, api default, etc.).
+# [key, value] pairs with one pair per key (NDB parameter names are not
+# case sensitive): the last value of a key, at the place of its first one.
+sub ndb_config_last_wins {
+  my (@pairs) = @_;
+  my (%at, @out);
+  for my $pair (@pairs) {
+    my $key = lc($pair->[0]);
+    if (exists $at{$key}) {
+      $out[$at{$key}] = $pair;
+    } else {
+      $at{$key} = scalar(@out);
+      push @out, $pair;
+    }
+  }
+  return @out;
+}
+
 sub generate_ndb_config_ini {
   my ($mycnf_path, $config_ini_path) = @_;
 
@@ -4233,7 +4250,10 @@ sub generate_ndb_config_ini {
       push @all_default_pairs, @{$sections{$name}};
     }
 
-    for my $pair (@all_default_pairs) {
+    # A key in [cluster_config.N] overrides the same key in
+    # [cluster_config], as it does when ndb_mgmd reads my.cnf with
+    # --mycnf; config.ini refuses a key given twice in a section.
+    for my $pair (ndb_config_last_wins(@all_default_pairs)) {
       next if $skip_key{$pair->[0]};
       next if $pair->[0] =~ /^#/;
       my $sec = $ndb_param_sections{$pair->[0]} || 'DB';
@@ -4258,12 +4278,16 @@ sub generate_ndb_config_ini {
     # 2) [api default] from [api] section plus api-level params from defaults
     my @api_defaults;
     if (my $opts = $sections{'api'}) {
-      for my $pair (@$opts) {
+      for my $pair (ndb_config_last_wins(@$opts)) {
         next if $skip_key{$pair->[0]};
         next if $pair->[0] =~ /^#/;
         push @api_defaults, "$pair->[0]=$pair->[1]";
       }
     }
+    # The api parameters of [cluster_config] and [cluster_config.N]
+    # override the same keys of [api]
+    my %api_extra_key = map { lc((split(/=/, $_, 2))[0]) => 1 } @api_extra_defaults;
+    @api_defaults = grep { !$api_extra_key{lc((split(/=/, $_, 2))[0])} } @api_defaults;
     push @api_defaults, @api_extra_defaults;
     if (@api_defaults) {
       print $out "[api default]\n";
@@ -4280,7 +4304,7 @@ sub generate_ndb_config_ini {
     next unless defined $header;
 
     my @node_opts;
-    for my $pair (@{$sections{$name}}) {
+    for my $pair (ndb_config_last_wins(@{$sections{$name}})) {
       next if $skip_key{$pair->[0]};
       next if $pair->[0] =~ /^#/;
       push @node_opts, "$pair->[0]=$pair->[1]";
@@ -6587,6 +6611,23 @@ sub clean_datadir {
     my $cluster_dir = "$opt_vardir/" . $cluster->{name};
     mtr_verbose(" - removing '$cluster_dir'");
     rmtree($cluster_dir);
+  }
+
+  # RONDB-1150: the REDO logs of RedoLogMode=pmem on a DAX mount, all
+  # clusters of this vardir (fix_redo_log_path in lib/My/ConfigFactory.pm
+  # makes them again with the new config). The data nodes start without
+  # --initial on an empty file system, which does not clear
+  # FileSystemPathRedoLog, and the REDO initialisation writes only the
+  # files of the new configuration: files of an earlier test or run with
+  # more log files, log parts or data nodes would stay and fill the mount.
+  # At the first test clusters() is still empty, so the whole directory.
+  my $pmem_dir = $ENV{MTR_NDB_PMEM_DIR};
+  if (defined $pmem_dir && $pmem_dir ne '') {
+    my $redo_dir = "$pmem_dir/" . basename($opt_vardir);
+    if (-d $redo_dir) {
+      mtr_verbose(" - removing '$redo_dir'");
+      rmtree($redo_dir);
+    }
   }
 
   foreach my $mysqld (mysqlds()) {

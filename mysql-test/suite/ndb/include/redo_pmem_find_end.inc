@@ -6,12 +6,18 @@
 # of each log part's log that the reader finds from its files, and where
 # each node's log ends. With $redo_pmem_find_end_save = 0, after the nodes
 # have started: the line that phase 1 logged for each log part must be
-# the reader's.
+# the reader's. The REDO files are where redo_pmem_cluster_dir.inc says,
+# the node logs in the vardir.
 
 if ($redo_pmem_find_end_save) {
 --perl
   use strict;
+  use File::Basename;
   my $cluster = "$ENV{MYSQLTEST_VARDIR}/mysql_cluster.1";
+  my $redo = $cluster;
+  my $pmem = $ENV{MTR_NDB_PMEM_DIR};
+  $redo = "$pmem/" . basename($ENV{MYSQLTEST_VARDIR}) . "/mysql_cluster.1"
+    if defined $pmem && $pmem ne '';
   my $tmp = "$ENV{MYSQLTEST_VARDIR}/tmp/redo_pmem_find_end";
   my $reader = $ENV{NDB_REDO_LOG_READER};
   open(my $out, '>', $tmp) or die "Cannot open $tmp: $!\n";
@@ -19,7 +25,7 @@ if ($redo_pmem_find_end_save) {
     my $log = "$cluster/ndbd.$node/ndbd.log";
     print $out "offset $node ", ((-s $log) || 0), "\n";
     foreach my $part (0 .. 3) {
-      my $dir = "$cluster/ndbd.$node/ndb_${node}_fs/D" . (8 + $part) .
+      my $dir = "$redo/ndbd.$node/ndb_${node}_fs/D" . (8 + $part) .
                 "/DBLQH";
       my $line = `$reader --find-end=$dir 2>&1`;
       die "ndb_redo_log_reader --find-end=$dir failed: $line" if $? != 0;
