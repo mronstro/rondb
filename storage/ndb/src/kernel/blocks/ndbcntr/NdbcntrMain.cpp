@@ -5224,7 +5224,27 @@ void Ndbcntr::StopRecord::checkTimeout(Signal *signal) {
  * permission protocol entirely.
  */
 void Ndbcntr::StopRecord::checkStopPermTimeout(Signal *signal) {
-  if (stopReq.senderRef == 0 || !m_stop_perm_polling) {
+  if (stopReq.senderRef == 0) {
+    jam();
+    return;
+  }
+
+  if (!m_stop_perm_polling) {
+    if (m_stop_perm == SP_GRANTED) {
+      jam();
+      /**
+       * execSTOP_PERM_CONF() has handed this CONTINUEB chain over to the
+       * shutdown, but the NODE_STATE_REP it sent to NDBCNTR itself is
+       * still behind this signal in the job buffer, so the start level
+       * read here is not yet SL_STOPPING_1. Keep the chain alive: it is
+       * the only one, and dropping it leaves the stop without a driver
+       * for good.
+       */
+      signal->theData[0] = ZSHUTDOWN;
+      cntr.sendSignalWithDelay(cntr.reference(), GSN_CONTINUEB, signal, 100,
+                               1);
+      return;
+    }
     jam();
     return;
   }
