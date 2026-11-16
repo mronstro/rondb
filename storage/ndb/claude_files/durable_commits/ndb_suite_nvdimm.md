@@ -48,7 +48,7 @@ Rerun one test in the VM:
 | `ndb_print_sys_file` | 9 data nodes, the guest's OOM killer | VM too small: `MEM=24G` |
 | `ndb_scan_start_restart` | 8 data nodes: OOM and more than 7.87 GB of REDO | VM too small: `MEM=24G PMEM_SIZE=16G` |
 | `ndb_error_reporter` | `bzip2` not in the guest | VM set-up; `make-vm.sh` installs it now |
-| `ndbinfo_plans` | M4 below: `ndb$config_values` 414 rows, estimate 402 ± 10 | open |
+| `ndbinfo_plans` | M4 below: `ndb$config_values` 414 rows, estimate 402 ± 10 | DAX configuration; the test skips itself under `MTR_NDB_PMEM_DIR` now |
 | `ndb_redo_pmem_paths` | needs `nodax` (its REDO log off the DAX mount); test mode off refuses it | skips itself under `MTR_NDB_PMEM_DIR` since `e7b4ce6eccd` |
 | `ndb_redo_pmem_reader` | M3 below: `cannot open` the REDO files | test defect, fixed |
 
@@ -122,11 +122,16 @@ gone after the run. `ndb_redo_pmem_reader` also passes without
 `MTR_NDB_PMEM_DIR`. Not rerun: the tests too big for the VM, with a
 bigger one, and the suite as a whole.
 
-**M4. `ndbinfo_plans` and `FileSystemPathRedoLog` (open).** 207 rows per
+**M4. `ndbinfo_plans` and `FileSystemPathRedoLog`.** 207 rows per
 data node against the 201 of the estimate in `NdbinfoTables.cpp`: with
 the parameters of the DAX configuration, among them
 `FileSystemPathRedoLog` (712), which has no default and adds a row only
 when set. With 2 data nodes that is 12 rows over the estimate, outside its
 tolerance of 10. Which other 5 parameters per node add rows was not
 looked at. Choices: raise the estimate (then the file-mode count must
-stay within 10 of it), or keep the test off the DAX runs.
+stay within 10 of it), or keep the test off the DAX runs. Decided
+(2026-11-14): the test skips itself when `MTR_NDB_PMEM_DIR` is set, as
+`ndb_redo_pmem_paths` does. The rows come from what the DAX configuration
+sets, not from the data node, and raising the estimate would move it off
+the count of file mode, the default; file mode and `nodax` PMEM mode
+still run it.
