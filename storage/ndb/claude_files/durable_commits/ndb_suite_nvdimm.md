@@ -94,8 +94,9 @@ or data nodes (`ndb_143_fs` and the like) stayed and filled the mount.
 Fix: `clean_datadir` removes `$MTR_NDB_PMEM_DIR/<name of the vardir>`, the
 directory of the worker that `fix_redo_log_path` fills, every time it
 cleans the datadirs, including before the first test. The kernel side,
-that an initial start leaves FileSystemPathRedoLog as it is, is the open
-point of `step1_phases.md` decision 12.
+that a start on an empty FileSystemPath without `--initial` leaves
+FileSystemPathRedoLog as it is, is the last point of `step1_phases.md`
+decision 13.
 
 **M3. `ndb_redo_pmem_reader` looked for the REDO files in the vardir.**
 The test and `include/redo_pmem_find_end.inc` used

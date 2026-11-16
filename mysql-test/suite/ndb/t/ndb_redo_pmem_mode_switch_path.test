@@ -1,0 +1,54 @@
+--source include/have_ndb.inc
+
+# A run on a DAX mount (MTR_NDB_PMEM_DIR) replaces the nodax test mode of
+# this test's .cnf, and the BackupDataDir used here is not on the DAX mount.
+if ($MTR_NDB_PMEM_DIR) {
+  --skip Needs __RedoLogPmemTestMode=nodax and its REDO log off the DAX mount
+}
+
+# RONDB-1150 (recovery plan A5): RedoLogMode changes only with an initial
+# node restart, with the REDO log of PMEM mode under FileSystemPathRedoLog,
+# away from file mode's under FileSystemPath. PmemRedoModeSwitch: file mode
+# finds the REDO log of PMEM mode there and refuses to start on it, and an
+# initial start in file mode clears it. PmemRedoModeSwitchDropPath: with
+# FileSystemPathRedoLog unset while the node runs in file mode, nothing
+# clears it, and PMEM mode finds its old REDO log there as well as file
+# mode's under FileSystemPath, and refuses to start.
+
+# NDBT creates TEST_DB.T1 directly through the NDB API. Keep both mysqlds
+# stopped so that metadata discovery cannot import the API table.
+--connect(s2,127.0.0.1,root,,test,$MASTER_MYPORT1,)
+--connection default
+--echo # Shutting down mysqld 1
+--let $mysqld_name=mysqld.1.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld1_file_name= $_expect_file_name
+
+--connection s2
+--echo # Shutting down mysqld 2
+--let $mysqld_name=mysqld.2.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld2_file_name= $_expect_file_name
+
+let NDBAPITEST_CLEANUP_QUERY=;
+let NDBAPITEST_NAME=testSystemRestart;
+let NDBAPITEST_ARGS=-n PmemRedoModeSwitch --records=1000 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+let NDBAPITEST_ARGS=-n PmemRedoModeSwitchDropPath --records=1000 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+--connection default
+--echo # Starting mysqld 1
+--let $_expect_file_name= $expect_mysqld1_file_name
+--let $mysqld_name=mysqld.1.1
+--source include/start_mysqld.inc
+
+--connection s2
+--echo # Starting mysqld 2
+--let $_expect_file_name= $expect_mysqld2_file_name
+--let $mysqld_name=mysqld.2.1
+--source include/start_mysqld.inc
+
+--connection default
+--disconnect s2

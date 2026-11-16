@@ -42,6 +42,7 @@
 #include "util/ndb_openssl_evp.h"
 #include "util/ndb_rand.h"
 #include "util/ndb_zlib.h"
+#include "util/File.hpp"
 #include "util/RedoLogPaths.hpp"
 
 #include <NdbThread.h>
@@ -161,6 +162,11 @@ int AsyncFile::map_pmem(Request *request, Uint64 size) {
  * path is looked for under the other REDO paths, then FileSystemPath,
  * so that a changed CPU binding or path order does not stop the node.
  * The path it is found under goes back to DBLQH in FSOPENCONF.
+ *
+ * In file mode a REDO log file is under FileSystemPath, and the REDO paths
+ * are set only where PMEM mode left a directory (Ndbfs::
+ * read_redo_paths_file_mode()). A file found there was written in PMEM
+ * mode, and DBLQH refuses to start on it.
  */
 bool AsyncFile::open_redo_elsewhere(Request *request, Uint32 open_flags) {
   const Uint32 asked = theFileName.get_base_path_spec();
@@ -181,6 +187,30 @@ bool AsyncFile::open_redo_elsewhere(Request *request, Uint32 open_flags) {
   // The error names the file under the path asked for
   theFileName.set_base_path(&m_fs, asked);
   return false;
+}
+
+/**
+ * OM_REDO_PATH (RONDB-1150): a REDO log file opened under a REDO path that
+ * also exists under FileSystemPath. PMEM mode writes nothing under
+ * FileSystemPath when it has a REDO path of its own, and an initial start
+ * clears both, so file mode wrote the one under FileSystemPath after PMEM
+ * mode wrote this one: FileSystemPathRedoLog was unset while the node ran
+ * in file mode, and file mode did not clear it. This one is stale.
+ */
+bool AsyncFile::redo_also_under_fs() {
+  const Uint32 used = theFileName.get_base_path_spec();
+  if (used == FsOpenReq::BP_FS) return false;
+  const BaseString pmem_name(theFileName.c_str());
+  theFileName.set_base_path(&m_fs, FsOpenReq::BP_FS);
+  const bool found = File_class::exists(theFileName.c_str());
+  if (found) {
+    g_eventLogger->error(
+        "NDBFS: REDO log file %s, written with RedoLogMode=pmem, is stale: "
+        "%s, written with RedoLogMode=file, came after it",
+        pmem_name.c_str(), theFileName.c_str());
+  }
+  theFileName.set_base_path(&m_fs, used);
+  return found;
 }
 
 int AsyncFile::init() { return 0; }
@@ -304,12 +334,24 @@ void AsyncFile::openReq(Request *request) {
   if (m_file.open(theFileName.c_str(), flags & open_flags) == -1) {
     // Common expected error for NDBCNTR sysfile, DBDIH sysfile, LCP ctl
     const int error = get_last_os_error();
-    if (!(flags & FsOpenReq::OM_REDO_PATH) || created ||
+    if (!request->par.open.redo_lookup || created ||
         Ndbfs::translateErrno(error) != FsRef::fsErrFileDoesNotExist ||
         !open_redo_elsewhere(request, flags & open_flags)) {
       NDBFS_SET_REQUEST_ERROR(request, error);
       goto remove_if_created;
     }
+    if (!(flags & FsOpenReq::OM_REDO_PATH)) {
+      // DBLQH refuses it at page 0 of file 0, which is in the PMEM format
+      g_eventLogger->warning(
+          "NDBFS: REDO log file %s found under FileSystemPathRedoLog, not "
+          "under FileSystemPath: written with RedoLogMode=pmem",
+          theFileName.c_str());
+    }
+  }
+  if ((flags & FsOpenReq::OM_REDO_PATH) && !created && redo_also_under_fs()) {
+    NDBFS_SET_REQUEST_ERROR(request, FsRef::fsErrRedoLogTwice);
+    m_file.close();
+    goto remove_if_created;
   }
 
   // Truncate if OM_TRUNCATE

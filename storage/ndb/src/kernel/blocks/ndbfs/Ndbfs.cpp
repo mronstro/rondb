@@ -308,12 +308,49 @@ static_assert(NDB_REDO_PMEM_COPY_MOVDIR64B == NDB_PMEM_COPY_MOVDIR64B);
 static_assert(NDB_REDO_PMEM_COPY_CLWB == NDB_PMEM_COPY_CLWB);
 
 /**
+ * RONDB-1150, file mode: the REDO log stays under FileSystemPath with
+ * today's names and probes, whether FileSystemPathRedoLog is set or not.
+ * Only a directory that PMEM mode left under FileSystemPathRedoLog,
+ * <path>/<fs_dir>, gets its REDO path slot, so that an initial start
+ * clears it (Ndbcntr::clearFilesystem()) and a restart without --initial
+ * finds the REDO log of PMEM mode there and is refused
+ * (AsyncFile::open_redo_elsewhere()). Without it, PMEM mode would later
+ * find that old REDO log before file mode's under FileSystemPath. Nothing
+ * is created, probed or refused here; the management server warns about a
+ * path it cannot parse.
+ */
+void Ndbfs::read_redo_paths_file_mode(const ndb_mgm_configuration_iterator *p,
+                                      const BaseString &fs_dir) {
+  const char *spec = nullptr;
+  ndb_mgm_get_string_parameter(p, CFG_DB_REDO_LOG_PATH, &spec);
+  if (spec == nullptr || spec[0] == 0) return;
+  RedoLogPaths paths;
+  BaseString err;
+  if (paths.parse(spec, err) != 0) return;
+  BaseString fs_real;
+  do_mkdir(m_base_path[FsOpenReq::BP_FS].c_str());  // as at STTOR
+  if (!validate_path(fs_real, m_base_path[FsOpenReq::BP_FS].c_str())) return;
+  for (Uint32 i = 0; i < paths.count; i++) {
+    BaseString path;
+    add_path(path, paths.entry[i].path.c_str());
+    add_path(path, fs_dir.c_str());
+    BaseString real;
+    if (!validate_path(real, path.c_str())) continue;  // nothing left there
+    if (strcmp(real.c_str(), fs_real.c_str()) == 0) continue;
+    m_base_path[FsOpenReq::BP_REDO_FIRST + i].assign(real);
+    g_eventLogger->info(
+        "RedoLogMode=file: %s is left from RedoLogMode=pmem; an initial "
+        "start clears it, and a restart without --initial that finds a "
+        "REDO log there is refused",
+        real.c_str());
+  }
+}
+
+/**
  * RONDB-1150: RedoLogMode=pmem (platform plan S2.3, S2.7, S3.3). The copy
  * method is chosen before any file is opened. The management server
  * checks the path too; a configuration without RedoLogMode gives file
- * mode, and file mode reads nothing more: its REDO path slots stay
- * empty, so the REDO log stays under FileSystemPath with today's names,
- * cleanup and probes, whether FileSystemPathRedoLog is set or not.
+ * mode (read_redo_paths_file_mode()).
  *
  * Each FileSystemPathRedoLog entry i gets the slot BP_REDO_FIRST + i,
  * <path>/<fs_dir>, like FileSystemPathDD. An entry that is FileSystemPath
@@ -324,7 +361,10 @@ void Ndbfs::read_redo_pmem_config(const ndb_mgm_configuration_iterator *p,
   m_pmem_map_flags = NDB_PMEM_MAP_SYNC_REQUIRED;
   Uint32 mode = NDB_REDO_LOG_MODE_FILE;
   ndb_mgm_get_int_parameter(p, CFG_DB_REDO_LOG_MODE, &mode);
-  if (mode != NDB_REDO_LOG_MODE_PMEM) return;
+  if (mode != NDB_REDO_LOG_MODE_PMEM) {
+    read_redo_paths_file_mode(p, fs_dir);
+    return;
+  }
 
   Uint32 test_mode = NDB_REDO_PMEM_TEST_MODE_OFF;
   Uint32 power_loss_emul = 0;
@@ -896,6 +936,11 @@ void Ndbfs::execFSOPENREQ(Signal *signal) {
     redo_path_no = FsOpenReq::getRedoPathNo(fsOpenReq->secondFileFlags);
     file->theFileName.set_base_path(this, get_redo_base_path(redo_path_no));
   }
+  // RONDB-1150: file mode also looks for a REDO log file of PMEM mode
+  const bool redo_lookup =
+      (fsOpenReq->fileFlags & FsOpenReq::OM_REDO_PATH) ||
+      (FsOpenReq::getVersion(fsOpenReq->fileNumber) == FsOpenReq::V_BLOCK &&
+       FsOpenReq::getSuffix(fsOpenReq->fileNumber) == FsOpenReq::S_FRAGLOG);
   if (handle.m_cnt > FsOpenReq::ENCRYPT_KEY_MATERIAL) {
     jam();
     SegmentedSectionPtr ptr;
@@ -996,6 +1041,7 @@ void Ndbfs::execFSOPENREQ(Signal *signal) {
   request->par.open.file_size = file_size;
   request->par.open.auto_sync_size = auto_sync_size;
   request->par.open.redo_path_no = redo_path_no;
+  request->par.open.redo_lookup = redo_lookup;
   request->m_do_bind = bound;
   ndbrequire(forward(file, request));
 }

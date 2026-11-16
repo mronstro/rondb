@@ -1566,7 +1566,7 @@ unchanged. Written in three parts:
 |---|---|---|---|
 | 11a | S1.5, S7.3 | The power-loss emulation in `ndb_pmem` and its unit tests; NDBFS turns it on; every stop but a graceful shutdown is a power loss (`NdbShutdown`); the checks after each DBLQH drain and before GCP_SAVECONF; `DUMP 2370`; `ndb_redo_pmem_power_loss`, `pmem_redo_powerloss.cnf` | Passed its commands (reported 2026-11-11) |
 | 11b | S7.1, S7.2 | The crash error inserts 5155-5172 through `redoPmemCrashPoint()`, the torn-copy injector M1, the M3 checks, `DUMP 2369`; `ndb_redo_pmem_crash_points`, `ndb_redo_pmem_crash_restart` | Passed its commands on macOS ARM64, Linux x86_64 and Linux ARM64 (reported 2026-11-12), with the updates in a client per UPDATE (decision 10) |
-| 11c | S7.4 cases, S7.5 | `GciLedgerTornTail`, `GciLedgerCrashPoints`, `GciLedgerPowerLoss`; `pmem_redo_dax.cnf`, the `MTR_NDB_PMEM_DIR` rule, `pmem_redo.skip`, the atrt configurations and `pmem-redo-tests.txt` | The ledger tests passed after the fix of decision 7 (reported 2026-11-12): `ndb_redo_pmem_ledger`, `ndb_redo_pmem_ledger_power_loss` and `ndb_gci_ledger` on macOS ARM64; on Linux also `ndb_redo_pmem_ledger` with `pmem_redo_powerloss.cnf` and `ndb_redo_pmem_ledger_crash`. The ndb suite in PMEM mode passed on macOS ARM64 but for two tests (reported 2026-11-13), fixed by decisions 9 and 10 and the error count of the base. `ndb_redo_pmem_gcp_save` (decision 11) passed on macOS ARM64. `ndb_redo_pmem_mode_switch` (A5, decision 12) passed on macOS ARM64 (reported 2026-11-14). The ndb suite in PMEM mode ran on Linux x86_64 on an emulated NVDIMM with the production checks (2026-11-14, `ndb_suite_nvdimm.md`): no failure in the PMEM REDO code; three MTR defects fixed, `ndbinfo_plans` over its estimate with `FileSystemPathRedoLog` set (open), 8 tests too big for the VM. Still to run: `ndbinfo_plans` in both modes, `ndb_redo_pmem_gcp_save` on Linux and with the power-loss emulation, `ndb_redo_pmem_ledger_crash` on macOS ARM64, the file-mode suite on the rebased branch, and the atrt lists |
+| 11c | S7.4 cases, S7.5 | `GciLedgerTornTail`, `GciLedgerCrashPoints`, `GciLedgerPowerLoss`; `pmem_redo_dax.cnf`, the `MTR_NDB_PMEM_DIR` rule, `pmem_redo.skip`, the atrt configurations and `pmem-redo-tests.txt` | The ledger tests passed after the fix of decision 7 (reported 2026-11-12): `ndb_redo_pmem_ledger`, `ndb_redo_pmem_ledger_power_loss` and `ndb_gci_ledger` on macOS ARM64; on Linux also `ndb_redo_pmem_ledger` with `pmem_redo_powerloss.cnf` and `ndb_redo_pmem_ledger_crash`. The ndb suite in PMEM mode passed on macOS ARM64 but for two tests (reported 2026-11-13), fixed by decisions 9 and 10 and the error count of the base. `ndb_redo_pmem_gcp_save` (decision 11) passed on macOS ARM64. `ndb_redo_pmem_mode_switch` (A5, decision 12) passed on macOS ARM64 (reported 2026-11-14). The ndb suite in PMEM mode ran on Linux x86_64 on an emulated NVDIMM with the production checks (2026-11-14, `ndb_suite_nvdimm.md`): no failure in the PMEM REDO code; three MTR defects fixed, `ndbinfo_plans` over its estimate with `FileSystemPathRedoLog` set (open), 8 tests too big for the VM. Still to run: `ndb_redo_pmem_mode_switch_path` (decision 13), `ndb_redo_pmem_mode_switch` on a DAX mount, `ndbinfo_plans` in both modes, `ndb_redo_pmem_gcp_save` on Linux and with the power-loss emulation, `ndb_redo_pmem_ledger_crash` on macOS ARM64, the file-mode suite on the rebased branch, and the atrt lists |
 
 **Changes in 11a.** File mode is unchanged: the emulation is on only with
 `__RedoLogPmemPowerLossEmulation=1`, which needs `RedoLogMode=pmem`.
@@ -1765,8 +1765,11 @@ configurations and MTR's configuration rule.
 | `mysql-test/suite/ndb/pmem_redo.skip` | New, for `--skip-test-list`: the tests that set `EncryptedFileSystem=1` or `Diskless=1`, which PMEM mode refuses; those of the file format, the REDO buffer and the file switch of file mode, `testNodeRestartGcpSaveAndFileChange` among them (decision 9); `ndbinfo` and `ndbinfo_backup` |
 | `mysql-test/suite/ndb/t/ndbinfo_plans.test`, `r/` | The list of tables whose estimate equals their row count leaves out `ndb$redo_log_pmem`, as it does `ndb$config_values` (decision 10) |
 | `test/ndbapi/testNodeRestart.cpp` | `PmemGcpSaveAndFileChange` (M6, decision 11): `runPmemGcpNeedsPmem` skips it outside PMEM mode and reads TimeBetweenGlobalCheckpoints and FragmentLogFileSize; `runPmemGcpSaveWatch` times each GCI, reads `bytes_copied` of ndbinfo `redo_log_pmem` every 5 s, and at a stall runs DUMP 7025, 2369 and 2368 2; `runGciWatcher` is quiet with `GciWatcherQuiet` |
-| `test/ndbapi/testSystemRestart.cpp` | `PmemRedoModeSwitch` (A5, decision 12): `pmemSwitchSetMode` (the node's RedoLogMode through `set_config`), `pmemSwitchCheckMode` (rows of ndbinfo `redo_log_pmem`), `pmemSwitchStopError` (the NDBStopForced event), `pmemSwitchOnce`, and the finalizer `runPmemRedoModeRestore` |
+| `test/ndbapi/testSystemRestart.cpp` | `PmemRedoModeSwitch` (A5, decision 12) and `PmemRedoModeSwitchDropPath` (decision 13): `pmemSwitchSetMode` (the node's RedoLogMode, and FileSystemPathRedoLog in the second case, through `set_config`), `pmemSwitchGetPath`, `pmemSwitchCheckMode` (rows of ndbinfo `redo_log_pmem`), `pmemSwitchStopError` (the NDBStopForced event), `pmemSwitchOnce`, and the finalizer `runPmemRedoModeRestore` |
 | `mysql-test/suite/ndb/t/ndb_redo_pmem_mode_switch.{test,cnf}`, `-master.opt`, `r/` | New (A5): `PmemRedoModeSwitch --records=1000 T1` in PMEM mode, `nodax`, 4 files of 16 MB, StopOnError=0, StartFailRetryDelay=10, MaxStartFailRetries=10, the mysqlds stopped, a timeout of 45 minutes |
+| `mysql-test/suite/ndb/t/ndb_redo_pmem_mode_switch_path.{test,cnf}`, `-master.opt`, `r/` | New (decision 13): `PmemRedoModeSwitch` and `PmemRedoModeSwitchDropPath`, as `ndb_redo_pmem_mode_switch` but with `FileSystemPathRedoLog` the BackupDataDir of each data node; skipped with `MTR_NDB_PMEM_DIR`; a timeout of 90 minutes |
+| `src/kernel/blocks/ndbfs/Ndbfs.hpp`, `Ndbfs.cpp`, `AsyncFile.hpp`, `AsyncFile.cpp`, `AsyncIoThread.hpp`; `include/kernel/signaldata/FsRef.hpp`; `src/kernel/blocks/ndbcntr/NdbcntrMain.cpp`; `src/kernel/blocks/dblqh/DblqhMain.cpp` | Decision 13: `read_redo_paths_file_mode()`, `par.open.redo_lookup`, `redo_also_under_fs()`, `fsErrRedoLogTwice` and its refusal in `execFSOPENREF`; the comment of `CLEAR_REDO` |
+| `src/common/mgmcommon/ConfigInfo.cpp`, `mysql-test/suite/ndb/r/ndb_redo_pmem_config.result` | Decision 13: the description of `FileSystemPathRedoLog` and the warning about it in file mode |
 | `mysql-test/suite/ndb/t/ndb_redo_pmem_gcp_save.{test,cnf}`, `r/` | New (M6): `PmemGcpSaveAndFileChange --records=2000 T3` in PMEM mode, 6 files of 16 MB, TimeBetweenGlobalCheckpoints=2000, the mysqlds stopped as in `ndb_gci_ledger` (a mysqld that imported TEST_DB.T3 kept TEST_DB, and the check of the test case failed); no error inserts |
 | `test/run-test/conf-pmem-nodax.cnf` | New: `.2node` and `.4node` of `conf-autotest.cnf` in PMEM mode, `nodax`, 6 files of 64 MB; `.2node_powerloss` with the emulation |
 | `test/run-test/conf-pmem-emulated.cnf` | New: `.2node` and `.4node` with `emulated` and `FileSystemPathRedoLog=/mnt/pmem0/atrt` |
@@ -1892,19 +1895,55 @@ configurations and MTR's configuration rule.
     `__RedoLogPmemTestMode` skips the case, as PMEM mode would need a DAX
     file system there. A finalizer puts the node's mode back after a
     failure.
-    **Open:** the refusals hold only while the REDO log of PMEM mode is
-    under FileSystemPath. With FileSystemPathRedoLog elsewhere, as in
-    production on a DAX mount, file mode neither clears that path at an
-    initial start nor looks there (`clearFilesystem` in NDBCNTR, NDBFS
-    `read_redo_pmem_config`). PMEM → file without `--initial` then fails
-    to open file 0 under FileSystemPath, a file error, not error 2350.
-    PMEM → file with `--initial`, then back to PMEM without it, finds the
-    old PMEM files first (`AsyncFile::open_redo_elsewhere` tries the REDO
-    paths before FileSystemPath) and restarts from a stale log. So the MTR
-    test skips itself when `MTR_NDB_PMEM_DIR` is set. Not decided: file
-    mode reading the paths of FileSystemPathRedoLog to clear them at an
-    initial start and to refuse a non-initial start that finds PMEM files
-    there.
+    The refusals first held only while the REDO log of PMEM mode was
+    under FileSystemPath; decision 13 makes them hold with
+    FileSystemPathRedoLog elsewhere.
+
+13. **File mode knows the REDO log that PMEM mode left under
+    FileSystemPathRedoLog** (found 2026-11-14 while reviewing the QEMU CXL
+    hand-off). Before, file mode read nothing of FileSystemPathRedoLog, so
+    with the REDO log of PMEM mode away from FileSystemPath, as on a DAX
+    mount in production: PMEM → file without `--initial` failed to open
+    file 0 under FileSystemPath (a file error, not 2350), and PMEM → file
+    with `--initial`, then back to PMEM without it, found the old PMEM
+    files first (`open_redo_elsewhere` tries the REDO paths before
+    FileSystemPath) and restarted from a stale log. Now:
+    - `Ndbfs::read_redo_paths_file_mode()`: in file mode, each
+      FileSystemPathRedoLog entry whose `<path>/ndb_<id>_fs` exists (PMEM
+      mode left it) gets its REDO path slot. Nothing is created, probed
+      or refused; an empty or unparsable value is ignored.
+    - `Ndbcntr::clearFilesystem()` then clears those slots at an initial
+      start in file mode too, as it does in PMEM mode.
+    - A file-mode open of a REDO log file (`V_BLOCK`, `S_FRAGLOG`) that
+      finds no file under FileSystemPath looks under those slots
+      (`par.open.redo_lookup`); a file found there is in the PMEM format,
+      and DBLQH refuses it at page 0 of file 0 with 2350, as when both
+      are under FileSystemPath. NDBFS logs where it found it.
+    - The remaining way to a stale log: FileSystemPathRedoLog unset while
+      the node runs in file mode, so nothing clears it. Then PMEM mode
+      finds its old file there and file mode's under FileSystemPath.
+      PMEM mode writes nothing under FileSystemPath when it has a path of
+      its own, so `AsyncFile::redo_also_under_fs()` refuses an
+      `OM_REDO_PATH` file opened under a REDO path that also exists under
+      FileSystemPath: `FsRef::fsErrRedoLogTwice`, 2350 in DBLQH, both
+      names in the node log.
+    - ndb_mgmd's warning about FileSystemPathRedoLog in file mode said it
+      had no effect, which invited unsetting it; it now says that it lets
+      an initial start clear the REDO log of PMEM mode.
+    - Left as it is: a start on an empty FileSystemPath without
+      `--initial` is an initial start that does not run
+      `clearFilesystem()` (only `--initial` and a node that must restart
+      initially do), so FileSystemPathRedoLog keeps its files. The REDO
+      initialisation rewrites those of the current configuration; those
+      of a configuration with more log files, log parts or data nodes are
+      never read but take space on the mount, which filled the MTR runs
+      on DAX until `clean_datadir` removed them (M2 of
+      `ndb_suite_nvdimm.md`). A file of file mode's REDO log left under
+      FileSystemPath that way meets the `fsErrRedoLogTwice` check above.
+    `PmemRedoModeSwitchDropPath` unsets the path while the node runs in
+    file mode. MTR `ndb_redo_pmem_mode_switch_path` runs both cases with
+    the REDO log under each data node's BackupDataDir, and
+    `ndb_redo_pmem_mode_switch` no longer skips itself on a DAX mount.
 
 **Commands for the pusher (11c).** The branch is rebased onto
 RONDB-1124-exec-fixes, so first a full build. On Linux x86_64, Linux
@@ -1915,6 +1954,7 @@ cmake --build .
 cd mysql-test
 ./mtr ndb.ndb_redo_pmem_ledger ndb.ndb_redo_pmem_ledger_power_loss ndb.ndb_gci_ledger
 ./mtr ndb.ndb_redo_pmem_gcp_save ndb.ndbinfo_plans ndb.ndb_redo_pmem_mode_switch
+./mtr ndb.ndb_redo_pmem_mode_switch_path ndb.ndb_redo_pmem_config
 ./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndbinfo_plans
 ./mtr --defaults-extra-file=suite/ndb/pmem_redo_powerloss.cnf ndb.ndb_redo_pmem_ledger
 ./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndb_gci_ledger
@@ -1937,9 +1977,12 @@ atrt --conf=conf-pmem-nodax.cnf --clusters=.2node_powerloss --testcase-file=pmem
 MTR_NDB_PMEM_DIR=/mnt/pmem0/mtr ./mtr --defaults-extra-file=suite/ndb/pmem_redo_dax.cnf ndb.ndb_basic ndb.ndb_gci_ledger
 ```
 
-The `ndb_redo_pmem_*` tests set `nodax` in their own `.cnf`, which wins
-over `pmem_redo_dax.cnf`; `ndb_basic` and `ndb_gci_ledger` take the
-`emulated` mode, and their REDO log goes under `MTR_NDB_PMEM_DIR`.
+`pmem_redo_dax.cnf` sets the test mode in `[cluster_config.1]` too, so it
+replaces the `nodax` of the `ndb_redo_pmem_*` tests' own `.cnf` (defect D1
+of `qemu_cxl_test.md`); before that fix those tests ran in `nodax` mode
+with it. `ndb_redo_pmem_paths` and `ndb_redo_pmem_mode_switch_path`, whose
+REDO log is off the DAX mount, skip themselves when `MTR_NDB_PMEM_DIR` is
+set.
 
 **Results.** The ledger tests passed on macOS ARM64 and Linux after the
 fix of decision 7 (reported 2026-11-12). The ndb suite in PMEM mode

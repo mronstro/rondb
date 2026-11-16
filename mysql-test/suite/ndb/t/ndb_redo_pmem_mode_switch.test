@@ -1,19 +1,12 @@
 --source include/have_ndb.inc
 
-# A run on a DAX mount (MTR_NDB_PMEM_DIR) puts the REDO log of PMEM mode
-# under FileSystemPathRedoLog, away from file mode's under FileSystemPath.
-# File mode neither clears nor looks there, so the refusals checked here
-# need both modes' REDO logs in FileSystemPath.
-if ($MTR_NDB_PMEM_DIR) {
-  --skip Needs the REDO log of both modes under FileSystemPath
-}
-
 # RONDB-1150 (recovery plan A5): RedoLogMode changes only with an initial
 # node restart, in both directions. One data node is switched from PMEM
 # mode to file mode and back: a restart without --initial is refused, the
 # node starts again with its old mode, an initial node restart switches
 # it, it restarts in the new mode, and the cluster restarts with the nodes
-# in different modes.
+# in different modes. ndb_redo_pmem_mode_switch_path does the same with
+# the REDO log of PMEM mode away from FileSystemPath.
 
 # NDBT creates TEST_DB.T1 directly through the NDB API. Keep both mysqlds
 # stopped so that metadata discovery cannot import the API table.

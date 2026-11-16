@@ -69,6 +69,7 @@ struct FsRef {
     fsErrNotDax = FS_ERR_BIT | 16,         // OM_MAP_SYNC: no MAP_SYNC
     fsErrPmemMapFailed = FS_ERR_BIT | 17,  // OM_MAP_SYNC: map or prefault
     fsErrPmemBadBlocks = FS_ERR_BIT | 18,  // OM_MAP_SYNC: on bad blocks
+    fsErrRedoLogTwice = FS_ERR_BIT | 19,   // OM_REDO_PATH: and FileSystemPath
     fsErrMax
   };
   /**

@@ -101,6 +101,7 @@ class Request {
       bool pmem_map_sync;  // mapped with MAP_SYNC
       int pmem_numa_node;  // NUMA node of the mapped memory, -1 unknown
       Uint32 redo_path_no;  // OM_REDO_PATH: as asked, then the one used
+      bool redo_lookup;     // a REDO log file: looked for under each path
     } open;
     struct {
       int numberOfPages;

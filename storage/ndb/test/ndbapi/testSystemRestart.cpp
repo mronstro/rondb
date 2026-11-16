@@ -4628,48 +4628,91 @@ int runMaxRedoRecordSR(NDBT_Context *ctx, NDBT_Step *step) {
  * case then puts the old mode back, and the angel's next start of the node
  * succeeds. The MTR test sets them; the autotest configurations keep
  * StopOnError=1, so there the case only switches by initial node restarts.
+ *
+ * With FileSystemPathRedoLog away from FileSystemPath, file mode finds the
+ * REDO log of PMEM mode there, and clears it at an initial start.
+ * PmemRedoModeSwitchDropPath unsets FileSystemPathRedoLog while the node
+ * runs in file mode, so PMEM mode later finds its own old REDO log there,
+ * and file mode's under FileSystemPath: it refuses that one too.
  */
 static const char *pmemModeName(Uint32 mode) {
   return mode == NDB_REDO_LOG_MODE_PMEM ? "pmem" : "file";
 }
 
-/* Sets RedoLogMode of data node nodeId in ndb_mgmd's configuration */
-static bool pmemSwitchSetMode(int nodeId, Uint32 mode) {
-  NdbMgmd mgmd;
+/* The configuration of ndb_mgmd */
+static bool pmemSwitchGetConfig(NdbMgmd &mgmd, Config &conf) {
   mgmd.use_tls(opt_tls_search_path, opt_mgm_tls);
   if (!mgmd.connect()) {
     g_err << "Failed to connect to ndb_mgmd" << endl;
     return false;
   }
-  Config conf;
   if (!mgmd.get_config(conf)) {
     g_err << "Failed to get the configuration from ndb_mgmd" << endl;
     return false;
   }
+  return true;
+}
+
+/* FileSystemPathRedoLog of data node nodeId in ndb_mgmd's configuration,
+ * empty if it is not set */
+static bool pmemSwitchGetPath(int nodeId, BaseString *path) {
+  NdbMgmd mgmd;
+  Config conf;
+  if (!pmemSwitchGetConfig(mgmd, conf)) return false;
+  path->clear();
+  ConfigValues::Iterator iter(conf.m_configuration->m_config_values);
+  for (int idx = 0; iter.openSection(CFG_SECTION_NODE, idx); idx++) {
+    Uint32 type = 0;
+    Uint32 id = 0;
+    const char *value = nullptr;
+    iter.get(CFG_TYPE_OF_SECTION, &type);
+    iter.get(CFG_NODE_ID, &id);
+    if (type == NODE_TYPE_DB && int(id) == nodeId &&
+        iter.get(CFG_DB_REDO_LOG_PATH, &value)) {
+      path->assign(value);
+    }
+    iter.closeSection();
+  }
+  return true;
+}
+
+/* Sets RedoLogMode of data node nodeId in ndb_mgmd's configuration, and
+ * FileSystemPathRedoLog to path unless it is nullptr ("" for unset) */
+static bool pmemSwitchSetMode(int nodeId, Uint32 mode,
+                              const char *path = nullptr) {
+  NdbMgmd mgmd;
+  Config conf;
+  if (!pmemSwitchGetConfig(mgmd, conf)) return false;
   ConfigValues::Iterator iter(conf.m_configuration->m_config_values);
   bool found = false;
   for (int idx = 0; iter.openSection(CFG_SECTION_NODE, idx); idx++) {
     Uint32 type = 0;
     Uint32 id = 0;
     Uint32 old = 0;
+    const char *oldPath = nullptr;
     iter.get(CFG_TYPE_OF_SECTION, &type);
     iter.get(CFG_NODE_ID, &id);
     if (type == NODE_TYPE_DB && int(id) == nodeId &&
         iter.get(CFG_DB_REDO_LOG_MODE, &old)) {
-      found = iter.set(CFG_DB_REDO_LOG_MODE, mode);
+      found = iter.set(CFG_DB_REDO_LOG_MODE, mode) &&
+              (path == nullptr ||
+               (iter.get(CFG_DB_REDO_LOG_PATH, &oldPath) &&
+                iter.set(CFG_DB_REDO_LOG_PATH, path)));
     }
     iter.closeSection();
   }
   if (!found) {
-    g_err << "No RedoLogMode for data node " << nodeId << endl;
+    g_err << "No RedoLogMode or FileSystemPathRedoLog for data node "
+          << nodeId << endl;
     return false;
   }
   if (!mgmd.set_config(conf)) {
     g_err << "Failed to set the configuration in ndb_mgmd" << endl;
     return false;
   }
-  g_err << "Node " << nodeId << ": RedoLogMode=" << pmemModeName(mode)
-        << " in the configuration" << endl;
+  g_err << "Node " << nodeId << ": RedoLogMode=" << pmemModeName(mode);
+  if (path != nullptr) g_err << " FileSystemPathRedoLog='" << path << "'";
+  g_err << " in the configuration" << endl;
   NdbSleep_SecSleep(3);  // Give ndb_mgmd time to take the new configuration
   return true;
 }
@@ -4753,16 +4796,26 @@ static Uint32 pmemSwitchStopError(NdbLogEventHandle handle, int nodeId,
   return 0;
 }
 
-/* One switch of nodeId from mode `from` to mode `to` */
+/**
+ * One switch of nodeId from mode `from` to mode `to`. With dropPath (the
+ * node's FileSystemPathRedoLog) the node runs in file mode with
+ * FileSystemPathRedoLog unset, so file mode neither clears nor knows the
+ * REDO log that PMEM mode left there. In the refused restart in file mode
+ * the path is still set: file mode finds the REDO log of PMEM mode there.
+ */
 static bool pmemSwitchOnce(NDBT_Context *ctx, NDBT_Step *step,
                            NdbRestarter &restarter, NdbLogEventHandle handle,
                            int nodeId, Uint32 from, Uint32 to, bool refusal,
-                           bool mixedSR) {
+                           bool mixedSR, const char *dropPath) {
   Ndb *pNdb = GETNDB(step);
   const int records = ctx->getNumRecords();
   HugoTransactions hugoTrans(*ctx->getTab());
   g_err << "Node " << nodeId << ": RedoLogMode " << pmemModeName(from)
         << " to " << pmemModeName(to) << endl;
+  auto pathOf = [dropPath](Uint32 mode) -> const char * {
+    if (dropPath == nullptr) return nullptr;
+    return mode == NDB_REDO_LOG_MODE_PMEM ? dropPath : "";
+  };
 
   if (refusal) {
     // REDO records in the old mode, then a restart without --initial
@@ -4771,7 +4824,9 @@ static bool pmemSwitchOnce(NDBT_Context *ctx, NDBT_Step *step,
     while (ndb_logevent_get_next(handle, &event, 100) > 0) {
       // events of earlier restarts
     }
-    if (!pmemSwitchSetMode(nodeId, to)) return false;
+    if (!pmemSwitchSetMode(nodeId, to, pathOf(NDB_REDO_LOG_MODE_PMEM))) {
+      return false;
+    }
     if (restarter.restartOneDbNode(nodeId, false, false, false) != 0) {
       g_err << "Failed to restart node " << nodeId << endl;
       return false;
@@ -4786,7 +4841,7 @@ static bool pmemSwitchOnce(NDBT_Context *ctx, NDBT_Step *step,
       return false;
     }
     // The old mode again: the angel's next start of the node succeeds
-    if (!pmemSwitchSetMode(nodeId, from)) return false;
+    if (!pmemSwitchSetMode(nodeId, from, pathOf(from))) return false;
     if (restarter.waitNodesStarted(&nodeId, 1, 600) != 0) {
       g_err << "ERR: node " << nodeId << " did not start again with "
             << "RedoLogMode=" << pmemModeName(from) << endl;
@@ -4796,7 +4851,7 @@ static bool pmemSwitchOnce(NDBT_Context *ctx, NDBT_Step *step,
   }
 
   // The new mode with an initial node restart
-  if (!pmemSwitchSetMode(nodeId, to)) return false;
+  if (!pmemSwitchSetMode(nodeId, to, pathOf(to))) return false;
   if (restarter.restartOneDbNode(nodeId, true, false, false) != 0 ||
       restarter.waitNodesStarted(&nodeId, 1, 600) != 0) {
     g_err << "ERR: node " << nodeId << " did not start with --initial and "
@@ -4869,6 +4924,17 @@ int runPmemRedoModeSwitch(NDBT_Context *ctx, NDBT_Step *step) {
           << "they need StopOnError=0, StartFailRetryDelay >= 5 and "
           << "MaxStartFailRetries >= 3" << endl;
   }
+  BaseString path;
+  const bool dropPath = ctx->getProperty("PmemSwitchDropPath", Uint32(0));
+  if (dropPath) {
+    if (!pmemSwitchGetPath(victim, &path)) return NDBT_FAILED;
+    if (mode != NDB_REDO_LOG_MODE_PMEM || path.length() == 0) {
+      g_err << "[SKIPPED] Node " << victim << " needs RedoLogMode=pmem and "
+            << "FileSystemPathRedoLog" << endl;
+      return NDBT_SKIPPED;
+    }
+    ctx->setProperty("PmemSwitchPath", path.c_str());
+  }
   ctx->setProperty("PmemSwitchNode", Uint32(victim));
   ctx->setProperty("PmemSwitchMode", mode);
 
@@ -4882,10 +4948,11 @@ int runPmemRedoModeSwitch(NDBT_Context *ctx, NDBT_Step *step) {
   const Uint32 other = mode == NDB_REDO_LOG_MODE_PMEM
                            ? Uint32(NDB_REDO_LOG_MODE_FILE)
                            : Uint32(NDB_REDO_LOG_MODE_PMEM);
+  const char *drop = dropPath ? path.c_str() : nullptr;
   const bool ok = pmemSwitchOnce(ctx, step, restarter, handle, victim, mode,
-                                 other, refusal, true) &&
+                                 other, refusal, true, drop) &&
                   pmemSwitchOnce(ctx, step, restarter, handle, victim, other,
-                                 mode, refusal, false);
+                                 mode, refusal, false, drop);
   ndb_mgm_destroy_logevent_handle(&handle);
   return ok ? NDBT_OK : NDBT_FAILED;
 }
@@ -4903,7 +4970,8 @@ int runPmemRedoModeRestore(NDBT_Context *ctx, NDBT_Step *step) {
         << node << endl;
   NdbRestarter restarter;
   const int nodeId = int(node);
-  if (!pmemSwitchSetMode(nodeId, mode) ||
+  const char *path = ctx->getProperty("PmemSwitchPath", (const char *)nullptr);
+  if (!pmemSwitchSetMode(nodeId, mode, path) ||
       restarter.restartOneDbNode(nodeId, true, false, true) != 0 ||
       restarter.waitNodesStarted(&nodeId, 1, 600) != 0) {
     g_err << "Failed to restore node " << node << endl;
@@ -5442,6 +5510,16 @@ TESTCASE("MaxRedoRecordSR",
 TESTCASE("PmemRedoModeSwitch",
          "RONDB-1150: RedoLogMode changes only with an initial node "
          "restart, in both directions") {
+  INITIALIZER(runWaitStarted);
+  INITIALIZER(runLoadTable);
+  STEP(runPmemRedoModeSwitch);
+  FINALIZER(runPmemRedoModeRestore);
+  FINALIZER(runClearTable);
+}
+TESTCASE("PmemRedoModeSwitchDropPath",
+         "RONDB-1150: as PmemRedoModeSwitch, from PMEM mode with "
+         "FileSystemPathRedoLog, unset while the node runs in file mode") {
+  TC_PROPERTY("PmemSwitchDropPath", Uint32(1));
   INITIALIZER(runWaitStarted);
   INITIALIZER(runLoadTable);
   STEP(runPmemRedoModeSwitch);

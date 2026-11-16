@@ -5952,9 +5952,9 @@ void Ndbcntr::execSTART_ORD(Signal *signal) {
 #define CLEAR_DD 2
 // FileSystemPathDataFiles FileSystemPathUndoFiles
 #define CLEAR_REDO (FsOpenReq::BP_REDO_LAST - FsOpenReq::BP_REDO_FIRST + 1)
-// FileSystemPathRedoLog, set in PMEM mode only (RONDB-1150); NDBFS
-// answers at once for a REDO path that is not set, so file mode clears
-// the REDO log under FileSystemPath only, as before
+// FileSystemPathRedoLog (RONDB-1150): set in PMEM mode, and in file mode
+// where PMEM mode left a directory (Ndbfs::read_redo_paths_file_mode());
+// NDBFS answers at once for a REDO path that is not set
 #define CLEAR_ALL (CLEAR_DX + CLEAR_LCP + CLEAR_DD + CLEAR_REDO)
 
 void Ndbcntr::clearFilesystem(Signal *signal) {

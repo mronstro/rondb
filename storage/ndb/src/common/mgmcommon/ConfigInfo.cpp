@@ -1020,10 +1020,10 @@ const ConfigInfo::ParamInfo ConfigInfo::m_ParamInfo[] = {
     CFG_DB_REDO_LOG_PATH,
     "FileSystemPathRedoLog",
     DB_TOKEN,
-    "Directory of the REDO log files with RedoLogMode=pmem, unused in file "
-    "mode: one absolute path, or one per NUMA node as "
-    "node:path,node:path (at most 8). A log part takes the path of the "
-    "NUMA node its LDM thread runs on. Unset: FileSystemPath",
+    "Directory of the REDO log files with RedoLogMode=pmem, in file mode "
+    "only cleared at an initial start: one absolute path, or one per NUMA "
+    "node as node:path,node:path (at most 8). A log part takes the path of "
+    "the NUMA node its LDM thread runs on. Unset: FileSystemPath",
     ConfigInfo::CI_USED,
     CI_RESTART_INITIAL,
     ConfigInfo::CI_STRING,
@@ -4226,9 +4226,9 @@ static bool checkRedoLogPmem(InitConfigFileParser::Context &ctx) {
   if (mode != NDB_REDO_LOG_MODE_PMEM) {
     if (path != nullptr) {
       ctx.reportWarning(
-          "FileSystemPathRedoLog has no effect with RedoLogMode=file, the "
-          "REDO log stays under FileSystemPath (section starting at line "
-          "%u)",
+          "With RedoLogMode=file the REDO log stays under FileSystemPath; "
+          "FileSystemPathRedoLog only lets an initial start clear the REDO "
+          "log of RedoLogMode=pmem there (section starting at line %u)",
           ctx.m_sectionLineno);
     }
     if (testSettings) {

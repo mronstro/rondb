@@ -35184,6 +35184,15 @@ void Dblqh::execFSOPENREF(Signal *signal) {
               "the node log");
     return;
   }
+  if (err == FsRef::fsErrRedoLogTwice) {
+    /* RONDB-1150: the node log names both files (NDBFS) */
+    progError(__LINE__, NDBD_EXIT_INVALID_CONFIG,
+              "RedoLogMode=pmem: the REDO log under FileSystemPathRedoLog "
+              "is older than the one RedoLogMode=file wrote under "
+              "FileSystemPath, see the node log; changing RedoLogMode needs "
+              "an initial node restart");
+    return;
+  }
   if (err == FsRef::fsErrFileDoesNotExist && c_redo_pmem) {
     /* NDBFS looked under every REDO path and FileSystemPath */
     progError(__LINE__, NDBD_EXIT_INVALID_CONFIG,
