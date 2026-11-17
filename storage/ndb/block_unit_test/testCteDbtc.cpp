@@ -1469,11 +1469,27 @@ collectCteLookupResults(SignalSender &ss,
                         Uint32 apiConnectPtr, Uint32 tcRef, Uint32 nodeId)
 {
   V("Waiting for CTE_LOOKUP results...\n");
+  /* Each op of a SCAN_TABCONF declares the rows of its batch, but the
+   * TRANSID_AI rows come directly from the data node of each fragment
+   * while the CONF comes from DBTC, with no ordering between nodes.
+   * Stopping at the EndOfData CONF loses a remote node's rows under
+   * load, as collectResults() did with the agg rows: keep collecting
+   * until every declared row has arrived. */
+  bool gotEndOfData = false;
+  Uint64 declaredRows = 0;
   bool done = false;
   while (!done) {
     SimpleSignal *resp = waitForSignal(ss, WAIT_TIMEOUT_MS,
                                        "TRANSID_AI/SCAN_TABCONF");
-    if (resp == nullptr) return -1;
+    if (resp == nullptr) {
+      if (gotEndOfData) {
+        fprintf(stderr,
+                "collectCteLookupResults: timeout with %zu of %llu "
+                "declared rows collected\n",
+                rows.size(), (unsigned long long)declaredRows);
+      }
+      return -1;
+    }
     int gsn = getGsn(resp);
 
     if (gsn == GSN_TRANSID_AI) {
@@ -1488,15 +1504,31 @@ collectCteLookupResults(SignalSender &ss,
       Uint32 ri = d[1];
       bool endOfData = (ri & ScanTabConf::EndOfData) != 0;
       Uint32 ops = ri & 0xFF;
-      V("  SCAN_TABCONF: ops=%u endOfData=%d ri=0x%x sigLen=%u\n",
-        ops, (int)endOfData, ri, resp->header.theLength);
+      /* ExtendedConf: [apiPtr, tcPtrI, rows, len(, active)] per op, in
+       * section 0 when the list does not fit in the signal */
+      const Uint32 *opData = d + ScanTabConf::SignalLength;
+      Uint32 opWords = resp->header.theLength - ScanTabConf::SignalLength;
+      if (resp->header.m_noOfSections != 0) {
+        opData = resp->ptr[0].p;
+        opWords = resp->ptr[0].sz;
+      }
+      if (ops != 0 && opWords != 4 * ops && opWords != 5 * ops) {
+        fprintf(stderr, "Invalid SCAN_TABCONF: %u words for %u ops\n",
+                opWords, ops);
+        return -1;
+      }
+      Uint32 words_per_op = ops > 0 ? opWords / ops : 4;
+      for (Uint32 i = 0; i < ops; i++) {
+        declaredRows += opData[i * words_per_op + 2];
+      }
+      V("  SCAN_TABCONF: ops=%u endOfData=%d ri=0x%x sigLen=%u "
+        "declared=%llu collected=%zu\n",
+        ops, (int)endOfData, ri, resp->header.theLength,
+        (unsigned long long)declaredRows, rows.size());
 
       if (endOfData) {
-        done = true;
+        gotEndOfData = true;
       } else {
-        Uint32 sigLen = resp->header.theLength;
-        Uint32 words_per_op = ops > 0 ? (sigLen - 4) / ops : 4;
-
         SimpleSignal nextSig;
         Uint32 *ndata = nextSig.getDataPtrSend();
         ndata[0] = apiConnectPtr;
@@ -1506,7 +1538,7 @@ collectCteLookupResults(SignalSender &ss,
 
         Uint32 ackCount = 0;
         for (Uint32 i = 0; i < ops; i++) {
-          Uint32 tcPtrI = d[4 + i * words_per_op + 1];
+          Uint32 tcPtrI = opData[i * words_per_op + 1];
           if (tcPtrI != RNIL) {
             ndata[4 + ackCount] = tcPtrI;
             ackCount++;
@@ -1537,6 +1569,7 @@ collectCteLookupResults(SignalSender &ss,
       V("  Ignoring GSN %d (sigLen=%u)\n",
         gsn, resp->header.theLength);
     }
+    done = gotEndOfData && rows.size() >= declaredRows;
   }
   return 0;
 }
