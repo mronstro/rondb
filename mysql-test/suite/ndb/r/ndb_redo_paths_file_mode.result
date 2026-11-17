@@ -5,4 +5,4 @@
 SELECT COUNT(*) FROM ndbinfo.redo_log_pmem;
 COUNT(*)
 0
-== 3 == an initial node restart leaves FileSystemPathRedoLog alone
+== 3 == an initial node restart clears what PMEM mode left under FileSystemPathRedoLog

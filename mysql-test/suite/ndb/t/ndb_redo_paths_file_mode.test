@@ -1,9 +1,11 @@
 --source include/have_ndb.inc
 
 # RONDB-1150: in file mode (RedoLogMode=file, the default) the REDO log
-# stays under FileSystemPath with today's names and cleanup, whether
-# FileSystemPathRedoLog is set or not. The management server warns that
-# it has no effect (ndb.ndb_redo_pmem_config).
+# stays under FileSystemPath with today's names, whether
+# FileSystemPathRedoLog is set or not. A <FileSystemPathRedoLog>/ndb_<id>_fs
+# that exists is what PMEM mode left, and an initial start clears it
+# (Ndbfs::read_redo_paths_file_mode(), decision 13 of step1_phases.md); the
+# management server warns about that (ndb.ndb_redo_pmem_config).
 
 let $cluster = $MYSQLTEST_VARDIR/mysql_cluster.1;
 
@@ -21,7 +23,7 @@ let $cluster = $MYSQLTEST_VARDIR/mysql_cluster.1;
 --echo == 2b == ndbinfo.redo_log_pmem has no rows in file mode
 SELECT COUNT(*) FROM ndbinfo.redo_log_pmem;
 
---echo == 3 == an initial node restart leaves FileSystemPathRedoLog alone
+--echo == 3 == an initial node restart clears what PMEM mode left under FileSystemPathRedoLog
 --mkdir $cluster/ndb_1_fs
 --write_file $cluster/ndb_1_fs/canary
 canary
@@ -30,11 +32,12 @@ EOF
 --exec $NDB_WAITER --wait-nodes=1 --not-started >> $NDB_TOOLS_OUTPUT
 --exec $NDB_MGM -e "1 start" >> $NDB_TOOLS_OUTPUT
 --exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+--error 1
 --file_exists $cluster/ndb_1_fs/canary
 --file_exists $cluster/ndbd.1/ndb_1_fs/D8/DBLQH/S0.FragLog
 --error 1
 --file_exists $cluster/ndb_1_fs/D8
 
---remove_file $cluster/ndb_1_fs/canary
+# The clear keeps the directory (ownDirectory = 0)
 --rmdir $cluster/ndb_1_fs
 --remove_file $NDB_TOOLS_OUTPUT

@@ -629,7 +629,7 @@ or not (`ndb.ndb_redo_paths_file_mode`).
 | `src/kernel/blocks/ndbcntr/NdbcntrMain.cpp` | `clearFilesystem`: 8 more steps, `V_BASEPATH` `BP_REDO_FIRST + i` with `ownDirectory = 0`; NDBFS answers at once for an empty slot, without touching the disk, as for unset Disk Data paths |
 | `src/kernel/blocks/dblqh/Dblqh.hpp`, `DblqhMain.cpp` | `c_ldm_numa_node`, `c_redo_path_no`; `LogPartRecord::m_redo_path_no`, `m_redo_path_warned`, `m_redo_numa_checked`. `initRedoPathConfig()` in READ_CONFIG: the LDM's NUMA node (`Ndb_GetThreadNumaNode`), its path (`RedoLogPaths::index_for_node`), one info line, or a warning if unbound or not listed. `setRedoPmemOpenFlags()` in the three open functions. `checkRedoPmemPlacement()` in `initFsopenconf`: adopts the path a file was found under, one warning per part, and one warning if the memory is on another NUMA node. FSOPENREF "not under FileSystemPathRedoLog or FileSystemPath; was FileSystemPathRedoLog changed without --initial?" |
 | `mysql-test/suite/ndb/t/ndb_redo_pmem_paths.{test,cnf}`, `r/` | PMEM mode with `nodax`, `FileSystemPathRedoLog` = the cluster's BackupDataDir: files there and not under `FileSystemPath`; system restart, node restart, a log part moved to `FileSystemPath` found there with one warning, initial node restart puts it back |
-| `mysql-test/suite/ndb/t/ndb_redo_paths_file_mode.{test,cnf}`, `r/` | File mode with `FileSystemPathRedoLog` set: files under `FileSystemPath`, nothing created under the REDO path, and an initial node restart leaves a file there alone |
+| `mysql-test/suite/ndb/t/ndb_redo_paths_file_mode.{test,cnf}`, `r/` | File mode with `FileSystemPathRedoLog` set: files under `FileSystemPath`, nothing created under the REDO path, and an initial node restart left a file there alone; since decision 13 of 11c it clears `<path>/ndb_<id>_fs` and keeps the directory |
 
 **Decisions taken in 4b.**
 
@@ -1940,6 +1940,11 @@ configurations and MTR's configuration rule.
       on DAX until `clean_datadir` removed them (M2 of
       `ndb_suite_nvdimm.md`). A file of file mode's REDO log left under
       FileSystemPath that way meets the `fsErrRedoLogTwice` check above.
+    `ndb_redo_paths_file_mode` expected the opposite, that an initial
+    node restart in file mode leaves a file under
+    `<FileSystemPathRedoLog>/ndb_<id>_fs` alone; it failed on Linux ARM64
+    once `ndbmtd` was rebuilt (reported 2026-11-17) and now checks that
+    the file is cleared and the directory kept (`ownDirectory = 0`).
     `PmemRedoModeSwitchDropPath` unsets the path while the node runs in
     file mode. MTR `ndb_redo_pmem_mode_switch_path` runs both cases with
     the REDO log under each data node's BackupDataDir, and
@@ -1954,7 +1959,7 @@ cmake --build .
 cd mysql-test
 ./mtr ndb.ndb_redo_pmem_ledger ndb.ndb_redo_pmem_ledger_power_loss ndb.ndb_gci_ledger
 ./mtr ndb.ndb_redo_pmem_gcp_save ndb.ndbinfo_plans ndb.ndb_redo_pmem_mode_switch
-./mtr ndb.ndb_redo_pmem_mode_switch_path ndb.ndb_redo_pmem_config
+./mtr ndb.ndb_redo_pmem_mode_switch_path ndb.ndb_redo_pmem_config ndb.ndb_redo_paths_file_mode
 ./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndbinfo_plans
 ./mtr --defaults-extra-file=suite/ndb/pmem_redo_powerloss.cnf ndb.ndb_redo_pmem_ledger
 ./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndb_gci_ledger
