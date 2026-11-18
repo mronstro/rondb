@@ -4676,39 +4676,72 @@ static bool pmemSwitchGetPath(int nodeId, BaseString *path) {
   return true;
 }
 
-/* Sets RedoLogMode of data node nodeId in ndb_mgmd's configuration, and
- * FileSystemPathRedoLog to path unless it is nullptr ("" for unset) */
-static bool pmemSwitchSetMode(int nodeId, Uint32 mode,
-                              const char *path = nullptr) {
-  NdbMgmd mgmd;
-  Config conf;
-  if (!pmemSwitchGetConfig(mgmd, conf)) return false;
+/* The configuration has RedoLogMode mode for data node nodeId, and
+ * FileSystemPathRedoLog path unless it is nullptr */
+static bool pmemSwitchHasMode(Config &conf, int nodeId, Uint32 mode,
+                              const char *path) {
   ConfigValues::Iterator iter(conf.m_configuration->m_config_values);
-  bool found = false;
+  bool has = false;
   for (int idx = 0; iter.openSection(CFG_SECTION_NODE, idx); idx++) {
     Uint32 type = 0;
     Uint32 id = 0;
-    Uint32 old = 0;
-    const char *oldPath = nullptr;
+    Uint32 now = 0;
+    const char *nowPath = "";
     iter.get(CFG_TYPE_OF_SECTION, &type);
     iter.get(CFG_NODE_ID, &id);
     if (type == NODE_TYPE_DB && int(id) == nodeId &&
-        iter.get(CFG_DB_REDO_LOG_MODE, &old)) {
-      found = iter.set(CFG_DB_REDO_LOG_MODE, mode) &&
-              (path == nullptr ||
-               (iter.get(CFG_DB_REDO_LOG_PATH, &oldPath) &&
-                iter.set(CFG_DB_REDO_LOG_PATH, path)));
+        iter.get(CFG_DB_REDO_LOG_MODE, &now)) {
+      iter.get(CFG_DB_REDO_LOG_PATH, &nowPath);
+      has = now == mode && (path == nullptr || strcmp(nowPath, path) == 0);
     }
     iter.closeSection();
   }
-  if (!found) {
-    g_err << "No RedoLogMode or FileSystemPathRedoLog for data node "
-          << nodeId << endl;
-    return false;
-  }
-  if (!mgmd.set_config(conf)) {
-    g_err << "Failed to set the configuration in ndb_mgmd" << endl;
-    return false;
+  return has;
+}
+
+/* Sets RedoLogMode of data node nodeId in ndb_mgmd's configuration, and
+ * FileSystemPathRedoLog to path unless it is nullptr ("" for unset).
+ * ndb_mgmd fails a change during which a node failure completes, also when
+ * it committed it (MgmtSrvr::change_config). The change after a refused
+ * restart can meet the end of the failure handling of that node, so a
+ * failed change is checked in the configuration and made again. */
+static bool pmemSwitchSetMode(int nodeId, Uint32 mode,
+                              const char *path = nullptr) {
+  for (Uint32 attempt = 1;; attempt++) {
+    NdbMgmd mgmd;
+    Config conf;
+    if (!pmemSwitchGetConfig(mgmd, conf)) return false;
+    if (attempt > 1 && pmemSwitchHasMode(conf, nodeId, mode, path)) break;
+    ConfigValues::Iterator iter(conf.m_configuration->m_config_values);
+    bool found = false;
+    for (int idx = 0; iter.openSection(CFG_SECTION_NODE, idx); idx++) {
+      Uint32 type = 0;
+      Uint32 id = 0;
+      Uint32 old = 0;
+      const char *oldPath = nullptr;
+      iter.get(CFG_TYPE_OF_SECTION, &type);
+      iter.get(CFG_NODE_ID, &id);
+      if (type == NODE_TYPE_DB && int(id) == nodeId &&
+          iter.get(CFG_DB_REDO_LOG_MODE, &old)) {
+        found = iter.set(CFG_DB_REDO_LOG_MODE, mode) &&
+                (path == nullptr ||
+                 (iter.get(CFG_DB_REDO_LOG_PATH, &oldPath) &&
+                  iter.set(CFG_DB_REDO_LOG_PATH, path)));
+      }
+      iter.closeSection();
+    }
+    if (!found) {
+      g_err << "No RedoLogMode or FileSystemPathRedoLog for data node "
+            << nodeId << endl;
+      return false;
+    }
+    if (mgmd.set_config(conf)) break;
+    if (attempt == 5) {
+      g_err << "Failed to set the configuration in ndb_mgmd" << endl;
+      return false;
+    }
+    g_err << "The configuration change failed, checking it" << endl;
+    NdbSleep_SecSleep(1);
   }
   g_err << "Node " << nodeId << ": RedoLogMode=" << pmemModeName(mode);
   if (path != nullptr) g_err << " FileSystemPathRedoLog='" << path << "'";

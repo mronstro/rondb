@@ -1765,7 +1765,7 @@ configurations and MTR's configuration rule.
 | `mysql-test/suite/ndb/pmem_redo.skip` | New, for `--skip-test-list`: the tests that set `EncryptedFileSystem=1` or `Diskless=1`, which PMEM mode refuses; those of the file format, the REDO buffer and the file switch of file mode, `testNodeRestartGcpSaveAndFileChange` among them (decision 9); `ndbinfo` and `ndbinfo_backup` |
 | `mysql-test/suite/ndb/t/ndbinfo_plans.test`, `r/` | The list of tables whose estimate equals their row count leaves out `ndb$redo_log_pmem`, as it does `ndb$config_values` (decision 10); the test skips itself under `MTR_NDB_PMEM_DIR`, whose configuration adds 6 rows of `ndb$config_values` per data node (M4 of `ndb_suite_nvdimm.md`) |
 | `test/ndbapi/testNodeRestart.cpp` | `PmemGcpSaveAndFileChange` (M6, decision 11): `runPmemGcpNeedsPmem` skips it outside PMEM mode and reads TimeBetweenGlobalCheckpoints and FragmentLogFileSize; `runPmemGcpSaveWatch` times each GCI, reads `bytes_copied` of ndbinfo `redo_log_pmem` every 5 s, and at a stall runs DUMP 7025, 2369 and 2368 2; `runGciWatcher` is quiet with `GciWatcherQuiet` |
-| `test/ndbapi/testSystemRestart.cpp` | `PmemRedoModeSwitch` (A5, decision 12) and `PmemRedoModeSwitchDropPath` (decision 13): `pmemSwitchSetMode` (the node's RedoLogMode, and FileSystemPathRedoLog in the second case, through `set_config`), `pmemSwitchGetPath`, `pmemSwitchCheckMode` (rows of ndbinfo `redo_log_pmem`), `pmemSwitchStopError` (the NDBStopForced event), `pmemSwitchOnce`, and the finalizer `runPmemRedoModeRestore` |
+| `test/ndbapi/testSystemRestart.cpp` | `PmemRedoModeSwitch` (A5, decision 12) and `PmemRedoModeSwitchDropPath` (decision 13): `pmemSwitchSetMode` (the node's RedoLogMode, and FileSystemPathRedoLog in the second case, through `set_config`), `pmemSwitchHasMode` (to check a change that ndb_mgmd reported as failed), `pmemSwitchGetPath`, `pmemSwitchCheckMode` (rows of ndbinfo `redo_log_pmem`), `pmemSwitchStopError` (the NDBStopForced event), `pmemSwitchOnce`, and the finalizer `runPmemRedoModeRestore` |
 | `mysql-test/suite/ndb/t/ndb_redo_pmem_mode_switch.{test,cnf}`, `-master.opt`, `r/` | New (A5): `PmemRedoModeSwitch --records=1000 T1` in PMEM mode, `nodax`, 4 files of 16 MB, StopOnError=0, StartFailRetryDelay=10, MaxStartFailRetries=10, the mysqlds stopped, a timeout of 45 minutes |
 | `mysql-test/suite/ndb/t/ndb_redo_pmem_mode_switch_path.{test,cnf}`, `-master.opt`, `r/` | New (decision 13): `PmemRedoModeSwitch` and `PmemRedoModeSwitchDropPath`, as `ndb_redo_pmem_mode_switch` but with `FileSystemPathRedoLog` the BackupDataDir of each data node; skipped with `MTR_NDB_PMEM_DIR`; a timeout of 90 minutes |
 | `src/kernel/blocks/ndbfs/Ndbfs.hpp`, `Ndbfs.cpp`, `AsyncFile.hpp`, `AsyncFile.cpp`, `AsyncIoThread.hpp`; `include/kernel/signaldata/FsRef.hpp`; `src/kernel/blocks/ndbcntr/NdbcntrMain.cpp`; `src/kernel/blocks/dblqh/DblqhMain.cpp` | Decision 13: `read_redo_paths_file_mode()`, `par.open.redo_lookup`, `redo_also_under_fs()`, `fsErrRedoLogTwice` and its refusal in `execFSOPENREF`; the comment of `CLEAR_REDO` |
@@ -1894,7 +1894,14 @@ configurations and MTR's configuration rule.
     switches by initial node restarts alone. A file-mode node without
     `__RedoLogPmemTestMode` skips the case, as PMEM mode would need a DAX
     file system there. A finalizer puts the node's mode back after a
-    failure.
+    failure. ndb_mgmd fails a configuration change during which a node
+    failure completes, also when it committed it
+    (`MgmtSrvr::change_config`), and the change after a refused restart
+    can meet the end of that node's failure handling: then
+    `pmemSwitchSetMode` reads the configuration back and makes the change
+    again unless it is there, up to 5 times (`PmemRedoModeSwitchDropPath`
+    failed so on macOS ARM64 with `pmem_redo_powerloss.cnf`, reported
+    2026-11-18).
     The refusals first held only while the REDO log of PMEM mode was
     under FileSystemPath; decision 13 makes them hold with
     FileSystemPathRedoLog elsewhere.
