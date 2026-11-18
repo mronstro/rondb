@@ -135,3 +135,16 @@ stay within 10 of it), or keep the test off the DAX runs. Decided
 sets, not from the data node, and raising the estimate would move it off
 the count of file mode, the default; file mode and `nodax` PMEM mode
 still run it.
+
+Correction (2026-11-18): the other 5 rows per node are not the DAX
+configuration's. The estimate was never centred on file mode: 705161e820f
+added the 4 parameters of phase 3 to an estimate already below the count,
+and phase 9 added `__RedoLogPmemPersistDelayNs`. The 207 rows above less
+`FileSystemPathRedoLog` give 206 per data node in file mode, 412 with 2
+data nodes, exactly 10 over 402: a single row more (the drift of
+066bdd414a3, online config changes by earlier tests in the worker) failed
+`ndbinfo_plans` now and then on Linux ARM64 (reported 2026-11-18). The
+estimate is now 206 per data node; `ndbinfo_plans` passed with it on
+Linux ARM64 in file mode and with `pmem_redo.cnf` (reported 2026-11-18).
+The DAX configuration has 1 row more per node, within the tolerance, but
+the test still skips itself under `MTR_NDB_PMEM_DIR`.
