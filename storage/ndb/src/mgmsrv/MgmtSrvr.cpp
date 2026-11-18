@@ -5902,7 +5902,7 @@ bool MgmtSrvr::change_config(Config &new_config, BaseString &msg) {
 
       case GSN_NF_COMPLETEREP: {
         NodeId nodeId = refToNode(signal->header.theSendersBlockRef);
-        msg.assign("Node %d failed during configuration change", nodeId);
+        msg.assfmt("Node %d failed during configuration change", nodeId);
         return false;
         break;
       }
