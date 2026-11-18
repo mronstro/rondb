@@ -84,8 +84,21 @@ Trpman::Trpman(Block_context &ctx, Uint32 instanceno)
   addRecSignal(GSN_TIME_SIGNAL, &Trpman::execTIME_SIGNAL);
   m_distribution_handler_inited = false;
   m_init_continueb = false;
-  m_trp_activity = nullptr;
-  m_num_trp_ids = 0;
+  /**
+   * Size the per-transporter activity array from the runtime
+   * configuration (same bound as the trp-id indexed send buffer arrays
+   * in mt.cpp, computed in ThreadConfig::init() before the blocks are
+   * created). Allocate it here, not in READ_CONFIG_REQ: a node started
+   * with --nostart gets READ_CONFIG_REQ only at START_ORD, but already
+   * opens and closes its transporter to the management server. All
+   * accesses use transporter ids handed out by the TransporterRegistry,
+   * which is sized from the same configuration.
+   */
+  m_num_trp_ids = mt_get_num_trp_ids();
+  ndbrequire(m_num_trp_ids > 0);
+  ndbrequire(m_num_trp_ids <= MAX_NTRANSPORTERS);
+  m_trp_activity = new TrpActivity[m_num_trp_ids];
+  memset(m_trp_activity, 0, sizeof(TrpActivity) * m_num_trp_ids);
 }
 
 Trpman::~Trpman() { delete[] m_trp_activity; }
@@ -1012,19 +1025,7 @@ void Trpman::execREAD_CONFIG_REQ(Signal *signal) {
   m_dbHbSenderTrp = 0;
   m_dbHbInterval = 0;
 
-  /**
-   * Size the per-transporter activity array from the runtime
-   * configuration (same bound as the trp-id indexed send buffer
-   * arrays in mt.cpp). All accesses use transporter ids handed out
-   * by the TransporterRegistry, which is sized from the same
-   * configuration, so the bound holds for every access.
-   */
-  if (m_trp_activity == nullptr) {
-    m_num_trp_ids = mt_get_num_trp_ids();
-    ndbrequire(m_num_trp_ids > 0);
-    ndbrequire(m_num_trp_ids <= MAX_NTRANSPORTERS);
-    m_trp_activity = new TrpActivity[m_num_trp_ids];
-  }
+  /* m_trp_activity is allocated in the constructor. */
   memset(m_trp_activity, 0, sizeof(TrpActivity) * m_num_trp_ids);
 
   ReadConfigConf *conf = (ReadConfigConf *)signal->getDataPtrSend();
