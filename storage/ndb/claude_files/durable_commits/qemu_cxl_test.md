@@ -4,7 +4,7 @@ Test Q1 of the step-1 test plan (`impl_step1_recovery_test.md` §4.1, §4.4,
 §4.5) was run on 2026-11-13 on a Rocky Linux 9.8 x86_64 host (kernel 6.11,
 32 CPUs, 62 GB), without root, in QEMU 10.1 (the Rocky 9 `qemu-kvm` build)
 with a Rocky 9 guest on elrepo `kernel-ml` 7.3.4. The build was a debug
-build of `f381b91e9f8`. This file has the result, the defects it found, the
+build of `f94f30f0a94`. This file has the result, the defects it found, the
 corrections to the plan, and how to run MTR tests on the emulated device.
 The scripts are in `qemu_cxl/`.
 
