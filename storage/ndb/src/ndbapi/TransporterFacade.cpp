@@ -2022,13 +2022,26 @@ int TransporterFacade::close_clnt(trp_client *clnt) {
 
       clnt->prepare_poll();
       if (first) {
-        clnt->raw_sendSignal(&signal, theOwnId);
-        clnt->do_forceSend(1);
-        first = false;
+        /**
+         * The send fails while this node's own transporter is not yet
+         * enabled for send to the client: start_instance() sets
+         * theTransporterRegistry, so we come here, before configure()
+         * sets theOwnTrpId and before the poll owner enables it. A
+         * client opened and closed in that window (e.g. an ndbinfo scan
+         * at mysqld start while the connect thread starts the facade)
+         * would otherwise lose its CLOSE_COMREQ and wait here forever.
+         * So retry the send until it succeeds.
+         */
+        if (clnt->raw_sendSignal(&signal, theOwnId) == 0) {
+          clnt->do_forceSend(1);
+          first = false;
+        }
       }
 
-      // perform_close_clnt() will 'wakeup()', so wait how long it takes
-      clnt->do_poll(3000);
+      // perform_close_clnt() will 'wakeup()', so wait how long it takes.
+      // Until the CLOSE_COMREQ is sent, poll briefly so that the send is
+      // retried soon after the own transporter is enabled.
+      clnt->do_poll(first ? 10 : 3000);
 
       NdbMutex_Lock(m_open_close_mutex);
       not_finished = (m_threads.get(clnt->m_blockNo) == clnt);
