@@ -329,6 +329,17 @@ our @RONDB_SUITES = qw(
   myrouter_ndb
 );
 
+# RONDB-1150: aliases that run the suites of rondb with the REDO log in
+# PMEM mode: the configuration file of the alias added to every test,
+# unless --defaults-extra-file gives another (pmem_redo_dax.cnf), and the
+# tests of its skip list skipped. rondb_pmem_powerloss adds the power-loss
+# emulation.
+our %RONDB_PMEM_ALIASES = (
+  rondb_pmem => [ "suite/ndb/pmem_redo.cnf", "suite/ndb/pmem_redo.skip" ],
+  rondb_pmem_powerloss => [ "suite/ndb/pmem_redo_powerloss.cnf",
+                            "suite/ndb/pmem_redo_powerloss.skip" ],
+);
+
 # End of list of default suites
 
 our $opt_big_test                  = 0;
@@ -3271,10 +3282,29 @@ sub get_all_suites {
 sub expand_suite_aliases {
   return if not $opt_suites;
 
+  my @suites = split(",", $opt_suites);
+  for my $suite (@suites) {
+    my $pmem_alias = $RONDB_PMEM_ALIASES{ lc($suite) };
+    next if not defined $pmem_alias;
+    # The configuration applies to the whole run, so the same suites
+    # cannot also run in another configuration in it
+    mtr_error("--suite=$suite cannot be combined with other suites")
+      if @suites > 1;
+    my ($extra_file, $skip_list) = @$pmem_alias;
+    $mtr_cases::defaults_extra_file = $extra_file
+      if not defined $mtr_cases::defaults_extra_file;
+    $opt_skip_test_list = $opt_skip_test_list ?
+      "$opt_skip_test_list,$skip_list" : $skip_list;
+    mtr_report("$suite: --defaults-extra-file=" .
+               "$mtr_cases::defaults_extra_file " .
+               "--skip-test-list=$opt_skip_test_list");
+  }
+
   my @expanded_suites;
-  for my $suite (split(",", $opt_suites)) {
+  for my $suite (@suites) {
     push(@expanded_suites,
-         lc($suite) eq "rondb" ? @RONDB_SUITES : $suite);
+         (lc($suite) eq "rondb" or exists $RONDB_PMEM_ALIASES{ lc($suite) }) ?
+           @RONDB_SUITES : $suite);
   }
   $opt_suites = join(",", @expanded_suites);
 }
@@ -8603,7 +8633,8 @@ Options to control what test suites or cases to run
   skip-sys-schema       Skip loading of the sys schema, and running the
                         sysschema test suite. An empty sys database is
                         still created.
-  skip-test-list=FILE   Skip the tests listed in FILE. Each line in the file
+  skip-test-list=FILE[,FILE...]
+                        Skip the tests listed in FILE. Each line in the file
                         is an entry and should be formatted as:
                         <TESTNAME> : <COMMENT>
   skip-test=PREFIX or REGEX
@@ -8623,6 +8654,20 @@ Options to control what test suites or cases to run
                         'non-default'- will scan the mysql directory for
                                        available suites and runs only the
                                        non-default suites.
+                        RonDB aliases, each expanded to all the RonDB suites -
+                        'rondb'      - in the suites' own configuration.
+                        'rondb_pmem' - with the REDO log in PMEM mode:
+                                       --defaults-extra-file=
+                                       $RONDB_PMEM_ALIASES{rondb_pmem}[0]
+                                       unless one is given, and the tests
+                                       of $RONDB_PMEM_ALIASES{rondb_pmem}[1]
+                                       skipped. Not with other suites.
+                        'rondb_pmem_powerloss'
+                                     - as rondb_pmem, with the power-loss
+                                       emulation:
+                                       $RONDB_PMEM_ALIASES{rondb_pmem_powerloss}[0]
+                                       and
+                                       $RONDB_PMEM_ALIASES{rondb_pmem_powerloss}[1].
   with-ndb[cluster]-only  Run only ndb tests. If no suites are explicitly given,
                         this option also skip all non ndb suites without
                         checking individual test names.

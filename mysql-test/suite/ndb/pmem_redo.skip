@@ -1,7 +1,17 @@
 ##############################################################################
 #
-# RONDB-1150: the ndb tests that do not run with the REDO log in PMEM mode
-# (pmem_redo.cnf, pmem_redo_dax.cnf, pmem_redo_powerloss.cnf):
+# RONDB-1150: the tests of the rondb suites that do not run with the REDO
+# log in PMEM mode (pmem_redo.cnf, pmem_redo_dax.cnf,
+# pmem_redo_powerloss.cnf). The suite alias rondb_pmem runs all the rondb
+# suites with pmem_redo.cnf, or the file of --defaults-extra-file, and
+# skips these; rondb_pmem_powerloss runs them with
+# pmem_redo_powerloss.cnf and skips those of pmem_redo_powerloss.skip,
+# which imports this file:
+#   ./mtr --suite=rondb_pmem --force --parallel=auto
+#   ./mtr --suite=rondb_pmem_powerloss --force --parallel=auto
+#   MTR_NDB_PMEM_DIR=/mnt/pmem0/mtr ./mtr --suite=rondb_pmem \
+#         --defaults-extra-file=suite/ndb/pmem_redo_dax.cnf --force
+# One suite by hand:
 #   ./mtr --suite=ndb --defaults-extra-file=suite/ndb/pmem_redo.cnf \
 #         --skip-test-list=suite/ndb/pmem_redo.skip --force --parallel=auto
 #

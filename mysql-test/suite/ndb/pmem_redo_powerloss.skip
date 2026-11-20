@@ -1,0 +1,14 @@
+##############################################################################
+#
+# RONDB-1150: the tests of the rondb suites that do not run with the REDO
+# log in PMEM mode and the power-loss emulation (pmem_redo_powerloss.cnf):
+# those of pmem_redo.skip, and below those that fail only with the
+# emulation. The suite alias rondb_pmem_powerloss skips them:
+#   ./mtr --suite=rondb_pmem_powerloss --force --parallel=auto
+#
+# Format as collections/disabled_ndb.def:
+#   <suite>.<test> : RONDB-1150 <comment of at most 80 characters>
+#
+##############################################################################
+
+@import suite/ndb/pmem_redo.skip

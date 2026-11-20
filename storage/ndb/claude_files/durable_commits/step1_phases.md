@@ -2019,6 +2019,25 @@ The ndb suite passed on Linux ARM64 (reported 2026-11-16), in file mode
 `pmem_redo.cnf` and `pmem_redo.skip`: no failure, and no test added to
 `pmem_redo.skip`.
 
+**The suite aliases `rondb_pmem` and `rondb_pmem_powerloss`**
+(2026-11-20). `./mtr --suite=rondb_pmem` runs all the suites of
+`--suite=rondb`, not only ndb, with `pmem_redo.cnf` as
+`--defaults-extra-file`, unless the command gives one
+(`pmem_redo_dax.cnf`), and the tests of `pmem_redo.skip` skipped.
+`rondb_pmem_powerloss` does the same with `pmem_redo_powerloss.cnf` and
+`pmem_redo_powerloss.skip`, which imports `pmem_redo.skip` and takes the
+tests that fail only with the emulation (`%RONDB_PMEM_ALIASES` and
+`expand_suite_aliases` in `mysql-test-run.pl`). The configuration
+applies to the whole run, so an alias refuses other suites beside it.
+`--skip-test-list` takes a list separated by commas now (`mtr_cases.pm`,
+as its comment said it did), so a list given with an alias is added to
+its own. The suites other than ndb have not run in PMEM mode yet, and
+none, ndb included, with the power-loss emulation as a whole. None of their tests sets
+`EncryptedFileSystem` or `Diskless`, reads `logbuffers` or `logspaces`,
+or uses the REDO log of file mode, and their `RedoBuffer` (4 MB in
+`ndb_tls`, 100 MB in `ndb_push_agg` and `rdrs2-ronsqltpch`) gives each
+log part more than the 51 pages of PMEM mode.
+
 ---
 
 ## Side track: the GCP-saved ledger (S7.4)

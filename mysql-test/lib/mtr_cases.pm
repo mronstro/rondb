@@ -462,8 +462,10 @@ sub create_disabled_test_list($$) {
 
   # Tokenize the comma separated disabled file names and add them to the hash
   if ($opt_skip_test_list) {
-    $opt_skip_test_list = get_disabled_file_path($opt_skip_test_list);
-    add_to_disabled_files_map($opt_skip_test_list, \%disabled_files_map);
+    for my $skip_test_file (split(",", $opt_skip_test_list)) {
+      add_to_disabled_files_map(get_disabled_file_path($skip_test_file),
+                                \%disabled_files_map);
+    }
   }
 
   # Add 'disabled.def' to the list of disabled files
