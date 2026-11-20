@@ -30,6 +30,18 @@ endif()
 set(BUILD_EXAMPLES ON CACHE BOOL "Build Drogon examples" FORCE)
 set(BUILD_TESTING ON CACHE BOOL "Enable Drogon tests" FORCE)
 
+# The REST server uses no database client of Drogon's ORM. Drogon builds its
+# SQLite backend whenever the build host has SQLite, and rdrs2 then links
+# libsqlite3. Without it the SQLite tests are not built either: one of them,
+# sqlite3_failed_commit, needs sqlite3_auto_extension(), which the SQLite of
+# macOS does not support.
+set(BUILD_SQLITE OFF CACHE BOOL "Build Drogon with SQLite3 support" FORCE)
+# Drogon sets USE_SQLITE3, which drogon/config.h passes to the ORM sources,
+# with option(), which keeps a value already in the cache. A build directory
+# configured when SQLite was built would otherwise keep USE_SQLITE3=ON and
+# compile calls into the SQLite backend that is no longer built.
+set(USE_SQLITE3 OFF CACHE BOOL "Enable Sqlite3" FORCE)
+
 # Define Jsoncpp_lib target
 set(jsoncpp_SOURCE_DIR "${SIMDJSON_SOURCE_DIR}/dependencies/jsoncppdist")
 add_library(Jsoncpp_lib STATIC ${jsoncpp_SOURCE_DIR}/jsoncpp.cpp)
