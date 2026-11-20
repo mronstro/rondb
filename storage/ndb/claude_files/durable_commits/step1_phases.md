@@ -24,9 +24,14 @@ merged (pull request #1231): the 14 commits of RONDB-1124-exec-fixes and
 the ronsql_oom_test link-line fix were dropped, as 26.10-main has them,
 and `ZPMEM_SR_ZERO` became 63, as 26.10-main took CONTINUEB 62 for
 `ZCONTINUE_CTE_DROP_ZERO_FINALIZE`. On 2026-11-20 it was rebased onto
-`e5cfacc2eb9` (pull request #1239, Drogon 1.9.14). The commit ids in
-this file are those after the rebase of 2026-11-20; line numbers cited
-at `7128c75dca4` are of the tree before the first rebase.
+`e5cfacc2eb9` (pull request #1239, Drogon 1.9.14). On 2026-11-21 the
+commits that are not of RONDB-1150 were moved to the start of the
+branch, so that they can go to 26.10-main on their own, except three
+that contain RONDB-1150 code and were moved to its end: the two REDO
+file-change fixes (`557bce8e128`, `f28abbe45fc`) and the MTR fix of
+config.ini and `MTR_NDB_PMEM_DIR`. The commit ids in this file are
+those after that move; line numbers cited at `7128c75dca4` are of the
+tree before the first rebase.
 
 | Phase | Pull request | Content | Packages | Gate (what the pusher runs) | Needs | State |
 |---|---|---|---|---|---|---|
@@ -72,8 +77,8 @@ otherwise unchanged.
 | `src/common/util/ndb_init.cpp` | `ndb_xxh3_init()` in `ndb_init_internal()` |
 
 The first version of this phase had a CRC32C instead, a port of InnoDB's
-(`ndb_crc32c`, commit 5c6acd4850a). It was removed after decision 5; commit
-36aef66e888 has it with its timing test.
+(`ndb_crc32c`, commit 7e1c9f9cb57). It was removed after decision 5; commit
+f97a84a7ca6 has it with its timing test.
 
 **Decisions taken while implementing.**
 
@@ -146,7 +151,7 @@ implementation and for the checksum of a REDO record (`record`). The
 timings mean something only from an optimised build (`-DWITH_DEBUG=0`).
 
 **Timings.** These come from `ndb_crc32c-t`, the timing test of the CRC32C
-version (commit 36aef66e888), in an optimised build, in ns per checksum. `crc32c/3` and `xxh3/3` checksum the same bytes in three
+version (commit f97a84a7ca6), in an optimised build, in ns per checksum. `crc32c/3` and `xxh3/3` checksum the same bytes in three
 pieces, 4 + body + 16, as a record is checksummed. `xxh3+mix` is a format
 built for XXH3: the body in one call,
 then a seeded XXH3 over the 20 bytes of `w0` and `S` with the body's hash
@@ -611,7 +616,7 @@ reservation are released. `ndb_pmem-t` gets `test_concurrent_maps` (8
 threads, 30 files each, every page tagged and read back), and
 `AsyncFile::map_pmem` logs a failed map and a failed prefault apart.
 macOS never tries MAP_SYNC, so it did not show. With the fix (commit
-fab4fbd5dc1) `ndb_pmem-t` and ten repeats of `ndb.ndb_restart`,
+28c93a50b06) `ndb_pmem-t` and ten repeats of `ndb.ndb_restart`,
 `ndb.ndb_restart2` and `ndb.ndb_basic` in `nodax` passed on Linux x86_64.
 
 Two failures seen while testing phase 4 were not in the REDO code and
@@ -1137,7 +1142,7 @@ with the last-file slot, the initial images, and the restart's phases 1,
 |---|---|---|---|
 | 8a | S6.3 (codecs), U5 | The control area of a log part: the config line and the two last-file slots, their builders (writer) and checks (reader); `pmem_redo_slot-t` | Built with 8b (2026-11-03); `ctest -R pmem_redo` not yet reported |
 | 8b | S4.8, S5.2-S5.5 | The write path: the initial images through the mapping, the copy-out at the end of each record, the persist, the mbyte and file switch with the slot, GCP_SAVEREQ with no FSSYNCREQ, the bypassed paths, `DUMP 2368 3` to verify the persisted log. `c_redo_pmem_format` is set in PMEM mode | `ndb.ndb_redo_pmem_write` and `ndb.ndb_basic` with `pmem_redo.cnf` passed on macOS ARM64 (2026-11-03), after the fix of the test's recursive CTE; the rest of the commands below to be run |
-| 8c | S6.1, S6.3-S6.6 | The restart: the reads from the mapping, the control area and the slot at phase 1, the exact end E and its zeroing, phase 3 on the new records with the COMMIT invalidation in place, phase 4 with the zeroing back to the head and the writer resume | First run on macOS ARM64: `ndb.ndb_basic` with `pmem_redo.cnf` hung in the initial start (decision 10, fixed); then all of its commands passed (reported 2026-11-05). Committed as `a4efaf6ba59` with 8a and 8b |
+| 8c | S6.1, S6.3-S6.6 | The restart: the reads from the mapping, the control area and the slot at phase 1, the exact end E and its zeroing, phase 3 on the new records with the COMMIT invalidation in place, phase 4 with the zeroing back to the head and the writer resume | First run on macOS ARM64: `ndb.ndb_basic` with `pmem_redo.cnf` hung in the initial start (decision 10, fixed); then all of its commands passed (reported 2026-11-05). Committed as `b0633237c00` with 8a and 8b |
 | 8d | S5.5 | The rest of S5.5: the asserts on the paths the PMEM format never takes, no IO tracker tick, the log-buffer-full assert, the RedoBuffer check at start, `ndb_redo_pmem_queue` | All of its commands passed on macOS ARM64 (reported 2026-11-05) |
 
 **Decision taken before 8b: the format comes on in 8b, and a PMEM-mode
@@ -1442,9 +1447,9 @@ with `__RedoLogPmemPersistDelayNs` at 0, 200 and 2000.
 GCP stop while MTR stopped the cluster after
 `testNodeRestartGcpSaveAndFileChange`, the last test of its worker. The
 GCP save of one LDM waited for page 0 of a new REDO file; file mode,
-older than phase 9, fixed in a commit of its own (`de59cbb79e5`). Looking
+older than phase 9, fixed in a commit of its own (`b5a99331e8e`). Looking
 into it found a second file-mode bug, fixed in another commit
-(`882904f5075`, test `ndb.ndb_redo_late_file_open`): when logging moved to
+(`557bce8e128`, test `ndb.ndb_redo_late_file_open`): when logging moved to
 a REDO file whose open had not completed, the records written before the
 open were lost under the file descriptor written at the open.
 
@@ -1540,7 +1545,7 @@ last command is the file-mode regression.
   `setLogTail()` took the head from the last mbyte of file 1 to file 2,
   and page 0 of file 0 ended with file 1, the older change completing
   last. File mode, older than RONDB-1150, fixed in a commit of its own
-  (`69f31ac751f`, test `ndb.ndb_redo_file_change_hold`): the head now
+  (`f28abbe45fc`, test `ndb.ndb_redo_file_change_hold`): the head now
   leaves a file only when the change to the file is done and the next
   file is open, and the commit, abort and COMPLETED_GCI records that do
   not fit before the end of the file wait in the log queues. Error insert
@@ -2015,7 +2020,7 @@ passed on macOS ARM64 (reported 2026-11-13) but for two tests:
   (decision 10), and 946 error messages where the result has 943. The
   count fails in file mode too: RONDB-1124-exec-fixes added the errors
   604, 817 and 5071 after its last re-record of the result
-  (`d21ca4d24be`). Fixed in a commit of its own (`2b470e1e813`).
+  (`d21ca4d24be`). Fixed in a commit of its own (`4b639d28a25`).
 
 `ndb_redo_pmem_gcp_save` (decision 11) passed on macOS ARM64 (reported
 2026-11-13), once the mysqlds were stopped during the run. After it MTR
