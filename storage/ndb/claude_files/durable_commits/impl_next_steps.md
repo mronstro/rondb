@@ -525,8 +525,12 @@ Part 1 written, to be tested:
   the durable COMMIT passed on to the previous replica. Printers and
   `PackedSignal::verify` know code 8.
 - The LQH_TRANSCONF word moves to X4.9, its only reader.
-- Test setting: `suite/ndb/pmem_redo_durable.cnf`. ndbinfo `config_values`
-  estimate 207 per node.
+- Test setting: `suite/ndb/pmem_redo_durable.cnf`, with
+  `pmem_redo_durable.skip` (`pmem_redo.skip` and the two tests of
+  `PmemRedoModeSwitch`, whose node in file mode DIH refuses) and the
+  suite alias `rondb_pmem_durable`:
+  `./mtr --suite=rondb_pmem_durable --force --parallel=auto`. ndbinfo
+  `config_values` estimate 207 per node.
 
 Part 2 written, to be tested (X4.5 and X4.4):
 - An `OP_DURABLE` operation's COMMIT record has `CF_DURABLE` and the

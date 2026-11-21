@@ -333,11 +333,13 @@ our @RONDB_SUITES = qw(
 # PMEM mode: the configuration file of the alias added to every test,
 # unless --defaults-extra-file gives another (pmem_redo_dax.cnf), and the
 # tests of its skip list skipped. rondb_pmem_powerloss adds the power-loss
-# emulation.
+# emulation, rondb_pmem_durable durable commits (X4).
 our %RONDB_PMEM_ALIASES = (
   rondb_pmem => [ "suite/ndb/pmem_redo.cnf", "suite/ndb/pmem_redo.skip" ],
   rondb_pmem_powerloss => [ "suite/ndb/pmem_redo_powerloss.cnf",
                             "suite/ndb/pmem_redo_powerloss.skip" ],
+  rondb_pmem_durable => [ "suite/ndb/pmem_redo_durable.cnf",
+                          "suite/ndb/pmem_redo_durable.skip" ],
 );
 
 # End of list of default suites
@@ -8709,6 +8711,11 @@ Options to control what test suites or cases to run
                                        $RONDB_PMEM_ALIASES{rondb_pmem_powerloss}[0]
                                        and
                                        $RONDB_PMEM_ALIASES{rondb_pmem_powerloss}[1].
+                        'rondb_pmem_durable'
+                                     - as rondb_pmem, with durable commits:
+                                       $RONDB_PMEM_ALIASES{rondb_pmem_durable}[0]
+                                       and
+                                       $RONDB_PMEM_ALIASES{rondb_pmem_durable}[1].
   with-ndb[cluster]-only  Run only ndb tests. If no suites are explicitly given,
                         this option also skip all non ndb suites without
                         checking individual test names.

@@ -4,6 +4,11 @@
 # durably and is acknowledged after the complete phase. Add it to a test
 # run:
 #   ./mtr --defaults-extra-file=suite/ndb/pmem_redo_durable.cnf ndb.ndb_basic
+# All the rondb suites, without the tests of pmem_redo_durable.skip:
+#   ./mtr --suite=rondb_pmem_durable --force --parallel=auto
+# The ndb suite by hand:
+#   ./mtr --suite=ndb --defaults-extra-file=suite/ndb/pmem_redo_durable.cnf \
+#         --skip-test-list=suite/ndb/pmem_redo_durable.skip --force
 [cluster_config]
 RedoLogMode=pmem
 __RedoLogPmemTestMode=nodax
