@@ -23,10 +23,8 @@ let $base_backup_records_in_use =
 --echo # Start backup with NOWAIT option
 --exec $NDB_MGM -e "start backup nowait" >> $NDB_TOOLS_OUTPUT
 
-# Load current backup id into "the_backup_id" variable
---source include/ndb_backup_id.inc
-
---assert($the_backup_id > $old_backup_id)
+# The backup takes its id after NOWAIT has returned
+--source ndb_backup_nowait_wait_id.inc
 
 --echo # Repeat above steps with node 2 as master
 --echo # Restart Node 1 to force Node 2 to be master
@@ -49,10 +47,8 @@ let $start_backup_records_in_use = $base_backup_records_in_use;
 --echo # Start backup with NOWAIT option
 --exec $NDB_MGM -e "start backup nowait" >> $NDB_TOOLS_OUTPUT
 
-# Load current backup id into "the_backup_id" variable
---source include/ndb_backup_id.inc
-
---assert($the_backup_id > $old_backup_id)
+# The backup takes its id after NOWAIT has returned
+--source ndb_backup_nowait_wait_id.inc
 
 let $start_backup_records_in_use = $base_backup_records_in_use;
 --source ndb_backup_nowait_wait.inc
