@@ -28,10 +28,12 @@ and `ZPMEM_SR_ZERO` became 63, as 26.10-main took CONTINUEB 62 for
 commits that are not of RONDB-1150 were moved to the start of the
 branch, so that they can go to 26.10-main on their own, except three
 that contain RONDB-1150 code and were moved to its end: the two REDO
-file-change fixes (`557bce8e128`, `f28abbe45fc`) and the MTR fix of
-config.ini and `MTR_NDB_PMEM_DIR`. The commit ids in this file are
-those after that move; line numbers cited at `7128c75dca4` are of the
-tree before the first rebase.
+file-change fixes (`f5db9c55c52`, `7646a500fbf`) and the MTR fix of
+config.ini and `MTR_NDB_PMEM_DIR`. X1 of the next steps, the takeover's
+ack after the complete phase (`6878ac25a3f`, DBTC only), was then put
+last among them, before the first RONDB-1150 commit. The commit ids in
+this file are those after that; line numbers cited at `7128c75dca4` are
+of the tree before the first rebase.
 
 Also on 2026-11-21 the PMEM functions of DBLQH moved from `DblqhMain.cpp`
 to the new `DblqhPmemRedo.cpp`, and the PMEM members to the end of their
@@ -83,8 +85,8 @@ otherwise unchanged.
 | `src/common/util/ndb_init.cpp` | `ndb_xxh3_init()` in `ndb_init_internal()` |
 
 The first version of this phase had a CRC32C instead, a port of InnoDB's
-(`ndb_crc32c`, commit 7e1c9f9cb57). It was removed after decision 5; commit
-f97a84a7ca6 has it with its timing test.
+(`ndb_crc32c`, commit fcea3085e37). It was removed after decision 5; commit
+a086f1d7808 has it with its timing test.
 
 **Decisions taken while implementing.**
 
@@ -157,7 +159,7 @@ implementation and for the checksum of a REDO record (`record`). The
 timings mean something only from an optimised build (`-DWITH_DEBUG=0`).
 
 **Timings.** These come from `ndb_crc32c-t`, the timing test of the CRC32C
-version (commit f97a84a7ca6), in an optimised build, in ns per checksum. `crc32c/3` and `xxh3/3` checksum the same bytes in three
+version (commit a086f1d7808), in an optimised build, in ns per checksum. `crc32c/3` and `xxh3/3` checksum the same bytes in three
 pieces, 4 + body + 16, as a record is checksummed. `xxh3+mix` is a format
 built for XXH3: the body in one call,
 then a seeded XXH3 over the 20 bytes of `w0` and `S` with the body's hash
@@ -622,7 +624,7 @@ reservation are released. `ndb_pmem-t` gets `test_concurrent_maps` (8
 threads, 30 files each, every page tagged and read back), and
 `AsyncFile::map_pmem` logs a failed map and a failed prefault apart.
 macOS never tries MAP_SYNC, so it did not show. With the fix (commit
-28c93a50b06) `ndb_pmem-t` and ten repeats of `ndb.ndb_restart`,
+5f3b1548561) `ndb_pmem-t` and ten repeats of `ndb.ndb_restart`,
 `ndb.ndb_restart2` and `ndb.ndb_basic` in `nodax` passed on Linux x86_64.
 
 Two failures seen while testing phase 4 were not in the REDO code and
@@ -1148,7 +1150,7 @@ with the last-file slot, the initial images, and the restart's phases 1,
 |---|---|---|---|
 | 8a | S6.3 (codecs), U5 | The control area of a log part: the config line and the two last-file slots, their builders (writer) and checks (reader); `pmem_redo_slot-t` | Built with 8b (2026-11-03); `ctest -R pmem_redo` not yet reported |
 | 8b | S4.8, S5.2-S5.5 | The write path: the initial images through the mapping, the copy-out at the end of each record, the persist, the mbyte and file switch with the slot, GCP_SAVEREQ with no FSSYNCREQ, the bypassed paths, `DUMP 2368 3` to verify the persisted log. `c_redo_pmem_format` is set in PMEM mode | `ndb.ndb_redo_pmem_write` and `ndb.ndb_basic` with `pmem_redo.cnf` passed on macOS ARM64 (2026-11-03), after the fix of the test's recursive CTE; the rest of the commands below to be run |
-| 8c | S6.1, S6.3-S6.6 | The restart: the reads from the mapping, the control area and the slot at phase 1, the exact end E and its zeroing, phase 3 on the new records with the COMMIT invalidation in place, phase 4 with the zeroing back to the head and the writer resume | First run on macOS ARM64: `ndb.ndb_basic` with `pmem_redo.cnf` hung in the initial start (decision 10, fixed); then all of its commands passed (reported 2026-11-05). Committed as `b0633237c00` with 8a and 8b |
+| 8c | S6.1, S6.3-S6.6 | The restart: the reads from the mapping, the control area and the slot at phase 1, the exact end E and its zeroing, phase 3 on the new records with the COMMIT invalidation in place, phase 4 with the zeroing back to the head and the writer resume | First run on macOS ARM64: `ndb.ndb_basic` with `pmem_redo.cnf` hung in the initial start (decision 10, fixed); then all of its commands passed (reported 2026-11-05). Committed as `f77b921a6ef` with 8a and 8b |
 | 8d | S5.5 | The rest of S5.5: the asserts on the paths the PMEM format never takes, no IO tracker tick, the log-buffer-full assert, the RedoBuffer check at start, `ndb_redo_pmem_queue` | All of its commands passed on macOS ARM64 (reported 2026-11-05) |
 
 **Decision taken before 8b: the format comes on in 8b, and a PMEM-mode
@@ -1455,7 +1457,7 @@ GCP stop while MTR stopped the cluster after
 GCP save of one LDM waited for page 0 of a new REDO file; file mode,
 older than phase 9, fixed in a commit of its own (`b5a99331e8e`). Looking
 into it found a second file-mode bug, fixed in another commit
-(`557bce8e128`, test `ndb.ndb_redo_late_file_open`): when logging moved to
+(`f5db9c55c52`, test `ndb.ndb_redo_late_file_open`): when logging moved to
 a REDO file whose open had not completed, the records written before the
 open were lost under the file descriptor written at the open.
 
@@ -1551,7 +1553,7 @@ last command is the file-mode regression.
   `setLogTail()` took the head from the last mbyte of file 1 to file 2,
   and page 0 of file 0 ended with file 1, the older change completing
   last. File mode, older than RONDB-1150, fixed in a commit of its own
-  (`f28abbe45fc`, test `ndb.ndb_redo_file_change_hold`): the head now
+  (`7646a500fbf`, test `ndb.ndb_redo_file_change_hold`): the head now
   leaves a file only when the change to the file is done and the next
   file is open, and the commit, abort and COMPLETED_GCI records that do
   not fit before the end of the file wait in the log queues. Error insert

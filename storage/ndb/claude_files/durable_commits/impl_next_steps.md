@@ -88,6 +88,30 @@ transaction; new test passes; existing takeover tests in
 **Order:** X1.1, X1.2. **Risk:** low; the ack after takeover gets slower
 by one COMPLETEREQ round.
 
+**State (2026-11-21): implemented in `6878ac25a3f`, to be tested.** It
+needs nothing from RONDB-1150, so it sits before the first RONDB-1150
+commit on the branch and can go to 26.10-main on its own.
+- X1.1 as planned in `DbtcMain.cpp`: no TCKEY_FAILCONF in
+  `completeTransAtTakeOverDoOne` (CS_FAIL_COMMITTED) or in the takeover
+  branch of `check_finished_commit_handling`; it is sent first in the
+  takeover branch of `check_finished_complete_handling`, before
+  `releaseTakeOver`. CS_FAIL_COMPLETED unchanged.
+- Error insert 8320 (`ERROR_codes.txt`, the RONDB-1150 range 8320-8339):
+  at the start of `toCompleteHandlingLab` for a takeover, once, the
+  COMPLETEREQs are sent 2 s late through `ZSEND_TO_COMPLETE_HANDLING`, as
+  after a real-time break.
+- `testNodeRestart -n TakeoverReadBackupRYW T1`: T1 re-created with
+  READ_BACKUP; one transaction on a non-master TC updates the first 64
+  rows; 8133 on that TC, 8320 on the others. After the takeover's ack a
+  committed read of the rows must show the update. Only the rows whose
+  primary replica was on the failed TC tell the fix apart (the replica
+  left is a backup, which shows the update at COMPLETE), so the test
+  counts them through `getFragmentNodes` and is skipped if there are
+  none. Registered in `daily-devel--07-tests.txt` next to
+  `TcTakeoverReopenOlderGciBehindNewerGci`, as `daily-basic-tests.txt` is
+  split into numbered files, and run by MTR as
+  `ndb.testNodeRestartTakeoverReadBackupRYW`.
+
 ---
 
 ## 3. X3 — Test harness
