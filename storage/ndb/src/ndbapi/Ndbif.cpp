@@ -609,6 +609,17 @@ void NdbImpl::trp_deliver_signal(const NdbApiSignal *aSignal,
 #endif
 
         if (unlikely(magicNumber != tRec->getMagicNumber())) {
+          if (magicNumber == 0) {
+            /**
+             * The receiver is released (NdbReceiver::release()), its scan
+             * is closed. A scan that fails in one fragment is closed
+             * while the other fragments' TRANSID_AI can still be on their
+             * way: they come straight from the LQHs, the SCAN_TABREF comes
+             * from the TC, and nothing orders the two. Such a late signal
+             * is expected and is dropped without a warning.
+             */
+            return;
+          }
 #ifdef NDB_NO_DROPPED_SIGNAL
           abort();
 #endif
