@@ -280,8 +280,13 @@ void Dbtup::execTUP_WRITELOG_REQ(Signal *signal) {
 /* ---------------------------------------------------------------- */
 void Dbtup::initOpConnection(Operationrec* regOperPtr)
 {
-  /* Cannot use jam here, called from other thread */
-  jamDebug();
+  /**
+   * Cannot use jam here, called from other thread: a query thread that
+   * executes a non-dirty LQHKEYREQ seizes the operation record in the LDM
+   * thread that owns the fragment (Dblqh::seize_op_rec), which comes here
+   * through Dbtup::seize_op_rec on the LDM's DBTUP. A jam would write to
+   * the jam buffer of the LDM thread.
+   */
   set_tuple_state(regOperPtr, TUPLE_ALREADY_ABORTED);
   set_trans_state(regOperPtr, TRANS_IDLE);
   regOperPtr->m_commit_state = Operationrec::CommitNotStarted;
