@@ -8462,6 +8462,18 @@ Ptr<Dbtc::ApiConnectRecord> Dbtc::sendApiCommitAndCopy(
     goto err8055;
   }
 
+  /**
+   * RONDB-1150 (X4.7): invariant A. This is the ack at the end of the
+   * commit phase; a durable transaction is acked only after the complete
+   * phase, by sendApiLateCommitSignal() or, after a TC takeover, by
+   * TCKEY_FAILCONF. The other senders of a commit ack (no operations left,
+   * only simple reads or dirty writes) answer transactions that never
+   * reach DIVERIFYCONF, so never TF_DURABLE ones.
+   */
+  ndbassert(!tc_testbit(apiConnectptr.p->m_flags,
+                        ApiConnectRecord::TF_DURABLE) ||
+            tc_testbit(apiConnectptr.p->m_flags,
+                       ApiConnectRecord::TF_LATE_COMMIT));
   sendApiCommitSignal(signal, apiConnectptr);
 
 err8055:

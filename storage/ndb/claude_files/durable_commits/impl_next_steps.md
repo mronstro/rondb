@@ -565,6 +565,41 @@ Part 2 written, to be tested (X4.5 and X4.4):
   no `durable`, no COMPLETE). Also: the hint check of error inserts
   8050/8072 in TC ignores `SOF_LOGGED_WRITE`, as before part 1.
 
+Part 3 written, to be tested (X4.6 and X4.7):
+- `redoLocalCommitAtComplete()` decides once the COMMIT record is
+  written, for seqNoReplica 0, in `commitReqLab` and
+  `handle_queued_log_write`: an operation in `RESERVED_TAIL` (durable, a
+  COMPLETE record to follow) with `AC_NORMAL` gets
+  `OP_LOCAL_COMMIT_AT_COMPLETE` (0x800) and goes to `commitReplyLab`
+  (COMMITTED or COMMITCONF) without the local commit.
+- `execCOMPLETE` and `execCOMPLETEREQ`: seq 0 with the flag →
+  `localCommitLab`, after the COMPLETE record and its barrier (part 2).
+  `tupcommit_conf` tests the flag first → `completeTransLastLab`, which
+  sends COMPLETED, or COMPLETECONF through `completeUnusualLab` for
+  `REQ_FROM_TC_COMMIT`. The disk-page wait (`tupcommit_conf_callback`)
+  takes the same way.
+- Unlike the table above, the flag is set at COMMIT, not at COMPLETE: the
+  COMPLETE record has taken the reservation to `RESERVED_NONE` before the
+  branch, so `RESERVED_TAIL` can no longer tell there.
+- Not deferred: reads (DI-9), writes without a REDO record (no COMPLETE
+  record follows), `AC_NR_COPY`, dirty writes (X4.13).
+- Checked: TC sends COMMITREQ in a takeover only to replicas reported
+  Prepared; a primary in `WAIT_TUP_COMMIT` at COMPLETE reports Committed,
+  as a backup does today, and a COMPLETEREQ for an operation already gone
+  gets COMPLETECONF. The copy scan of a node restart (`CFR_TRANSACTIONAL`)
+  takes shared locks, so it waits for the primary's commit. The
+  transaction stays in TC's GCP list until the complete phase ends, so
+  the detached triggers that the primary now fires at COMPLETE come
+  before the GCP completes.
+- X4.7: every commit ack before the complete phase goes through
+  `sendApiCommitAndCopy`, which now asserts that a `TF_DURABLE`
+  transaction has `TF_LATE_COMMIT`; the other senders (no operations
+  left, only simple reads or dirty writes) answer transactions that
+  never reach DIVERIFYCONF. `CS_FAIL_COMPLETED` and X1's TCKEY_FAILCONF
+  come after the complete phase.
+- The test of a primary row not visible before its COMPLETE is in part 5
+  (EI 5183); the durable test run covers the path.
+
 **Risks:** the hottest commit code changes (`tupcommit_conf`, queued-log,
 parallel and takeover paths); the abort-after-commit path is new in LQH
 and TC; longer lock hold on hot rows (measured in X8.3).

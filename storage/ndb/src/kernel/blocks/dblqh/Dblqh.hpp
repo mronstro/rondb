@@ -3376,7 +3376,13 @@ class Dblqh : public SimulatedBlock {
        * COMMITREQ, or TUP's loop over the operations on the row);
        * m_op_count holds the opCount. PMEM format only.
        */
-      OP_DURABLE = 0x400
+      OP_DURABLE = 0x400,
+      /**
+       * RONDB-1150 (X4.6): a primary replica that commits locally at
+       * COMPLETE, not at COMMIT (redoLocalCommitAtComplete()), so that
+       * tupcommit_conf ends the complete phase
+       */
+      OP_LOCAL_COMMIT_AT_COMPLETE = 0x800
     };
     Uint32 m_flags;
     LogPartRecord *m_log_part_ptr_p;
@@ -4446,6 +4452,7 @@ private:
   void redoPersistOp(Signal *signal, const TcConnectionrec *regTcPtr);
   void redoCheckPersisted(const TcConnectionrec *regTcPtr, Uint32 line);
   void redoSetDurable(TcConnectionrec *regTcPtr, Uint32 opCount);
+  bool redoLocalCommitAtComplete(TcConnectionrec *regTcPtr);
   /**
    * RONDB-1150: theData[3] of TUP_WRITELOG_REQ and LQH_WRITELOG_REQ, the
    * direct calls of TUP's loop over the operations on a row: this bit and
@@ -7081,6 +7088,26 @@ inline void Dblqh::redoSetDurable(TcConnectionrec *regTcPtr, Uint32 opCount) {
     regTcPtr->m_flags |= TcConnectionrec::OP_DURABLE;
     regTcPtr->m_op_count = opCount;
   }
+}
+
+/**
+ * RONDB-1150 (X4.6): invariant L. The primary replica of an operation
+ * whose COMMIT record is durable commits locally at COMPLETE, after its
+ * COMPLETE record is persistent, not at COMMIT: its row is not visible,
+ * and its locks are held, until then. Asked once the COMMIT record is
+ * written, for seqNoReplica 0; RESERVED_TAIL says the record is durable
+ * and a COMPLETE record follows. AC_NR_COPY commits at COMMIT as before
+ * and writes no COMPLETE (DI-10). Reads and writes without a REDO record
+ * keep committing at COMMIT (DI-9).
+ */
+inline bool Dblqh::redoLocalCommitAtComplete(TcConnectionrec *regTcPtr) {
+  if (unlikely(c_redo_pmem_format) &&
+      regTcPtr->m_committed_log_space == PmemRedo::RESERVED_TAIL &&
+      regTcPtr->activeCreat == Fragrecord::AC_NORMAL) {
+    regTcPtr->m_flags |= TcConnectionrec::OP_LOCAL_COMMIT_AT_COMPLETE;
+    return true;
+  }
+  return false;
 }
 
 /**

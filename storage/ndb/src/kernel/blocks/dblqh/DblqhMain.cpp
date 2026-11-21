@@ -929,8 +929,13 @@ void Dblqh::handle_queued_log_write(Signal *signal, LogPartRecord *logPartPtrP,
                        instance(),
                        logPartPtrP->logPartNo,
                        tcConnectptr.i));
-        if (tcConnectptr.p->seqNoReplica == 0 ||
-            tcConnectptr.p->activeCreat == Fragrecord::AC_NR_COPY) {
+        if (tcConnectptr.p->seqNoReplica == 0 &&
+            redoLocalCommitAtComplete(tcConnectptr.p)) {
+          /* RONDB-1150 (X4.6): L, the primary commits locally at COMPLETE */
+          jam();
+          commitReplyLab(signal, tcConnectptr.p);
+        } else if (tcConnectptr.p->seqNoReplica == 0 ||
+                   tcConnectptr.p->activeCreat == Fragrecord::AC_NR_COPY) {
           jam();
           localCommitLab(signal, tcConnectptr);
         } else {
@@ -15394,6 +15399,13 @@ void Dblqh::execCOMPLETE(Signal *signal) {
     }
     else if (tcConnectptr.p->seqNoReplica == 0)
     {
+      if (unlikely(regTcPtr->m_flags &
+                   TcConnectionrec::OP_LOCAL_COMMIT_AT_COMPLETE)) {
+        /* RONDB-1150 (X4.6): L, after the COMPLETE record above */
+        jam();
+        localCommitLab(signal, tcConnectptr);
+        return;
+      }
       jam();
       completeTransLastLab(signal, tcConnectptr);
       return;
@@ -15521,6 +15533,16 @@ void Dblqh::execCOMPLETEREQ(Signal *signal) {
      * cases properly.
      */
     jamDebug();
+    localCommitLab(signal, tcConnectptr);
+  } else if (regTcPtr->seqNoReplica == 0 &&
+             unlikely(regTcPtr->m_flags &
+                      TcConnectionrec::OP_LOCAL_COMMIT_AT_COMPLETE)) {
+    /**
+     * RONDB-1150 (X4.6): L, after the COMPLETE record above. tupcommit_conf
+     * ends with completeTransLastLab, which sends COMPLETECONF for
+     * REQ_FROM_TC_COMMIT.
+     */
+    jam();
     localCommitLab(signal, tcConnectptr);
   } else if (regTcPtr->seqNoReplica == 0) {
     jam();
@@ -15677,6 +15699,13 @@ void Dblqh::commitReqLab(Signal *signal, Uint32 gci_hi, Uint32 gci_lo,
   }
   if (unlikely(regTcPtr->seqNoReplica == 0 ||
                regTcPtr->activeCreat == Fragrecord::AC_NR_COPY)) {
+    if (unlikely(regTcPtr->seqNoReplica == 0) &&
+        redoLocalCommitAtComplete(regTcPtr)) {
+      /* RONDB-1150 (X4.6): L, the primary commits locally at COMPLETE */
+      jam();
+      commitReplyLab(signal, regTcPtr);
+      return;
+    }
     jamDebug();
     localCommitLab(signal, tcConnectptr);
     return;
@@ -15995,6 +16024,16 @@ void Dblqh::tupcommit_conf(Signal *signal,
                    regFragptr->tabRef, regFragptr->fragId));
   }  // if
   if (dirtyOp != ZTRUE) {
+    if (unlikely(tcPtrP->m_flags &
+                 TcConnectionrec::OP_LOCAL_COMMIT_AT_COMPLETE)) {
+      /**
+       * RONDB-1150 (X4.6): the primary's local commit came with COMPLETE,
+       * so it ends the complete phase
+       */
+      jam();
+      completeTransLastLab(signal, tcConnectptr);
+      return;
+    }
     if (seqNoReplica == 0 || activeCreat == Fragrecord::AC_NR_COPY) {
       jamDebug();
       commitReplyLab(signal, tcConnectptr.p);
