@@ -755,7 +755,7 @@ bool framing(TestLog &log) {
   CHECK(checkRecord(v, p, &info) == R_LEN);
   craft(log, p, makeW0(TYPE_FILLER, 0, 0), body.data(), sfx(p));
   CHECK(checkRecord(v, p, &info) == R_LEN);
-  craft(log, p, makeW0(TYPE_COMPLETE, CF_DURABLE, 4), body.data(), sfx(p));
+  craft(log, p, makeW0(TYPE_COMPLETE, 1u << 10, 4), body.data(), sfx(p));
   CHECK(checkRecord(v, p, &info) == R_FLAGS);
   craft(log, p, makeW0(TYPE_COMMIT, 1u << 10, 12), body.data(), sfx(p));
   CHECK(checkRecord(v, p, &info) == R_FLAGS);

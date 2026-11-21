@@ -695,6 +695,28 @@ Part 4b written, to be tested (X4.9):
   COMPLETEREQ or ABORTREQ finishes the operation; with rule F off it is
   COMPLETEREQ, as today.
 
+Part 5 split in two: 5a the code of X4.11 and X4.13, 5b the tests of
+X4.14. Part 5a written, to be tested:
+- **X4.13, dirty writes (Q-B1).** `CPF_SELF` (bit 9 of a COMPLETE's w0,
+  in the checksum; `checkFraming` allows it, `completeRecord` and
+  `writeCompleteLog` take the flags; the reader prints `self`). LQH reads
+  `__DurableCommits` at start (`c_durable_commits`, until X7 tells it at
+  GCP_SAVEREQ). In `doWritePrepareLog` a dirty write then gets
+  `redoSetDurable(op, 0)`, so its COMMIT is durable with opCount 0 (TC
+  counts no dirty write) and keeps the COMPLETE's part of the
+  reservation; `redoCompleteDirty()` writes its COMPLETE with `CPF_SELF`
+  (none for `AC_NR_COPY`/`AC_IGNORED`, DI-10), and the existing barrier
+  4 persists both before the local commit and before the write goes on.
+  The unit tests that took bit 9 of a COMPLETE as invalid use bit 10.
+- **X4.11, API node ids (Q-B8, f+1).** QMGR records, at the end of an API
+  node's failure handling with durable commits on, the current gci_hi
+  (`NodeRec::m_api_fail_gci`, from DIH in the same thread:
+  `durableCommitsOn()`, `currentGciHi()`, `newestRestorableGci()`).
+  `execAPI_REGREQ` ignores the node, as in ZFAIL_CLOSING, until GCI
+  f + 1 is restorable (`c_newest_restorable_gci`), with one log line; the
+  API asks again. A data node that restarted since knows no f and lets
+  the API in; X6's node-failure file may close that.
+
 **Risks:** the hottest commit code changes (`tupcommit_conf`, queued-log,
 parallel and takeover paths); the abort-after-commit path is new in LQH
 and TC; longer lock hold on hot rows (measured in X8.3).

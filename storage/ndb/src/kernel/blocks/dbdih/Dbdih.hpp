@@ -3011,6 +3011,16 @@ class Dbdih : public SimulatedBlock {
   void calculate_any_node_waiting_for_lcp();
 public:
   bool is_master() { return isMaster(); }
+  /**
+   * RONDB-1150 (X4.11): for QMGR, which runs in the same thread: whether
+   * durable commits are on, the current gci_hi, and the newest GCI that a
+   * system restart restores
+   */
+  bool durableCommitsOn() const { return m_micro_gcp.m_durable_gci != 0; }
+  Uint32 currentGciHi() const {
+    return Uint32(m_micro_gcp.m_current_gci >> 32);
+  }
+  Uint32 newestRestorableGci() const { return c_newest_restorable_gci; }
 
   NdbNodeBitmask c_shutdownReqNodes;
   void print_lcp_state();

@@ -2908,6 +2908,9 @@ void Dblqh::execREAD_CONFIG_REQ(Signal *signal) {
     ndb_mgm_get_int_parameter(p, CFG_DB_REDO_LOG_MODE, &redo_log_mode);
     c_redo_pmem = (redo_log_mode == NDB_REDO_LOG_MODE_PMEM);
     c_redo_pmem_format = c_redo_pmem;
+    Uint32 durable_commits = 0;
+    ndb_mgm_get_int_parameter(p, CFG_DB_DURABLE_COMMITS, &durable_commits);
+    c_durable_commits = c_redo_pmem && durable_commits != 0;
     c_redo_pmem_test_mode = NDB_REDO_PMEM_TEST_MODE_OFF;
     ndb_mgm_get_int_parameter(p, CFG_DB_REDO_PMEM_TEST_MODE,
                               &c_redo_pmem_test_mode);
@@ -13806,10 +13809,24 @@ void Dblqh::doWritePrepareLog(Signal *signal,
      * ACTIVE IN WRITING THE LOG. WE THUS WRITE THE LOG WITHOUT GETTING A LOCK
      * SINCE WE ARE ONLY WRITING A COMMIT LOG RECORD.
      * -------------------------------------------------------------------- */
+    if (unlikely(c_durable_commits)) {
+      /* RONDB-1150 (X4.13): a durable dirty write, opCount 0 */
+      jam();
+      redoSetDurable(regTcPtr, 0);
+    }
     writeCommitLog(signal, regTcPtr, regLogPartPtr);
     removeLogTcrec(regTcPtr, regLogPartPtr);
+    if (unlikely(regTcPtr->m_committed_log_space ==
+                 PmemRedo::RESERVED_TAIL)) {
+      jam();
+      redoCompleteDirty(signal, regTcPtr, regLogPartPtr);
+    }
     if (unlikely(c_redo_pmem_format) && regTcPtr->m_redo_end_lsn != 0) {
-      /* RONDB-1150 (S5.8): a C place of E8, the COMMIT of a dirty write */
+      /**
+       * RONDB-1150 (S5.8): a C place of E8, the COMMIT of a dirty write;
+       * with durable commits (X4.13) barrier 4 of X4.4, also over its
+       * COMPLETE, before the local commit and before the write goes on
+       */
       jam();
       redoPersistCommit(signal, regLogPartPtr, regTcPtr);
     }

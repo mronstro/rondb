@@ -78,6 +78,8 @@ void Qmgr::initData() {
     nodeRec[i].m_is_using_multi_trp = false;
     nodeRec[i].m_set_up_multi_trp_started = false;
     nodeRec[i].m_used_num_multi_trps = 0;
+    nodeRec[i].m_api_fail_gci = 0;
+    nodeRec[i].m_api_held_back_logged = false;
     nodeRec[i].m_num_activated_trps = 0;
     nodeRec[i].m_multi_trp_blockref = 0;
     nodeRec[i].m_check_multi_trp_connect_loop_count = 0;

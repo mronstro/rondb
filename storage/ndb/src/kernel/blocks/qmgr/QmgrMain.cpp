@@ -5803,6 +5803,18 @@ void Qmgr::execAPI_FAILCONF(Signal *signal) {
     setNodeInfo(failedNodePtr.i).m_version = 0;
     setNodeInfo(failedNodePtr.i).m_mysql_version = 0;
     recompute_version_info(getNodeInfo(failedNodePtr.i).m_type);
+
+    Dbdih *dih = (Dbdih *)globalData.getBlock(DBDIH, instance());
+    if (unlikely(dih->durableCommitsOn()) &&
+        getNodeInfo(failedNodePtr.i).getType() == NodeInfo::API) {
+      /**
+       * RONDB-1150 (X4.11): no transaction of the failed API process
+       * commits after this, so in no later GCI (plan, transid uniqueness)
+       */
+      jam();
+      failedNodePtr.p->m_api_fail_gci = dih->currentGciHi();
+      failedNodePtr.p->m_api_held_back_logged = false;
+    }
   }
   return;
 }  // Qmgr::execAPI_FAILCONF()
@@ -6680,6 +6692,32 @@ void Qmgr::execAPI_REGREQ(Signal *signal) {
      *   so ignore this until we do...
      */
     return;
+  }
+
+  if (unlikely(apiNodePtr.p->m_api_fail_gci != 0)) {
+    /**
+     * RONDB-1150 (X4.11, DI-5): the node id of a failed API is taken into
+     * use again once the GCI after the one it failed in is restorable, as
+     * GCIs can differ by one between data nodes. A new process starts its
+     * transids again, and phase 2 of a system restart needs each transid
+     * once in the durable tail. Ignored as in ZFAIL_CLOSING above, so the
+     * API asks again.
+     */
+    Dbdih *dih = (Dbdih *)globalData.getBlock(DBDIH, instance());
+    const Uint32 failGci = apiNodePtr.p->m_api_fail_gci;
+    if (dih->durableCommitsOn() && dih->newestRestorableGci() < failGci + 1) {
+      jam();
+      if (!apiNodePtr.p->m_api_held_back_logged) {
+        g_eventLogger->info(
+            "API node %u failed in GCI %u: it may connect again when GCI %u"
+            " is restorable (durable commits)",
+            apiNodePtr.i, failGci, failGci + 1);
+        apiNodePtr.p->m_api_held_back_logged = true;
+      }
+      return;
+    }
+    jam();
+    apiNodePtr.p->m_api_fail_gci = 0;
   }
 
 #if 0

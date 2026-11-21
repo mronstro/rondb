@@ -114,6 +114,7 @@ cannot be mixed by accident.
 | 1 | `CF_DURABLE` | COMMIT | Written under the durable protocol (GCI ≥ g). A COMPLETE or a rule-F ABORT is expected | Yes |
 | 1 | `AF_AFTER_COMMIT` | ABORT | Rule F: this operation's COMMIT record was written before | Yes |
 | 1 | `PF_TRANSID` | PREPARE | Words 8–9 hold the transid | Yes |
+| 1 | `CPF_SELF` | COMPLETE | A dirty write's (X4.13, DI-1): completes only its own COMMIT; step B of phase 2 ignores it | Yes |
 | 2–7 | — | — | Reserved, 0 | Yes |
 
 ### 3.3 What the checksum covers

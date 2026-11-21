@@ -278,10 +278,11 @@ void Dblqh::writeCompletedGciLogPmem(Signal *signal,
 /**
  * S4.4: a COMPLETE (format §5.5), after a durable COMMIT; a dependent
  * signal waits for it, and it gives back the rest of the reservation.
- * With the log part locked, from redoCompleteDurable().
+ * With the log part locked, from redoCompleteDurable(), or with CPF_SELF
+ * from redoCompleteDirty().
  */
 void Dblqh::writeCompleteLog(Signal *signal, TcConnectionrec *regTcPtr,
-                             LogPartRecord *logPartPtrP) {
+                             LogPartRecord *logPartPtrP, Uint32 flags) {
   ndbrequire(c_redo_pmem_format);
   LogPageRecordPtr logPagePtr;
   LogFileRecordPtr logFilePtr;
@@ -292,7 +293,8 @@ void Dblqh::writeCompleteLog(Signal *signal, TcConnectionrec *regTcPtr,
   ptrCheckGuard(logPagePtr, logPartPtrP->logPageFileSize,
                 logPartPtrP->logPageRecord);
   Uint32 rec[PmemRedo::COMPLETE_LEN];
-  PmemRedo::completeRecord(rec, regTcPtr->transid[0], regTcPtr->transid[1]);
+  PmemRedo::completeRecord(rec, flags, regTcPtr->transid[0],
+                           regTcPtr->transid[1]);
   redoAppendFixed(signal, logPartPtrP, logPagePtr, logFilePtr, rec,
                   PmemRedo::COMPLETE_LEN);
   regTcPtr->m_redo_end_lsn =
@@ -322,9 +324,31 @@ void Dblqh::redoCompleteDurable(Signal *signal, TcConnectionrec *regTcPtr) {
     return;
   }
   jam();
-  writeCompleteLog(signal, regTcPtr, logPartPtrP);
+  writeCompleteLog(signal, regTcPtr, logPartPtrP, 0);
   redoPersistCommit(signal, logPartPtrP, regTcPtr);
   unlock_log_part(logPartPtrP);
+}
+
+/**
+ * X4.13 (Q-B1, DI-1): a dirty write under durable commits. Its COMMIT,
+ * durable with opCount 0 (TC counts no dirty write), kept the COMPLETE's
+ * part of its reservation; its COMPLETE with CPF_SELF follows at once, so
+ * that a restart completes only this operation's own COMMIT with it. The
+ * caller persists both with one barrier (4 of X4.4) before the local
+ * commit and before the operation goes on. With the log part locked. An
+ * operation of a node restart's copy writes none (DI-10).
+ */
+void Dblqh::redoCompleteDirty(Signal *signal, TcConnectionrec *regTcPtr,
+                              LogPartRecord *logPartPtrP) {
+  ndbassert(regTcPtr->m_committed_log_space == PmemRedo::RESERVED_TAIL);
+  if (regTcPtr->activeCreat != Fragrecord::AC_NORMAL) {
+    jam();
+    release_committed_words(logPartPtrP, regTcPtr, PmemRedo::AT_COMPLETE,
+                            true);
+    return;
+  }
+  jam();
+  writeCompleteLog(signal, regTcPtr, logPartPtrP, PmemRedo::CPF_SELF);
 }
 
 /**

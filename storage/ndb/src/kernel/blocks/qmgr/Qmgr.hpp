@@ -409,6 +409,15 @@ class Qmgr : public SimulatedBlock {
     Uint64 m_secret;
     NDB_TICKS m_alloc_timeout;
     Uint16 m_failconf_blocks[QMGR_MAX_FAIL_STATE_BLOCKS];
+    /**
+     * RONDB-1150 (X4.11): with durable commits, the gci_hi at the end of
+     * the failure handling of an API node; it may register again once the
+     * next GCI is restorable, so that a new process using the node id,
+     * whose transids start again, has no transaction in the tail of a
+     * system restart beside the old one's. 0 when none is held back.
+     */
+    Uint32 m_api_fail_gci;
+    bool m_api_held_back_logged;
 
     NodeRec() { std::memset(m_failconf_blocks, 0, sizeof(m_failconf_blocks)); }
   }; /* p2c: size = 52 bytes */

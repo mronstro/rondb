@@ -218,7 +218,8 @@ void framing() {
   OK(checkFraming(makeW0(TYPE_PREPARE, 0, PREPARE_MAX + 2)) == R_LEN);
 
   /* Flags of other types, and the reserved ones */
-  OK(checkFraming(makeW0(TYPE_COMPLETE, 1u << 9, 4)) == R_FLAGS);
+  OK(checkFraming(makeW0(TYPE_COMPLETE, 1u << 10, 4)) == R_FLAGS);
+  OK(checkFraming(makeW0(TYPE_COMPLETE, CPF_SELF, 4)) == R_VALID);
   OK(checkFraming(makeW0(TYPE_COMMIT, 1u << 10, 12)) == R_FLAGS);
   OK(checkFraming(makeW0(TYPE_FILLER, 1u << 15, 4)) == R_FLAGS);
   OK(checkFraming(makeW0(TYPE_COMMIT, RF_INVALIDATED | CF_DURABLE, 12)) ==
