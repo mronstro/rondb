@@ -8,8 +8,11 @@ rev 9, `pmem_redo_recovery.md`, `pmem_redo_format.md`,
 `impl_next_steps.md`.
 
 Conventions:
-- Paths are relative to `storage/ndb/`. `DblqhMain.cpp` and `Dblqh.hpp` are
-  in `src/kernel/blocks/dblqh/`; `DbdihMain.cpp` in `src/kernel/blocks/dbdih/`.
+- Paths are relative to `storage/ndb/`. `DblqhMain.cpp`, `DblqhPmemRedo.cpp`
+  and `Dblqh.hpp` are in `src/kernel/blocks/dblqh/`; `DbdihMain.cpp` in
+  `src/kernel/blocks/dbdih/`. The new PMEM functions of DBLQH are in
+  `DblqhPmemRedo.cpp` since 2026-11-21; the restart code of file mode they
+  hook into (`execSr` and the read functions) stays in `DblqhMain.cpp`.
 - [V] = verified by reading the code at `7128c75dca4`; [I] = inferred.
 - Line numbers are those of today's tree; they move once S4/S5 land.
 - Position p = (fileNo, pageNo, pageIndex) in a log part. E = end of the
@@ -1073,7 +1076,7 @@ S7.2, S7.1 (after S5 and S6.6) ── S7.3 (after S1 journal) ─┴── S7.5
 |---|---|---|
 | Module | In `PmemRedoFormat.hpp` (W): extended `PmemRedo::pageHeaderOk`, `recordOk`. New `PmemRedoScan.{hpp,cpp}`: `PmemRedo::Pos`, `Geom`, `PartView`, `Reason`, `RecInfo`, `ScanResult`, `checkRecord`, `findEnd`, `expectedLap`, `ceilUnit`, `buildCtrlConfig`, `checkCtrlConfig`, `buildSlot`, `pickSlot` | `src/kernel/blocks/dblqh/` |
 | Constants | `PmemRedo::SLOT0_WORD` (8160), `SLOT1_WORD` (8176), `CTRL_MAGIC`, `SLOT_MAGIC`. The rest (`W_WORDS`, `HDR_*`, `FORMAT_MAGIC`, sizes, flags, `CONTROL_AREA_WORD`) is W §3.1 | `PmemRedoFormat.hpp` |
-| DBLQH functions | **End-of-log scan:** `redoPmemSrPhase1`. **Slot read and write:** `redoPmemReadControlArea`, `redoWriteLastFileSlot`. **Zeroing:** `redoPmemZero`, `redoPmemSrFourth`. Others: `redoPmemCopyPages`, `redoPmemSendReadConf`, `readCommitLogPmem`, `redoPmemInvalidateCommit`, `execSrNextMbyte`, `execSrCompletedGci`, `srPhase1PartCompleted`, `redoPmemCrashPoint`, `redoPmemCopyTorn`, `redoPmemAssertPersisted`, `redoPmemVerifyCopy` | `Dblqh.hpp`, `DblqhMain.cpp` |
+| DBLQH functions | **End-of-log scan:** `redoPmemSrPhase1`. **Slot read and write:** `redoPmemReadControlArea`, `redoWriteLastFileSlot`. **Zeroing:** `redoPmemZero`, `redoPmemSrFourth`. Others: `redoPmemCopyPages`, `redoPmemSendReadConf`, `readCommitLogPmem`, `redoPmemInvalidateCommit`, `execSrNextMbyte`, `execSrCompletedGci`, `srPhase1PartCompleted`, `redoPmemCrashPoint`, `redoPmemCopyTorn`, `redoPmemAssertPersisted`, `redoPmemVerifyCopy` | `Dblqh.hpp`, `DblqhPmemRedo.cpp`; the hooks in `execSr` and the read functions in `DblqhMain.cpp` |
 | `LogPartRecord` fields | `m_pmem_end`, `m_pmem_end_reason`, `m_pmem_file_base`, `m_pmem_zero_next`, `m_pmem_zero_stop`, `m_pmem_slot_seq`, `m_pmem_dsc_recorded`, `m_pmem_dsc_flags`, `m_pmem_unsafe_shutdown`, `m_pmem_inval_pending` | `Dblqh.hpp:1864` |
 | `LogFileRecord` field | `m_pmem_base`, `m_pmem_fileRef` (P S3.4; used here) | `Dblqh.hpp:2310` |
 | `CommitLogRecord` fields | `flags`, `gci_lo`, `transid1`, `transid2`, `opCount` | `Dblqh.hpp:3357` |

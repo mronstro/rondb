@@ -33,6 +33,11 @@ config.ini and `MTR_NDB_PMEM_DIR`. The commit ids in this file are
 those after that move; line numbers cited at `7128c75dca4` are of the
 tree before the first rebase.
 
+Also on 2026-11-21 the PMEM functions of DBLQH moved from `DblqhMain.cpp`
+to the new `DblqhPmemRedo.cpp`, and the PMEM members to the end of their
+records (the side track at the end of this file). The tables of the
+phases name the files as they were when each phase was written.
+
 | Phase | Pull request | Content | Packages | Gate (what the pusher runs) | Needs | State |
 |---|---|---|---|---|---|---|
 | 1 | 2 | CPU feature detection and XXH3, with AVX2 chosen at run time | S1.1, S1.2 | `NdbHW-t`, `ndb_xxh3-t`, `rondb_hash-t` on Linux x86_64, Linux ARM64 and macOS ARM64; file-mode regression | — | **Done**: the XXH3 version passed all tests (reported 2026-10-29); the first, CRC32C version had passed on 2026-10-28 |
@@ -53,6 +58,7 @@ tree before the first rebase.
 |---|---|---|---|---|
 | Ledger | 1 | GCP-saved ledger checker (S7.4), validated in file mode on today's code | Phase 8 | `GciLedgerSR`, `GciLedgerNR` and `ndb.ndb_gci_ledger` passed on macOS ARM64 (reported 2026-11-05), after a fix of two sign-compare warnings (section below) |
 | Bug fix | 0 | `ZMIN_READ_BUFFER_SIZE` 3 → 4 in both modes, own ticket (R13, Q-A6) | — | Written (2026-11-13), with `testSystemRestart -n MaxRedoRecordSR` and `ndb_redo_max_record` (section below); passed in both modes on macOS ARM64 (reported 2026-11-14) |
+| Layout | — | The PMEM code out of the file-mode paths of DBLQH: the PMEM members last in their records, `m_redo_end_lsn` touched only in the PMEM format, the PMEM functions in `DblqhPmemRedo.cpp` (section below) | — | Written (2026-11-21); to be built and tested |
 
 ---
 
@@ -2123,4 +2129,52 @@ cd mysql-test
 ./mtr --defaults-extra-file=suite/ndb/pmem_redo.cnf ndb.ndb_redo_max_record
 ./mtr --suite=ndb --parallel=auto
 ```
+
+## Side track: the PMEM code out of the file-mode paths (2026-11-21)
+
+**Scope.** File mode is the normal mode of RonDB. Its hot path, per
+operation and per record and page of the REDO log, is to touch neither
+the members nor the code of PMEM mode, and the PMEM code is to sit apart
+from the file-mode code. Before this change file mode reset and read
+`TcConnectionrec::m_redo_end_lsn`, which sat on the first cache line of
+the record and moved every member after it by 8 bytes; about 250 bytes
+of PMEM members sat in the middle of `LogPartRecord`, before the members
+the writers use (`logPageRecord`, `logPageFileSize`, `my_block`), and two
+in `LogFileRecord`; and about 2000 lines of PMEM functions sat in
+`DblqhMain.cpp` among the file-mode REDO functions. Both modes behave as
+before.
+
+| File | Change |
+|---|---|
+| `src/kernel/blocks/dblqh/Dblqh.hpp` | The PMEM members last in `LogPartRecord` and in `LogFileRecord`. `TcConnectionrec::m_redo_end_lsn` last in the record, after the 4 cache lines that `seizeTcrec` prefetches; the constructor, run at each seize from the pool, writes the members before it anyway. `redoCheckPersisted()` and the checks of `unlock_log_part()` read nothing of PMEM mode in file mode (debug builds). Declarations of `redoPmemEndMbyte()`, `redoPmemStartMbyte()` |
+| `src/kernel/blocks/dblqh/DblqhMain.cpp` | `m_redo_end_lsn` reset in `seizeTcrec` and `execLQHKEYREQ`, and read in `handle_queued_log_write`, `doWritePrepareLog` and `commitReqLab`, only when `c_redo_pmem_format` is set. `completedLogPage` tests it with `unlikely`. The two PMEM blocks of `writeNextLog` are calls to `redoPmemEndMbyte()` and `redoPmemStartMbyte()` |
+| `src/kernel/blocks/dblqh/DblqhPmemRedo.cpp` | New, JAM file id 574. The PMEM functions, moved from `DblqhMain.cpp` unchanged: the section from `redoSuffix` to `redoPmemPrintInfo` (the writers and the LSN helpers of phase 7, the write path of phase 8, the restart from the mappings, the checks and crash inserts of phases 9 and 11), `release_committed_words`, `openAllRedoFilesPmem`, `checkRedoPmemPlacement`, `setRedoPmemOpenFlags` and `openKeptRedoFile`. New: `redoPmemEndMbyte()`, `redoPmemStartMbyte()` |
+| `src/kernel/blocks/CMakeLists.txt`, `src/kernel/vm/Emulator.hpp` | The new file in the blocks library and in `jamFileNames` |
+
+The PMEM code left in `DblqhMain.cpp` is off the per-record path of file
+mode or behind one `unlikely` test that calls out: the dispatch at the
+top of the writers (`doWritePrepareLog`, `checkNewMbyte`,
+`increment_committed_mbytes`, `writeCommitLog`, `writeAbortLog`,
+`writeCompletedGciLog`), READ_CONFIG, the opens, the restart (`execSr`
+and the read functions), the GCP save, `DUMP 2368`, `2369`, `2370` and
+ndbinfo `redo_log_pmem`. NDBFS has PMEM code in its open and close paths
+only.
+
+**State.** Written (2026-11-21); to be built and tested on the three
+platforms.
+
+**Commands for the pusher.** On Linux x86_64, Linux ARM64 and macOS ARM64,
+in the build directory:
+
+```
+cmake --build .
+cd mysql-test
+./mtr --suite=ndb ndb_redo_late_file_open ndb_redo_file_change_hold ndb_redo_max_record testNodeRestartGcpSaveAndFileChange
+./mtr --suite=ndb --do-test=ndb_redo_pmem --force --parallel=auto
+./mtr --suite=rondb_pmem --force --parallel=auto
+./mtr --suite=ndb --parallel=auto
+```
+
+and once, in the source tree, `storage/ndb/src/kernel/vm/test_jamFileNames.sh`
+for the new JAM file id.
 

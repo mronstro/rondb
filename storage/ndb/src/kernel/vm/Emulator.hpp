@@ -706,6 +706,7 @@ static constexpr const char* const jamFileNames[] =
   "JoinAgg.hpp",                        // 571
   "AggInterpreterBase.cpp",             // 572
   "MaliciousSignalReport.hpp",          // 573
+  "DblqhPmemRedo.cpp",                  // 574
   // END jamFileNames (This marker is used by ./test_jamFileNames.sh)
 };
 

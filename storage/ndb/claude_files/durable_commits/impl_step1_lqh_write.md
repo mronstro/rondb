@@ -7,8 +7,12 @@ one of four parallel plans for execution phase X2 (`pmem_redo_design.md`
 tests) and `impl_next_steps.md`.
 
 Paths are relative to `storage/ndb/`. Short names: `DblqhMain.cpp`,
-`Dblqh.hpp`, `DblqhInit.cpp` are in `src/kernel/blocks/dblqh/`. Line numbers
-are from commit 7128c75dca4 and were checked by reading the code.
+`Dblqh.hpp`, `DblqhInit.cpp`, `DblqhPmemRedo.cpp` are in
+`src/kernel/blocks/dblqh/`. Line numbers are from commit 7128c75dca4 and
+were checked by reading the code. The new PMEM functions planned here
+for `DblqhMain.cpp` are in `DblqhPmemRedo.cpp` since 2026-11-21
+(`step1_phases.md`, the side track on the PMEM code out of the file-mode
+paths).
 Tags: **[V]** verified in the code, **[I]** inferred.
 
 Scope: S4 (record writers) and S5 (write path). Step 1 ends with the REDO on
@@ -273,7 +277,7 @@ address(f, p, w)  = file(f).m_pmem_base + p * 32768 + w * 4
 ### S4.2 Framing helpers in DBLQH
 
 - **Goal.** One way to frame a record at the current position.
-- **Functions (new, `DblqhMain.cpp`, beside `writeLogWords` at `43746`):**
+- **Functions (new, `DblqhPmemRedo.cpp`; planned beside `writeLogWords` at `DblqhMain.cpp:43746`):**
   - `void redoRecBegin(PmemRedo::RecChecksum &c, LogPartRecord *part, LogFileRecord *file, LogPageRecord *page, Uint32 w0, Uint32 *w1)`:
     S from `page->logPageWord[ZPOS_LOG_LAP]` (F10), `part->logPartNo`,
     `file->fileNo`, `file->currentFilepage`, `page->logPageWord[ZCURR_PAGE_INDEX]`.
@@ -513,9 +517,9 @@ address(f, p, w)  = file(f).m_pmem_base + p * 32768 + w * 4
 ### S5.2 The persist primitive
 
 - **Goal.** Write path §2.4 with the fence rule of E7.
-- **Functions** (new, `DblqhMain.cpp`, a "PMEM REDO" section after
-  `writeNextLog` at `44003`; declarations near `Dblqh.hpp:3991`). All run
-  with `lock_log_part(part)` held.
+- **Functions** (new, `DblqhPmemRedo.cpp`; planned as a "PMEM REDO"
+  section after `writeNextLog` at `DblqhMain.cpp:44003`; declarations near
+  `Dblqh.hpp:3991`). All run with `lock_log_part(part)` held.
 
 ```
 redoCopyOut(part, filledOnly)          // copy + drain + advance; the only PMEM store path
@@ -858,18 +862,18 @@ S5 ≈ 18.5 (1 + 5 + 3 + 1.5 + 1.5 + 1 + 1 + 1.5 + 3).
 | `LogFileRecord::m_pmem_base` | `Uint8 *` | `Dblqh.hpp` (set by platform) | S5.1 |
 | `TcConnectionrec::m_redo_end_lsn` | `Uint64` | `Dblqh.hpp` | S5.1 |
 | `Dblqh::c_redo_pmem_persist_commit` | `Uint32` | `Dblqh.hpp` | S5.8 |
-| `redoRecBegin`, `redoAppendFixed` | method | `DblqhMain.cpp` | S4.2 |
-| `writePrepareLogPmem`, `writeCommitLogPmem`, `writeAbortLogPmem`, `writeCompletedGciLogPmem`, `writeCompleteLog` | method | `DblqhMain.cpp` | S4.3, S4.4 |
-| `writeFillerPmem`, `writeNextMbytePmem` | method | `DblqhMain.cpp` | S4.5 |
-| `redoPmemHeaderImage`, `writeFileHeaderOpenPmem` | method | `DblqhMain.cpp` | S4.6 |
-| `release_committed_words`, enum `RedoRelease { AT_COMMIT, AT_COMPLETE, AT_ABORT }` | method | `DblqhMain.cpp` | S4.7 |
-| `redoLsn`, `redoAppendLsn`, `redoPmemAddr`, `redoHasUnpersisted`, `redoInitWritePosition` | method | `Dblqh.hpp` / `DblqhMain.cpp` | S5.1 |
-| `redoCopyOut`, `redoPadToUnit`, `redoPersist`, `redoPersistOp`, `redoEndOfRecord` | method | `DblqhMain.cpp` | S5.2 |
-| `redoCopyPageZero` | method | `DblqhMain.cpp` | S5.3 |
+| `redoRecBegin`, `redoAppendFixed` | method | `DblqhPmemRedo.cpp` | S4.2 |
+| `writePrepareLogPmem`, `writeCommitLogPmem`, `writeAbortLogPmem`, `writeCompletedGciLogPmem`, `writeCompleteLog` | method | `DblqhPmemRedo.cpp` | S4.3, S4.4 |
+| `writeFillerPmem`, `writeNextMbytePmem` | method | `DblqhPmemRedo.cpp` | S4.5 |
+| `redoPmemHeaderImage`, `writeFileHeaderOpenPmem` | method | `DblqhPmemRedo.cpp` | S4.6 |
+| `release_committed_words`, enum `RedoRelease { AT_COMMIT, AT_COMPLETE, AT_ABORT }` | method | `DblqhPmemRedo.cpp` | S4.7 |
+| `redoLsn`, `redoAppendLsn`, `redoPmemAddr`, `redoHasUnpersisted`, `redoInitWritePosition` | method | `Dblqh.hpp` / `DblqhPmemRedo.cpp` | S5.1 |
+| `redoCopyOut`, `redoPadToUnit`, `redoPersist`, `redoPersistOp`, `redoEndOfRecord` | method | `DblqhPmemRedo.cpp` | S5.2 |
+| `redoCopyPageZero` | method | `DblqhPmemRedo.cpp` | S5.3 |
 | `sendGcpSaveConf` | method | `DblqhMain.cpp` | S5.4 |
-| `redoCheckPersisted` | method | `DblqhMain.cpp` | S5.7 |
+| `redoCheckPersisted` | inline method | `Dblqh.hpp` | S5.7 |
 | `DumpStateOrd::LqhRedoPmem` = 2368 | enum | `include/kernel/signaldata/DumpStateOrd.hpp` | S5.8 |
-| `redoWriteLastFileSlot` | method (recovery) | `DblqhMain.cpp` | consumed |
+| `redoWriteLastFileSlot` | method (recovery) | `DblqhPmemRedo.cpp` | consumed |
 
 ---
 

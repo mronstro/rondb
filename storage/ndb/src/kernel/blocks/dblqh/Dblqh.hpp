@@ -2078,98 +2078,6 @@ class Dblqh : public SimulatedBlock {
     bool m_logged_file_change_wait;
 
     /**
-     * RONDB-1150, PMEM mode: the REDO path its files are opened under
-     * (FsOpenReq::OM_REDO_PATH), the one of its LDM thread's NUMA node,
-     * or the one a file was found under. One warning for a file found
-     * elsewhere. m_pmem_mem_numa_node: the NUMA node of the memory of
-     * its first file mapped with MAP_SYNC, -1 before; one warning when it
-     * is not the LDM thread's.
-     */
-    Uint8 m_redo_path_no;
-    bool m_redo_path_warned;
-    Int32 m_pmem_mem_numa_node;
-    /**
-     * RONDB-1150, PMEM mode: the files that SR or NR still waits for in
-     * OPENING_PMEM_MAP_ALL (openAllRedoFilesPmem()).
-     */
-    Uint32 m_pmem_files_to_map;
-    /**
-     * RONDB-1150, PMEM mode: counters of the writes to persistent memory
-     * for ndbinfo redo_log_pmem. The writer updates them under the log
-     * part lock and times one persist in 16; the owner LDM reads them
-     * without the lock, as 64-bit loads do not tear. They stay 0 until
-     * the REDO log is written through the mapping (phase 8).
-     * lat_hist: at most 250 ns, 500 ns, 1, 2, 4, 8, 16 us, more.
-     */
-    struct RedoPmemStats {
-      Uint64 barriers;
-      Uint64 bytes_copied;
-      Uint64 filler_bytes;
-      Uint64 lat_samples;
-      Uint64 lat_hist[8];
-    };
-    RedoPmemStats m_pmem_stats;
-    /**
-     * RONDB-1150, PMEM format: every byte of the log below this LSN
-     * (Dblqh::redoLsn()) is persistent; a multiple of W. Changed under
-     * the log part lock, by the copy-out of phase 8 and by
-     * redoInitWritePosition() at a restart.
-     */
-    Uint64 m_pmem_persisted_lsn;
-    /**
-     * RONDB-1150 (recovery plan S7.3), with the power-loss emulation in
-     * debug builds: the persisted LSN that the last GCP_SAVECONF checked
-     * (redoPmemCheckGcpPersisted()).
-     */
-    Uint64 m_pmem_gcp_checked_lsn;
-    /**
-     * RONDB-1150, PMEM format (S5.6): bytes stored to the mapping by the
-     * write path and not yet fenced. Every function that stores fences
-     * before it returns, so it is 0 whenever the log part is unlocked,
-     * which unlock_log_part() checks in debug builds.
-     */
-    Uint32 m_pmem_unfenced;
-    /**
-     * RONDB-1150, PMEM format: the seq of the last-file slot written last
-     * (PmemRedoFormat.hpp), and the dirty-shutdown count and the
-     * SLOT_F_* flags that the next slot records.
-     */
-    Uint64 m_pmem_slot_seq;
-    Uint64 m_pmem_dsc_recorded;
-    Uint32 m_pmem_dsc_flags;
-    /**
-     * RONDB-1150, PMEM format, a system or node restart (recovery plan
-     * S6.3-S6.6), from phase 1 to the end of phase 4:
-     *   m_pmem_file_base   the mapping of each file, by file number
-     *   m_pmem_end         E, the end of the valid log that phase 1
-     *                      found, and m_pmem_end_reason why the record
-     *                      there is not valid
-     *   m_pmem_exec_lap    the lap of the log where phase 3 reads
-     *   m_pmem_inval_pending  COMMITs invalidated in phase 3, not fenced
-     *   m_pmem_zero_from, m_pmem_zero_to  the LSNs that phase 4 still
-     *                      zeroes, from the end backwards
-     *   m_pmem_unsafe_shutdown  the device reported an unsafe shutdown
-     *                      since the last-file slot was written
-     */
-    Uint8 **m_pmem_file_base;
-    PmemRedo::Pos m_pmem_end;
-    Uint32 m_pmem_end_reason;
-    Uint32 m_pmem_exec_lap;
-    Uint32 m_pmem_inval_pending;
-    Uint64 m_pmem_zero_from;
-    Uint64 m_pmem_zero_to;
-    bool m_pmem_unsafe_shutdown;
-    /**
-     * RONDB-1150, PMEM format: the end LSN of the last COMPLETED_GCI of
-     * the part, logPartNewestCompletedGCI, which GCP_SAVECONF claims
-     * persistent (recovery plan S7.2) and DUMP 2369 prints. Error insert
-     * 5168: the LSN where the zeroing of phase 4 stops the node, 0 for
-     * none (S7.1).
-     */
-    Uint64 m_pmem_gci_end_lsn;
-    Uint64 m_pmem_zero_crash;
-
-    /**
      *       A timer that is set every time a log page is sent to disk.
      *       Ensures that log pages are not kept in main memory for
      *       more than a certain time.
@@ -2376,6 +2284,104 @@ class Dblqh : public SimulatedBlock {
       Uint32 m_first_page;
     } m_redo_page_cache;
 
+    /*
+     * RONDB-1150: the members below are used with RedoLogMode=pmem only.
+     * They come last, so that the members that the REDO log uses in file
+     * mode keep their places in the record.
+     */
+
+    /**
+     * RONDB-1150, PMEM mode: the REDO path its files are opened under
+     * (FsOpenReq::OM_REDO_PATH), the one of its LDM thread's NUMA node,
+     * or the one a file was found under. One warning for a file found
+     * elsewhere. m_pmem_mem_numa_node: the NUMA node of the memory of
+     * its first file mapped with MAP_SYNC, -1 before; one warning when it
+     * is not the LDM thread's.
+     */
+    Uint8 m_redo_path_no;
+    bool m_redo_path_warned;
+    Int32 m_pmem_mem_numa_node;
+    /**
+     * RONDB-1150, PMEM mode: the files that SR or NR still waits for in
+     * OPENING_PMEM_MAP_ALL (openAllRedoFilesPmem()).
+     */
+    Uint32 m_pmem_files_to_map;
+    /**
+     * RONDB-1150, PMEM mode: counters of the writes to persistent memory
+     * for ndbinfo redo_log_pmem. The writer updates them under the log
+     * part lock and times one persist in 16; the owner LDM reads them
+     * without the lock, as 64-bit loads do not tear. They stay 0 until
+     * the REDO log is written through the mapping (phase 8).
+     * lat_hist: at most 250 ns, 500 ns, 1, 2, 4, 8, 16 us, more.
+     */
+    struct RedoPmemStats {
+      Uint64 barriers;
+      Uint64 bytes_copied;
+      Uint64 filler_bytes;
+      Uint64 lat_samples;
+      Uint64 lat_hist[8];
+    };
+    RedoPmemStats m_pmem_stats;
+    /**
+     * RONDB-1150, PMEM format: every byte of the log below this LSN
+     * (Dblqh::redoLsn()) is persistent; a multiple of W. Changed under
+     * the log part lock, by the copy-out of phase 8 and by
+     * redoInitWritePosition() at a restart.
+     */
+    Uint64 m_pmem_persisted_lsn;
+    /**
+     * RONDB-1150 (recovery plan S7.3), with the power-loss emulation in
+     * debug builds: the persisted LSN that the last GCP_SAVECONF checked
+     * (redoPmemCheckGcpPersisted()).
+     */
+    Uint64 m_pmem_gcp_checked_lsn;
+    /**
+     * RONDB-1150, PMEM format (S5.6): bytes stored to the mapping by the
+     * write path and not yet fenced. Every function that stores fences
+     * before it returns, so it is 0 whenever the log part is unlocked,
+     * which unlock_log_part() checks in debug builds.
+     */
+    Uint32 m_pmem_unfenced;
+    /**
+     * RONDB-1150, PMEM format: the seq of the last-file slot written last
+     * (PmemRedoFormat.hpp), and the dirty-shutdown count and the
+     * SLOT_F_* flags that the next slot records.
+     */
+    Uint64 m_pmem_slot_seq;
+    Uint64 m_pmem_dsc_recorded;
+    Uint32 m_pmem_dsc_flags;
+    /**
+     * RONDB-1150, PMEM format, a system or node restart (recovery plan
+     * S6.3-S6.6), from phase 1 to the end of phase 4:
+     *   m_pmem_file_base   the mapping of each file, by file number
+     *   m_pmem_end         E, the end of the valid log that phase 1
+     *                      found, and m_pmem_end_reason why the record
+     *                      there is not valid
+     *   m_pmem_exec_lap    the lap of the log where phase 3 reads
+     *   m_pmem_inval_pending  COMMITs invalidated in phase 3, not fenced
+     *   m_pmem_zero_from, m_pmem_zero_to  the LSNs that phase 4 still
+     *                      zeroes, from the end backwards
+     *   m_pmem_unsafe_shutdown  the device reported an unsafe shutdown
+     *                      since the last-file slot was written
+     */
+    Uint8 **m_pmem_file_base;
+    PmemRedo::Pos m_pmem_end;
+    Uint32 m_pmem_end_reason;
+    Uint32 m_pmem_exec_lap;
+    Uint32 m_pmem_inval_pending;
+    Uint64 m_pmem_zero_from;
+    Uint64 m_pmem_zero_to;
+    bool m_pmem_unsafe_shutdown;
+    /**
+     * RONDB-1150, PMEM format: the end LSN of the last COMPLETED_GCI of
+     * the part, logPartNewestCompletedGCI, which GCP_SAVECONF claims
+     * persistent (recovery plan S7.2) and DUMP 2369 prints. Error insert
+     * 5168: the LSN where the zeroing of phase 4 stops the node, 0 for
+     * none (S7.1).
+     */
+    Uint64 m_pmem_gci_end_lsn;
+    Uint64 m_pmem_zero_crash;
+
   };  // Size 164 Bytes
   typedef Ptr<LogPartRecord> LogPartRecordPtr;
 
@@ -2538,15 +2544,6 @@ class Dblqh : public SimulatedBlock {
      */
     UintR fileRef;
     /**
-     *       RONDB-1150, PMEM mode: the mapping of the file, from its first
-     *       FSOPENCONF; nullptr before. NDBFS keeps the file open and
-     *       mapped from the first open until the node stops, as
-     *       m_pmem_fileRef (RNIL before); fileRef is RNIL while the file
-     *       is closed for DBLQH. See closeFile() and openKeptRedoFile().
-     */
-    Uint8 *m_pmem_base;
-    UintR m_pmem_fileRef;
-    /**
      *       The head of the pages waiting for shipment to disk.
      *       They are filled with log info.
      */
@@ -2623,6 +2620,18 @@ class Dblqh : public SimulatedBlock {
     Uint32 nextList;
     Uint32 prevList;
 #endif
+
+    /**
+     *       RONDB-1150, PMEM mode: the mapping of the file, from its first
+     *       FSOPENCONF; nullptr before. NDBFS keeps the file open and
+     *       mapped from the first open until the node stops, as
+     *       m_pmem_fileRef (RNIL before); fileRef is RNIL while the file
+     *       is closed for DBLQH. See closeFile() and openKeptRedoFile().
+     *       Last in the record, so that the members that the REDO log
+     *       uses in file mode keep their places.
+     */
+    Uint8 *m_pmem_base;
+    UintR m_pmem_fileRef;
   };  // Size 288 bytes
   typedef Ptr<LogFileRecord> LogFileRecordPtr;
   typedef ArrayPool<LogFileRecord> LogFileRecord_pool;
@@ -3208,12 +3217,6 @@ class Dblqh : public SimulatedBlock {
     }
     Uint64 fragmentptr;
     Uint64 m_user_ptr_i;
-    /**
-     * RONDB-1150, PMEM format: the end LSN of the operation's newest
-     * record that must be persistent before a dependent signal is sent:
-     * its COMMIT, and from X4 its COMPLETE or rule-F ABORT. 0 if none.
-     */
-    Uint64 m_redo_end_lsn;
     Dbacc::Operationrec *accConnectPtrP;
     Dbtup::Operationrec *tupConnectPtrP;
 #ifdef DEBUG_USAGE_COUNT
@@ -3412,6 +3415,16 @@ class Dblqh : public SimulatedBlock {
     Uint8 ring_buffer_op; /* Ring Buffer related */
     Uint8 ring_buffer_show_meta;
     Uint8 m_restore_op; /* TTL related, op originates from LCP restore */
+
+    /**
+     * RONDB-1150, PMEM format: the end LSN of the operation's newest
+     * record that must be persistent before a dependent signal is sent:
+     * its COMMIT, and from X4 its COMPLETE or rule-F ABORT. 0 if none.
+     * Read and written only when c_redo_pmem_format is set, and last in
+     * the record, so that file mode neither touches it nor has the
+     * members before it moved.
+     */
+    Uint64 m_redo_end_lsn;
   };                 /* p2c: size = 308 bytes */
 
   static constexpr Uint32 DBLQH_OPERATION_RECORD_TRANSIENT_POOL_INDEX = 0;
@@ -4334,6 +4347,9 @@ private:
    * RONDB-1150, PMEM format (PmemRedoFormat.hpp): the record writers,
    * entered from today's writers when c_redo_pmem_format is set, and the
    * positions in the log (impl_step1_lqh_write.md S4.2-S4.7, S5.1).
+   * These and the PMEM functions below are in DblqhPmemRedo.cpp, apart
+   * from redoCheckPersisted(), inline at the end of this file, and
+   * sendGcpSaveConf(), which file mode uses too.
    */
   PmemRedo::Suffix redoSuffix(const LogPartRecord *logPartPtrP,
                               const LogFileRecord *logFilePtrP,
@@ -4362,6 +4378,12 @@ private:
   void writeNextMbytePmem(LogPartRecord *logPartPtrP,
                           LogFileRecord *logFilePtrP,
                           LogPageRecord *logPagePtrP);
+  void redoPmemEndMbyte(LogPageRecordPtr &logPagePtr,
+                        LogFileRecordPtr &logFilePtr,
+                        LogPartRecord *logPartPtrP);
+  void redoPmemStartMbyte(LogPageRecordPtr &logPagePtr,
+                          LogFileRecordPtr &logFilePtr,
+                          LogPartRecord *logPartPtrP);
   void redoBuildPageZero(LogPageRecordPtr logPagePtr,
                          LogFileRecordPtr logFilePtr,
                          LogPartRecord *logPartPtrP);
@@ -7021,7 +7043,7 @@ inline void Dblqh::lock_log_part(LogPartRecord *logPartPtrP) {
 
 inline void Dblqh::unlock_log_part(LogPartRecord *logPartPtrP) {
   /* RONDB-1150 (S5.6): no store to the mapping is left unfenced */
-  ndbassert(logPartPtrP->m_pmem_unfenced == 0);
+  ndbassert(!c_redo_pmem_format || logPartPtrP->m_pmem_unfenced == 0);
   if (qt_likely(m_use_mutex_for_log_parts)) {
     jamDebug();
     NdbMutex_Unlock(&logPartPtrP->m_log_part_mutex);
@@ -7038,6 +7060,7 @@ inline void Dblqh::unlock_log_part(LogPartRecord *logPartPtrP) {
 inline void Dblqh::redoCheckPersisted(const TcConnectionrec *regTcPtr,
                                       Uint32 line) {
 #if defined(VM_TRACE) || defined(ERROR_INSERT)
+  if (!c_redo_pmem_format) return;
   const Uint64 end = regTcPtr->m_redo_end_lsn;
   if (end == 0) return;
   LogPartRecord *const logPartPtrP = regTcPtr->m_log_part_ptr_p;
@@ -7130,7 +7153,7 @@ inline void Dblqh::unlock_log_part(LogPartRecord *logPartPtrP,
                                    EmulatedJamBuffer *jamBuf)
 {
   /* RONDB-1150 (S5.6): no store to the mapping is left unfenced */
-  ndbassert(logPartPtrP->m_pmem_unfenced == 0);
+  ndbassert(!c_redo_pmem_format || logPartPtrP->m_pmem_unfenced == 0);
   if (qt_likely(m_use_mutex_for_log_parts))
   {
     thrjamDebug(jamBuf);

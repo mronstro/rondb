@@ -97,6 +97,7 @@ ADD_STATIC_LIBRARY(ndbblocks
   dblqh/DblqhCommon.cpp
   dblqh/DblqhInit.cpp
   dblqh/DblqhMain.cpp
+  dblqh/DblqhPmemRedo.cpp
   dblqh/DblqhProxy.cpp
   dblqh/Dbqlqh.cpp
   dblqh/DbqlqhProxy.cpp
