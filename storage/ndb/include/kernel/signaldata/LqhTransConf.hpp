@@ -49,7 +49,7 @@ class LqhTransConf {
   friend bool printLQH_TRANSCONF(FILE *, const Uint32 *, Uint32, Uint16);
 
  public:
-  static constexpr Uint32 SignalLength = 18;
+  static constexpr Uint32 SignalLength = 20;
   static constexpr Uint32 MarkerSignalLength = 7;
 
   /**
@@ -58,6 +58,10 @@ class LqhTransConf {
   static constexpr Uint32 SignalLength_GCI_LO = 16;
   static constexpr Uint32 SignalLength_FRAG_ID = 17;
   static constexpr Uint32 SignalLength_INST_ID = 18;
+  /* RONDB-1150 (X4.9): durableOpCount and prevNodeId */
+  static constexpr Uint32 SignalLength_DURABLE = 20;
+  /* durableOpCount of a durable operation: this bit and its opCount */
+  static constexpr Uint32 DURABLE_FLAG = 1u << 31;
 
  private:
   /**
@@ -99,6 +103,8 @@ class LqhTransConf {
   Uint32 gci_lo;
   Uint32 fragId;
   Uint32 maxInstanceId;
+  Uint32 durableOpCount;  // 18 RONDB-1150: DURABLE_FLAG | opCount, else 0
+  Uint32 prevNodeId;      // 19 RONDB-1150: the previous replica's node, or 0
 
   /**
    * Getters

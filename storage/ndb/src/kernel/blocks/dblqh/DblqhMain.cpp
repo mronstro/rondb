@@ -15384,6 +15384,18 @@ void Dblqh::execCOMPLETE(Signal *signal) {
       }
     }
     TRACE_OP(regTcPtr, "COMPLETE");
+    if (unlikely(regTcPtr->abortState == TcConnectionrec::NEW_FROM_TC) &&
+        (regTcPtr->m_flags & TcConnectionrec::OP_DURABLE) != 0) {
+      /**
+       * RONDB-1150 (X4.9, DI-7): a late COMPLETE of the failed TC, or one
+       * passed on by another replica, for a durable operation already
+       * reported to the takeover TC. That TC decides from the reports
+       * whether a COMPLETE was sent, and sends COMPLETEREQ or, by rule F,
+       * ABORTREQ: a commit here would make its decision wrong.
+       */
+      jam();
+      return;
+    }
     if (unlikely(c_redo_pmem_format) &&
         regTcPtr->m_committed_log_space == PmemRedo::RESERVED_TAIL) {
       /* RONDB-1150 (X4.5, barrier 7 of X4.4): K */
@@ -15489,6 +15501,17 @@ void Dblqh::execCOMPLETEREQ(Signal *signal) {
   switch (regTcPtr->transactionState) {
   case TcConnectionrec::COMMITTED:
     jam();
+    if (unlikely(regTcPtr->abortState == TcConnectionrec::NEW_FROM_TC) &&
+        (regTcPtr->m_flags & TcConnectionrec::OP_DURABLE) != 0 &&
+        reqBlockref == old_blockref) {
+      /**
+       * RONDB-1150 (X4.9, DI-7): a late COMPLETEREQ of the failed TC itself
+       * for a durable operation already reported to the takeover TC, as a
+       * late COMPLETE in execCOMPLETE
+       */
+      jam();
+      return;
+    }
     regTcPtr->reqBlockref = reqBlockref;
     regTcPtr->reqRef = reqPtr;
     regTcPtr->abortState = TcConnectionrec::REQ_FROM_TC_COMMIT;
@@ -18648,6 +18671,8 @@ void Dblqh::scanMarkers(Signal *signal, Uint32 tcNodeFail,
       lqhTransConf->lqhNodeId = cownNodeid;
       lqhTransConf->operationStatus = LqhTransConf::LastTransConf;
       lqhTransConf->maxInstanceId = tcNodeFailPtr.p->maxInstanceId;
+      lqhTransConf->durableOpCount = 0;
+      lqhTransConf->prevNodeId = 0;
       sendSignal(tcNodeFailPtr.p->newTcBlockref, GSN_LQH_TRANSCONF, signal,
                  LqhTransConf::SignalLength, JBB);
       return;
@@ -44815,6 +44840,21 @@ void Dblqh::sendLqhTransconf(Signal *signal, LqhTransConf::OperationStatus stat,
   lqhTransConf->tableId         = tcConnectptr.p->tableref;
   lqhTransConf->gci_lo          = tcConnectptr.p->gci_lo;
   lqhTransConf->fragId          = tcConnectptr.p->fragmentid;
+  /**
+   * RONDB-1150 (X4.9): a durable operation's opCount, so that the takeover
+   * TC commits durably and can count the transaction's writes, and the
+   * node of the previous replica, which LQHKEYREQ came from, so that it
+   * knows the node of a primary that does not report
+   */
+  lqhTransConf->durableOpCount =
+      (tcConnectptr.p->m_flags & TcConnectionrec::OP_DURABLE)
+          ? (LqhTransConf::DURABLE_FLAG | tcConnectptr.p->m_op_count)
+          : 0;
+  lqhTransConf->prevNodeId =
+      (tcConnectptr.p->seqNoReplica != 0 &&
+       refToMain(tcConnectptr.p->clientBlockref) == DBLQH)
+          ? refToNode(tcConnectptr.p->clientBlockref)
+          : 0;
 
   TcNodeFailRecord::TcFailStatus failStatus = tcNodeFailPtr.p->tcFailStatus;
   ndbrequire(failStatus == TcNodeFailRecord::TC_STATE_TRUE ||

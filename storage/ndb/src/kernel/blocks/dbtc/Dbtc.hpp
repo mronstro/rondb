@@ -1242,6 +1242,9 @@ class Dbtc : public SimulatedBlock {
      * without any does not commit durably.
      */
     Uint32 m_durable_op_count;
+    // RONDB-1150 (X4.9): in a takeover, the logged writes reported, one per
+    // operation, against m_durable_op_count: fewer means a COMPLETE was sent
+    Uint32 m_fail_logged_write_count;
     Uint32 m_concurrent_overtakeable_operations;
     Uint32 m_tc_hbrep_timer;
     ReturnSignal returnsignal;
@@ -3108,6 +3111,10 @@ class Dbtc : public SimulatedBlock {
   void timeOutFoundLab(Signal *signal, UintR anAdd, Uint32 errCode);
   void completeTransAtTakeOverLab(Signal *signal, UintR TtakeOverInd);
   void completeTransAtTakeOverDoLast(Signal *signal, UintR TtakeOverInd);
+  void fillTcConnectFailNodes(TcConnectRecord *regTcPtr, Uint32 replicaNo);
+  bool takeOverCompleteSent(ApiConnectRecordPtr apiConnectptr);
+  void takeOverAbortAfterCommit(Signal *signal,
+                                ApiConnectRecordPtr const apiConnectptr);
   void completeTransAtTakeOverDoOne(Signal *signal, UintR TtakeOverInd,
                                     ApiConnectRecordPtr apiConnectptr);
   void timeOutLoopStartLab(Signal *signal, Uint32 apiConnectPtr);
@@ -3353,6 +3360,8 @@ class Dbtc : public SimulatedBlock {
 
   Uint16 csignalKey;
   Uint16 csystemnodes;
+  // LQH_TRANSCONF: the nodes of the next replicas; [3] RONDB-1150 (X4.9),
+  // the node of the previous replica
   Uint16 cnodes[4];
   NodeId cmasterNodeId;
   UintR cnoParallelTakeOver;

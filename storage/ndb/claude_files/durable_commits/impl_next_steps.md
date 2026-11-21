@@ -652,8 +652,48 @@ Part 4 split in two. Part 4a written, to be tested (X4.10 and X4.8),
   failure after the commit decision caused abort of a durable
   transaction" (Q-B3). Late COMMITTED and COMMITCONF are ignored by the
   state checks, as today.
-- **Part 4b (X4.9):** the takeover, with the LQH_TRANSCONF opCount word;
-  a takeover TC commits a durable transaction as today until then.
+- **Part 4b (X4.9):** the takeover, below.
+
+Part 4b written, to be tested (X4.9):
+- **LQH_TRANSCONF** grows to 20 words (`SignalLength_DURABLE`): word 18
+  `durableOpCount`, `DURABLE_FLAG` (bit 31) and the opCount of an
+  `OP_DURABLE` operation, else 0; word 19 `prevNodeId`, the node of the
+  previous replica (the LQH that LQHKEYREQ came from, `clientBlockref`),
+  0 for the primary. `nextNodeId1-3` already named the next ones, so the
+  reports of an operation name the nodes of all its replicas, also of a
+  primary that does not report. The proxy and both LastTransConf senders
+  clear the words; the printer shows them.
+- **Durable takeover commit, also with rule F off.** A report with
+  `DURABLE_FLAG` sets `TF_DURABLE` and `m_durable_op_count` on the
+  takeover's transaction record (`initApiConnectFail` clears them), so its
+  COMMITREQs carry the opCount as the failed TC's COMMITs did: until now
+  a takeover wrote COMMITs without `CF_DURABLE`, and no COMPLETE for them.
+- **Counting.** A new operation record of the takeover from a Prepared or
+  Committed report of a non-dirty write on a logged table counts in
+  `m_fail_logged_write_count`, as the failed TC counted it in the opCount.
+  `fillTcConnectFailNodes()` keeps the nodes that a report names in
+  `tcNodedata` of the replicas that have not reported (failData stays
+  InvalidStatus; the other users read `tcNodedata` only for replicas that
+  reported; `updateTcStateFail` accepts the node already filled in).
+- **Rule F, with `DUMP 2561 1`.** `completeTransAtTakeOverDoOne`:
+  CS_FAIL_COMMITTING aborts (a replica only prepared means no COMPLETE was
+  sent); CS_FAIL_COMMITTED aborts unless `takeOverCompleteSent()`: fewer
+  logged writes reported than the opCount, or a replica of a reported
+  operation on a live node without a report (LQH frees an operation only
+  at COMPLETE). A replica whose node no report named, or a transaction of
+  more than 4096 operations, counts as completed: in doubt the takeover
+  completes, as without rule F. `takeOverAbortAfterCommit()` sends the
+  flagged ABORTREQs through `toAbortHandlingLab`; the API gets
+  TCKEY_FAILREF. Nothing to unlink: `commitGciHandling` runs only on the
+  commit paths of a takeover.
+- **DI-7.** LQH drops a COMPLETE for a durable operation already reported
+  to a takeover TC (`abortState` NEW_FROM_TC), and a COMPLETEREQ of the
+  failed TC itself (`reqBlockref == old_blockref`) for it. Without that, a
+  COMPLETE of the failed TC executed after the report would commit that
+  replica locally, without passing COMPLETE on (`completeUnusualLab` with
+  NEW_FROM_TC), while a rule-F takeover aborts the others. The takeover's
+  COMPLETEREQ or ABORTREQ finishes the operation; with rule F off it is
+  COMPLETEREQ, as today.
 
 **Risks:** the hottest commit code changes (`tupcommit_conf`, queued-log,
 parallel and takeover paths); the abort-after-commit path is new in LQH

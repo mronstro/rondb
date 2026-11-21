@@ -29,7 +29,7 @@
 
 bool printLQH_TRANSCONF(FILE *output, const Uint32 *theData, Uint32 len,
                         Uint16 /*receiverBlockNo*/) {
-  if (len < LqhTransConf::SignalLength) {
+  if (len < LqhTransConf::SignalLength_INST_ID) {
     fprintf(output, "Short LQH_TRANSCONF: len: %u, SignalLength: %u\n",
       len, LqhTransConf::SignalLength);
   }
@@ -44,7 +44,7 @@ bool printLQH_TRANSCONF(FILE *output, const Uint32 *theData, Uint32 len,
     fprintf(output, " apiRef: %x\n", sig->apiRef);
     fprintf(output, " apiOpRec: %x\n", sig->apiOpRec);
   }
-  if (len >= LqhTransConf::SignalLength) {
+  if (len >= LqhTransConf::SignalLength_INST_ID) {
     fprintf(output, " lqhConnectPtr: %x\n", sig->lqhConnectPtr);
     fprintf(output, " oldTcOpRec: %x\n", sig->oldTcOpRec);
     fprintf(output, " requestInfo: %x\n", sig->requestInfo);
@@ -54,6 +54,10 @@ bool printLQH_TRANSCONF(FILE *output, const Uint32 *theData, Uint32 len,
     fprintf(output, " nextNodeId2: %x\n", sig->nextNodeId2);
     fprintf(output, " nextNodeId3: %x\n", sig->nextNodeId3);
     fprintf(output, " tableId: %x\n", sig->tableId);
+  }
+  if (len >= LqhTransConf::SignalLength_DURABLE) {
+    fprintf(output, " durableOpCount: %x\n", sig->durableOpCount);
+    fprintf(output, " prevNodeId: %u\n", sig->prevNodeId);
   }
   return true;
 }

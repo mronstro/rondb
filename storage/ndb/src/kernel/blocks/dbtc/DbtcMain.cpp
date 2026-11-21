@@ -14318,6 +14318,12 @@ void Dbtc::execLQH_TRANSCONF(Signal *signal) {
   cnodes[0] = lqhTransConf->nextNodeId1;
   cnodes[1] = lqhTransConf->nextNodeId2;
   cnodes[2] = lqhTransConf->nextNodeId3;
+  /* RONDB-1150 (X4.9) */
+  const bool lengthDurable =
+      signal->getLength() >= LqhTransConf::SignalLength_DURABLE;
+  cnodes[3] = lengthDurable ? lqhTransConf->prevNodeId : 0;
+  const Uint32 durableOpCount =
+      lengthDurable ? lqhTransConf->durableOpCount : 0;
   const BlockReference ref = lqhTransConf->apiRef;
   BlockReference applRef = lqhTransConf->apiRef;
   Uint32 applOprec = lqhTransConf->apiOpRec;
@@ -14455,6 +14461,21 @@ void Dbtc::execLQH_TRANSCONF(Signal *signal) {
     apiConnectptr.p->ndbapiConnect = applOprec;
   }
 
+  if (unlikely((durableOpCount & LqhTransConf::DURABLE_FLAG) != 0)) {
+    /**
+     * RONDB-1150 (X4.9): an operation that had a durable COMMIT. The
+     * transaction commits durably, so the COMMITREQs of this takeover
+     * carry the opCount, as the failed TC's COMMITs did.
+     */
+    jam();
+    const Uint32 opCount = durableOpCount & ~LqhTransConf::DURABLE_FLAG;
+    ndbassert(!tc_testbit(apiConnectptr.p->m_flags,
+                          ApiConnectRecord::TF_DURABLE) ||
+              apiConnectptr.p->m_durable_op_count == opCount);
+    apiConnectptr.p->m_flags |= ApiConnectRecord::TF_DURABLE;
+    apiConnectptr.p->m_durable_op_count = opCount;
+  }
+
   if (transStatus != LqhTransConf::Marker) {
     Uint32 instanceKey;
 
@@ -14541,6 +14562,25 @@ void Dbtc::execLQH_TRANSCONF(Signal *signal) {
         insert_tc_fail_hash(transid1, tcOprec);
         initTcConnectFail(signal, instanceKey, tcOprec, reqinfo, transStatus,
                           nodeId, apiConnectptr.i);
+        if (transStatus == LqhTransConf::Prepared ||
+            transStatus == LqhTransConf::Committed) {
+          /**
+           * RONDB-1150 (X4.9): a write on a logged table, counted once per
+           * operation as the failed TC counted it in the opCount
+           */
+          const Uint32 operation = LqhTransConf::getOperation(reqinfo);
+          TableRecordPtr tabPtr;
+          tabPtr.i = tableId;
+          ptrCheckGuard(tabPtr, ctabrecFilesize, tableRecord);
+          if ((operation == ZUPDATE || operation == ZINSERT ||
+               operation == ZDELETE || operation == ZWRITE ||
+               operation == ZREFRESH) &&
+              !LqhTransConf::getDirtyFlag(reqinfo) &&
+              tabPtr.p->get_storedTable()) {
+            jam();
+            apiConnectptr.p->m_fail_logged_write_count++;
+          }
+        }
       }
     }
   }
@@ -14837,6 +14877,17 @@ void Dbtc::completeTransAtTakeOverDoOne(Signal* signal,
   switch (apiConnectptr.p->apiConnectstate) {
   case CS_FAIL_COMMITTED:
     jam();
+    if (unlikely(tc_testbit(apiConnectptr.p->m_flags,
+                            ApiConnectRecord::TF_DURABLE)) &&
+        c_durable_rule_f != 0 && !takeOverCompleteSent(apiConnectptr)) {
+      /**
+       * RONDB-1150 (X4.9): rule F. Every replica committed, and the failed
+       * TC sent no COMPLETE: the transaction is aborted
+       */
+      jam();
+      takeOverAbortAfterCommit(signal, apiConnectptr);
+      return;
+    }
     /*------------------------------------------------------------*/
     /*       ALL PARTS OF THE TRANSACTIONS REPORTED COMMITTED. WE */
     /*       HAVE THUS COMPLETED THE COMMIT PHASE. CONTINUE WITH  */
@@ -14860,6 +14911,18 @@ void Dbtc::completeTransAtTakeOverDoOne(Signal* signal,
     return;
   case CS_FAIL_COMMITTING:
     jam();
+    if (unlikely(tc_testbit(apiConnectptr.p->m_flags,
+                            ApiConnectRecord::TF_DURABLE)) &&
+        c_durable_rule_f != 0) {
+      /**
+       * RONDB-1150 (X4.9): rule F. A replica is only prepared, so the
+       * failed TC sent no COMPLETE, which comes after every COMMITTED: the
+       * transaction is aborted
+       */
+      jam();
+      takeOverAbortAfterCommit(signal, apiConnectptr);
+      return;
+    }
     /*------------------------------------------------------------*/
     /*       AT LEAST ONE PART WAS ONLY PREPARED AND AT LEAST ONE */
     /*       PART WAS COMMITTED. COMPLETE THE COMMIT PHASE FIRST. */
@@ -14938,6 +15001,71 @@ void Dbtc::completeTransAtTakeOverDoOne(Signal* signal,
     ndbabort();
     return;
   }
+}
+
+/**
+ * RONDB-1150 (X4.9): rule F in a takeover. ABORTREQ with FLAG_AFTER_COMMIT
+ * to every replica that reported Prepared or Committed;
+ * check_finished_abort_handling answers the API with TCKEY_FAILREF. The
+ * transaction was not linked to a GCP, which commitGciHandling does only
+ * for a commit.
+ */
+void Dbtc::takeOverAbortAfterCommit(Signal *signal,
+                                    ApiConnectRecordPtr const apiConnectptr) {
+  apiConnectptr.p->m_flags |= ApiConnectRecord::TF_ABORT_AFTER_COMMIT;
+  tcConnectptr.i = apiConnectptr.p->tcConnect.getFirst();
+  ndbrequire(tcConnectRecord.getValidPtr(tcConnectptr));
+  init_finish_processing(apiConnectptr.p);
+  toAbortHandlingLab(signal, apiConnectptr);
+}
+
+/**
+ * RONDB-1150 (X4.9): rule F in a takeover. Did the failed TC send a
+ * COMPLETE for a durable transaction that every replica reported
+ * Committed? LQH frees an operation's record only at COMPLETE: yes if
+ * fewer logged writes were reported than its opCount, or if a replica of
+ * a reported operation, on a live node, did not report. LQH drops a late
+ * COMPLETE of the failed TC after its report (DI-7), so the reports stand.
+ * A replica whose node no report named counts as one that completed, and
+ * so does a transaction too long to check in one signal: in doubt the
+ * takeover completes, as without rule F.
+ */
+bool Dbtc::takeOverCompleteSent(ApiConnectRecordPtr apiConnectptr) {
+  constexpr Uint32 MaxOpsChecked = 4096;
+  if (apiConnectptr.p->m_fail_logged_write_count <
+      apiConnectptr.p->m_durable_op_count) {
+    jam();
+    return true;
+  }
+  Uint32 loop_count = 0;
+  TcConnectRecordPtr opPtr;
+  opPtr.i = apiConnectptr.p->tcConnect.getFirst();
+  while (opPtr.i != RNIL) {
+    if (++loop_count > MaxOpsChecked) {
+      jam();
+      return true;
+    }
+    ndbrequire(tcConnectRecord.getValidPtr(opPtr));
+    for (Uint32 i = 0; i <= opPtr.p->lastReplicaNo; i++) {
+      if (opPtr.p->failData[i] != LqhTransConf::InvalidStatus) {
+        continue;
+      }
+      const Uint32 nodeId = opPtr.p->tcNodedata[i];
+      if (nodeId == ZNIL) {
+        jam();
+        return true;
+      }
+      HostRecordPtr Thostptr;
+      Thostptr.i = nodeId;
+      ptrCheckGuard(Thostptr, chostFilesize, hostRecord);
+      if (Thostptr.p->hostStatus == HS_ALIVE) {
+        jam();
+        return true;
+      }
+    }
+    opPtr.i = opPtr.p->nextList;
+  }
+  return false;
 }
 
 void Dbtc::sendTCKEY_FAILREF(Signal *signal, ApiConnectRecord *regApiPtr) {
@@ -16374,6 +16502,12 @@ void Dbtc::initApiConnectFail(Signal *signal, Uint32 transid1, Uint32 transid2,
   apiConnectptr.p->nextTcOperation = RNIL;
   apiConnectptr.p->m_transaction_nodes.clear();
   apiConnectptr.p->singleUserMode = 0;
+  /* RONDB-1150 (X4.9): from the reports of execLQH_TRANSCONF */
+  apiConnectptr.p->m_flags &=
+      ~Uint32(ApiConnectRecord::TF_DURABLE |
+              ApiConnectRecord::TF_ABORT_AFTER_COMMIT);
+  apiConnectptr.p->m_durable_op_count = 0;
+  apiConnectptr.p->m_fail_logged_write_count = 0;
   setApiConTimer(apiConnectptr, 0, __LINE__);
   switch (transStatus) {
     case LqhTransConf::Committed:
@@ -16492,7 +16626,30 @@ void Dbtc::initTcConnectFail(Signal *signal, Uint32 instanceKey, Uint32 tcOprec,
   regTcPtr->dirtyOp = LqhTransConf::getDirtyFlag(reqinfo);
   regTcPtr->lqhInstanceKey = instanceKey;
   regTcPtr->recBlockNo = DBLQH;
+  fillTcConnectFailNodes(regTcPtr, replicaNo);
 }  // Dbtc::initTcConnectFail()
+
+/**
+ * RONDB-1150 (X4.9): the nodes of the replicas that one report names: the
+ * next ones (cnodes[0-2]) and the previous one (cnodes[3]). A replica that
+ * does not report keeps the node, with failData InvalidStatus, so that
+ * takeOverCompleteSent() can tell a replica on a failed node from one
+ * that has completed. The other users of tcNodedata read it only for a
+ * replica that reported.
+ */
+void Dbtc::fillTcConnectFailNodes(TcConnectRecord *regTcPtr,
+                                  Uint32 replicaNo) {
+  const Uint32 lastReplicaNo = regTcPtr->lastReplicaNo;
+  for (Uint32 i = 0; i < 3 && replicaNo + 1 + i <= lastReplicaNo; i++) {
+    if (cnodes[i] != 0 && regTcPtr->tcNodedata[replicaNo + 1 + i] == ZNIL) {
+      regTcPtr->tcNodedata[replicaNo + 1 + i] = cnodes[i];
+    }
+  }
+  if (replicaNo > 0 && cnodes[3] != 0 &&
+      regTcPtr->tcNodedata[replicaNo - 1] == ZNIL) {
+    regTcPtr->tcNodedata[replicaNo - 1] = cnodes[3];
+  }
+}
 
 /*----------------------------------------------------------*/
 /*       INITIALISE TC NODE FAIL RECORD.                    */
@@ -16921,14 +17078,17 @@ void Dbtc::updateTcStateFail(Signal *signal, Uint32 instanceKey, Uint32 tcOprec,
 
   ndbrequire(regTcPtr->apiConnect == apiConnectptr.i);
   ndbrequire(regTcPtr->failData[replicaNo] == LqhTransConf::InvalidStatus);
-  ndbrequire(regTcPtr->tcNodedata[replicaNo] == ZNIL);
+  /* RONDB-1150 (X4.9): another replica's report may have named the node */
+  ndbrequire(regTcPtr->tcNodedata[replicaNo] == ZNIL ||
+             regTcPtr->tcNodedata[replicaNo] == nodeId);
   ndbrequire(regTcPtr->lastReplicaNo == lastReplicaNo);
   ndbrequire(regTcPtr->dirtyOp == dirtyOp);
 
   regTcPtr->tcNodedata[replicaNo] = nodeId;
   regTcPtr->failData[replicaNo] = transStatus;
   ndbrequire(regTcPtr->tcOprec == tcOprec);
-  ndbrequire(regTcPtr->lqhInstanceKey == instanceKey)
+  ndbrequire(regTcPtr->lqhInstanceKey == instanceKey);
+  fillTcConnectFailNodes(regTcPtr, replicaNo);
 }
 
 void Dbtc::execTCGETOPSIZEREQ(Signal *signal) {
