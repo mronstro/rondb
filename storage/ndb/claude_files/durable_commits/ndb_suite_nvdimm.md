@@ -4,7 +4,9 @@ Run on 2026-11-14 on a Rocky Linux 9.8 x86_64 host (32 CPUs, 62 GB), in
 the VM of `qemu_cxl_test.md` §6: QEMU `-device nvdimm`, 8 GB backed by
 `/dev/shm`, `nvdimm-persistence=mem-ctrl`, KVM, 8 vCPUs, 12 GB RAM, guest
 kernel 7.3.4. fsdax namespace of 7.87 GB, XFS `dax=always` on
-`/mnt/pmem0`. Debug build of `795b1f2c1a0`, without the commits after it.
+`/mnt/pmem0`. Debug build of the commit
+"RONDB-1150: plan revision 13, a transaction above R_gcp all or nothing",
+without the commits after it.
 
 Mode: `RedoLogMode=pmem` with the production checks
 (`__RedoLogPmemTestMode=off`: region, persistence domain
@@ -49,7 +51,7 @@ Rerun one test in the VM:
 | `ndb_scan_start_restart` | 8 data nodes: OOM and more than 7.87 GB of REDO | VM too small: `MEM=24G PMEM_SIZE=16G` |
 | `ndb_error_reporter` | `bzip2` not in the guest | VM set-up; `make-vm.sh` installs it now |
 | `ndbinfo_plans` | M4 below: `ndb$config_values` 414 rows, estimate 402 ± 10 | DAX configuration; the test skips itself under `MTR_NDB_PMEM_DIR` now |
-| `ndb_redo_pmem_paths` | needs `nodax` (its REDO log off the DAX mount); test mode off refuses it | skips itself under `MTR_NDB_PMEM_DIR` since `fa79e74ea47` |
+| `ndb_redo_pmem_paths` | needs `nodax` (its REDO log off the DAX mount); test mode off refuses it | skips itself under `MTR_NDB_PMEM_DIR` since the commit "RONDB-1150: CXL dirty-shutdown count in cxl/, the DAX test mode in [cluster_config.1], pmem_redo_cxl.cnf" |
 | `ndb_redo_pmem_reader` | M3 below: `cannot open` the REDO files | test defect, fixed |
 
 The run stopped once at 88%: `rdrs2` of this build links
@@ -77,7 +79,8 @@ with `--config-change`, MTR writes a `config.ini` from `my.cnf`
 (`mysql-test-run.pl`). It put every pair of `[cluster_config]` and of each
 `[cluster_config.N]` into `[ndbd default]`, so a key in both came twice,
 and `ndb_mgmd` refuses that. With `--mycnf` the later group wins. A key
-in both sections is what `pmem_redo_dax.cnf` (since `fa79e74ea47`) and
+in both sections is what `pmem_redo_dax.cnf` (since the commit
+"RONDB-1150: CXL dirty-shutdown count in cxl/, the DAX test mode in [cluster_config.1], pmem_redo_cxl.cnf") and
 `pmem_redo_cxl.cnf` do with `__RedoLogPmemTestMode`, and what any test
 `.cnf` does that overrides a `default_ndbd.cnf` key in
 `[cluster_config.1]`. Fix: one pair per key, case-insensitive, the last
@@ -111,7 +114,8 @@ there twice.)
 
 ## The fixes, verified
 
-On the same VM, the build of `795b1f2c1a0` (its `mysql-test-run.pl` and
+On the same VM, the build of the commit
+"RONDB-1150: plan revision 13, a transaction above R_gcp all or nothing" (its `mysql-test-run.pl` and
 these test files are the same as on the branch head), with
 `pmem_redo_cxl.cnf`: `ndb_arbitration_president_failover`,
 `ndb_arbitration_rank_wait`, `ndb_config_change_rdrs`,
@@ -137,7 +141,8 @@ the count of file mode, the default; file mode and `nodax` PMEM mode
 still run it.
 
 Correction (2026-11-18): the other 5 rows per node are not the DAX
-configuration's. The estimate was never centred on file mode: a0f2bb05ba5
+configuration's. The estimate was never centred on file mode: the commit
+"RONDB-1150: config_values estimate counts the REDO log parameters"
 added the 4 parameters of phase 3 to an estimate already below the count,
 and phase 9 added `__RedoLogPmemPersistDelayNs`. The 207 rows above less
 `FileSystemPathRedoLog` give 206 per data node in file mode, 412 with 2

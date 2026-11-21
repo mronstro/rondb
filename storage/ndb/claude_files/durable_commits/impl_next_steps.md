@@ -88,7 +88,8 @@ transaction; new test passes; existing takeover tests in
 **Order:** X1.1, X1.2. **Risk:** low; the ack after takeover gets slower
 by one COMPLETEREQ round.
 
-**State (2026-11-21): implemented in `6878ac25a3f`, to be tested.** It
+**State (2026-11-21): implemented, to be tested,** in the commit "DBTC:
+the takeover TC acks a commit to the API after the complete phase". It
 needs nothing from RONDB-1150, so it sits before the first RONDB-1150
 commit on the branch and can go to 26.10-main on its own.
 - X1.1 as planned in `DbtcMain.cpp`: no TCKEY_FAILCONF in
