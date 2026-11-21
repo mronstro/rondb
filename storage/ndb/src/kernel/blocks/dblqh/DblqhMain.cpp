@@ -15147,14 +15147,15 @@ void Dblqh::execCOMMIT(Signal *signal) {
       return;
     }
   }
-  if (ERROR_INSERTED(5160) &&
+  if (ERROR_INSERTED(5160) && !durable &&
       refToMain(signal->getSendersBlockRef()) == DBTC) {
     /**
      * Delay COMMIT of user table operations only, so that a unique index
      * row commits before the base table row it points to. Used to test the
      * lock-free base read of a unique index lookup during that window.
      * Only the delivery from DBTC is delayed, the delayed re-delivery is
-     * sent by this block and goes through.
+     * sent by this block and goes through. A durable operation commits at
+     * COMPLETE (RONDB-1150), so execCOMPLETE delays that one instead.
      */
     jam();
     TablerecPtr tablePtr;
@@ -15381,6 +15382,24 @@ void Dblqh::execCOMPLETE(Signal *signal) {
       jam();
       g_eventLogger->info("LQH %u delaying complete", instance());
       sendSignalWithDelay(cownref, GSN_COMPLETE, signal, 1000,
+                          signal->getLength());
+      return;
+    }
+  }
+  if (ERROR_INSERTED(5160) &&
+      (tcConnectptr.p->m_flags & TcConnectionrec::OP_DURABLE) != 0 &&
+      refToMain(signal->getSendersBlockRef()) == DBTC) {
+    /**
+     * The COMMIT delay of execCOMMIT for a durable operation, which commits
+     * and becomes visible at COMPLETE (RONDB-1150, X4.6).
+     */
+    jam();
+    TablerecPtr tablePtr;
+    tablePtr.i = tcConnectptr.p->tableref;
+    ptrCheckGuard(tablePtr, ctabrecFileSize, tablerec);
+    if (DictTabInfo::isTable(tablePtr.p->tableType)) {
+      jam();
+      sendSignalWithDelay(cownref, GSN_COMPLETE, signal, 1500,
                           signal->getLength());
       return;
     }
