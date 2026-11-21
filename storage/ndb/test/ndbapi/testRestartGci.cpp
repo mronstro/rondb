@@ -24,11 +24,14 @@
 */
 
 #include <algorithm>
+#include <array>
 #include <map>
+#include <set>
 #include <utility>
 #include <vector>
 
 #include <signaldata/DumpStateOrd.hpp>
+#include "../../src/ndbapi/NdbInfo.hpp"
 #include "HugoTransactions.hpp"
 #include "NDBT_ReturnCodes.h"
 #include "NDBT_Test.hpp"
@@ -77,6 +80,18 @@ static int maybeExtraBits(Ndb *ndb, NdbDictionary::Table &tab, int when,
       return 0;
   }
 
+  /* The ledger on the table variants that durable commits treat apart */
+  NDBT_Context *ctx = static_cast<NDBT_Context *>(arg);
+  if (ctx != nullptr && ctx->getProperty("LedgerReadBackup", Uint32(0)) != 0) {
+    ndbout_c("Creating table %s with READ_BACKUP", tab.getName());
+    tab.setReadBackupFlag(true);
+  }
+  if (ctx != nullptr &&
+      ctx->getProperty("LedgerFullyReplicated", Uint32(0)) != 0) {
+    ndbout_c("Creating table %s fully replicated", tab.getName());
+    tab.setFullyReplicated(true);
+  }
+
   bool useExtendedBits = ((ndb_rand() % 5) != 0);
   Uint32 numGciBits = ndb_rand() % 32;    /* 0 -> 31 */
   Uint32 numAuthorBits = ndb_rand() % 32; /* 0 -> 31 */
@@ -103,7 +118,7 @@ int runCreateTable(NDBT_Context *ctx, NDBT_Step *step) {
 
   /* Use extra proc to control whether we have extra bits */
   if (NDBT_Tables::createTable(GETNDB(step), ctx->getTab()->getName(), false,
-                               false, maybeExtraBits) == NDBT_OK) {
+                               false, maybeExtraBits, ctx) == NDBT_OK) {
     ctx->setTab(
         GETNDB(step)->getDictionary()->getTable(ctx->getTab()->getName()));
     return NDBT_OK;
@@ -745,6 +760,117 @@ int ledgerReadRow(NDBT_Context *ctx, NDBT_Step *step, HugoOperations &hugoOps,
   return NDBT_FAILED;
 }
 
+/**
+ * G3 of the durable-commits plan: every replica of a fragment of the
+ * ledger table, and of its unique indexes, has as many rows and as many
+ * fixed- and var-size elements (ndbinfo frag_mem_use, summed over the LDM
+ * instances of a node), as include/ndb_assert_frag_replica_consistency.inc
+ * checks in MTR. The writers are parked; ndbinfo reads are live, so a
+ * difference, or a fragment that fewer nodes report than it has replicas,
+ * as just after a node started, is read again for a while.
+ */
+bool ledgerReplicasAgree(NDBT_Context *ctx, NDBT_Step *step,
+                         const char *what) {
+  const NdbDictionary::Table *tab = ctx->getTab();
+  std::set<Uint32> tableIds = {Uint32(tab->getObjectId())};
+  NdbDictionary::Dictionary::List indexes;
+  if (GETNDB(step)->getDictionary()->listIndexes(indexes, *tab) != 0) {
+    ndbout << "ERR: ledger: the indexes of " << tab->getName() << ": "
+           << GETNDB(step)->getDictionary()->getNdbError() << endl;
+    return false;
+  }
+  for (unsigned i = 0; i < indexes.count; i++) {
+    if (indexes.elements[i].type == NdbDictionary::Object::UniqueHashIndex) {
+      tableIds.insert(indexes.elements[i].id);
+    }
+  }
+  NdbRestarter restarter;
+  const size_t replicas = size_t(std::max(restarter.getNumReplicas(), 1));
+  NdbInfo ndbinfo(&ctx->m_cluster_connection, "ndbinfo/");
+  const NdbInfo::Table *fragMemUse = nullptr;
+  if (!ndbinfo.init() ||
+      ndbinfo.openTable("ndbinfo/frag_mem_use", &fragMemUse) != 0) {
+    ndbout_c("ERR: ledger: ndbinfo frag_mem_use cannot be read");
+    return false;
+  }
+  /* (table, fragment) -> node -> rows, fixed and var-size elements */
+  using Counts = std::array<Uint64, 3>;
+  std::map<std::pair<Uint32, Uint32>, std::map<Uint32, Counts>> frags;
+  char mismatch[256] = "";
+  bool agree = false;
+  for (int attempt = 0; attempt < 60 && !agree; attempt++) {
+    if (attempt > 0) NdbSleep_MilliSleep(500);
+    frags.clear();
+    NdbInfoScanOperation *scanOp = nullptr;
+    if (ndbinfo.createScanOperation(fragMemUse, &scanOp) != 0) continue;
+    const NdbInfoRecAttr *nodeId = nullptr;
+    const NdbInfoRecAttr *tableId = nullptr;
+    const NdbInfoRecAttr *fragNo = nullptr;
+    const NdbInfoRecAttr *rows = nullptr;
+    const NdbInfoRecAttr *fixedElems = nullptr;
+    const NdbInfoRecAttr *varElems = nullptr;
+    int ret = scanOp->readTuples();
+    if (ret == 0) {
+      nodeId = scanOp->getValue("node_id");
+      tableId = scanOp->getValue("table_id");
+      fragNo = scanOp->getValue("fragment_num");
+      rows = scanOp->getValue("rows");
+      fixedElems = scanOp->getValue("fixed_elem_count");
+      varElems = scanOp->getValue("var_elem_count");
+      ret = scanOp->execute();
+    }
+    while (ret == 0 && (ret = scanOp->nextResult()) == 1) {
+      ret = 0;
+      if (tableIds.count(tableId->u_32_value()) == 0) continue;
+      Counts &c = frags[{tableId->u_32_value(), fragNo->u_32_value()}]
+                       [nodeId->u_32_value()];
+      c[0] += rows->u_64_value();
+      c[1] += fixedElems->u_64_value();
+      c[2] += varElems->u_64_value();
+    }
+    ndbinfo.releaseScanOperation(scanOp);
+    if (ret != 0) continue;  // the scan failed
+    agree = !frags.empty();
+    BaseString::snprintf(mismatch, sizeof(mismatch),
+                         "no fragment of table %u in frag_mem_use",
+                         tab->getObjectId());
+    for (const auto &frag : frags) {
+      if (frag.second.size() < replicas) {
+        agree = false;
+        BaseString::snprintf(mismatch, sizeof(mismatch),
+                             "table %u fragment %u: %u of %u replicas",
+                             frag.first.first, frag.first.second,
+                             Uint32(frag.second.size()), Uint32(replicas));
+        break;
+      }
+      const auto first = frag.second.begin();
+      for (const auto &node : frag.second) {
+        if (node.second != first->second) {
+          agree = false;
+          BaseString::snprintf(
+              mismatch, sizeof(mismatch),
+              "table %u fragment %u: node %u has %llu rows, %llu fixed and "
+              "%llu var-size elements, node %u %llu, %llu and %llu",
+              frag.first.first, frag.first.second, first->first,
+              first->second[0], first->second[1], first->second[2],
+              node.first, node.second[0], node.second[1], node.second[2]);
+          break;
+        }
+      }
+      if (!agree) break;
+    }
+  }
+  ndbinfo.closeTable(fragMemUse);
+  if (!agree) {
+    ndbout_c("ERR: ledger after the %s: the replicas differ: %s", what,
+             mismatch);
+    return false;
+  }
+  ndbout_c("Ledger after the %s: the replicas of %u fragments agree", what,
+           Uint32(frags.size()));
+  return true;
+}
+
 void ledgerPrintRow(Uint32 r, const LedgerRow &row) {
   ndbout_c("  row %u at the round's start: %s, updates %u, GCI 0x%x/0x%x", r,
            row.exists ? "exists" : "absent", row.updates,
@@ -770,6 +896,7 @@ int ledgerVerify(NDBT_Context *ctx, NDBT_Step *step, Uint64 maxGci,
   std::map<Uint64, std::pair<Uint32, Uint32>> unknownTxns;  // with, without
   Uint32 kept = 0;
   Uint32 lost = 0;
+  Uint64 maxLostGci = 0;
   Uint32 unknownRows = 0;
   Uint32 failures = 0;
   for (Uint32 r = 0; r < g_ledger.size(); r++) {
@@ -795,6 +922,11 @@ int ledgerVerify(NDBT_Context *ctx, NDBT_Step *step, Uint64 maxGci,
         /* A later transaction on the row has a GCI at least this one's */
         lost++;
         rowLost = true;
+        for (const LedgerTxn &l : row.txns) {
+          if (l.state == LEDGER_COMMITTED && l.gci > maxGci) {
+            maxLostGci = std::max(maxLostGci, l.gci);
+          }
+        }
         break;
       }
       kept++;
@@ -854,12 +986,19 @@ int ledgerVerify(NDBT_Context *ctx, NDBT_Step *step, Uint64 maxGci,
           txn.second.second);
     }
   }
+  if (!ledgerReplicasAgree(ctx, step, what)) failures++;
   ndbout_c(
       "Ledger after the %s: %u rows, %u row writes kept, %u row writes "
       "acknowledged and lost, %u rows of %u transactions with an unknown "
       "result, %u failures",
       what, Uint32(g_ledger.size()), kept, lost, unknownRows,
       Uint32(unknownTxns.size()), failures);
+  if (lost > 0) {
+    /* What durable commits are to bring to 0 */
+    ndbout_c("Ledger after the %s: restart GCI %u, highest lost GCI 0x%x/0x%x",
+             what, Uint32(maxGci >> 32), Uint32(maxLostGci >> 32),
+             Uint32(maxLostGci));
+  }
   return failures == 0 ? NDBT_OK : NDBT_FAILED;
 }
 
@@ -1620,6 +1759,28 @@ TESTCASE("GciLedgerSR",
          "after each system restart with abort every row holds the last of "
          "its transactions with a GCI up to the restart's") {
   TC_PROPERTY("LedgerSeconds", Uint32(5));
+  INITIALIZER(runCreateTable);
+  INITIALIZER(runLedgerInit);
+  STEPS(runLedgerWriter, LEDGER_WRITERS);
+  STEP(runLedgerSR);
+  FINALIZER(runDropTable);
+}
+TESTCASE("GciLedgerSRReadBackup",
+         "RONDB-1150 (X3): as GciLedgerSR on the table with READ_BACKUP, "
+         "whose transactions are acknowledged after the complete phase") {
+  TC_PROPERTY("LedgerSeconds", Uint32(5));
+  TC_PROPERTY("LedgerReadBackup", Uint32(1));
+  INITIALIZER(runCreateTable);
+  INITIALIZER(runLedgerInit);
+  STEPS(runLedgerWriter, LEDGER_WRITERS);
+  STEP(runLedgerSR);
+  FINALIZER(runDropTable);
+}
+TESTCASE("GciLedgerSRFullyReplicated",
+         "RONDB-1150 (X3): as GciLedgerSR on the table fully replicated, "
+         "with a replica of every fragment in each node group") {
+  TC_PROPERTY("LedgerSeconds", Uint32(5));
+  TC_PROPERTY("LedgerFullyReplicated", Uint32(1));
   INITIALIZER(runCreateTable);
   INITIALIZER(runLedgerInit);
   STEPS(runLedgerWriter, LEDGER_WRITERS);

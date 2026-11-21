@@ -79,6 +79,21 @@ cmd: testRestartGci
 args: -n GciLedgerSR -l 5 T1
 max-time: 1800
 
+# X3: the ledger on the table variants whose commit path durable commits
+# change apart: disk columns (D1), a unique index (I3), READ_BACKUP and
+# fully replicated
+cmd: testRestartGci
+args: -n GciLedgerSR -l 2 D1 I3
+max-time: 3600
+
+cmd: testRestartGci
+args: -n GciLedgerSRReadBackup -l 2 T1
+max-time: 1800
+
+cmd: testRestartGci
+args: -n GciLedgerSRFullyReplicated -l 2 T1
+max-time: 1800
+
 cmd: testRestartGci
 args: -n GciLedgerNR -l 2 T1
 max-time: 1800

@@ -181,6 +181,34 @@ coding X5.
 
 **Order:** X3.1, X3.2, X3.3; X3.4 in parallel with X4.
 
+**State (2026-11-21): re-scoped after step 1, extended, to be tested.**
+Step 1 built most of this harness, as the GCP-saved ledger of
+`testRestartGci` (`step1_phases.md`, the side track and phase 11c), so
+X3 extends it instead of a new `testDurableCommits.cpp`:
+- Already there (X3.1, X3.2, X3.3): writers commit transactions of 1 to
+  8 rows and keep each one's GCI, or that its result is unknown; after a
+  restart every row is checked against its history, an unknown
+  transaction in all of its rows or none, the losses above the restart's
+  GCI counted, and with `allKept` (after a graceful restart) none
+  allowed, the check X5 needs after a crash. Crashes: system restarts with
+  abort (all data nodes at once), the crash inserts 5155-5172, power loss
+  by DUMP 2370; MTR `ndb_gci_ledger`, `ndb_redo_pmem_ledger*`, the
+  `rondb_pmem` aliases, `conf-pmem-*.cnf` and `pmem-redo-tests.txt`.
+- Added: G3, `ledgerReplicasAgree()` after every check: the replicas of
+  each fragment of the table and of its unique indexes have as many rows
+  and fixed- and var-size elements in ndbinfo `frag_mem_use`. W4 by table:
+  `GciLedgerSRReadBackup`, `GciLedgerSRFullyReplicated` (properties of the
+  table hook), `GciLedgerSR` on D1 (disk columns) and I3 (a unique index)
+  in `pmem-redo-tests.txt`, MTR `ndb_gci_ledger_tables` without D1. The
+  report adds the restart's GCI and the highest lost GCI.
+- Dropped: W2 (chain), as the history of each row catches a broken
+  dependency, the commits on a row keeping their GCI order; W3 (hot row),
+  for X8; the BLOB variant, as Hugo writes BLOBs but cannot check them
+  read back.
+- Left: X3.4 (TLA+), with X4 as planned; the protocol-point crashes of
+  X3.2 (c) and a durable-commits test list come with the inserts and the
+  setting of X4 and X5.
+
 ---
 
 ## 4. X4 — Commit path

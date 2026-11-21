@@ -1,0 +1,18 @@
+# Shutting down mysqld 1
+# Shutting down mysqld 2
+== 1 == a unique index and two ordered indexes (I3)
+Running command
+Result of command: 0
+Test program success!
+== 2 == READ_BACKUP
+Running command
+Result of command: 0
+Test program success!
+== 3 == fully replicated
+Running command
+Result of command: 0
+Test program success!
+# Starting mysqld 1
+# restart
+# Starting mysqld 2
+# restart
