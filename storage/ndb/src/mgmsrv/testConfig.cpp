@@ -683,6 +683,9 @@ static void test_redo_log_pmem(void) {
       {"RedoLogMode=pmem", "FileSystemPathRedoLog=/mnt/pmem0", true, "full"},
       {"RedoLogMode=pmem", "FileSystemPathRedoLog=0:/mnt/p0,1:/mnt/p1", true,
        "full"},
+      // Durable commits (X4) need PMEM mode
+      {"RedoLogMode=pmem", "__DurableCommits=true", true, "full"},
+      {"RedoLogMode=file", "__DurableCommits=true", false, nullptr},
       // Refused
       {"RedoLogMode=pmem", "EncryptedFileSystem=1", false, nullptr},
       {"RedoLogMode=pmem", "Diskless=true", false, nullptr},

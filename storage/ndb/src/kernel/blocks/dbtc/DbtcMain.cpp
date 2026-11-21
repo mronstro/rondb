@@ -3620,6 +3620,7 @@ void Dbtc::initApiConnectRec(Signal *signal, ApiConnectRecord *const regApiPtr,
   regApiPtr->m_write_count = 0;
   regApiPtr->m_exec_count = 0;
   regApiPtr->m_simple_read_count = 0;
+  regApiPtr->m_durable_op_count = 0;
   regApiPtr->m_firstTcConnectPtrI_FT = RNIL;
   regApiPtr->m_lastTcConnectPtrI_FT = RNIL;
   regApiPtr->m_concurrent_overtakeable_operations = 0;
@@ -5004,6 +5005,10 @@ void Dbtc::execTCKEYREQ(Signal *signal) {
       case ZREFRESH:
         jamDebug();
         regApiPtr->m_write_count++;
+        if (localTabptr.p->get_storedTable()) {
+          /* RONDB-1150: counted in the opCount at its LQHKEYCONF */
+          regTcPtr->m_special_op_flags |= TcConnectRecord::SOF_LOGGED_WRITE;
+        }
         if (unlikely(regApiPtr->m_flags &
                      ApiConnectRecord::TF_DEFERRED_CONSTRAINTS)) {
           /**
@@ -7122,6 +7127,13 @@ void Dbtc::execLQHKEYCONF(Signal *signal) {
       UintR Tlqhkeyconfrec = regApiPtr.p->lqhkeyconfrec;
       regApiPtr.p->lqhkeyconfrec = Tlqhkeyconfrec + 1;
       regTcPtr->tcConnectstate = OS_PREPARED;
+      /**
+       * RONDB-1150, opCount: once per operation, as one with fired
+       * triggers comes here only when they are done (numFired 0)
+       */
+      if (regTcPtr->m_special_op_flags & TcConnectRecord::SOF_LOGGED_WRITE) {
+        regApiPtr.p->m_durable_op_count++;
+      }
     } else {
       jam();
     }
@@ -7737,6 +7749,7 @@ Dbtc::ApiConnectRecord::ApiConnectRecord()
 
   m_transaction_nodes.clear();
   m_releaseId = 0;
+  m_durable_op_count = 0;
 }
 
 bool Dbtc::seizeApiConnectCopy(Signal *signal,
@@ -7764,6 +7777,8 @@ void Dbtc::execDIVERIFYCONF(Signal *signal) {
   UintR Tgci_hi = signal->theData[1];
   UintR Tgci_lo = signal->theData[2];
   Uint64 Tgci = Tgci_lo | (Uint64(Tgci_hi) << 32);
+  /* RONDB-1150: the GCI is one of durable commits, from the local DIH */
+  const Uint32 TdurableGci = signal->theData[4];
 
   jamEntryDebug();
   if (ERROR_INSERTED(8017)) {
@@ -7816,6 +7831,16 @@ void Dbtc::execDIVERIFYCONF(Signal *signal) {
     DIVER_node_fail_handling(signal, Tgci, apiConnectptr);
     return;
   }//if
+  if (unlikely(TdurableGci != 0) && regApiPtr->m_durable_op_count > 0) {
+    /**
+     * RONDB-1150 (X4.1): a durable commit. The API is acknowledged after
+     * the complete phase (invariant A), as TF_LATE_COMMIT does for
+     * READ_BACKUP; the COMMIT signals carry the opCount.
+     */
+    jam();
+    regApiPtr->m_flags |=
+        ApiConnectRecord::TF_DURABLE | ApiConnectRecord::TF_LATE_COMMIT;
+  }
   commitGciHandling(signal, Tgci, apiConnectptr, __LINE__);
 
   /**************************************************************************
@@ -8129,13 +8154,20 @@ Uint32 Dbtc::sendCommitLqh(Signal *signal, TcConnectRecord *const regTcPtr,
     signal->m_send_wakeups++;
   }
 
-  Uint32 Tdata[5];
+  Uint32 Tdata[ZCOMMIT_DURABLE_LEN];
   Tdata[0] = regTcPtr->lastLqhCon;
   Tdata[1] = Uint32(regApiPtr->globalcheckpointid >> 32);
   Tdata[2] = regApiPtr->transid[0];
   Tdata[3] = regApiPtr->transid[1];
   Tdata[4] = Uint32(regApiPtr->globalcheckpointid);
-  Uint32 len = 5;
+  Uint32 len = Commit::SignalLength;
+  Uint32 packedCode = ZCOMMIT;
+  if (unlikely(tc_testbit(regApiPtr->m_flags, ApiConnectRecord::TF_DURABLE))) {
+    /* RONDB-1150: the opCount goes into each replica's COMMIT record */
+    Tdata[5] = regApiPtr->m_durable_op_count;
+    len = Commit::SignalLengthDurable;
+    packedCode = ZCOMMIT_DURABLE;
+  }
   Uint32 instanceNo = getInstanceNo(Tnode, instanceKey);
 #ifndef UNPACKED_COMMIT_SIGNALS
   if (unlikely(instanceNo > MAX_NDBMT_LQH_WORKERS))
@@ -8158,7 +8190,7 @@ Uint32 Dbtc::sendCommitLqh(Signal *signal, TcConnectRecord *const regTcPtr,
     updatePackedList(signal, Thostptr.p, Thostptr.i);
   }
 
-  Tdata[0] |= (ZCOMMIT << 28);
+  Tdata[0] |= (packedCode << 28);
   UintR Tindex = container->noOfPackedWords;
   container->noOfPackedWords = Tindex + len;
   Thostptr.p->lqh_pack_mask.set(instanceNo);
@@ -15646,10 +15678,18 @@ void Dbtc::toCommitHandlingLab(Signal* signal,
         req->old_blockref = apiConnectptr.p->tcBlockref;
         req->tcOprec = tcConnectptr.p->tcOprec;
         req->gci_lo = Uint32(gci);
+        Uint32 length = CommitReq::SignalLength;
+        if (unlikely(tc_testbit(apiConnectptr.p->m_flags,
+                                ApiConnectRecord::TF_DURABLE))) {
+          /* RONDB-1150: as the durable COMMIT, with its opCount */
+          req->opCount = apiConnectptr.p->m_durable_op_count;
+          req->flags = CommitReq::FLAG_DURABLE;
+          length = CommitReq::SignalLengthDurable;
+        }
         sendSignal(blockRef,
                    GSN_COMMITREQ,
                    signal,
-                   CommitReq::SignalLength,
+                   length,
                    JBB);
       }
       break;

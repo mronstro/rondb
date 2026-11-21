@@ -957,6 +957,9 @@ class Dbtc : public SimulatedBlock {
       ,SOF_UTIL_FLAG = 2048            // Sender to TC is DBUTIL (higher prio)
       ,SOF_BATCH_SAFE = 4096           // Batching is safe for this operation
       ,SOF_BATCH_UNSAFE = 8192         // Batching is unsafe for this operation
+      // RONDB-1150: a write on a logged table, counted in
+      // m_durable_op_count once every replica has prepared it
+      ,SOF_LOGGED_WRITE = 16384
     };
 
     static inline bool isIndexOp(Uint16 flags) {
@@ -1127,6 +1130,9 @@ class Dbtc : public SimulatedBlock {
       // Exempt from TransactionInactiveTimeout (TCKEYREQ attrLen bit 18),
       // gets EXEMPT_TRANSACTION_INACTIVE_TIMEOUT instead
       ,TF_EXEMPT_INACTIVE_TIMEOUT = 4096
+      // RONDB-1150: commits durably; set at DIVERIFYCONF with
+      // TF_LATE_COMMIT, the COMMIT signals carry m_durable_op_count
+      ,TF_DURABLE = 8192
 
       ,TF_END = 0
     };
@@ -1221,6 +1227,13 @@ class Dbtc : public SimulatedBlock {
     Uint32 m_exec_count;
     Uint32 m_exec_write_count;
     Uint32 m_simple_read_count;
+    /**
+     * RONDB-1150, opCount: the writes on logged tables that every replica
+     * has prepared (LQHKEYCONF), triggered ones included, dirty writes
+     * not. Final at DIVERIFY, after the deferred triggers; a transaction
+     * without any does not commit durably.
+     */
+    Uint32 m_durable_op_count;
     Uint32 m_concurrent_overtakeable_operations;
     Uint32 m_tc_hbrep_timer;
     ReturnSignal returnsignal;

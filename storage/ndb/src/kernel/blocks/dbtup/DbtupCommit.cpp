@@ -250,6 +250,8 @@ void Dbtup::execTUP_WRITELOG_REQ(Signal *signal) {
   loopOpPtr.i = signal->theData[0];
   Uint32 gci_hi = signal->theData[1];
   Uint32 gci_lo = signal->theData[2];
+  /* RONDB-1150: durable flag and opCount, the same for every operation */
+  const Uint32 durableWord = signal->theData[3];
   ndbrequire(m_curr_tup->c_operation_pool.getValidPtr(loopOpPtr));
   ndbassert(!m_is_query_block);
   while (loopOpPtr.p->prevActiveOp != RNIL) {
@@ -262,6 +264,7 @@ void Dbtup::execTUP_WRITELOG_REQ(Signal *signal) {
     signal->theData[0] = loopOpPtr.p->userpointer;
     signal->theData[1] = gci_hi;
     signal->theData[2] = gci_lo;
+    signal->theData[3] = durableWord;
     if (loopOpPtr.p->nextActiveOp == RNIL) {
       jamDebug();
       c_lqh->execLQH_WRITELOG_REQ(signal);

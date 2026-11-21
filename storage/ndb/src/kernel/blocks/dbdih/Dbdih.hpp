@@ -2224,6 +2224,12 @@ class Dbdih : public SimulatedBlock {
     Uint64 m_last_sent_gci;
     Uint64 m_current_gci;  // Currently active
     Uint64 m_new_gci;      // Currently being prepared...
+    /**
+     * RONDB-1150: g, the first gci_hi whose write transactions commit
+     * durably, 0 when durable commits are off; DIVERIFY reports it under
+     * m_lock. Until online activation (X7) it is 1 with __DurableCommits.
+     */
+    Uint32 m_durable_gci;
     enum State {
       M_GCP_IDLE = 0,
       M_GCP_PREPARE = 1,
@@ -2239,6 +2245,15 @@ class Dbdih : public SimulatedBlock {
       NDB_TICKS m_start_time;
     } m_master;
   } m_micro_gcp;
+
+  /**
+   * RONDB-1150: 1 if a transaction that commits in gci commits durably,
+   * for DIVERIFYCONF (theData[4]); read under m_micro_gcp.m_lock
+   */
+  Uint32 durableCommitGci(Uint64 gci) const {
+    const Uint32 g = m_micro_gcp.m_durable_gci;
+    return (g != 0 && Uint32(gci >> 32) >= g) ? 1 : 0;
+  }
 
   struct GcpMonitor {
     struct {

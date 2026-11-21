@@ -1665,6 +1665,30 @@ void Dbdih::execREAD_CONFIG_REQ(Signal *signal) {
   ndb_mgm_get_int_parameter(p, CFG_DB_LCP_TRY_LOCK_TIMEOUT,
                             &c_lcpState.m_lcp_trylock_timeout);
 
+  /**
+   * RONDB-1150: durable commits, __DurableCommits until online activation
+   * (X7). A commit is durable only once its REDO record is persistent, so
+   * it needs RedoLogMode=pmem, as the management server checks too. g is
+   * 1: every write transaction since the start commits durably, the same
+   * on every node, which a GCI seen first after the start would not be
+   * for a node that joins by a node restart.
+   */
+  {
+    Uint32 durable = 0;
+    Uint32 redoLogMode = NDB_REDO_LOG_MODE_FILE;
+    ndb_mgm_get_int_parameter(p, CFG_DB_DURABLE_COMMITS, &durable);
+    ndb_mgm_get_int_parameter(p, CFG_DB_REDO_LOG_MODE, &redoLogMode);
+    if (durable != 0 && redoLogMode != NDB_REDO_LOG_MODE_PMEM) {
+      progError(__LINE__, NDBD_EXIT_INVALID_CONFIG,
+                "__DurableCommits=1 needs RedoLogMode=pmem");
+    }
+    m_micro_gcp.m_durable_gci = durable != 0 ? 1 : 0;
+    if (durable != 0) {
+      g_eventLogger->info("DIH: durable commits from GCI %u (__DurableCommits)",
+                          m_micro_gcp.m_durable_gci);
+    }
+  }
+
   cfileFileSize = (2 * ctabFileSize) + 2;
   initRecords();
   initialiseRecordsLab(signal, 0, ref, senderData);
@@ -17901,6 +17925,7 @@ loop:
     signal->theData[1] = (Uint32)(m_micro_gcp.m_current_gci >> 32);
     signal->theData[2] = (Uint32)(m_micro_gcp.m_current_gci & 0xFFFFFFFF);
     signal->theData[3] = 0;
+    signal->theData[4] = durableCommitGci(m_micro_gcp.m_current_gci);
     if (unlikely(!m_micro_gcp.m_lock.read_unlock(val))) goto loop;
     return;
   }  // if
@@ -25020,7 +25045,8 @@ void Dbdih::emptyverificbuffer(Signal *signal, Uint32 q, bool aContinueB) {
     signal->theData[1] = (Uint32)(m_micro_gcp.m_current_gci >> 32);
     signal->theData[2] = (Uint32)(m_micro_gcp.m_current_gci & 0xFFFFFFFF);
     signal->theData[3] = 0;
-    sendSignal(c_diverify_queue[q].m_ref, GSN_DIVERIFYCONF, signal, 4, JBB);
+    signal->theData[4] = durableCommitGci(m_micro_gcp.m_current_gci);
+    sendSignal(c_diverify_queue[q].m_ref, GSN_DIVERIFYCONF, signal, 5, JBB);
   } else if (aContinueB == true) {
     jam();
     /**

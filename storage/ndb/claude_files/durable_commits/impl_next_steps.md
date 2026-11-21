@@ -499,6 +499,38 @@ GCP_SAVEREQ flag; interim: the start-time config).
 **Order inside X4:** X4.1 → X4.2 → X4.3 → X4.5 → X4.4 → X4.6 → X4.7 →
 X4.10 → X4.8 → X4.9 → X4.11 → X4.13; X4.12 and X4.14 alongside.
 
+**State (2026-11-21).** X4 comes in five parts, each a commit tested
+before the next: (1) X4.1-X4.3; (2) X4.5 and X4.4; (3) X4.6 and X4.7;
+(4) X4.10, X4.8, X4.9; (5) X4.11, X4.13 and the tests of X4.14. Q-B1-B3,
+B8 answered, B4, B9, B12 taken (`implementation_plan.md` §5).
+
+Part 1 written, to be tested:
+- `__DurableCommits` (CFG 716, hidden until X7 makes it the online
+  `DurableCommits`), refused without `RedoLogMode=pmem` by the management
+  server and by DIH. g is 1, not the first GCI after the start: the same
+  on every node, also one that joins by a node restart; X5's condition
+  R_gcp ≥ g − 1 always holds. Change it only by a system restart.
+- DIH: `m_micro_gcp.m_durable_gci`, `durableCommitGci()`, DIVERIFYCONF
+  `theData[4]` (length 5) on both the direct and the queued path.
+- TC: `TF_DURABLE` (8192) with `TF_LATE_COMMIT` at DIVERIFYCONF when the
+  opCount is above 0; `SOF_LOGGED_WRITE` (16384) at TCKEYREQ for a write
+  on a logged table, counted in `m_durable_op_count` at LQHKEYCONF once
+  the operation has no fired triggers left (so once, also for one with
+  triggers); packed `ZCOMMIT_DURABLE` (8, 6 words), unpacked COMMIT of 6
+  words, COMMITREQ of 10 words.
+- LQH: `OP_DURABLE` (0x400) and `m_op_count` (last in the record) from
+  the durable COMMIT, COMMITREQ and, for the operations that TUP's loop
+  over a row reaches before their own COMMIT, `theData[3]` of
+  TUP_WRITELOG_REQ/LQH_WRITELOG_REQ (`LQH_WRITELOG_DURABLE` | opCount);
+  the durable COMMIT passed on to the previous replica. Printers and
+  `PackedSignal::verify` know code 8.
+- Not yet: COMMIT records with `CF_DURABLE` and opCount come in part 2
+  with `writeCompleteLog`, as a durable COMMIT keeps the COMPLETE half of
+  the reservation, which only the COMPLETE record gives back. The
+  LQH_TRANSCONF word moves to X4.9, its only reader.
+- Test setting: `suite/ndb/pmem_redo_durable.cnf`. ndbinfo `config_values`
+  estimate 207 per node.
+
 **Risks:** the hottest commit code changes (`tupcommit_conf`, queued-log,
 parallel and takeover paths); the abort-after-commit path is new in LQH
 and TC; longer lock hold on hot rows (measured in X8.3).

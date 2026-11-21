@@ -1084,6 +1084,20 @@ const ConfigInfo::ParamInfo ConfigInfo::m_ParamInfo[] = {
     "0",
     "0", "100000" },
 
+  {
+    CFG_DB_DURABLE_COMMITS,
+    "__DurableCommits",
+    DB_TOKEN,
+    "Test setting, interim until online activation: every write "
+    "transaction commits durably, its acknowledgement waits for the "
+    "complete phase. Needs RedoLogMode=pmem; set it for all data nodes "
+    "and change it only by a system restart",
+    ConfigInfo::CI_USED,
+    false,
+    ConfigInfo::CI_BOOL,
+    "false",
+    "false", "true" },
+
     /* End RonDB additions */
 
     {CFG_DB_TRANSACTION_MEM, "TransactionMemory", DB_TOKEN,
@@ -4218,12 +4232,22 @@ static bool checkRedoLogPmem(InitConfigFileParser::Context &ctx) {
   ctx.m_currentSection->get("__RedoLogPmemCopyMethod", &copyMethod);
   ctx.m_currentSection->get("__RedoLogPmemPersistDelayNs", &persistDelayNs);
   ctx.m_currentSection->get("FileSystemPathRedoLog", &path);
+  Uint32 durableCommits = 0;
+  ctx.m_currentSection->get("__DurableCommits", &durableCommits);
   const bool testSettings = testMode != NDB_REDO_PMEM_TEST_MODE_OFF ||
                             powerLossEmul != 0 ||
                             copyMethod != NDB_REDO_PMEM_COPY_AUTO ||
                             persistDelayNs != 0;
 
   if (mode != NDB_REDO_LOG_MODE_PMEM) {
+    if (durableCommits != 0) {
+      /* A commit is durable only once its REDO record is persistent */
+      ctx.reportError(
+          "__DurableCommits=1 needs RedoLogMode=pmem - [%s] starting at "
+          "line: %d",
+          ctx.fname, ctx.m_sectionLineno);
+      return false;
+    }
     if (path != nullptr) {
       ctx.reportWarning(
           "With RedoLogMode=file the REDO log stays under FileSystemPath; "
@@ -4311,6 +4335,13 @@ static bool checkRedoLogPmem(InitConfigFileParser::Context &ctx) {
         "__RedoLogPmemPersistDelayNs=%u is a test setting, each persist of "
         "the REDO log waits %u ns (section starting at line %u)",
         persistDelayNs, persistDelayNs, ctx.m_sectionLineno);
+  }
+  if (durableCommits != 0) {
+    ctx.reportWarning(
+        "__DurableCommits is a test setting, not yet complete: a cluster "
+        "crash still loses the commits after the last saved global "
+        "checkpoint (section starting at line %u)",
+        ctx.m_sectionLineno);
   }
   return true;
 }

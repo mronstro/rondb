@@ -51,6 +51,9 @@ class CommitReq {
 
 public:
   static constexpr Uint32 SignalLength = 8;
+  /* RONDB-1150: of a durable transaction, with opCount and flags */
+  static constexpr Uint32 SignalLengthDurable = 10;
+  static constexpr Uint32 FLAG_DURABLE = 1;
 
 private:
   Uint32 reqPtr;
@@ -61,6 +64,8 @@ private:
   Uint32 old_blockref;
   Uint32 tcOprec;
   Uint32 gci_lo;
+  Uint32 opCount;  // SignalLengthDurable
+  Uint32 flags;    // SignalLengthDurable: FLAG_DURABLE
 };
 
 class Commit {
@@ -84,6 +89,8 @@ class Commit {
 
 public:
   static constexpr Uint32 SignalLength = 5;
+  /* RONDB-1150: of a durable transaction, with its opCount */
+  static constexpr Uint32 SignalLengthDurable = 6;
 
 private:
   Uint32 tcConnectPtr;
@@ -91,6 +98,7 @@ private:
   Uint32 transid1;
   Uint32 transid2;
   Uint32 gci_lo;
+  Uint32 opCount;  // SignalLengthDurable
 };
 
 class Committed {

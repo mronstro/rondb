@@ -39,6 +39,10 @@ Uint32 packedSignalLength(Uint32 signalType)
   {
     return 5;
   }
+  case ZCOMMIT_DURABLE:
+  {
+    return ZCOMMIT_DURABLE_LEN;
+  }
   case ZCOMPLETE:
   {
     return 3;
@@ -81,6 +85,10 @@ const char* packedSignalName(Uint32 signalType, bool failApi)
   case ZCOMMIT:
   {
     return "COMMIT";
+  }
+  case ZCOMMIT_DURABLE:
+  {
+    return "COMMIT_DURABLE";
   }
   case ZCOMPLETE:
   {
@@ -134,6 +142,7 @@ printPACKED_SIGNAL(FILE * output,
     switch (signalType)
     {
     case ZCOMMIT:
+    case ZCOMMIT_DURABLE:
     case ZCOMPLETE:
     case ZCOMMITTED:
     case ZCOMPLETED:
@@ -185,6 +194,7 @@ printPACKED_SIGNAL(FILE * output,
       switch (signalType)
       {
       case ZCOMMIT:
+      case ZCOMMIT_DURABLE:
       case ZCOMPLETE:
       case ZCOMMITTED:
       case ZCOMPLETED:
@@ -253,6 +263,9 @@ bool PackedSignal::verify(const Uint32 *data, Uint32 len,
         case ZCOMMIT:
           assert(commitLen > 0);
           pos += commitLen;
+          break;
+        case ZCOMMIT_DURABLE:
+          pos += ZCOMMIT_DURABLE_LEN;
           break;
         case ZCOMPLETE:
           pos += 3;

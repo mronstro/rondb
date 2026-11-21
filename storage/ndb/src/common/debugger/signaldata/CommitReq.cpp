@@ -30,7 +30,7 @@
 bool
 printCOMMITREQ(FILE * output,
                const Uint32 * theData,
-               Uint32 /*len*/,
+               Uint32 len,
                Uint16 /*receiverBlockNo*/)
 {
   const CommitReq * const sig = (const CommitReq *) theData;
@@ -48,13 +48,19 @@ printCOMMITREQ(FILE * output,
           sig->tcOprec,
           sig->old_blockref
           );
+  if (len >= CommitReq::SignalLengthDurable)
+  {
+    fprintf(output, " opCount = %u flags = H\'%.8x%s\n",
+            sig->opCount, sig->flags,
+            (sig->flags & CommitReq::FLAG_DURABLE) ? " durable" : "");
+  }
   return true;
 }
 
 bool
 printCOMMIT(FILE * output,
             const Uint32 * theData,
-            Uint32 /*len*/,
+            Uint32 len,
             Uint16 /*receiverBlockNo*/)
 {
   const Commit * const sig = (const Commit *) theData;
@@ -68,6 +74,10 @@ printCOMMIT(FILE * output,
           sig->gci_lo,
           sig->gci_hi
           );
+  if (len >= Commit::SignalLengthDurable)
+  {
+    fprintf(output, " durable, opCount = %u", sig->opCount);
+  }
   return true;
 }
 

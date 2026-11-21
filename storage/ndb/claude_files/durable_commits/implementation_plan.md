@@ -289,18 +289,18 @@ the ones marked * need your decision, see §5):
 
 | # | Question | Proposal |
 |---|---|---|
-| Q-B1 | Dirty writes in durable mode (DI-1): flag their records, or turn them into normal writes? | Turn them into normal writes; simpler to reason about |
-| Q-B2 | Read locks (DI-9): released at COMMIT or at COMPLETE? | At COMPLETE, like write locks |
-| Q-B3 | Error code for a rule-F abort | A new temporary error, retryable |
-| Q-B4 | Should TCKEY_FAILCONF carry the GCI? | No change |
+| Q-B1 | Dirty writes in durable mode (DI-1): flag their records, or turn them into normal writes? | **Answered (2026-11-21):** flag them. LQH writes PREPARE, COMMIT (`CF_DURABLE`, opCount 0) and COMPLETE with `CPF_SELF` behind one barrier; phase 2 treats `CPF_SELF` apart (DI-1) |
+| Q-B2 | Read locks (DI-9): released at COMMIT or at COMPLETE? | **Answered (2026-11-21):** at COMPLETE, like write locks |
+| Q-B3 | Error code for a rule-F abort | **Answered (2026-11-21):** a new temporary error, retryable |
+| Q-B4 | Should TCKEY_FAILCONF carry the GCI? | **Taken (2026-11-21):** no change |
 | Q-B5 | Forced start to R_gcp when a node group has only stale nodes? | No forced start in the first version |
 | Q-B6 | `SET DurableCommits=0` on a running cluster: accepted as pending until the next SR, or refused? | Accepted as pending |
 | Q-B7 | Block activation while a node restart runs? | Yes |
-| Q-B8 | API node-id hold-back until the save of f or of f+1 (DI-5)? | f+1 |
-| Q-B9 | Takeover: decide "any COMPLETE sent?" by opCount or by a marker bit (DI-7)? | Decide after the TLA+ check |
+| Q-B8 | API node-id hold-back until the save of f or of f+1 (DI-5)? | **Answered (2026-11-21):** f+1 |
+| Q-B9 | Takeover: decide "any COMPLETE sent?" by opCount or by a marker bit (DI-7)? | **Taken (2026-11-21):** opCount in X4.9, checked again with the TLA+ model (X3.4) |
 | Q-B10 | Path of the node-failure file | Under the REDO path of NUMA node 0 |
 | Q-B11 | Memory for the step-A hash table, and what happens when it runs out | Sized from the transaction-record count; out of memory stops the SR with a clear message |
-| Q-B12 | Force durable transactions onto the parallel commit path? | No; measure first |
+| Q-B12 | Force durable transactions onto the parallel commit path? | **Taken (2026-11-21):** no; measure first |
 | Q-B13 | There is no CI (§2.4). Which developer machines cover Linux ARM64 and `memmap=`, and when do real CXL modules arrive? | Linux ARM64 by pull request 2, `memmap=` by pull request 5 |
 
 ### 5.1 Q-A4 explained: the DRAM-only words of the page header

@@ -6552,6 +6552,16 @@ void Dblqh::execPACKED_SIGNAL(Signal* signal)
       execCOMMIT(signal);
       break;
     }
+    case ZCOMMIT_DURABLE:
+    {
+      /* RONDB-1150: ZCOMMIT with the opCount, as an unpacked durable COMMIT */
+      signal->theData[4] = packedData[step+4];
+      signal->theData[5] = packedData[step+5];
+      signal->header.theLength = Commit::SignalLengthDurable;
+      step += ZCOMMIT_DURABLE_LEN;
+      execCOMMIT(signal);
+      break;
+    }
     case ZCOMPLETE:
     {
       signal->header.theLength = 3;
@@ -7088,6 +7098,9 @@ void Dblqh::sendCommitLqh(Signal *signal, BlockReference alqhBlockref,
   ndbassert(!m_is_in_query_thread);
   Uint32 instanceKey = refToInstance(alqhBlockref);
   ndbassert(refToMain(alqhBlockref) == getDBLQH());
+  /* RONDB-1150: a durable operation passes its opCount on */
+  const bool durable =
+      unlikely((regTcPtr->m_flags & TcConnectionrec::OP_DURABLE) != 0);
 
 #ifndef UNPACKED_COMMIT_SIGNALS
   if (unlikely(instanceKey > MAX_NDBMT_LQH_WORKERS))
@@ -7100,7 +7113,10 @@ void Dblqh::sendCommitLqh(Signal *signal, BlockReference alqhBlockref,
     signal->theData[2] = regTcPtr->transid[0];
     signal->theData[3] = regTcPtr->transid[1];
     signal->theData[4] = regTcPtr->gci_lo;
-    sendSignal(alqhBlockref, GSN_COMMIT, signal, 5, JBB);
+    signal->theData[5] = durable ? regTcPtr->m_op_count : 0;
+    sendSignal(alqhBlockref, GSN_COMMIT, signal,
+               durable ? Commit::SignalLengthDurable : Commit::SignalLength,
+               JBB);
     return;
   }
 
@@ -7110,13 +7126,19 @@ void Dblqh::sendCommitLqh(Signal *signal, BlockReference alqhBlockref,
   ptrCheckGuard(Thostptr, chostFileSize, hostRecord);
   struct PackedWordsContainer *container = &Thostptr.p->lqh_pack[instanceKey];
 
-  Uint32 Tdata[5];
+  Uint32 Tdata[ZCOMMIT_DURABLE_LEN];
   Tdata[0] = regTcPtr->clientConnectrec;
   Tdata[1] = regTcPtr->gci_hi;
   Tdata[2] = regTcPtr->transid[0];
   Tdata[3] = regTcPtr->transid[1];
   Tdata[4] = regTcPtr->gci_lo;
-  Uint32 len = 5;
+  Uint32 len = Commit::SignalLength;
+  Uint32 packedCode = ZCOMMIT;
+  if (durable) {
+    Tdata[5] = regTcPtr->m_op_count;
+    len = Commit::SignalLengthDurable;
+    packedCode = ZCOMMIT_DURABLE;
+  }
 
   if (Thostptr.i != getOwnNodeId())
   {
@@ -7130,7 +7152,7 @@ void Dblqh::sendCommitLqh(Signal *signal, BlockReference alqhBlockref,
     updatePackedList(signal, Thostptr.p, Thostptr.i);
   }
 
-  Tdata[0] |= (ZCOMMIT << 28);
+  Tdata[0] |= (packedCode << 28);
   Uint32 pos = container->noOfPackedWords;
   container->noOfPackedWords = pos + len;
   Thostptr.p->lqh_pack_mask.set(instanceKey);
@@ -15056,6 +15078,9 @@ void Dblqh::execCOMMIT(Signal *signal) {
   Uint32 transid1 = req->transid1;
   Uint32 transid2 = req->transid2;
   Uint32 gci_lo = req->gci_lo;
+  /* RONDB-1150: a COMMIT of a durable transaction carries its opCount */
+  const bool durable = signal->getLength() >= Commit::SignalLengthDurable;
+  const Uint32 opCount = durable ? req->opCount : 0;
   jamEntryDebug();
   jamDataDebug(tcConnectptr.i);
   if (unlikely(!tcConnect_pool.getValidPtr(tcConnectptr)))
@@ -15146,9 +15171,14 @@ void Dblqh::execCOMMIT(Signal *signal) {
         jam();
         CLEAR_ERROR_INSERT_VALUE;
         g_eventLogger->info("Delaying COMMIT for READ");
-        sendSignalWithDelay(cownref, GSN_COMMIT, signal, 3000, 5);
+        sendSignalWithDelay(cownref, GSN_COMMIT, signal, 3000,
+                            signal->getLength());
         return;
       }
+    }
+    if (unlikely(durable)) {
+      jamDebug();
+      redoSetDurable(regTcPtr, opCount);
     }
     commitReqLab(signal, gci_hi, gci_lo, tcConnectptr);
     return;
@@ -15176,6 +15206,11 @@ void Dblqh::execCOMMITREQ(Signal *signal) {
   Uint32 gci_lo = req->gci_lo;
 
   ndbrequire(signal->getLength() >= CommitReq::SignalLength);
+  /* RONDB-1150: a COMMITREQ of a durable transaction carries its opCount */
+  const bool durable =
+      signal->getLength() >= CommitReq::SignalLengthDurable &&
+      (req->flags & CommitReq::FLAG_DURABLE) != 0;
+  const Uint32 opCount = durable ? req->opCount : 0;
 
   if (ERROR_INSERTED(5004)) {
     systemErrorLab(signal, __LINE__);
@@ -15225,6 +15260,10 @@ void Dblqh::execCOMMITREQ(Signal *signal) {
     regTcPtr->reqBlockref = reqBlockref;
     regTcPtr->reqRef = reqPtr;
     regTcPtr->abortState = TcConnectionrec::REQ_FROM_TC_COMMIT;
+    if (unlikely(durable)) {
+      jamDebug();
+      redoSetDurable(regTcPtr, opCount);
+    }
     commitReqLab(signal, gci_hi, gci_lo, tcConnectptr);
     return;
   case TcConnectionrec::COMMITTED:
@@ -15556,6 +15595,15 @@ void Dblqh::commitReqLab(Signal *signal, Uint32 gci_hi, Uint32 gci_lo,
       signal->theData[0] = regTcPtr->tupConnectrec;
       signal->theData[1] = gci_hi;
       signal->theData[2] = gci_lo;
+      /**
+       * RONDB-1150: TUP passes it to every operation on the row, so that
+       * an operation whose COMMIT record is written here, before its own
+       * COMMIT signal, commits durably as well
+       */
+      signal->theData[3] =
+          unlikely(regTcPtr->m_flags & TcConnectionrec::OP_DURABLE)
+              ? (LQH_WRITELOG_DURABLE | regTcPtr->m_op_count)
+              : 0;
       c_tup->execTUP_WRITELOG_REQ(signal);
       jamEntryDebug();
       if (regTcPtr->transactionState == TcConnectionrec::LOG_COMMIT_QUEUED) {
@@ -15629,6 +15677,12 @@ void Dblqh::execLQH_WRITELOG_REQ(Signal *signal) {
   TcConnectionrec *const regTcPtr = tcConnectptr.p;
   Uint32 gci_hi = signal->theData[1];
   Uint32 gci_lo = signal->theData[2];
+  /* RONDB-1150: the operation that TUP's loop started commits durably */
+  const Uint32 durableWord = signal->theData[3];
+  if (unlikely((durableWord & LQH_WRITELOG_DURABLE) != 0)) {
+    jamDebug();
+    redoSetDurable(regTcPtr, durableWord & ~LQH_WRITELOG_DURABLE);
+  }
   Uint32 newestGci = cnewestGci;
   TcConnectionrec::LogWriteState logWriteState = regTcPtr->logWriteState;
   TcConnectionrec::TransactionState transState = regTcPtr->transactionState;

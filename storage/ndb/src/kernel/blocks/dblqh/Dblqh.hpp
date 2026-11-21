@@ -3370,7 +3370,13 @@ class Dblqh : public SimulatedBlock {
        * same-owner duplicate check, so genuine recovery/replication replays stay
        * exempt while an ordinary same-transaction duplicate is still rejected.
        */
-      OP_TTL_OWNER_CHECK_BYPASS = 0x200
+      OP_TTL_OWNER_CHECK_BYPASS = 0x200,
+      /**
+       * RONDB-1150: the operation commits durably (a durable COMMIT or
+       * COMMITREQ, or TUP's loop over the operations on the row);
+       * m_op_count holds the opCount. PMEM format only.
+       */
+      OP_DURABLE = 0x400
     };
     Uint32 m_flags;
     LogPartRecord *m_log_part_ptr_p;
@@ -3425,6 +3431,12 @@ class Dblqh : public SimulatedBlock {
      * members before it moved.
      */
     Uint64 m_redo_end_lsn;
+    /**
+     * RONDB-1150: the opCount of a durable operation (OP_DURABLE), the
+     * number of logged write operations of its transaction; for its
+     * COMMIT record and LQH_TRANSCONF. Read only with OP_DURABLE set.
+     */
+    Uint32 m_op_count;
   };                 /* p2c: size = 308 bytes */
 
   static constexpr Uint32 DBLQH_OPERATION_RECORD_TRANSIENT_POOL_INDEX = 0;
@@ -4432,6 +4444,13 @@ private:
                          const TcConnectionrec *regTcPtr);
   void redoPersistOp(Signal *signal, const TcConnectionrec *regTcPtr);
   void redoCheckPersisted(const TcConnectionrec *regTcPtr, Uint32 line);
+  void redoSetDurable(TcConnectionrec *regTcPtr, Uint32 opCount);
+  /**
+   * RONDB-1150: theData[3] of TUP_WRITELOG_REQ and LQH_WRITELOG_REQ, the
+   * direct calls of TUP's loop over the operations on a row: this bit and
+   * the opCount when the operation commits durably, else 0
+   */
+  static constexpr Uint32 LQH_WRITELOG_DURABLE = 0x80000000;
   [[noreturn]] void redoCheckPersistedFailed(const TcConnectionrec *regTcPtr,
                                              Uint64 persisted, Uint32 line);
   void redoPmemPrintCounters(const LogPartRecord *logPartPtrP);
@@ -7057,6 +7076,19 @@ inline void Dblqh::unlock_log_part(LogPartRecord *logPartPtrP) {
  * step 1 a COMMIT written with the benchmark switch on, from X4 a durable
  * one. Debug and error-insert builds only.
  */
+/**
+ * RONDB-1150 (X4.3): the operation commits durably, with the opCount of
+ * its transaction, from a durable COMMIT, COMMITREQ or TUP's loop over the
+ * operations on the row. Only in the PMEM format, which durable commits
+ * need: a node in file mode commits as before.
+ */
+inline void Dblqh::redoSetDurable(TcConnectionrec *regTcPtr, Uint32 opCount) {
+  if (likely(c_redo_pmem_format)) {
+    regTcPtr->m_flags |= TcConnectionrec::OP_DURABLE;
+    regTcPtr->m_op_count = opCount;
+  }
+}
+
 inline void Dblqh::redoCheckPersisted(const TcConnectionrec *regTcPtr,
                                       Uint32 line) {
 #if defined(VM_TRACE) || defined(ERROR_INSERT)
