@@ -14743,11 +14743,11 @@ void Dbtc::completeTransAtTakeOverDoOne(Signal* signal,
     jam();
     /*------------------------------------------------------------*/
     /*       ALL PARTS OF THE TRANSACTIONS REPORTED COMMITTED. WE */
-    /*       HAVE THUS COMPLETED THE COMMIT PHASE. WE CAN REPORT  */
-    /*       COMMITTED TO THE APPLICATION AND CONTINUE WITH THE   */
-    /*       COMPLETE PHASE.                                      */
+    /*       HAVE THUS COMPLETED THE COMMIT PHASE. CONTINUE WITH  */
+    /*       THE COMPLETE PHASE. THE APPLICATION IS TOLD THAT THE */
+    /*       TRANSACTION COMMITTED WHEN THAT PHASE IS DONE, IN    */
+    /*       check_finished_complete_handling().                  */
     /*------------------------------------------------------------*/
-    sendTCKEY_FAILCONF(signal, apiConnectptr.p);
     tcConnectptr.i = apiConnectptr.p->tcConnect.getFirst();
     ndbrequire(tcConnectRecord.getValidPtr(tcConnectptr));
     commitGciHandling(signal,
@@ -15557,8 +15557,8 @@ Dbtc::check_finished_commit_handling(Signal *signal,
   /* Transaction committed, proceed */
   if (apiConnectptr.p->takeOverRec != RNIL)
   {
+    /* TCKEY_FAILCONF after the complete phase, see below */
     jam();
-    sendTCKEY_FAILCONF(signal, apiConnectptr.p);
   }
   else
   {
@@ -15949,6 +15949,14 @@ Dbtc::check_finished_complete_handling(Signal *signal,
   if (apiConnectptr.p->takeOverRec != RNIL)
   {
     jam();
+    /**
+     * A transaction committed by the TC takeover: the application is told
+     * only now, when every live replica has completed. As TF_LATE_COMMIT
+     * does without a takeover, so that a read of a READ_BACKUP table
+     * through a backup replica sees the commit; the takeover record does
+     * not know the flag, so it is done for every transaction.
+     */
+    sendTCKEY_FAILCONF(signal, apiConnectptr.p);
     signal->theData[0] = TcContinueB::ZCOMPLETE_TRANS_AT_TAKE_OVER;
     signal->theData[1] = apiConnectptr.p->takeOverRec;
     signal->theData[2] = apiConnectptr.p->takeOverInd;
@@ -15979,6 +15987,24 @@ void Dbtc::toCompleteHandlingLab(Signal* signal,
                apiConnectptr.p->check_fail_data_process_ongoing));
   apiConnectptr.p->send_fail_data_process_ongoing = true;
   apiConnectptr.p->apiConnectstate = CS_WAIT_COMPLETE_CONF;
+#ifdef ERROR_INSERT
+  if (apiConnectptr.p->takeOverRec != RNIL && ERROR_INSERTED_CLEAR(8320))
+  {
+    /**
+     * The TC takeover sends the COMPLETEREQs of a transaction 2 s late,
+     * once, so that a test can check that the API gets no commit ack
+     * before they are done. Resumed as after a real-time break.
+     */
+    jam();
+    apiConnectptr.p->finish_trans_counter++;
+    setApiConTimer(apiConnectptr, ctcTimer, __LINE__);
+    signal->theData[0] = TcContinueB::ZSEND_TO_COMPLETE_HANDLING;
+    signal->theData[1] = apiConnectptr.i;
+    signal->theData[2] = tcConnectptr.i;
+    sendSignalWithDelay(cownref, GSN_CONTINUEB, signal, 2000, 3);
+    return;
+  }
+#endif
   do
   {
     jam();

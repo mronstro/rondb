@@ -1,0 +1,24 @@
+--source include/have_ndb.inc
+--source have_ndb_error_insert.inc
+
+# After a TC takeover the API gets its commit ack only when the complete
+# phase is done, so that a committed read of a READ_BACKUP table sees the
+# commit. Error insert 8133 crashes the TC of the transaction after its
+# commit phase, 8320 makes the takeover send its COMPLETEREQs 2 s late;
+# the test program starts the crashed data node again.
+let NDBAPITEST_NAME=testNodeRestart;
+let NDBAPITEST_ARGS=-n TakeoverReadBackupRYW --records=1000 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+# NDBT creates and drops TEST_DB.T1 directly through the NDB API. A mysqld
+# whose metadata change monitor happens to see the table creates the
+# database TEST_DB and never removes it, and the check of the test case
+# fails. Drop it on both mysqlds: DROP DATABASE IF EXISTS is not
+# distributed from a mysqld that does not have the database.
+--connect(s2,127.0.0.1,root,,test,$MASTER_MYPORT1,)
+--disable_warnings
+DROP DATABASE IF EXISTS TEST_DB;
+--connection default
+DROP DATABASE IF EXISTS TEST_DB;
+--enable_warnings
+--disconnect s2

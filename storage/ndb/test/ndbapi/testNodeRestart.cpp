@@ -12412,6 +12412,191 @@ int runTcTakeoverReopenOlderGciBehindNewerGci(NDBT_Context *ctx,
   return NDBT_OK;
 }
 
+static int takeoverRBCreateTableHook(Ndb *, NdbDictionary::Table &table,
+                                     int when, void *) {
+  if (when == 0) {
+    table.setReadBackupFlag(true);
+  }
+  return 0;
+}
+
+/* The test table, created again with READ_BACKUP */
+int runCreateReadBackupTable(NDBT_Context *ctx, NDBT_Step *step) {
+  Ndb *pNdb = GETNDB(step);
+  NdbDictionary::Dictionary *pDict = pNdb->getDictionary();
+  const BaseString tabName(ctx->getTab()->getName());
+  pDict->dropTable(tabName.c_str());
+  if (NDBT_Tables::createTable(pNdb, tabName.c_str(), false, false,
+                               takeoverRBCreateTableHook, nullptr) != 0) {
+    g_err << "Failed to create " << tabName.c_str() << " with READ_BACKUP"
+          << endl;
+    return NDBT_FAILED;
+  }
+  const NdbDictionary::Table *tab = pDict->getTable(tabName.c_str());
+  if (tab == nullptr || !tab->getReadBackupFlag()) {
+    g_err << "No READ_BACKUP table " << tabName.c_str() << endl;
+    return NDBT_FAILED;
+  }
+  ctx->setTab(tab);
+  return NDBT_OK;
+}
+
+/* The node of the primary replica of a Hugo row, 0 if not known */
+static Uint32 primaryNodeOfRow(const NdbDictionary::Table *tab, int row) {
+  HugoCalculator calc(*tab);
+  HugoCalculator::KeyParts keyParts;
+  calc.setKeyParts(&keyParts, row);
+  Uint32 hash;
+  if (Ndb::computeHash(&hash, tab, keyParts.ptrs) != 0) {
+    return 0;
+  }
+  Uint32 nodes[4];
+  if (tab->getFragmentNodes(tab->getPartitionId(hash), nodes,
+                            NDB_ARRAY_SIZE(nodes)) == 0) {
+    return 0;
+  }
+  return nodes[0];
+}
+
+int runTakeoverReadBackupRYW(NDBT_Context *ctx, NDBT_Step *step) {
+  /**
+  After a TC takeover the API gets TCKEY_FAILCONF only when the complete
+  phase is done, as TF_LATE_COMMIT does without a takeover. A backup
+  replica makes a commit visible at COMPLETE, so with the ack before it a
+  committed read of a READ_BACKUP table can miss the transaction it was
+  told is committed.
+
+    Flow in the test:
+      1. One transaction updates rows of a READ_BACKUP table on a
+         non-master TC, the victim. 8133 makes the victim leave it
+         committed, without the ack and before COMPLETE, and crash.
+      2. 8320 on the other nodes makes the takeover send its COMPLETEREQs
+         2 s late.
+      3. When the API has the ack, a committed read of the rows must see
+         the update. For the rows whose primary replica was on the
+         victim, the replica left is a backup, which shows the update
+         only after its COMPLETE: before the fix the ack came first.
+  */
+  NdbRestarter restarter;
+
+  if (restarter.waitClusterStarted(30) != 0) {
+    g_err << "Cluster is not started" << endl;
+    return NDBT_FAILED;
+  }
+
+  if (restarter.getNumDbNodes() < 2 || restarter.getNumReplicas() < 2) {
+    g_err << "Need at least two data nodes and two replicas" << endl;
+    return NDBT_SKIPPED;
+  }
+
+  const NdbDictionary::Table *tab = ctx->getTab();
+  if (!tab->getReadBackupFlag()) {
+    g_err << "Table " << tab->getName() << " is not READ_BACKUP" << endl;
+    return NDBT_FAILED;
+  }
+
+  const int victim = restarter.getRandomNotMasterNodeId(rand());
+  const int rows = std::min(ctx->getNumRecords(), 64);
+  int rowsOnVictim = 0;
+  for (int r = 0; r < rows; r++) {
+    if (primaryNodeOfRow(tab, r) == Uint32(victim)) rowsOnVictim++;
+  }
+  g_err << "Victim TC node " << victim << " has the primary replica of "
+        << rowsOnVictim << " of the " << rows << " rows" << endl;
+  if (rowsOnVictim == 0) {
+    g_err << "No updated row has its primary replica on the victim" << endl;
+    return NDBT_SKIPPED;
+  }
+
+  /* Clear 8320 on the other nodes; the victim restarts without inserts */
+  auto clearErrorInserts = [&restarter, victim]() {
+    for (int i = 0; i < restarter.getNumDbNodes(); i++) {
+      const int node = restarter.getDbNodeId(i);
+      if (node != victim) restarter.insertErrorInNode(node, 0);
+    }
+  };
+
+  // NRT_NoStart_Restart: restart the victim after the 8133 crash, but leave
+  // it in nostart so TC takeover runs while the victim is still down.
+  const int restartOnError[] = {DumpStateOrd::CmvmiSetRestartOnErrorInsert, 1};
+  if (restarter.dumpStateOneNode(victim, restartOnError, 2) != 0) {
+    return NDBT_FAILED;
+  }
+  if (restarter.insertErrorInAllNodes(8320) != 0 ||
+      restarter.insertErrorInNode(victim, 8133) != 0) {
+    clearErrorInserts();
+    restarter.insertErrorInNode(victim, 0);
+    return NDBT_FAILED;
+  }
+
+  Ndb *ndb = GETNDB(step);
+  const int updates = 1;  // runLoadTable wrote updates value 0
+  HugoOperations victimOps(*tab);
+  if (victimOps.startTransaction(ndb, victim, 0) != NDBT_OK ||
+      victimOps.pkUpdateRecord(ndb, 0, rows, updates) != NDBT_OK ||
+      victimOps.execute_NoCommit(ndb) != NDBT_OK) {
+    clearErrorInserts();
+    restarter.insertErrorInNode(victim, 0);
+    return NDBT_FAILED;
+  }
+  NdbTransaction *victimTrans = victimOps.getTransaction();
+  victimTrans->executeAsynchPrepare(Commit, callback, nullptr, AbortOnError);
+  ndb->sendPreparedTransactions(1);
+  g_err << "Commit sent to the victim" << endl;
+
+  if (checkOneNodeDead(victim, 30) != 0) {
+    g_err << "Victim did not leave STARTED state" << endl;
+    clearErrorInserts();
+    return NDBT_FAILED;
+  }
+
+  /**
+   * The takeover's TCKEY_FAILCONF puts the transaction in the Ndb's
+   * completed list: poll it out before reading, and before the
+   * transaction is closed.
+   */
+  int result = NDBT_OK;
+  if (ndb->pollNdb(30000, 1) != 1) {
+    g_err << "No commit ack from the takeover" << endl;
+    clearErrorInserts();
+    return NDBT_FAILED;
+  }
+  if (victimTrans->commitStatus() != NdbTransaction::Committed) {
+    g_err << "The takeover did not commit the transaction: "
+          << victimTrans->getNdbError() << endl;
+    result = NDBT_FAILED;
+  }
+
+  if (result == NDBT_OK) {
+    HugoOperations readOps(*tab);
+    if (readOps.startTransaction(ndb) != NDBT_OK ||
+        readOps.pkReadRecord(ndb, 0, rows, NdbOperation::LM_CommittedRead) !=
+            NDBT_OK ||
+        readOps.execute_Commit(ndb) != NDBT_OK) {
+      g_err << "Committed read after the ack failed" << endl;
+      result = NDBT_FAILED;
+    } else if (readOps.verifyUpdatesValue(updates, rows) != NDBT_OK) {
+      g_err << "A committed read after the takeover's ack missed the update"
+            << endl;
+      result = NDBT_FAILED;
+    }
+    readOps.closeTransaction(ndb);
+  }
+  victimOps.closeTransaction(ndb);
+  clearErrorInserts();
+
+  if (restarter.waitNodesNoStart(&victim, 1, 120) != 0) {
+    g_err << "Victim did not reach nostart after failure" << endl;
+    return NDBT_FAILED;
+  }
+  if (restarter.startNodes(&victim, 1) != 0 ||
+      restarter.waitNodesStarted(&victim, 1, 120) != 0) {
+    g_err << "Victim did not restart after failure" << endl;
+    return NDBT_FAILED;
+  }
+  return result;
+}
+
 int runGciWatcher(NDBT_Context *ctx, NDBT_Step *step) {
   /* Setup Event + subscribe, updating ClusterGci property
    * until test stopped
@@ -16055,6 +16240,15 @@ TESTCASE("TcTakeoverReopenOlderGciBehindNewerGci",
          "open on the master TC") {
   INITIALIZER(runLoadTable);
   STEP(runTcTakeoverReopenOlderGciBehindNewerGci);
+}
+TESTCASE("TakeoverReadBackupRYW",
+         "After a TC takeover the API is acked only when the complete phase "
+         "is done, so a committed read of a READ_BACKUP table sees the "
+         "commit") {
+  INITIALIZER(runCreateReadBackupTable);
+  INITIALIZER(runLoadTable);
+  STEP(runTakeoverReadBackupRYW);
+  FINALIZER(runClearTable);
 }
 TESTCASE("GCPSaveAndFileChange",
          "Check resilience of GCP_SAVE mechanism wrt redo log file changes") {
