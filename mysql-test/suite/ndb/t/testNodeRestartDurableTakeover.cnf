@@ -1,0 +1,8 @@
+!include ../my.cnf
+
+# RONDB-1150 X4.14: durable commits on the REDO log in PMEM mode on any
+# file system
+[cluster_config.1]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+__DurableCommits=1

@@ -15419,6 +15419,20 @@ void Dblqh::execCOMPLETE(Signal *signal) {
         return;
       }
     }
+    if (ERROR_INSERTED(5183) &&
+        (regTcPtr->m_flags & TcConnectionrec::OP_LOCAL_COMMIT_AT_COMPLETE) !=
+            0 &&
+        signal->getSendersBlockRef() != reference()) {
+      /**
+       * RONDB-1150 (X4.14): the primary of a durable write gets its
+       * COMPLETE 3 s late, once, so that a test can read the row while
+       * the backups have committed and the primary has not (L)
+       */
+      jam();
+      sendSignalWithDelay(cownref, GSN_COMPLETE, signal, 3000,
+                          signal->getLength());
+      return;
+    }
     TRACE_OP(regTcPtr, "COMPLETE");
     if (unlikely(regTcPtr->abortState == TcConnectionrec::NEW_FROM_TC) &&
         (regTcPtr->m_flags & TcConnectionrec::OP_DURABLE) != 0) {
@@ -15437,6 +15451,11 @@ void Dblqh::execCOMPLETE(Signal *signal) {
       /* RONDB-1150 (X4.5, barrier 7 of X4.4): K */
       jam();
       redoCompleteDurable(signal, regTcPtr);
+      if (ERROR_INSERTED(5181)) {
+        redoPmemCrashPoint(5181, nullptr,
+                           "a durable COMPLETE persistent, before the local "
+                           "commit");
+      }
     }
 
     if (tcConnectptr.p->seqNoReplica != 0 &&
@@ -15755,6 +15774,12 @@ void Dblqh::commitReqLab(Signal *signal, Uint32 gci_hi, Uint32 gci_lo,
      */
     jam();
     redoPersistOp(signal, regTcPtr);
+    if (ERROR_INSERTED(5180) &&
+        regTcPtr->m_committed_log_space == PmemRedo::RESERVED_TAIL) {
+      redoPmemCrashPoint(5180, nullptr,
+                         "a durable COMMIT persistent, before COMMITTED or "
+                         "COMMIT to the next replica");
+    }
   }
   if (unlikely(regTcPtr->seqNoReplica == 0 ||
                regTcPtr->activeCreat == Fragrecord::AC_NR_COPY)) {
@@ -16083,6 +16108,17 @@ void Dblqh::tupcommit_conf(Signal *signal,
                    regFragptr->tabRef, regFragptr->fragId));
   }  // if
   if (dirtyOp != ZTRUE) {
+    if (ERROR_INSERTED(5182) &&
+        (tcPtrP->m_flags & TcConnectionrec::OP_DURABLE) != 0 &&
+        activeCreat == Fragrecord::AC_NORMAL &&
+        (seqNoReplica != 0 ||
+         (tcPtrP->m_flags & TcConnectionrec::OP_LOCAL_COMMIT_AT_COMPLETE) !=
+             0)) {
+      /* RONDB-1150 (X4.14): the local commits that come with COMPLETE */
+      redoPmemCrashPoint(5182, nullptr,
+                         "a durable write committed locally, before "
+                         "COMPLETE to the next replica or COMPLETED");
+    }
     if (unlikely(tcPtrP->m_flags &
                  TcConnectionrec::OP_LOCAL_COMMIT_AT_COMPLETE)) {
       /**
@@ -17542,6 +17578,11 @@ void Dblqh::abortAfterCommitLab(Signal *signal,
     ndbrequire(regTcPtr->m_committed_log_space == PmemRedo::RESERVED_TAIL);
     redoAbortAfterCommit(signal, regTcPtr);
     regTcPtr->logWriteState = TcConnectionrec::NOT_STARTED;
+    if (ERROR_INSERTED(5184)) {
+      redoPmemCrashPoint(5184, nullptr,
+                         "an ABORT with AF_AFTER_COMMIT persistent, before "
+                         "the lock is released");
+    }
   }
   abortCommonLab(signal, tcConnectptr);
 }  // Dblqh::abortAfterCommitLab()

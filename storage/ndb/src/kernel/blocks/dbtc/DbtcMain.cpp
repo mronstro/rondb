@@ -8078,6 +8078,20 @@ void Dbtc::commit020Lab(Signal *signal,
     apiConnectptr.p->finish_trans_counter++;
 
     if (tcConList.next(localTcConnectptr)) {
+      if (unlikely(ERROR_INSERTED(8321)) &&
+          tc_testbit(apiConnectptr.p->m_flags, ApiConnectRecord::TF_DURABLE)) {
+        /**
+         * RONDB-1150 (X4.14): the TC of a durable transaction stops with
+         * the COMMIT of its first operation sent and not the others, as
+         * 8073 does after a batch. nextTcOperation stays RNIL, so the
+         * COMMITTED does not resume the loop before the crash.
+         */
+        jam();
+        execSEND_PACKED(signal);
+        signal->theData[0] = 9999;
+        sendSignalWithDelay(CMVMI_REF, GSN_NDB_TAMPER, signal, 100, 1);
+        return;
+      }
       if (Tcount < ZMAX_COMMIT_PER_RT_BREAK &&
           !(ERROR_INSERTED(8057) || ERROR_INSERTED(8073) ||
             ERROR_INSERTED(8089) ||
@@ -8669,6 +8683,19 @@ void Dbtc::complete010Lab(Signal *signal,
     Tcount += sendCompleteLqh(signal, localTcConnectptr.p, apiConnectptr.p);
     apiConnectptr.p->finish_trans_counter++;
     if (tcConList.next(localTcConnectptr)) {
+      if (unlikely(ERROR_INSERTED(8322)) &&
+          tc_testbit(apiConnectptr.p->m_flags, ApiConnectRecord::TF_DURABLE)) {
+        /**
+         * RONDB-1150 (X4.14): the TC of a durable transaction stops with
+         * the COMPLETE of its first operation sent and not the others,
+         * as 8321 does with COMMIT
+         */
+        jam();
+        execSEND_PACKED(signal);
+        signal->theData[0] = 9999;
+        sendSignalWithDelay(CMVMI_REF, GSN_NDB_TAMPER, signal, 100, 1);
+        return;
+      }
       if (Tcount < ZMAX_COMMIT_PER_RT_BREAK && !ERROR_INSERTED(8112) &&
           !(ERROR_INSERTED(8123) && ((apiConnectptr.i & 0x1) != 0))  &&
           !ERROR_INSERTED(8127)) {

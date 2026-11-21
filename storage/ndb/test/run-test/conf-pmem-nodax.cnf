@@ -29,6 +29,10 @@
 # .2node_powerloss, .2node with the power-loss emulation:
 #   atrt --conf=conf-pmem-nodax.cnf --clusters=.2node \
 #        --testcase-file=pmem-redo-tests.txt
+# .2node_durable and .4node_durable add durable commits (RONDB-1150 X4)
+# for pmem-durable-tests.txt and the daily-basic lists:
+#   atrt --conf=conf-pmem-nodax.cnf --clusters=.2node_durable,.4node_durable \
+#        --testcase-file=pmem-durable-tests.txt
 #
 
 [atrt]
@@ -163,3 +167,84 @@ TransactionDeadlockDetectionTimeout=2500
 
 RedoLogMode=pmem
 __RedoLogPmemTestMode=nodax
+
+#
+# .2node_durable - .2node with durable commits (__DurableCommits, the
+# interim setting until online activation)
+#
+
+[cluster_config.2node_durable]
+ndb_mgmd = CHOOSE_host1
+ndbd = CHOOSE_host2,CHOOSE_host3
+ndbapi= CHOOSE_host1,,,,
+
+NoOfReplicas = 2
+DataMemory = 400M
+BackupMemory = 64M
+MaxNoOfConcurrentScans = 100
+MaxNoOfSavedMessages= 5
+SendBufferMemory = 2M
+NoOfFragmentLogFiles = 6
+FragmentLogFileSize = 64M
+CompressedLCP=1
+CompressedBackup=1
+ODirect=1
+MaxNoOfAttributes=2000
+Checksum=1
+AutomaticThreadConfig=1
+AutomaticMemoryConfig=1
+NumCPUs=3
+TotalMemoryConfig=5500M
+MaxNoOfTables=200
+MaxNoOfOrderedIndexes=200
+MaxNoOfUniqueHashIndexes=200
+MaxNoOfTriggers=3000
+TransactionDeadlockDetectionTimeout=5000
+CrashOnLeakedLcpScannedBit=1
+
+SharedGlobalMemory=350M
+DiskPageBufferMemory=256M
+InitialLogfileGroup=undo_buffer_size=64M;undofile01.dat:512M;undofile02.dat:512M
+InitialTablespace=datafile01.dat:256M;datafile02.dat:256M
+TimeBetweenWatchDogCheckInitial=60000
+
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+__DurableCommits=1
+
+#
+# .4node_durable - .4node with durable commits; two node groups, as
+# testNodeRestart -n DurableCrashAbortAfterCommit needs
+#
+
+[cluster_config.4node_durable]
+ndb_mgmd = CHOOSE_host1
+ndbd = CHOOSE_host2,CHOOSE_host3,CHOOSE_host4,CHOOSE_host5
+ndbapi= CHOOSE_host1,,,,
+
+NoOfReplicas = 2
+IndexMemory = 100M
+DataMemory = 500M
+BackupMemory = 64M
+MaxNoOfConcurrentScans = 100
+MaxNoOfSavedMessages= 5
+NoOfFragmentLogFiles = 6
+FragmentLogFileSize = 64M
+ODirect=1
+MaxNoOfAttributes=2000
+Checksum=1
+AutomaticThreadConfig=1
+NumCPUs=4
+PartitionsPerNode=1
+
+SharedGlobalMemory=256M
+DiskPageBufferMemory=256M
+InitialLogfileGroup=undo_buffer_size=64M;undofile01.dat:512M;undofile02.dat:512M
+InitialTablespace=datafile01.dat:256M;datafile02.dat:256M
+TimeBetweenWatchDogCheckInitial=60000
+HeartbeatIntervalDbApi=5000
+TransactionDeadlockDetectionTimeout=2500
+
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+__DurableCommits=1

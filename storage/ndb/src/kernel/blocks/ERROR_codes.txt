@@ -202,12 +202,12 @@ the request. Codes below 5128 stay on the LDM instances. Clearing (code
       node-failure protocol); emits [JOIN_AGG_MERGE_HELD node=N iteration=I
       coordinator=C] (extra = iteration, top bit = event sent). NF-14: the
       host record's ZNODE_DOWN must stop it
-Next DBLQH 5174
+Next DBLQH 5174 (RONDB-1150 durable commits 5180-5199: next 5185)
 Next DBDICT 6229
 Next DBDIH 7251
 Next DBTC 8135
 Next DBTC 8318 (RonDB)
-Next DBTC 8321 (RONDB-1150, 8320-8339)
+Next DBTC 8323 (RONDB-1150, 8320-8339)
 Next TRPMAN 9007
 Next CMVMI 9993              Note: CMVMI grows downwards
 Next TRPMAN 9007 // Ndb numbers
@@ -377,6 +377,33 @@ emulation the lines not yet persistent are lost, kept or torn.
 5172:
 Restart: crash in phase 1 when the end of the log is found, before the
 zeroing after it; the next restart must find the same end.
+
+RONDB-1150, __DurableCommits=1: error inserts of the commit protocol of
+durable commits (impl_next_steps.md X4.14), DBLQH 5180-5199. The crashes
+stop the node with NDBD_EXIT_ERROR_INSERT, at the first operation of a
+durable transaction that reaches the point (testNodeRestart -n
+DurableCrash*).
+
+5180:
+Crash after a durable COMMIT record is persistent, before COMMITTED or
+COMMIT to the next replica.
+
+5181:
+Crash after a durable COMPLETE record is persistent, before the local
+commit.
+
+5182:
+Crash after the local commit of a durable write at COMPLETE, before
+COMPLETE to the next replica or COMPLETED.
+
+5183:
+Delay COMPLETE at the primary replica of a durable write by 3 s, once
+per operation, while the backups have committed it (testNodeRestart -n
+DurableDelayedComplete).
+
+5184:
+Crash after an ABORT with AF_AFTER_COMMIT of rule F is persistent,
+before the lock is released.
 
 7165: Delay INCL_NODE_REQ in starting node yeilding error in GCP_PREPARE
 
@@ -865,6 +892,12 @@ DBTC 8320-8339: reserved for durable commits (RONDB-1150)
       2 s late, once (cleared after use), so that a test can check that
       the API gets TCKEY_FAILCONF only after the complete phase
       (testNodeRestart -n TakeoverReadBackupRYW)
+8321: The TC of a durable transaction sends the COMMIT of its first
+      operation, not those of the others, and crashes 100 ms later
+      (testNodeRestart -n DurableTcCrashCommit)
+8322: The TC of a durable transaction sends the COMPLETE of its first
+      operation, not those of the others, and crashes 100 ms later
+      (testNodeRestart -n DurableTcCrashComplete)
 
 
 TRPMAN

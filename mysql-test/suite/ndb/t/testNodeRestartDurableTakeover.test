@@ -1,0 +1,38 @@
+--source include/have_ndb.inc
+--source have_ndb_error_insert.inc
+
+# RONDB-1150 X4.14: with durable commits the TC of a transaction stops in
+# its commit or complete phase, and the test program checks the outcome
+# that the API gets from the takeover against the rows, before and after
+# the data node restarts:
+#  - DurableTcCrashCommit: with the COMMIT of the first operation sent
+#    (8321); the takeover commits.
+#  - DurableTcCrashCommitRuleF: the same with rule F (DUMP 2561 1); the
+#    takeover aborts (4031).
+#  - DurableTcCrashComplete: with the COMPLETE of the first operation sent
+#    (8322); the takeover completes, also with rule F.
+
+let NDBAPITEST_NAME=testNodeRestart;
+let NDBAPITEST_ARGS=-n DurableTcCrashCommit --records=1000 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+let NDBAPITEST_NAME=testNodeRestart;
+let NDBAPITEST_ARGS=-n DurableTcCrashCommitRuleF --records=1000 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+let NDBAPITEST_NAME=testNodeRestart;
+let NDBAPITEST_ARGS=-n DurableTcCrashComplete --records=1000 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+# NDBT creates and drops TEST_DB.T1 directly through the NDB API. A mysqld
+# whose metadata change monitor happens to see the table creates the
+# database TEST_DB and never removes it, and the check of the test case
+# fails. Drop it on both mysqlds: DROP DATABASE IF EXISTS is not
+# distributed from a mysqld that does not have the database.
+--connect(s2,127.0.0.1,root,,test,$MASTER_MYPORT1,)
+--disable_warnings
+DROP DATABASE IF EXISTS TEST_DB;
+--connection default
+DROP DATABASE IF EXISTS TEST_DB;
+--enable_warnings
+--disconnect s2

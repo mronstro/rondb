@@ -1,0 +1,26 @@
+--source include/have_ndb.inc
+--source have_ndb_error_insert.inc
+
+# RONDB-1150 X4.14, invariants L and A: with durable commits the primary
+# replica commits a write locally at COMPLETE, and the API is acknowledged
+# after the complete phase. Error insert 5183 gives each primary its
+# COMPLETE 3 s late; meanwhile a committed read, which goes to the primary
+# of a table without READ_BACKUP, sees the rows as before the update, and
+# a locking read waits for the primary's commit.
+
+let NDBAPITEST_NAME=testNodeRestart;
+let NDBAPITEST_ARGS=-n DurableDelayedComplete --records=1000 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+# NDBT creates and drops TEST_DB.T1 directly through the NDB API. A mysqld
+# whose metadata change monitor happens to see the table creates the
+# database TEST_DB and never removes it, and the check of the test case
+# fails. Drop it on both mysqlds: DROP DATABASE IF EXISTS is not
+# distributed from a mysqld that does not have the database.
+--connect(s2,127.0.0.1,root,,test,$MASTER_MYPORT1,)
+--disable_warnings
+DROP DATABASE IF EXISTS TEST_DB;
+--connection default
+DROP DATABASE IF EXISTS TEST_DB;
+--enable_warnings
+--disconnect s2

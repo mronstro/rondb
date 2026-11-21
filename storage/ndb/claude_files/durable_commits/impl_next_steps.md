@@ -716,6 +716,50 @@ X4.14. Part 5a written, to be tested:
   f + 1 is restorable (`c_newest_restorable_gci`), with one log line; the
   API asks again. A data node that restarted since knows no f and lets
   the API in; X6's node-failure file may close that.
+- Also: error insert 5160 (the 627 window of a unique index read) delays
+  COMPLETE instead of COMMIT for a durable operation, which commits at
+  COMPLETE; `ndb_uk_committed_read` and `_api` failed in durable mode.
+
+Part 5b written, to be tested (X4.14):
+- **Error inserts** (§12.2). DBLQH, through `redoPmemCrashPoint()`, at the
+  first durable operation that reaches the point: 5180 in `commitReqLab`
+  after the COMMIT's barrier (`RESERVED_TAIL`); 5181 in `execCOMPLETE`
+  after `redoCompleteDurable()`; 5182 in `tupcommit_conf` for a local
+  commit that came with COMPLETE (a backup, or the primary with
+  `OP_LOCAL_COMMIT_AT_COMPLETE`); 5184 in `abortAfterCommitLab` after
+  `redoAbortAfterCommit()`. 5183 delays COMPLETE 3 s at a primary with
+  `OP_LOCAL_COMMIT_AT_COMPLETE`, once (the resend from itself passes).
+  DBTC, as 8073: 8321 sends the COMMIT of the first operation of a
+  `TF_DURABLE` transaction and stops 100 ms later, 8322 the COMPLETE;
+  `nextTcOperation` stays RNIL so the replies do not resume the loop.
+  Not "half the COMMITs": the first operation is enough for a takeover
+  that finds one operation committed and the others prepared.
+- **testNodeRestart** (`runDurableCrash`, NOSTART restart by DUMP 2602 1,
+  rows checked by committed read after the outcome and after the
+  restart): `DurableCrashCommit` (5180, commits), `...RuleF` (aborts,
+  268), `DurableCrashComplete` (5181) and `DurableCrashLocalCommit`
+  (5182), which commit also with rule F, on a replica that is not the TC;
+  `DurableTcCrashCommit` (8321, commits), `...RuleF` (aborts, 4031),
+  `DurableTcCrashComplete` (8322, completes with rule F: the first row's
+  primary is on the TC, so the replicas left complete and free the
+  first operation before the stop, and `takeOverCompleteSent()` sees it
+  missing); `DurableCrashAbortAfterCommit` (two node groups: 5180 on the
+  master's partner, 5184 on a node of the other group, 268);
+  `DurableDelayedComplete` (5183, L and A: a committed read during the
+  delay sees the rows as before, a locking read the update or 266, the
+  commit ack not before 2.5 s). `runDurableNeedsDurable` skips without
+  `__DurableCommits`.
+- **MTR**: `ndb.testNodeRestartDurableCrash`, `...DurableTakeover`,
+  `...DurableDelayedComplete`, each with a `.cnf` that turns durable
+  commits on; the ledger under node failures is `ndb_gci_ledger`
+  (`GciLedgerNR`) in the `rondb_pmem_durable` run.
+- **Autotest**: `.2node_durable` and `.4node_durable` in
+  `conf-pmem-nodax.cnf`, `pmem-durable-tests.txt` (the cases above,
+  `TakeoverReadBackupRYW`, `GciLedgerNR`, `GciLedgerSRReadBackup`); the
+  daily-basic lists run on the same clusters.
+- Left: the unit test of the packed COMMIT with code 8, and the DUMP that
+  counts COMMIT records per transid (X4.2), as `ndb_redo_pmem_durable_commit`
+  checks the opCount of each transaction from the reader.
 
 **Risks:** the hottest commit code changes (`tupcommit_conf`, queued-log,
 parallel and takeover paths); the abort-after-commit path is new in LQH
@@ -1300,7 +1344,7 @@ LQH codes below 5180.
 | Block | Range | Codes |
 |---|---|---|
 | DBLQH | 5180–5199 | 5180 crash after COMMIT persisted, before COMMITTED/forward; 5181 after COMPLETE persisted, before local commit; 5182 after local commit, before COMPLETE/COMPLETED; 5183 delay COMPLETE at primary 3 s; 5184 crash after ABORT `AF_AFTER_COMMIT` persisted, before release; 5185 skip COMPLETE records (debug, forces fallback); 5186 SR crash after step A; 5187 during the step-B rescan; 5188 mid-invalidation in step C; 5189 after SR_HEAD, before START_RECCONF; 5190 step-B batch size 1 |
-| DBTC | 8320–8339 | 8320 takeover delays COMPLETEREQ 2 s (X1); 8321 crash after half the COMMITs; 8322 crash after the first COMPLETE; 8323 treat the next node failure as a participant failure; 8324 crash takeover TC during the F abort |
+| DBTC | 8320–8339 | 8320 takeover delays COMPLETEREQ 2 s (X1); 8321 crash after the COMMIT of the first operation; 8322 after its COMPLETE; 8323 treat the next node failure as a participant failure; 8324 crash takeover TC during the F abort |
 | DBDIH | 7260–7279 | 7260 crash master after GCP_PREPARE(activate); 7261 crash after GCP_COMMIT(g), before save of g − 1; 7262 crash during COPY_GCIREQ(RESTART_DURABLE); 7263 delay activation |
 | QMGR | 990–998 | 990 crash after the node-failure record, before PREP_FAILCONF; 991 skip the record (negative test) |
 | NDBCNTR | 1040–1049 | 1040 report unsafe shutdown; 1041 ignore received node-failure records (negative test) |
