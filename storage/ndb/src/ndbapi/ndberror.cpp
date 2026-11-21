@@ -137,6 +137,7 @@ ErrorBundle ErrorCodes[] = {
    * Node recovery errors
    */
   {  286, HA_ERR_LOCK_WAIT_TIMEOUT, NR, "Node failure caused abort of transaction" },
+  {  268, HA_ERR_LOCK_WAIT_TIMEOUT, NR, "Node failure after the commit decision caused abort of a durable transaction" },
   /* Error code 250 never used, is ZSCAN_NODE_ERROR in DBTC */
   {  250, DMEC, NR, "Node where lock was held crashed, restart scan transaction" },
   {  499, HA_ERR_LOCK_WAIT_TIMEOUT, NR, "Scan take over error, restart scan transaction" },

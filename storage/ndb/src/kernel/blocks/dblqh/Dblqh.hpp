@@ -3382,7 +3382,12 @@ class Dblqh : public SimulatedBlock {
        * COMPLETE, not at COMMIT (redoLocalCommitAtComplete()), so that
        * tupcommit_conf ends the complete phase
        */
-      OP_LOCAL_COMMIT_AT_COMPLETE = 0x800
+      OP_LOCAL_COMMIT_AT_COMPLETE = 0x800,
+      /**
+       * RONDB-1150 (X4.10): an ABORTREQ with FLAG_AFTER_COMMIT, the abort
+       * of a durable transaction after its commit decision (rule F)
+       */
+      OP_ABORT_AFTER_COMMIT = 0x1000
     };
     Uint32 m_flags;
     LogPartRecord *m_log_part_ptr_p;
@@ -4391,6 +4396,9 @@ private:
   void writeCompleteLog(Signal *signal, TcConnectionrec *regTcPtr,
                         LogPartRecord *logPartPtrP);
   void redoCompleteDurable(Signal *signal, TcConnectionrec *regTcPtr);
+  void redoAbortAfterCommit(Signal *signal, TcConnectionrec *regTcPtr);
+  void abortAfterCommitLab(Signal *signal,
+                           const TcConnectionrecPtr tcConnectptr);
   void writeFillerPmem(Signal *signal, LogPartRecord *logPartPtrP,
                        LogPageRecordPtr &logPagePtr,
                        LogFileRecordPtr &logFilePtr, Uint32 len);
@@ -7091,18 +7099,19 @@ inline void Dblqh::redoSetDurable(TcConnectionrec *regTcPtr, Uint32 opCount) {
 }
 
 /**
- * RONDB-1150 (X4.6): invariant L. The primary replica of an operation
- * whose COMMIT record is durable commits locally at COMPLETE, after its
- * COMPLETE record is persistent, not at COMMIT: its row is not visible,
- * and its locks are held, until then. Asked once the COMMIT record is
- * written, for seqNoReplica 0; RESERVED_TAIL says the record is durable
- * and a COMPLETE record follows. AC_NR_COPY commits at COMMIT as before
- * and writes no COMPLETE (DI-10). Reads and writes without a REDO record
- * keep committing at COMMIT (DI-9).
+ * RONDB-1150 (X4.6): invariant L. The primary replica of a write of a
+ * durable transaction commits locally at COMPLETE, after its COMPLETE
+ * record is persistent, not at COMMIT: its row is not visible, and its
+ * locks are held, until then. Asked once the COMMIT record is written,
+ * for seqNoReplica 0. Also a write without a REDO record (a table
+ * without logging), which writes no COMPLETE record: so that a rule-F
+ * abort (X4.10) finds every write of the transaction not yet committed
+ * on any replica. Reads keep releasing their locks at COMMIT (DI-9), and
+ * AC_NR_COPY commits at COMMIT as before (DI-10).
  */
 inline bool Dblqh::redoLocalCommitAtComplete(TcConnectionrec *regTcPtr) {
-  if (unlikely(c_redo_pmem_format) &&
-      regTcPtr->m_committed_log_space == PmemRedo::RESERVED_TAIL &&
+  if (unlikely(regTcPtr->m_flags & TcConnectionrec::OP_DURABLE) &&
+      regTcPtr->operation != ZREAD && regTcPtr->operation != ZREAD_EX &&
       regTcPtr->activeCreat == Fragrecord::AC_NORMAL) {
     regTcPtr->m_flags |= TcConnectionrec::OP_LOCAL_COMMIT_AT_COMPLETE;
     return true;

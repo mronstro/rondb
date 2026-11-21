@@ -257,6 +257,10 @@ class DumpStateOrd {
     TcSetTransErrorLogLevel = 2558,
     TcNdbInfoApiConnectRecFull = 2559,
     TcDumpJoinAggRecords = 2560,  // Verify join-agg records / scans released
+    // RONDB-1150 (X4.8): 1 / 0 = rule F on / off, the abort of a durable
+    // transaction after its commit decision when one of its nodes fails.
+    // Off by default until X5, whose system restart reads its ABORTs
+    TcDurableRuleF = 2561,
     SpjDumpRequests = 2650,       // Verify DBSPJ request pools are empty
     CmvmiDumpConnections = 2600,
     CmvmiDumpLongSignalMemory = 2601,

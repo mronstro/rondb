@@ -684,6 +684,15 @@ void Dbtc::execCONTINUEB(Signal *signal) {
           jam();
           toCommitHandlingLab(signal, apiConnectptr);
         }
+        else if (type == ZABORT_AFTER_COMMIT_SETUP)
+        {
+          /* RONDB-1150 (X4.8): rule F */
+          jam();
+          apiConnectptr.p->m_flags |= ApiConnectRecord::TF_ABORT_AFTER_COMMIT;
+          apiConnectptr.p->returnsignal = RS_TCROLLBACKREP;
+          apiConnectptr.p->returncode = ZNODEFAIL_AFTER_COMMIT;
+          toAbortHandlingLab(signal, apiConnectptr);
+        }
         else
         {
           jam();
@@ -1598,6 +1607,7 @@ void Dbtc::execREAD_CONFIG_REQ(Signal *signal) {
   val = TELL_NONE;
   ndb_mgm_get_int_parameter(p, CFG_DB_TRANS_ERROR_LOGLEVEL, &val);
   c_trans_error_loglevel = val;
+  c_durable_rule_f = 0;
 
   if (c_trans_error_loglevel != TELL_NONE) {
     g_eventLogger->info("TC %u __TransactionErrorLogLevel 0x%x", instance(),
@@ -12155,6 +12165,25 @@ void Dbtc::timeOutFoundLab(Signal *signal, Uint32 TapiConPtr, Uint32 errCode) {
            */
           return;
         }
+        if (unlikely(tc_testbit(apiConnectptr.p->m_flags,
+                                ApiConnectRecord::TF_DURABLE)) &&
+            c_durable_rule_f != 0 &&
+            (errCode == ZNODEFAIL_BEFORE_COMMIT ||
+             durableParticipantFailed(apiConnectptr.p))) {
+          /**
+           * RONDB-1150 (X4.8): rule F. A node of the durable transaction
+           * failed before any COMPLETE was sent: it is aborted, also on
+           * the replicas that have committed. A failure of another node
+           * keeps the commit below. Only with DUMP 2561 1 until X5, whose
+           * system restart reads the ABORTs with AF_AFTER_COMMIT: today's
+           * would execute the COMMITs before them.
+           */
+          jam();
+          init_setupFailData(signal,
+                             apiConnectptr,
+                             ZABORT_AFTER_COMMIT_SETUP);
+          break;
+        }
         init_setupFailData(signal,
                            apiConnectptr,
                            ZCOMMIT_SETUP);
@@ -12324,6 +12353,28 @@ void Dbtc::timeOutFoundLab(Signal *signal, Uint32 TapiConPtr, Uint32 errCode) {
     LocalTcConnectRecord_fifo tcConList(tcConnectRecord,
                                         apiConnectptr.p->tcConnect);
     ndbrequire(tcConList.first(tcConnectptr));
+    if (unlikely(tc_testbit(apiConnectptr.p->m_flags,
+                            ApiConnectRecord::TF_DURABLE)) &&
+        c_durable_rule_f != 0 &&
+        apiConnectptr.p->takeOverRec == RNIL &&
+        durableParticipantFailed(apiConnectptr.p)) {
+      /**
+       * RONDB-1150 (X4.8): rule F on the parallel path, also after a
+       * failure of another node switched to COMMITREQ: COMPLETEREQ comes
+       * only after every COMMITCONF, so none was sent. The failData of
+       * each replica is Prepared or Committed; the outstanding COMMITCONFs
+       * no longer count. The takeover comes in X4.9. Only with DUMP 2561
+       * 1, as above.
+       */
+      jam();
+      apiConnectptr.p->finish_trans_counter = 0;
+      apiConnectptr.p->nextTcOperation = RNIL;
+      apiConnectptr.p->m_flags |= ApiConnectRecord::TF_ABORT_AFTER_COMMIT;
+      apiConnectptr.p->returnsignal = RS_TCROLLBACKREP;
+      apiConnectptr.p->returncode = ZNODEFAIL_AFTER_COMMIT;
+      toAbortHandlingLab(signal, apiConnectptr);
+      break;
+    }
     checkFailData_commit(signal,
                          apiConnectptr);
     break;
@@ -15219,6 +15270,16 @@ Dbtc::check_finished_abort_handling(Signal *signal,
   else
   {
     jam();
+    if (unlikely(tc_testbit(apiConnectptr.p->m_flags,
+                            ApiConnectRecord::TF_ABORT_AFTER_COMMIT))) {
+      /**
+       * RONDB-1150 (X4.8, DI-6): rule F aborts after commitGciHandling
+       * linked the transaction to its GCP. No other abort comes after that
+       * point, so none unlinks it, and the GCP would never complete.
+       */
+      jam();
+      handleGcp(signal, apiConnectptr);
+    }
     releaseAbortResources(signal, apiConnectptr);
   }
   return;
@@ -15248,6 +15309,11 @@ void Dbtc::toAbortHandlingLab(Signal* signal,
       /*empty*/;
       break;
     }
+    case LqhTransConf::Committed:
+      /* RONDB-1150 (X4.8): rule F aborts a replica that has committed */
+      ndbrequire(tc_testbit(apiConnectptr.p->m_flags,
+                            ApiConnectRecord::TF_ABORT_AFTER_COMMIT));
+      [[fallthrough]];
     case LqhTransConf::Prepared:
     {
       jam();
@@ -15277,7 +15343,13 @@ void Dbtc::toAbortHandlingLab(Signal* signal,
         signal->theData[3] = apiConnectptr.p->transid[1];
         signal->theData[4] = apiConnectptr.p->tcBlockref;
         signal->theData[5] = tcConnectptr.p->tcOprec;
-        sendSignal(blockRef, GSN_ABORTREQ, signal, 6, JBB);
+        Uint32 length = AbortReq::SignalLength;
+        if (unlikely(tc_testbit(apiConnectptr.p->m_flags,
+                                ApiConnectRecord::TF_ABORT_AFTER_COMMIT))) {
+          signal->theData[6] = AbortReq::FLAG_AFTER_COMMIT;
+          length = AbortReq::SignalLengthFlags;
+        }
+        sendSignal(blockRef, GSN_ABORTREQ, signal, length, JBB);
       }
       break;
     }
@@ -15359,6 +15431,15 @@ Dbtc::checkFailData_abort(Signal *signal,
       /*empty*/;
       break;
     }
+    case LqhTransConf::Committed:
+      /**
+       * RONDB-1150 (X4.8): rule F waits for a replica that had committed.
+       * Durable commits need every data node to know them, so the resend
+       * to an old data node below does not occur for it.
+       */
+      ndbrequire(tc_testbit(apiConnectptr.p->m_flags,
+                            ApiConnectRecord::TF_ABORT_AFTER_COMMIT));
+      [[fallthrough]];
     case LqhTransConf::Prepared:
     {
       jam();
@@ -16539,6 +16620,25 @@ Dbtc::setFailData(Uint16 data)
   }
 }
 
+/**
+ * RONDB-1150 (X4.8): rule F. Has a data node of the transaction failed? A
+ * failure of another node keeps the commit of a durable transaction.
+ */
+bool Dbtc::durableParticipantFailed(const ApiConnectRecord *regApiPtr) {
+  for (Uint32 nodeId = regApiPtr->m_transaction_nodes.find_first();
+       nodeId != BitmaskImpl::NotFound;
+       nodeId = regApiPtr->m_transaction_nodes.find_next(nodeId + 1)) {
+    HostRecordPtr Thostptr;
+    Thostptr.i = nodeId;
+    ptrCheckGuard(Thostptr, chostFilesize, hostRecord);
+    if (Thostptr.p->hostStatus != HS_ALIVE) {
+      jam();
+      return true;
+    }
+  }
+  return false;
+}
+
 /*---------------------------------------------------------------------------*/
 /*                               SETUP_FAIL_DATA                             */
 /* SETUP DATA TO REUSE TAKE OVER CODE FOR HANDLING ABORT/COMMIT IN NODE      */
@@ -16607,21 +16707,23 @@ bool Dbtc::setupFailData(Signal* signal,
     case OS_PREPARED:
     {
       jam();
-      ndbrequire(type == ZABORT_SETUP || type == ZCOMMIT_SETUP);
+      ndbrequire(type == ZABORT_SETUP || type == ZCOMMIT_SETUP ||
+                 type == ZABORT_AFTER_COMMIT_SETUP);
       setFailData(LqhTransConf::Prepared);
       break;
     }
     case OS_COMMITTING:
     {
       jam();
-      ndbrequire(type == ZCOMMIT_SETUP);
+      ndbrequire(type == ZCOMMIT_SETUP || type == ZABORT_AFTER_COMMIT_SETUP);
       setFailData(LqhTransConf::Prepared);
       break;
     }
     case OS_COMMITTED:
     {
       jam();
-      ndbrequire(type == ZCOMMIT_SETUP || type == ZCOMPLETE_SETUP);
+      ndbrequire(type == ZCOMMIT_SETUP || type == ZCOMPLETE_SETUP ||
+                 type == ZABORT_AFTER_COMMIT_SETUP);
       setFailData(LqhTransConf::Committed);
       break;
     }
@@ -23222,6 +23324,16 @@ void Dbtc::execDUMP_STATE_ORD(Signal *signal) {
     }
   }
 #endif
+
+  if (arg == DumpStateOrd::TcDurableRuleF) {
+    jam();
+    const Uint32 on =
+        (signal->getLength() >= 2 && signal->theData[1] != 0) ? 1 : 0;
+    g_eventLogger->info("TC %u : rule F of durable commits %s", instance(),
+                        on ? "on" : "off");
+    c_durable_rule_f = on;
+    return;
+  }
 
   if (arg == DumpStateOrd::TcSetTransErrorLogLevel) {
     jam();

@@ -328,6 +328,31 @@ void Dblqh::redoCompleteDurable(Signal *signal, TcConnectionrec *regTcPtr) {
 }
 
 /**
+ * X4.10, barrier 10 of X4.4: rule F. An operation whose durable COMMIT
+ * kept the COMPLETE's part of its reservation (RESERVED_TAIL) is aborted
+ * after the commit decision: its ABORT with AF_AFTER_COMMIT, written from
+ * that part, is persistent before the lock is released and before
+ * ABORTCONF, so that a restart finds the abort with the COMMIT.
+ */
+void Dblqh::redoAbortAfterCommit(Signal *signal, TcConnectionrec *regTcPtr) {
+  ndbassert(regTcPtr->m_committed_log_space == PmemRedo::RESERVED_TAIL);
+  LogPartRecord *const logPartPtrP = regTcPtr->m_log_part_ptr_p;
+  lock_log_part(logPartPtrP);
+  LogPageRecordPtr logPagePtr;
+  LogFileRecordPtr logFilePtr;
+  logFilePtr.i = logPartPtrP->currentLogfile;
+  ptrCheckGuard(logFilePtr, logPartPtrP->my_block->clogFileFileSize,
+                logPartPtrP->my_block->logFileRecord);
+  logPagePtr.i = logFilePtr.p->currentLogpage;
+  ptrCheckGuard(logPagePtr, logPartPtrP->logPageFileSize,
+                logPartPtrP->logPageRecord);
+  writeAbortLogPmem(signal, regTcPtr, logPagePtr, logFilePtr, logPartPtrP,
+                    PmemRedo::AF_AFTER_COMMIT);
+  redoPersistCommit(signal, logPartPtrP, regTcPtr);
+  unlock_log_part(logPartPtrP);
+}
+
+/**
  * S4.5: a FILLER of len words that closes a write unit (format §5.6). Its
  * body is zeroed, so that the copied unit is the same every time, and is
  * not in the checksum. It never crosses a page end, and is not counted as

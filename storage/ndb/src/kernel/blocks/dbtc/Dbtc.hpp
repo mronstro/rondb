@@ -137,6 +137,9 @@
 #define ZABORT_SETUP 1
 #define ZCOMMIT_SETUP 2
 #define ZCOMPLETE_SETUP 3
+/* RONDB-1150 (X4.8): rule F, the abort of a durable transaction after its
+   commit decision */
+#define ZABORT_AFTER_COMMIT_SETUP 5
 #define ZCONTINUE_ABORT_080 4
 #define ZGCP_FILESIZE 10
 #define ZINTSPH1 1
@@ -225,6 +228,8 @@
 #define ZNO_SUCH_TABLE 284
 #define ZUNKNOWN_TABLE_ERROR 285
 #define ZNODEFAIL_BEFORE_COMMIT 286
+/* RONDB-1150 (X4.8): rule F aborted a durable transaction, temporary */
+#define ZNODEFAIL_AFTER_COMMIT 268
 #define ZINDEX_CORRUPT_ERROR 287
 #define ZSCAN_FRAGREC_ERROR 291
 #define ZMISSING_TRIGGER_DATA 240
@@ -1133,6 +1138,9 @@ class Dbtc : public SimulatedBlock {
       // RONDB-1150: commits durably; set at DIVERIFYCONF with
       // TF_LATE_COMMIT, the COMMIT signals carry m_durable_op_count
       ,TF_DURABLE = 8192
+      // RONDB-1150 (X4.8): rule F, aborted after the commit decision; the
+      // ABORTREQs carry FLAG_AFTER_COMMIT
+      ,TF_ABORT_AFTER_COMMIT = 16384
 
       ,TF_END = 0
     };
@@ -2690,6 +2698,7 @@ class Dbtc : public SimulatedBlock {
   void releaseTakeOver(Signal* signal, ApiConnectRecordPtr apiConnectptr);
   void setFailData(Uint16 data);
   bool setupFailData(Signal* signal, ApiConnectRecordPtr regApiPtr, Uint32 type);
+  bool durableParticipantFailed(const ApiConnectRecord *regApiPtr);
   bool findApiConnectFail(Signal* signal,
                           Uint32 transid1,
                           Uint32 transid2,
@@ -3941,6 +3950,9 @@ class Dbtc : public SimulatedBlock {
   Uint32 m_deferred_enabled;
   Uint32 m_max_writes_per_trans;
   Uint32 c_trans_error_loglevel;
+  // RONDB-1150 (X4.8): rule F on (DUMP 2561 1); off until X5, whose restart
+  // reads the ABORTs of rule F
+  Uint32 c_durable_rule_f;
   Uint32 m_take_over_operations;
   // RONDB-1062: when false, ignore DBACC wait-for edges (no proactive deadlock
   // detection); only the timeout backstop resolves deadlocks.  Config:

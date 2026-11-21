@@ -604,6 +604,57 @@ Part 3 written, to be tested (X4.6 and X4.7):
 - The test of a primary row not visible before its COMPLETE is in part 5
   (EI 5183); the durable test run covers the path.
 
+Part 4 split in two. Part 4a written, to be tested (X4.10 and X4.8),
+**rule F off by default** (decided 2026-11-21):
+- **Why off.** A rule-F abort leaves COMMIT records followed by ABORTs
+  with `AF_AFTER_COMMIT`. Today's `execSr` executes every COMMIT up to
+  the restart's GCI in log order and skips ABORTs, and the aborted
+  transaction's GCI can still be saved after the abort, so a later system
+  restart would apply a write that the API was told had failed (268).
+  Without rule F such a transaction commits on the surviving replicas, as
+  in parts 1-3. X5's phase 2 reads the flagged ABORTs (step A) and turns
+  rule F on; until then `DUMP 2561 1` on every node turns it on for a
+  test, `DUMP 2561 0` off (`Dbtc::c_durable_rule_f`, 0 at start).
+- **LQH (X4.10).** ABORTREQ of length 7 with `AbortReq::FLAG_AFTER_COMMIT`
+  (`Abort.hpp`) sets `OP_ABORT_AFTER_COMMIT` (0x1000).
+  `abortStateHandlerLab` sends `COMMITTED` and
+  `LOG_COMMIT_WRITTEN_WAIT_SIGNAL` with it to `abortAfterCommitLab`: an
+  operation with a COMMIT record (`logWriteState` WRITTEN, `RESERVED_TAIL`)
+  gets `redoAbortAfterCommit()`, the ABORT with `AF_AFTER_COMMIT` from the
+  COMPLETE's part of the reservation and its barrier (barrier 10), before
+  `abortCommonLab` releases the lock and ABORTCONF goes out;
+  `logWriteState` becomes NOT_STARTED, as the COMMIT record already took
+  the operation off the log part's list, so `continueAbortLab` writes no
+  second ABORT. A queued COMMIT record (only with the queue's error
+  inserts in PMEM mode) is an `ndbrequire`.
+- **Committed locally at COMMIT.** Part 3's deferral now covers every
+  write of a durable transaction on the primary, also one without a REDO
+  record (a table without logging), so that an abort leaves no replica
+  committed. A read on the primary has released its lock and changed
+  nothing: it only gets ABORTCONF. An `AC_NR_COPY` operation commits at
+  COMMIT (DI-10) and cannot be undone: the starting node stops with the
+  new exit code 7201 `NDBD_EXIT_ABORT_AFTER_COMMIT_DURING_NR` and copies
+  again in its next restart; its data cannot be restored from before the
+  restart is done (DI-10). Rare: rule F and a node restart's copy in the
+  same transaction.
+- **TC (X4.8).** `timeOutFoundLab` in CS_COMMITTING/CS_COMMIT_SENT: a
+  `TF_DURABLE` transaction with a failed node of `m_transaction_nodes`
+  (`ZNODEFAIL_BEFORE_COMMIT`, or `durableParticipantFailed()`) gets
+  `ZABORT_AFTER_COMMIT_SETUP` (5; 4 is taken) instead of
+  `ZCOMMIT_SETUP`; `setupFailData` maps OS_PREPARED and OS_COMMITTING to
+  Prepared and OS_COMMITTED to Committed. CS_WAIT_COMMIT_CONF (the
+  parallel path, or COMMITREQ after a failure of another node) switches
+  to the same abort when a participant fails, outside a takeover. The
+  abort sets `TF_ABORT_AFTER_COMMIT` (16384); `toAbortHandlingLab` and
+  `checkFailData_abort` send ABORTREQ with the flag also to Committed
+  replicas; `check_finished_abort_handling` calls `handleGcp` (DI-6);
+  the API gets TCROLLBACKREP with the new temporary error 268 "Node
+  failure after the commit decision caused abort of a durable
+  transaction" (Q-B3). Late COMMITTED and COMMITCONF are ignored by the
+  state checks, as today.
+- **Part 4b (X4.9):** the takeover, with the LQH_TRANSCONF opCount word;
+  a takeover TC commits a durable transaction as today until then.
+
 **Risks:** the hottest commit code changes (`tupcommit_conf`, queued-log,
 parallel and takeover paths); the abort-after-commit path is new in LQH
 and TC; longer lock hold on hot rows (measured in X8.3).
@@ -624,6 +675,9 @@ replicas, and raises the restorable GCI to G'.
 - The next SR after a durable SR works with no new traffic (R = G') and
   with traffic.
 - Partial SR in durable mode is refused until X6 (X5.8).
+- Rule F on by default (`Dbtc::c_durable_rule_f`, X4 part 4a), once
+  step A reads the ABORTs with `AF_AFTER_COMMIT`; `DUMP 2561 0` stays
+  for tests.
 
 ### X5.1 Phase-2 parameters (S, 2 pd)
 

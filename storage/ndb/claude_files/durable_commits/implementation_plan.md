@@ -261,7 +261,7 @@ the ones marked * need your decision, see §5):
 | Files | REDO files stay `D<8+p>/DBLQH/S<n>.FragLog`, under the REDO path of the part's NUMA node |
 | ndbinfo | `redo_log_pmem` (step 1); `durable_commits`, `durable_commit_stats`, `node_failure_records` (later steps) |
 | Error inserts | DBLQH 5155–5172 (step 1), 5180–5199 (later); DBTC 8320–8339; DBDIH 7260–7279; QMGR 990–998; NDBCNTR 1040–1049 |
-| DUMP | 2368–2370 (step 1) |
+| DUMP | 2368–2370 (step 1); TC 2561, rule F on or off until X5 (X4) |
 | Platforms | Linux x86_64, Linux ARM64, macOS ARM64 (Q-A5); not macOS x86_64 |
 | Tests | Unit tests with `NDB_ADD_TEST` and `TAPTEST`; MTR with `--defaults-extra-file=suite/ndb/pmem_redo.cnf` (`nodax`) or `pmem_redo_dax.cnf` (`memmap=`, `MTR_NDB_PMEM_DIR`); autotest lists `pmem-redo-tests.txt` and `pmem-redo-long-tests.txt` with about 50 existing restart cases in PMEM mode; no CI, the pusher runs them (§2.4) |
 
