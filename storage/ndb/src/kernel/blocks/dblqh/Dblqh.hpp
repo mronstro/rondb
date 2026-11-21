@@ -4384,6 +4384,7 @@ private:
                                 LogPartRecord *logPartPtrP);
   void writeCompleteLog(Signal *signal, TcConnectionrec *regTcPtr,
                         LogPartRecord *logPartPtrP);
+  void redoCompleteDurable(Signal *signal, TcConnectionrec *regTcPtr);
   void writeFillerPmem(Signal *signal, LogPartRecord *logPartPtrP,
                        LogPageRecordPtr &logPagePtr,
                        LogFileRecordPtr &logFilePtr, Uint32 len);
@@ -7070,13 +7071,6 @@ inline void Dblqh::unlock_log_part(LogPartRecord *logPartPtrP) {
 }
 
 /**
- * RONDB-1150, PMEM format (impl_step1_lqh_write.md S5.7): before a
- * signal that depends on the operation's REDO record, the record is
- * persistent, if a dependent signal waits for it (m_redo_end_lsn): in
- * step 1 a COMMIT written with the benchmark switch on, from X4 a durable
- * one. Debug and error-insert builds only.
- */
-/**
  * RONDB-1150 (X4.3): the operation commits durably, with the opCount of
  * its transaction, from a durable COMMIT, COMMITREQ or TUP's loop over the
  * operations on the row. Only in the PMEM format, which durable commits
@@ -7089,6 +7083,13 @@ inline void Dblqh::redoSetDurable(TcConnectionrec *regTcPtr, Uint32 opCount) {
   }
 }
 
+/**
+ * RONDB-1150, PMEM format (impl_step1_lqh_write.md S5.7): before a
+ * signal that depends on the operation's REDO record, the record is
+ * persistent, if a dependent signal waits for it (m_redo_end_lsn): in
+ * step 1 a COMMIT written with the benchmark switch on, from X4 a durable
+ * one. Debug and error-insert builds only.
+ */
 inline void Dblqh::redoCheckPersisted(const TcConnectionrec *regTcPtr,
                                       Uint32 line) {
 #if defined(VM_TRACE) || defined(ERROR_INSERT)

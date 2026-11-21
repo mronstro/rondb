@@ -1665,30 +1665,6 @@ void Dbdih::execREAD_CONFIG_REQ(Signal *signal) {
   ndb_mgm_get_int_parameter(p, CFG_DB_LCP_TRY_LOCK_TIMEOUT,
                             &c_lcpState.m_lcp_trylock_timeout);
 
-  /**
-   * RONDB-1150: durable commits, __DurableCommits until online activation
-   * (X7). A commit is durable only once its REDO record is persistent, so
-   * it needs RedoLogMode=pmem, as the management server checks too. g is
-   * 1: every write transaction since the start commits durably, the same
-   * on every node, which a GCI seen first after the start would not be
-   * for a node that joins by a node restart.
-   */
-  {
-    Uint32 durable = 0;
-    Uint32 redoLogMode = NDB_REDO_LOG_MODE_FILE;
-    ndb_mgm_get_int_parameter(p, CFG_DB_DURABLE_COMMITS, &durable);
-    ndb_mgm_get_int_parameter(p, CFG_DB_REDO_LOG_MODE, &redoLogMode);
-    if (durable != 0 && redoLogMode != NDB_REDO_LOG_MODE_PMEM) {
-      progError(__LINE__, NDBD_EXIT_INVALID_CONFIG,
-                "__DurableCommits=1 needs RedoLogMode=pmem");
-    }
-    m_micro_gcp.m_durable_gci = durable != 0 ? 1 : 0;
-    if (durable != 0) {
-      g_eventLogger->info("DIH: durable commits from GCI %u (__DurableCommits)",
-                          m_micro_gcp.m_durable_gci);
-    }
-  }
-
   cfileFileSize = (2 * ctabFileSize) + 2;
   initRecords();
   initialiseRecordsLab(signal, 0, ref, senderData);
@@ -25664,6 +25640,31 @@ void Dbdih::initCommonData() {
   memset(&m_micro_gcp, 0, sizeof(m_micro_gcp));
   NdbTick_Invalidate(&m_gcp_save.m_master.m_start_time);
   NdbTick_Invalidate(&m_micro_gcp.m_master.m_start_time);
+
+  /**
+   * RONDB-1150: durable commits, __DurableCommits until online activation
+   * (X7). A commit is durable only once its REDO record is persistent, so
+   * it needs RedoLogMode=pmem, as the management server checks too. g is
+   * 1: every write transaction since the start commits durably, the same
+   * on every node, which a GCI seen first after the start would not be
+   * for a node that joins by a node restart. Read here, after the memset
+   * of m_micro_gcp above.
+   */
+  {
+    Uint32 durable = 0;
+    Uint32 redoLogMode = NDB_REDO_LOG_MODE_FILE;
+    ndb_mgm_get_int_parameter(p, CFG_DB_DURABLE_COMMITS, &durable);
+    ndb_mgm_get_int_parameter(p, CFG_DB_REDO_LOG_MODE, &redoLogMode);
+    if (durable != 0 && redoLogMode != NDB_REDO_LOG_MODE_PMEM) {
+      progError(__LINE__, NDBD_EXIT_INVALID_CONFIG,
+                "__DurableCommits=1 needs RedoLogMode=pmem");
+    }
+    m_micro_gcp.m_durable_gci = durable != 0 ? 1 : 0;
+    if (durable != 0) {
+      g_eventLogger->info("DIH: durable commits from GCI %u (__DurableCommits)",
+                          m_micro_gcp.m_durable_gci);
+    }
+  }
   {
     {  // Set time-between global checkpoint
       Uint32 tmp = 2000;

@@ -1,0 +1,12 @@
+!include ../my.cnf
+
+# RONDB-1150 X4: durable commits on the REDO log in PMEM mode; small REDO
+# files so that the reader reads all of them quickly, and GCP saves twice
+# a second so that the rows survive the system restart.
+[cluster_config.1]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+__DurableCommits=1
+NoOfFragmentLogFiles=4
+FragmentLogFileSize=4M
+TimeBetweenGlobalCheckpoints=500

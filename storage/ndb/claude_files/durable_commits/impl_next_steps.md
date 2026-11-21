@@ -524,12 +524,46 @@ Part 1 written, to be tested:
   TUP_WRITELOG_REQ/LQH_WRITELOG_REQ (`LQH_WRITELOG_DURABLE` | opCount);
   the durable COMMIT passed on to the previous replica. Printers and
   `PackedSignal::verify` know code 8.
-- Not yet: COMMIT records with `CF_DURABLE` and opCount come in part 2
-  with `writeCompleteLog`, as a durable COMMIT keeps the COMPLETE half of
-  the reservation, which only the COMPLETE record gives back. The
-  LQH_TRANSCONF word moves to X4.9, its only reader.
+- The LQH_TRANSCONF word moves to X4.9, its only reader.
 - Test setting: `suite/ndb/pmem_redo_durable.cnf`. ndbinfo `config_values`
   estimate 207 per node.
+
+Part 2 written, to be tested (X4.5 and X4.4):
+- An `OP_DURABLE` operation's COMMIT record has `CF_DURABLE` and the
+  opCount, and keeps the COMPLETE's part of the reservation
+  (`RESERVED_TAIL`).
+- `redoCompleteDurable()` in `execCOMPLETE` (barrier 7) and
+  `execCOMPLETEREQ` (barrier 8) for an operation in `RESERVED_TAIL`, before
+  the branch to `localCommitLab` or the complete labs: the COMPLETE record
+  and the barrier under one lock, so it is persistent before a backup's
+  row becomes visible, before COMPLETE goes on and before COMPLETED or
+  COMPLETECONF (K). `AC_NR_COPY` and `AC_IGNORED` only give the words
+  back (DI-10).
+- No `OP_COMPLETE_LOGGED` flag: the reservation state is the guard, as the
+  record takes it from `RESERVED_TAIL` to `RESERVED_NONE`. File mode never
+  has `RESERVED_TAIL` (2). `execCOMPLETEREQ` in `WAIT_TUP_COMMIT` comes only
+  on a backup whose first COMPLETE started the local commit and wrote the
+  record; the takeover sends COMPLETEREQ after COMMITCONF.
+- Barriers 1-3 and the debug check of E7 needed no change: phase 9 keyed
+  them on `m_redo_end_lsn != 0`, which a durable COMMIT sets. Barrier 4
+  (dirty writes) is X4.13.
+- The COMPLETE is written at once, not through the log queues: it comes in
+  state COMMITTED, so its COMMIT and those of the transaction's other
+  operations here are in the log; PMEM mode never holds the head at a
+  file end; the staging budget keeps pages free (S5.5).
+- A restart skips COMPLETEs; phase 3 still invalidates the COMMITs, durable
+  or not, above the restart's GCI, until X5 adds phase 2.
+- Test: MTR `ndb_redo_pmem_durable_commit`, transactions of 1, 3, 3 and 2
+  writes, then the reader on every REDO file of both nodes: per
+  transaction 2 durable COMMITs with its opCount and 2 COMPLETEs per
+  write.
+- Part 1 fixed: DIH read `__DurableCommits` in `execREAD_CONFIG_REQ`, and
+  `initCommonData()` then cleared `m_micro_gcp` with a memset, so no
+  transaction committed durably and the runs of part 1 with
+  `pmem_redo_durable.cnf` tested nothing of it. The read is now in
+  `initCommonData()` after the memset; the new test found it (opCount 0,
+  no `durable`, no COMPLETE). Also: the hint check of error inserts
+  8050/8072 in TC ignores `SOF_LOGGED_WRITE`, as before part 1.
 
 **Risks:** the hottest commit code changes (`tupcommit_conf`, queued-log,
 parallel and takeover paths); the abort-after-commit path is new in LQH

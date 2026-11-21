@@ -5700,7 +5700,8 @@ void Dbtc::tckeyreq050Lab(Signal *signal, CacheRecordPtr const cachePtr,
 
   if((ERROR_INSERTED(8050) || ERROR_INSERTED(8072)) &&
      refToBlock(regApiPtr->ndbapiBlockref) != DBUTIL &&
-     regTcPtr->m_special_op_flags == 0 &&
+     (regTcPtr->m_special_op_flags &
+      ~TcConnectRecord::SOF_LOGGED_WRITE) == 0 &&
      (regTcPtr->tcNodedata[0] != getOwnNodeId()))
   {
     /**

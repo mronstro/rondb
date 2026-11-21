@@ -15379,6 +15379,12 @@ void Dblqh::execCOMPLETE(Signal *signal) {
       }
     }
     TRACE_OP(regTcPtr, "COMPLETE");
+    if (unlikely(c_redo_pmem_format) &&
+        regTcPtr->m_committed_log_space == PmemRedo::RESERVED_TAIL) {
+      /* RONDB-1150 (X4.5, barrier 7 of X4.4): K */
+      jam();
+      redoCompleteDurable(signal, regTcPtr);
+    }
 
     if (tcConnectptr.p->seqNoReplica != 0 &&
         tcConnectptr.p->activeCreat == Fragrecord::AC_NORMAL) {
@@ -15496,7 +15502,16 @@ void Dblqh::execCOMPLETEREQ(Signal *signal) {
     ndbabort();
     return;
   }//switch
-  if (regTcPtr->seqNoReplica != 0 && 
+  if (unlikely(c_redo_pmem_format) &&
+      regTcPtr->m_committed_log_space == PmemRedo::RESERVED_TAIL) {
+    /**
+     * RONDB-1150 (X4.5, barrier 8 of X4.4): K. In WAIT_TUP_COMMIT above
+     * the COMPLETE that started the local commit has written it.
+     */
+    jam();
+    redoCompleteDurable(signal, regTcPtr);
+  }
+  if (regTcPtr->seqNoReplica != 0 &&
       regTcPtr->activeCreat != Fragrecord::AC_NR_COPY)
   {
     /**
@@ -44781,7 +44796,9 @@ void Dblqh::writeAbortLog(Signal *signal, TcConnectionrec *regTcPtr,
 void Dblqh::writeCommitLog(Signal *signal, TcConnectionrec *regTcPtr,
                            LogPartRecord *logPartPtrP) {
   if (unlikely(c_redo_pmem_format)) {
-    writeCommitLogPmem(signal, regTcPtr, logPartPtrP, false);
+    writeCommitLogPmem(
+        signal, regTcPtr, logPartPtrP,
+        (regTcPtr->m_flags & TcConnectionrec::OP_DURABLE) != 0);
     return;
   }
   LogPageRecordPtr logPagePtr;

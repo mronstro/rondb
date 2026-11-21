@@ -184,11 +184,13 @@ void Dblqh::writePrepareLogPmem(Signal *signal,
 
 /**
  * S4.4: a COMMIT (format §5.2): where its PREPARE is, the GCI and the
- * transid; opCount 0 until X4. It gives back the operation's
- * reservation; durable is false in step 1. Its end goes to m_redo_end_lsn
- * when a dependent signal waits for it (S5.7, S5.8): a durable COMMIT, or
- * any with the benchmark switch on; else 0, so that a switch turned on
- * later is not waited for by an older COMMIT.
+ * transid. A durable one (X4, OP_DURABLE) has CF_DURABLE and the opCount
+ * of its transaction, and keeps the COMPLETE's part of the operation's
+ * reservation, which its COMPLETE gives back (redoCompleteDurable());
+ * any other gives back all of it. Its end goes to m_redo_end_lsn when a
+ * dependent signal waits for it (S5.7, S5.8): a durable COMMIT, or any
+ * with the benchmark switch on; else 0, so that a switch turned on later
+ * is not waited for by an older COMMIT.
  */
 void Dblqh::writeCommitLogPmem(Signal *signal, TcConnectionrec *regTcPtr,
                                LogPartRecord *logPartPtrP, bool durable) {
@@ -207,7 +209,8 @@ void Dblqh::writeCommitLogPmem(Signal *signal, TcConnectionrec *regTcPtr,
       regTcPtr->schemaVersion, regTcPtr->fragmentid, regTcPtr->logStartFileNo,
       regTcPtr->logStartPageNo, regTcPtr->logStartPageIndex,
       regTcPtr->logStopPageNo, regTcPtr->gci_hi, regTcPtr->gci_lo,
-      regTcPtr->transid[0], regTcPtr->transid[1], 0);
+      regTcPtr->transid[0], regTcPtr->transid[1],
+      durable ? regTcPtr->m_op_count : 0);
   redoAppendFixed(signal, logPartPtrP, logPagePtr, logFilePtr, rec,
                   PmemRedo::COMMIT_LEN);
   regTcPtr->m_redo_end_lsn =
@@ -275,8 +278,7 @@ void Dblqh::writeCompletedGciLogPmem(Signal *signal,
 /**
  * S4.4: a COMPLETE (format §5.5), after a durable COMMIT; a dependent
  * signal waits for it, and it gives back the rest of the reservation.
- * Format only in step 1: X4 calls it from execCOMPLETE and
- * execCOMPLETEREQ.
+ * With the log part locked, from redoCompleteDurable().
  */
 void Dblqh::writeCompleteLog(Signal *signal, TcConnectionrec *regTcPtr,
                              LogPartRecord *logPartPtrP) {
@@ -296,6 +298,33 @@ void Dblqh::writeCompleteLog(Signal *signal, TcConnectionrec *regTcPtr,
   regTcPtr->m_redo_end_lsn =
       redoPosLsn(logPartPtrP, logFilePtr.p, logPagePtr.p);
   release_committed_words(logPartPtrP, regTcPtr, PmemRedo::AT_COMPLETE, true);
+}
+
+/**
+ * X4.5 and the barrier K of X4.4, at COMPLETE and COMPLETEREQ of an
+ * operation whose durable COMMIT kept the COMPLETE's part of its
+ * reservation (RESERVED_TAIL): its COMPLETE record, persistent before
+ * the operation becomes visible on a backup, before COMPLETE is passed on
+ * and before COMPLETED or COMPLETECONF (invariant K). Once only, as the
+ * record gives the reservation back. An operation of a node restart's
+ * copy (AC_NR_COPY) or ignored by it (AC_IGNORED) writes none (DI-10) and
+ * only gives the reservation back.
+ */
+void Dblqh::redoCompleteDurable(Signal *signal, TcConnectionrec *regTcPtr) {
+  ndbassert(regTcPtr->m_committed_log_space == PmemRedo::RESERVED_TAIL);
+  LogPartRecord *const logPartPtrP = regTcPtr->m_log_part_ptr_p;
+  lock_log_part(logPartPtrP);
+  if (regTcPtr->activeCreat != Fragrecord::AC_NORMAL) {
+    jam();
+    release_committed_words(logPartPtrP, regTcPtr, PmemRedo::AT_COMPLETE,
+                            true);
+    unlock_log_part(logPartPtrP);
+    return;
+  }
+  jam();
+  writeCompleteLog(signal, regTcPtr, logPartPtrP);
+  redoPersistCommit(signal, logPartPtrP, regTcPtr);
+  unlock_log_part(logPartPtrP);
 }
 
 /**
@@ -811,8 +840,9 @@ void Dblqh::redoPersist(Signal *signal, LogPartRecord *logPartPtrP) {
 /**
  * S5.8: the barrier at a C place of E8 (impl_step1_lqh_write.md), where
  * X4 keeps it for durable operations: the COMMIT that a dependent signal
- * waits for is persistent before the signal. One barrier persists the
- * whole log part, so the other COMMITs written since are persistent too.
+ * waits for is persistent before the signal, and the COMPLETE of a
+ * durable operation (K, redoCompleteDurable()). One barrier persists the
+ * whole log part, so the other records written since are persistent too.
  * With the log part locked. In a debug build DUMP 2368 4 skips the next
  * one, and the check before the dependent signal stops the node.
  */
@@ -824,8 +854,8 @@ void Dblqh::redoPersistCommit(Signal *signal, LogPartRecord *logPartPtrP,
     jam();
     c_redo_pmem_skip_barrier = false;
     g_eventLogger->info(
-        "LDM(%u): PMEM REDO: DUMP 2368 4 skips the barrier of a COMMIT in "
-        "log part %u",
+        "LDM(%u): PMEM REDO: DUMP 2368 4 skips the barrier of a COMMIT or "
+        "COMPLETE in log part %u",
         instance(), logPartPtrP->logPartNo);
     return;
   }
@@ -1990,8 +2020,9 @@ void Dblqh::redoPmemPrintInfo(LogPartRecord *logPartPtrP) {
 
 /**
  * RONDB-1150, PMEM format: the words that a COMMIT, COMPLETE or ABORT
- * record of the operation gives back (PmemRedo::releasedWords()). In
- * step 1 every COMMIT is non-durable and gives back all of them.
+ * record of the operation gives back (PmemRedo::releasedWords()). A
+ * durable COMMIT (X4) keeps the COMPLETE's part, any other gives back
+ * all of them.
  */
 void Dblqh::release_committed_words(LogPartRecord *logPartPtrP,
                                     TcConnectionrec *regTcPtr,

@@ -4,7 +4,9 @@
 # $MTR_NDB_PMEM_DIR/<name of the vardir>/mysql_cluster.1; else the
 # cluster's directory in the vardir. Sets $redo_cluster, under which are
 # ndbd.N/ndb_N_fs/D8.../DBLQH. redo_pmem_find_end.inc has the same rule in
-# perl (a let of an environment variable here did not reach --perl).
+# perl. To pass it to --perl, let an environment variable of another name:
+# mysqltest's variable names ignore case, so let REDO_CLUSTER=$redo_cluster
+# sets $redo_cluster and exports it as redo_cluster.
 
 --perl
   use strict;
