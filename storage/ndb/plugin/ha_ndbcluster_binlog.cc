@@ -7762,10 +7762,11 @@ restart_cluster_failure:
       // Capture any dynamic changes to max_alloc
       i_ndb->set_eventbuf_max_alloc(opt_ndb_eventbuffer_max_alloc);
 
-      if (opt_ndb_log_empty_epochs) {
-        // Ensure that empty epochs (event type TE_EMPTY) are queued
-        i_ndb->setEventBufferQueueEmptyEpoch(true);
-      }
+      // Queue empty epochs (event type TE_EMPTY) only while they are
+      // logged. The setting follows the variable in both directions, the
+      // event buffer would otherwise keep queuing empty epochs for the
+      // rest of the server's life once the variable had been ON.
+      i_ndb->setEventBufferQueueEmptyEpoch(opt_ndb_log_empty_epochs);
 
       mysql_mutex_lock(&injector_event_mutex);
       Uint64 latest_epoch = 0;
@@ -7960,7 +7961,10 @@ restart_cluster_failure:
     }
     if (unlikely(i_pOp != nullptr &&
                  i_pOp->getState() == NdbEventOperation::EO_DROPPED)) {
-      i_pOp = i_ndb->nextEvent();
+      // nextEvent2(), as everywhere else on i_ndb: the next event can be
+      // an exceptional one (TE_EMPTY, ...), which nextEvent() answers by
+      // exiting the process. The loop above handles those event types.
+      i_pOp = i_ndb->nextEvent2();
       assert(i_pOp == nullptr ||
              i_pOp->getState() != NdbEventOperation::EO_DROPPED);
     }
