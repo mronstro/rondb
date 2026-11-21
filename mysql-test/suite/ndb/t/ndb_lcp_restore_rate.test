@@ -126,7 +126,9 @@ EOF
 --exec $NDB_MGM -e "all start" > /dev/null 2>&1
 --exec $NDB_WAITER --timeout=600 > /dev/null 2>&1
 
---source include/ndb_wait_connected.inc
+# Creates an NDB table, so that the DROP TABLE below does not come before
+# the schema distribution is ready
+--source include/ndb_not_readonly.inc
 --disable_query_log
 --disable_result_log
 let $mysql_errno= 1;
