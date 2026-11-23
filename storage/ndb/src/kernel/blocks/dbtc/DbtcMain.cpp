@@ -8563,6 +8563,14 @@ void Dbtc::copyApi(Signal *signal,
     regApiPtr.p->m_concurrent_overtakeable_operations;
   copyPtr.p->tcBlockref = regApiPtr.p->tcBlockref;
   copyPtr.p->failureNr = regApiPtr.p->failureNr;
+  /**
+   * RONDB-1150: the complete phase runs on the copy, so the copy commits
+   * durably as the transaction does (error insert 8322 looks there)
+   */
+  copyPtr.p->m_flags =
+      (copyPtr.p->m_flags & ~Uint32(ApiConnectRecord::TF_DURABLE)) |
+      (regApiPtr.p->m_flags & Uint32(ApiConnectRecord::TF_DURABLE));
+  copyPtr.p->m_durable_op_count = regApiPtr.p->m_durable_op_count;
 
   GcpRecordPtr gcpPtr;
   gcpPtr.i = TgcpPointer;
@@ -9671,6 +9679,8 @@ void Dbtc::releaseApiConCopy(Signal *signal,
   setApiConTimer(apiConnectptr, 0, __LINE__);
   regApiPtr->apiConnectstate = CS_RESTART;
   ndbrequire(regApiPtr->commitAckMarker == RNIL);
+  /* RONDB-1150: set by copyApi() */
+  tc_clearbit(regApiPtr->m_flags, ApiConnectRecord::TF_DURABLE);
   regApiPtr->apiConnectkind = ApiConnectRecord::CK_FREE;
   releaseApiConTimer(apiConnectptr);
   c_apiConnectRecordPool.release(apiConnectptr);

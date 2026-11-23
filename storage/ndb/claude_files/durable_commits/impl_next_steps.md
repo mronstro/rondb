@@ -808,6 +808,15 @@ Part 6 written, to be tested (the rest of X4):
   TimeBetweenGlobalCheckpoints (at least 10 s); DIH warns at 10 s and
   60 s of lag.
 
+Found in testing (2026-11-24, Linux): `DurableTcCrashComplete` timed out
+waiting for node 2 to stop, and the transaction committed. The complete
+phase runs on the copy record of `copyApi()` (from `execCOMMITTED` through
+`sendApiCommitAndCopy`), which got `TF_LATE_COMMIT` but not `TF_DURABLE`,
+so 8322's test in `complete010Lab` never held. `copyApi()` now copies
+`TF_DURABLE` and `m_durable_op_count`, and `releaseApiConCopy()` clears
+the flag. Nothing else reads `TF_DURABLE` in the complete phase: the rule-F
+tests are in the commit-phase states and the takeover builds its own record.
+
 **Risks:** the hottest commit code changes (`tupcommit_conf`, queued-log,
 parallel and takeover paths); the abort-after-commit path is new in LQH
 and TC; longer lock hold on hot rows (measured in X8.3).
