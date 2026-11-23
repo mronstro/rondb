@@ -8,7 +8,8 @@
 #  - DurableTcCrashCommit: with the COMMIT of the first operation sent
 #    (8321); the takeover commits.
 #  - DurableTcCrashCommitRuleF: the same with rule F (DUMP 2561 1); the
-#    takeover aborts (4031).
+#    takeover aborts (4010: the API drops TCKEY_FAILREF after a
+#    TC_COMMITREQ and learns the abort at TAKE_OVERTCCONF).
 #  - DurableTcCrashComplete: with the COMPLETE of the first operation sent
 #    (8322); the takeover completes, also with rule F.
 

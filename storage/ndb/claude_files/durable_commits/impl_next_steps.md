@@ -739,7 +739,11 @@ Part 5b written, to be tested (X4.14):
   restart): `DurableCrashCommit` (5180, commits), `...RuleF` (aborts,
   268), `DurableCrashComplete` (5181) and `DurableCrashLocalCommit`
   (5182), which commit also with rule F, on a replica that is not the TC;
-  `DurableTcCrashCommit` (8321, commits), `...RuleF` (aborts, 4031),
+  `DurableTcCrashCommit` (8321, commits), `...RuleF` (aborts, 4010:
+  the API drops TCKEY_FAILREF in send state `sendTC_COMMIT`, which a
+  commit by TC_COMMITREQ after `execute_NoCommit` is in, and reports
+  4010 at TAKE_OVERTCCONF, which no node sends before the takeover is
+  done; 4031 only comes for a commit sent with its operations),
   `DurableTcCrashComplete` (8322, completes with rule F: the first row's
   primary is on the TC, so the replicas left complete and free the
   first operation before the stop, and `takeOverCompleteSent()` sees it

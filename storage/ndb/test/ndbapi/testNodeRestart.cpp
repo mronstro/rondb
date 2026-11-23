@@ -12616,9 +12616,12 @@ int runTakeoverReadBackupRYW(NDBT_Context *ctx, NDBT_Step *step) {
  * DurableRuleF turns rule F on (DUMP 2561 1) for the case. Without it a
  * failure in the commit phase commits the transaction on the replicas
  * left, as before durable commits. With it the transaction is aborted
- * unless a COMPLETE was sent: the API gets 268 from its TC, or 4031 from
- * a takeover. The victim restarts in NOSTART (DUMP 2602 1) and is
- * started again.
+ * unless a COMPLETE was sent: the API gets 268 from its TC, or 4010 after
+ * a takeover. The transaction is committed by TC_COMMITREQ after
+ * execute_NoCommit, and the API drops TCKEY_FAILREF in that send state
+ * (sendTC_COMMIT); it reports 4010 at TAKE_OVERTCCONF instead, which no
+ * node sends before the takeover is done. The victim restarts in NOSTART
+ * (DUMP 2602 1) and is started again.
  * ------------------------------------------------------------------------ */
 int runDurableNeedsDurable(NDBT_Context *ctx, NDBT_Step *step) {
   NdbConfig conf;
@@ -16997,12 +17000,12 @@ TESTCASE("DurableTcCrashCommit",
 TESTCASE("DurableTcCrashCommitRuleF",
          "RONDB-1150, __DurableCommits=1: the TC stops with the COMMIT of "
          "the first operation sent (8321); rule F in the takeover aborts "
-         "(4031)") {
+         "(4010)") {
   TC_PROPERTY("DurableErrorInsert", Uint32(8321));
   TC_PROPERTY("DurableOnTc", Uint32(1));
   TC_PROPERTY("DurableRuleF", Uint32(1));
   TC_PROPERTY("DurableExpectCommit", Uint32(0));
-  TC_PROPERTY("DurableExpectError", Uint32(4031));
+  TC_PROPERTY("DurableExpectError", Uint32(4010));
   INITIALIZER(runDurableNeedsDurable);
   INITIALIZER(runLoadTable);
   STEP(runDurableCrash);
