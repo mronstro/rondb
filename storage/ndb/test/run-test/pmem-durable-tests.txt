@@ -69,9 +69,15 @@ cmd: testNodeRestart
 args: -n TakeoverReadBackupRYW T1
 max-time: 900
 
-# L and A: the primary commits at COMPLETE, the ack after it (5183)
+# L and A: the primary commits at COMPLETE, a locking read keeps its lock
+# until COMPLETE, the ack after it (5183)
 cmd: testNodeRestart
 args: -n DurableDelayedComplete T1
+max-time: 600
+
+# X4.12: epochs and GCP saves keep their pace under an update load
+cmd: testNodeRestart
+args: -n DurableGcpUnderLoad T1
 max-time: 600
 
 # The ledger under node failures: every acknowledged commit survives node

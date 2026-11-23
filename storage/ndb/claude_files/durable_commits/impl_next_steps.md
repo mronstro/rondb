@@ -283,9 +283,11 @@ opCount and `CF_DURABLE`; failed API node ids are held back.
   round, `7552-7571`) [V per research], so the count is final before the
   first COMMIT.
 - Takeover: from LQH_TRANSCONF (X4.3), see X4.9.
-- Check in X4.14: a debug DUMP in LQH that counts COMMIT records per
-  transid in a part, compared with opCount for a sample of transactions.
-  A wrong opCount only matters for the partial-SR fallback (risk 5).
+- Check in X4.14: ~~a debug DUMP in LQH that counts COMMIT records per
+  transid in a part~~. Dropped in part 6: `ndb_redo_pmem_durable_commit`
+  reads every REDO file with the reader and checks each transaction's
+  COMMITs against its opCount. A wrong opCount only matters for the
+  partial-SR fallback (risk 5).
 
 ### X4.3 Signal formats: durable flag and opCount (M, 5 pd)
 
@@ -357,9 +359,8 @@ opCount and `CF_DURABLE`; failed API node ids are held back.
   `WAIT_TUP_COMMIT` (`15414`) [V].
 - Backups already local-commit at COMPLETE, so the multi-op-row and
   disk-page paths are exercised today on backups [I].
-- **Reads** in a durable transaction keep releasing their S-locks at
-  COMMIT on the primary; L is about logged operations (DI-9, open
-  question).
+- **Reads** in a durable transaction hold their locks until COMPLETE on
+  the primary, like the writes (DI-9, Q-B2; part 6).
 - Side effects to test: detached triggers (SUMA, binlog, backup log) fire
   one round later; the lock-free unique-index base read sees
   `ZTUPLE_NOT_YET_COMMITTED_ERROR` longer (existing EI 5160,
@@ -472,7 +473,7 @@ TC_COMMITCONF and TCKEY_FAILCONF senders; `ndbassert(!TF_DURABLE)` where
 No GCP change: LQH persists by itself, so no wait depends on a GCP of the
 transaction's own GCI (`research_commit_protocol.md` §1 item 8). Test that
 epochs and the GCP-stop monitor (`checkGcpStopLab`, `DbdihMain.cpp:24281`)
-stay quiet under load.
+stay quiet under load: `DurableGcpUnderLoad` (part 6).
 
 ### X4.13 Dirty writes (S, 2 pd)
 
@@ -484,7 +485,9 @@ GCP_SAVEREQ flag; interim: the start-time config).
 
 ### X4.14 Tests (M, 10 pd)
 
-- Unit-level: packed signal verify with code 8; COMMIT record fields.
+- Unit-level: packed signal verify with code 8 (`packed_signal-t`, part
+  6); COMMIT record fields (`pmem_redo_writer-t`, step 1 phase 7, with
+  `CF_DURABLE` and the opCount since part 1).
 - MTR/ATRT with error inserts (§12.2): crash after COMMIT persisted and
   before COMMITTED (5180); after COMPLETE persisted and before local commit
   (5181); delayed COMPLETE at the primary with concurrent READ_COMMITTED and
@@ -499,10 +502,12 @@ GCP_SAVEREQ flag; interim: the start-time config).
 **Order inside X4:** X4.1 → X4.2 → X4.3 → X4.5 → X4.4 → X4.6 → X4.7 →
 X4.10 → X4.8 → X4.9 → X4.11 → X4.13; X4.12 and X4.14 alongside.
 
-**State (2026-11-21).** X4 comes in five parts, each a commit tested
+**State (2026-11-23).** X4 comes in six parts, each a commit tested
 before the next: (1) X4.1-X4.3; (2) X4.5 and X4.4; (3) X4.6 and X4.7;
-(4) X4.10, X4.8, X4.9; (5) X4.11, X4.13 and the tests of X4.14. Q-B1-B3,
-B8 answered, B4, B9, B12 taken (`implementation_plan.md` §5).
+(4) X4.10, X4.8, X4.9; (5) X4.11, X4.13 and the tests of X4.14; (6) the
+read locks of Q-B2, which part 3 had left at COMMIT, and the rest of
+X4.12 and X4.14. Q-B1-B3, B8 answered, B4, B9, B12 taken
+(`implementation_plan.md` §5).
 
 Part 1 written, to be tested:
 - `__DurableCommits` (CFG 716, hidden until X7 makes it the online
@@ -585,8 +590,9 @@ Part 3 written, to be tested (X4.6 and X4.7):
 - Unlike the table above, the flag is set at COMMIT, not at COMPLETE: the
   COMPLETE record has taken the reservation to `RESERVED_NONE` before the
   branch, so `RESERVED_TAIL` can no longer tell there.
-- Not deferred: reads (DI-9), writes without a REDO record (no COMPLETE
-  record follows), `AC_NR_COPY`, dirty writes (X4.13).
+- Not deferred: reads (DI-9; part 6 defers them, Q-B2), writes without
+  a REDO record (no COMPLETE record follows), `AC_NR_COPY`, dirty writes
+  (X4.13).
 - Checked: TC sends COMMITREQ in a takeover only to replicas reported
   Prepared; a primary in `WAIT_TUP_COMMIT` at COMPLETE reports Committed,
   as a backup does today, and a COMPLETEREQ for an operation already gone
@@ -631,7 +637,8 @@ Part 4 split in two. Part 4a written, to be tested (X4.10 and X4.8),
   write of a durable transaction on the primary, also one without a REDO
   record (a table without logging), so that an abort leaves no replica
   committed. A read on the primary has released its lock and changed
-  nothing: it only gets ABORTCONF. An `AC_NR_COPY` operation commits at
+  nothing: it only gets ABORTCONF (until part 6, which holds a read's
+  lock until COMPLETE). An `AC_NR_COPY` operation commits at
   COMMIT (DI-10) and cannot be undone: the starting node stops with the
   new exit code 7201 `NDBD_EXIT_ABORT_AFTER_COMMIT_DURING_NR` and copies
   again in its next restart; its data cannot be restored from before the
@@ -761,9 +768,45 @@ Part 5b written, to be tested (X4.14):
   `conf-pmem-nodax.cnf`, `pmem-durable-tests.txt` (the cases above,
   `TakeoverReadBackupRYW`, `GciLedgerNR`, `GciLedgerSRReadBackup`); the
   daily-basic lists run on the same clusters.
-- Left: the unit test of the packed COMMIT with code 8, and the DUMP that
-  counts COMMIT records per transid (X4.2), as `ndb_redo_pmem_durable_commit`
-  checks the opCount of each transaction from the reader.
+- Left for part 6: the unit test of the packed COMMIT with code 8; the
+  DUMP that counts COMMIT records per transid (X4.2) is dropped, as
+  `ndb_redo_pmem_durable_commit` checks the opCount of each transaction
+  from the reader.
+
+Part 6 written, to be tested (the rest of X4):
+- **Read locks (DI-9, Q-B2).** Q-B2 was answered "at COMPLETE, like
+  write locks" before part 1, but X4.6 still said COMMIT and part 3
+  followed it. `redoLocalCommitAtComplete()` now takes every operation of
+  a durable transaction that reaches the commit at seqNoReplica 0 with
+  `AC_NORMAL`, reads included: a locking read goes to `commitReplyLab`
+  at COMMIT with `OP_LOCAL_COMMIT_AT_COMPLETE` and releases its lock in
+  `localCommitLab` at COMPLETE (`ACC_COMMITREQ`, then `tupcommit_conf` →
+  `completeTransLastLab`). TC already sent the durable COMMIT and the
+  COMPLETE to every operation in its list; simple and dirty reads get
+  neither, and an unlock operation is gone at prepare. A rule-F abort
+  releases a read's lock in `abortCommonLab` (`abortAfterCommitLab` finds
+  it not committed); a takeover's COMPLETEREQ commits it at COMPLETE;
+  `takeOverCompleteSent()` counts logged writes only. 5183 delays the
+  COMPLETE of a read too; 5182 stays on writes.
+- **Test.** `DurableDelayedComplete` gets a locker step: the writer also
+  reads the next rows with `LM_Read`, and the locker asks for
+  `LM_Exclusive` on them 500 ms into the 3 s delay. It must wait until
+  the read's COMPLETE (granted no earlier than 2.5 s), or end at the
+  deadlock timeout (266).
+- **X4.14, unit level.** `packed_signal-t`
+  (`src/common/debugger/signaldata`): containers of durable and plain
+  COMMITs and COMPLETEs as `sendCommitLqh` fills them, up to 25 words,
+  pass `PackedSignal::verify()` for DBLQH; a durable COMMIT to DBTC, one
+  cut short, and a plain one with code 8 fail; the printers of
+  PACKED_SIGNAL and COMMIT show the code and the opCount.
+- **X4.12.** `testNodeRestart -n DurableGcpUnderLoad` (MTR
+  `ndb.testNodeRestartDurableGcpLoad`, `pmem-durable-tests.txt`): four
+  update threads for 30 s while a probe commits a write every 50 ms and
+  takes its epoch, and the GCP saves come from the cluster log
+  (GlobalCheckpointCompleted). It fails when an epoch took longer than
+  20 TimeBetweenEpochs (at least 2 s) or a GCP save longer than 3
+  TimeBetweenGlobalCheckpoints (at least 10 s); DIH warns at 10 s and
+  60 s of lag.
 
 **Risks:** the hottest commit code changes (`tupcommit_conf`, queued-log,
 parallel and takeover paths); the abort-after-commit path is new in LQH
@@ -1377,7 +1420,7 @@ Step 1 adds the persist counters per part (E19).
 | DI-6 | **Abort after `commitGciHandling`.** No abort follows the commit point today, so the abort path never unlinks the ApiConnect from its GcpRecord; GCP_TCFINISHED would never come | `commitGciHandling` `7825`, `handleGcp` `9415` [V] | The F paths call `handleGcp` (X4.8, X4.9) |
 | DI-7 | **Takeover: was a COMPLETE sent?** LQH frees the op at COMPLETE. Detection by missing ops (opCount) and missing live replicas works if no COMPLETE from the failed TC is executed after the LQH_TRANSREQ scan passed that op. `checkNodeFailSequence` orders LQH_TRANSREQ after NODE_FAILREP only | `SimulatedBlock.cpp:5313-5340` [V] | Verify that signals received from the failed node are executed before LQH_TRANSREQ (add a test with a delayed COMPLETE); fallback: a "complete seen" bit in the LQH commit-ack marker, with markers on every LDM in durable mode |
 | DI-8 | **D4 with all nodes present** crashes the master on `ndbrequire(!allNodes)` | `NdbcntrMain.cpp:2780` [V] | `progError` with node group and stale nodes (X6.4) |
-| DI-9 | **Reads under L.** L speaks of "an operation", but reads have no COMPLETE record | plan §3.1 | Keep read-lock release at COMMIT on the primary; confirm (Q5) |
+| DI-9 | **Reads under L.** L speaks of "an operation", but reads have no COMPLETE record | plan §3.1 | **Decided (Q-B2):** read locks are released at COMPLETE, like write locks (X4 part 6) |
 | DI-10 | **`AC_NR_COPY`/`AC_IGNORED` at COMPLETE** (write path Q10). The starting node cannot be in an SR whose tail holds that GCI: it refuses GCP saves until its restart is done, so `lastCompletedGCI` stays below R [I] | `execGCP_SAVEREQ` refusal (research §2.9) | No COMPLETE record for them; `AC_NR_COPY` keeps local commit at COMMIT |
 | DI-11 | `tupcommit_conf` has an unreachable `seqNoReplica == 0` branch | `DblqhMain.cpp:15578-15586` [V] | Use the new flag there (X4.6) |
 | DI-12 | The node-failure "ring" can be one slot pair per node id: only the highest failure GCI per node matters | plan §5.4 | X6.1 |
@@ -1386,18 +1429,21 @@ Step 1 adds the persist counters per part (E19).
 
 ## 14. Open questions
 
-| # | Question |
-|---|---|
-| Q1 | Should TCKEY_FAILCONF carry the GCI (API change)? |
-| Q2 | Error code for rule-F aborts: reuse 4010 / `ZNODEFAIL_BEFORE_COMMIT`, or a new temporary error "aborted after commit due to node failure"? |
-| Q3 | A forced start to R for a node group with only stale nodes (D4)? |
-| Q4 | Dirty writes: `CPF_SELF` COMPLETE, or convert them to normal writes (DI-1)? |
-| Q5 | Read locks in durable transactions: release at COMMIT (proposed) or at COMPLETE (DI-9)? |
-| Q6 | `SET DurableCommits=0` online: accept as pending until the next cluster restart (proposed) or refuse? |
-| Q7 | Block activation while a node restart runs (proposed), or allow it? |
-| Q8 | Hold-back until the save of f or f + 1 (DI-5)? |
-| Q9 | Takeover detection by opCount and missing replicas (proposed) or by a marker bit (DI-7)? |
-| Q10 | Where the node-failure file lives when `FileSystemPathRedoLog` has one path per NUMA node (proposed: the first path)? |
-| Q11 | Memory for the step-A hash table at SR, its limit, and what to do when it is exhausted |
-| Q12 | Force the parallel COMMITREQ/COMPLETEREQ path for durable transactions (2 serial persists instead of 2R)? Decide from X8.3 |
-| Q13 | There is no CI: which developer machines get `memmap=` PMEM, so the durable test set can run before pushes? |
+These went to the user as Q-B1-B13 (`implementation_plan.md` §5), where
+the answers are kept; the last column follows them.
+
+| # | Question | State |
+|---|---|---|
+| Q1 | Should TCKEY_FAILCONF carry the GCI (API change)? | Q-B4, taken: no change |
+| Q2 | Error code for rule-F aborts: reuse 4010 / `ZNODEFAIL_BEFORE_COMMIT`, or a new temporary error "aborted after commit due to node failure"? | Q-B3, answered: new temporary error 268 (TC); a takeover's abort reaches the API as TCKEY_FAILREF (4031), or 4010 after TC_COMMITREQ |
+| Q3 | A forced start to R for a node group with only stale nodes (D4)? | Q-B5, proposed: no forced start in the first version |
+| Q4 | Dirty writes: `CPF_SELF` COMPLETE, or convert them to normal writes (DI-1)? | Q-B1, answered: `CPF_SELF` (X4 part 5a) |
+| Q5 | Read locks in durable transactions: release at COMMIT (proposed) or at COMPLETE (DI-9)? | Q-B2, answered: at COMPLETE (X4 part 6) |
+| Q6 | `SET DurableCommits=0` online: accept as pending until the next cluster restart (proposed) or refuse? | Q-B6, proposed: accepted as pending |
+| Q7 | Block activation while a node restart runs (proposed), or allow it? | Q-B7, proposed: yes |
+| Q8 | Hold-back until the save of f or f + 1 (DI-5)? | Q-B8, answered: f + 1 (X4 part 5a) |
+| Q9 | Takeover detection by opCount and missing replicas (proposed) or by a marker bit (DI-7)? | Q-B9, taken: opCount (X4 part 4b), checked again with the TLA+ model |
+| Q10 | Where the node-failure file lives when `FileSystemPathRedoLog` has one path per NUMA node (proposed: the first path)? | Q-B10, proposed: under the REDO path of NUMA node 0 |
+| Q11 | Memory for the step-A hash table at SR, its limit, and what to do when it is exhausted | Q-B11, proposed: sized from the transaction records; out of memory stops the SR |
+| Q12 | Force the parallel COMMITREQ/COMPLETEREQ path for durable transactions (2 serial persists instead of 2R)? Decide from X8.3 | Q-B12, taken: no; measure first |
+| Q13 | There is no CI: which developer machines get `memmap=` PMEM, so the durable test set can run before pushes? | Q-B13, proposed: Linux ARM64 by pull request 2, `memmap=` by pull request 5 |

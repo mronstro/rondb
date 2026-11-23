@@ -2,11 +2,13 @@
 --source have_ndb_error_insert.inc
 
 # RONDB-1150 X4.14, invariants L and A: with durable commits the primary
-# replica commits a write locally at COMPLETE, and the API is acknowledged
-# after the complete phase. Error insert 5183 gives each primary its
-# COMPLETE 3 s late; meanwhile a committed read, which goes to the primary
-# of a table without READ_BACKUP, sees the rows as before the update, and
-# a locking read waits for the primary's commit.
+# replica commits a write locally at COMPLETE, a locking read keeps its
+# lock until COMPLETE, and the API is acknowledged after the complete
+# phase. Error insert 5183 gives each primary its COMPLETE 3 s late;
+# meanwhile a committed read, which goes to the primary of a table without
+# READ_BACKUP, sees the rows as before the update, a locking read waits
+# for the primary's commit, and an exclusive lock on a row that the
+# transaction read waits for its COMPLETE.
 
 let NDBAPITEST_NAME=testNodeRestart;
 let NDBAPITEST_ARGS=-n DurableDelayedComplete --records=1000 T1;

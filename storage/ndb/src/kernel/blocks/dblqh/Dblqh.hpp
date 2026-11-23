@@ -3378,9 +3378,10 @@ class Dblqh : public SimulatedBlock {
        */
       OP_DURABLE = 0x400,
       /**
-       * RONDB-1150 (X4.6): a primary replica that commits locally at
-       * COMPLETE, not at COMMIT (redoLocalCommitAtComplete()), so that
-       * tupcommit_conf ends the complete phase
+       * RONDB-1150 (X4.6): a primary replica, of a write or a locking
+       * read, that commits locally at COMPLETE, not at COMMIT
+       * (redoLocalCommitAtComplete()), so that tupcommit_conf ends the
+       * complete phase
        */
       OP_LOCAL_COMMIT_AT_COMPLETE = 0x800,
       /**
@@ -7113,12 +7114,13 @@ inline void Dblqh::redoSetDurable(TcConnectionrec *regTcPtr, Uint32 opCount) {
  * for seqNoReplica 0. Also a write without a REDO record (a table
  * without logging), which writes no COMPLETE record: so that a rule-F
  * abort (X4.10) finds every write of the transaction not yet committed
- * on any replica. Reads keep releasing their locks at COMMIT (DI-9), and
- * AC_NR_COPY commits at COMMIT as before (DI-10).
+ * on any replica. A locking read holds its lock until COMPLETE as well
+ * (DI-9, Q-B2): no reader sees a state that the transaction's abort by
+ * rule F could undo. Simple and dirty reads get no COMMIT. AC_NR_COPY
+ * commits at COMMIT as before (DI-10).
  */
 inline bool Dblqh::redoLocalCommitAtComplete(TcConnectionrec *regTcPtr) {
   if (unlikely(regTcPtr->m_flags & TcConnectionrec::OP_DURABLE) &&
-      regTcPtr->operation != ZREAD && regTcPtr->operation != ZREAD_EX &&
       regTcPtr->activeCreat == Fragrecord::AC_NORMAL) {
     regTcPtr->m_flags |= TcConnectionrec::OP_LOCAL_COMMIT_AT_COMPLETE;
     return true;

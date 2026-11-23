@@ -12936,18 +12936,26 @@ int runDurableCrashAbortAfterCommit(NDBT_Context *ctx, NDBT_Step *step) {
 }
 
 /**
- * 5183 (L and A): the primary of each durable write gets its COMPLETE
- * 3 s late. The writer step commits an update of the rows of a table
- * without READ_BACKUP, so that a committed read goes to the primary. The
- * reader step reads while the primaries wait: a committed read sees the
- * rows as before the update, the backups having committed them; a
- * locking read waits for the primary's commit and sees the update, or
- * ends at the deadlock timeout (266). The writer is acknowledged only
- * after the complete phase, so not within the delay.
+ * 5183 (L and A): the primary of each durable write, and of each locking
+ * read, gets its COMPLETE 3 s late. The writer step commits an update of
+ * the rows of a table without READ_BACKUP, so that a committed read goes
+ * to the primary, and reads the next rows with a shared lock. The reader
+ * step reads while the primaries wait: a committed read sees the rows as
+ * before the update, the backups having committed them; a locking read
+ * waits for the primary's commit and sees the update, or ends at the
+ * deadlock timeout (266). The locker step asks for an exclusive lock on
+ * the rows the writer read, which they keep until COMPLETE (Q-B2): it
+ * waits, or ends at the deadlock timeout. The writer is acknowledged
+ * only after the complete phase, so not within the delay.
  */
+static int durableDelayedReadRows(NDBT_Context *ctx, int rows) {
+  return std::max(std::min(ctx->getNumRecords() - rows, rows), 0);
+}
+
 int runDurableDelayedCompleteWriter(NDBT_Context *ctx, NDBT_Step *step) {
   const NdbDictionary::Table *tab = ctx->getTab();
   const int rows = std::min(ctx->getNumRecords(), 64);
+  const int readRows = durableDelayedReadRows(ctx, rows);
   if (tab->getReadBackupFlag()) {
     g_err << "Table " << tab->getName() << " is READ_BACKUP" << endl;
     ctx->setProperty("DurableWriterState", Uint32(3));
@@ -12963,6 +12971,8 @@ int runDurableDelayedCompleteWriter(NDBT_Context *ctx, NDBT_Step *step) {
   int result = NDBT_OK;
   if (ops.startTransaction(ndb) != NDBT_OK ||
       ops.pkUpdateRecord(ndb, 0, rows, 1) != NDBT_OK ||
+      (readRows > 0 && ops.pkReadRecord(ndb, rows, readRows,
+                                        NdbOperation::LM_Read) != NDBT_OK) ||
       ops.execute_NoCommit(ndb) != NDBT_OK) {
     result = NDBT_FAILED;
   } else {
@@ -13047,6 +13057,200 @@ int runDurableDelayedCompleteReader(NDBT_Context *ctx, NDBT_Step *step) {
     NdbSleep_MilliSleep(10);
   }
   if (checkDurableRows(ndb, tab, 0, rows, 1, "after the commit") != NDBT_OK) {
+    result = NDBT_FAILED;
+  }
+  return result;
+}
+
+int runDurableDelayedCompleteLocker(NDBT_Context *ctx, NDBT_Step *step) {
+  const NdbDictionary::Table *tab = ctx->getTab();
+  const int rows = std::min(ctx->getNumRecords(), 64);
+  const int readRows = durableDelayedReadRows(ctx, rows);
+  Ndb *ndb = GETNDB(step);
+  if (readRows == 0) {
+    g_err << "Too few records for the rows that the writer reads" << endl;
+    return NDBT_FAILED;
+  }
+  while (ctx->getProperty("DurableWriterState", Uint32(0)) == 0) {
+    NdbSleep_MilliSleep(10);
+  }
+  if (ctx->getProperty("DurableWriterState", Uint32(0)) != 1) {
+    /* The writer failed before its commit, and says so */
+    return NDBT_FAILED;
+  }
+  const NDB_TICKS start = NdbTick_getCurrentTicks();
+  NdbSleep_MilliSleep(500);
+  int result = NDBT_OK;
+
+  HugoOperations lockingOps(*tab);
+  const Uint64 asked =
+      NdbTick_Elapsed(start, NdbTick_getCurrentTicks()).milliSec();
+  int ret = lockingOps.startTransaction(ndb);
+  if (ret == NDBT_OK) {
+    ret = lockingOps.pkReadRecord(ndb, rows, readRows,
+                                  NdbOperation::LM_Exclusive);
+  }
+  if (ret == NDBT_OK) {
+    ret = lockingOps.execute_Commit(ndb);
+  }
+  const Uint64 ms =
+      NdbTick_Elapsed(start, NdbTick_getCurrentTicks()).milliSec();
+  if (ret == 266) {
+    g_err << "The exclusive lock waited past the deadlock timeout" << endl;
+  } else if (ret != NDBT_OK) {
+    g_err << "The exclusive lock failed: " << ret << endl;
+    result = NDBT_FAILED;
+  } else if (asked >= 2000) {
+    g_err << "The exclusive lock was asked for after " << asked
+          << " ms, too late to check the shared locks" << endl;
+  } else if (ms < 2500) {
+    g_err << "The exclusive lock was granted after " << ms
+          << " ms: the writer's shared locks went before its COMPLETE"
+          << endl;
+    result = NDBT_FAILED;
+  } else {
+    g_err << "The exclusive lock was granted after " << ms << " ms" << endl;
+  }
+  lockingOps.closeTransaction(ndb);
+  return result;
+}
+
+/**
+ * X4.12: LQH persists each durable operation itself, so no wait depends
+ * on a GCP, but a durable transaction stays in TC's GCP list until its
+ * complete phase ends, later than before. Under the update load of the
+ * other steps, epochs and GCP saves must keep their pace. The watch
+ * commits a write of a row after the load's rows every 50 ms and takes
+ * the epoch of each commit, and takes the GCP saves from the cluster log
+ * (GlobalCheckpointCompleted, from every node). It fails when an epoch
+ * took longer than 20 TimeBetweenEpochs (at least 2 s), or a GCP save
+ * longer than 3 TimeBetweenGlobalCheckpoints (at least 10 s): far below
+ * the 10 s and 60 s of lag at which DIH's GCP monitor warns.
+ */
+int runDurableGcpWatch(NDBT_Context *ctx, NDBT_Step *step) {
+  const NdbDictionary::Table *tab = ctx->getTab();
+  const int probeRow = ctx->getNumRecords();
+  const Uint32 seconds = ctx->getProperty("DurableLoadSeconds", Uint32(30));
+  NdbRestarter restarter;
+  if (restarter.waitClusterStarted(30) != 0) {
+    g_err << "Cluster is not started" << endl;
+    ctx->stopTest();
+    return NDBT_FAILED;
+  }
+  NdbConfig conf;
+  Uint32 epochMs = 0;
+  Uint32 gcpMs = 0;
+  for (int i = 0; i < conf.getNumDbNodes(); i++) {
+    const int node = conf.getDbNodeId(i);
+    Uint32 epoch = 100;
+    Uint32 gcp = 2000;
+    conf.getProperty(node, NODE_TYPE_DB, CFG_DB_MICRO_GCP_INTERVAL, &epoch);
+    conf.getProperty(node, NODE_TYPE_DB, CFG_DB_GCP_INTERVAL, &gcp);
+    epochMs = std::max(epochMs, epoch);
+    gcpMs = std::max(gcpMs, gcp);
+  }
+  const Uint64 maxEpochMs = std::max(Uint64(2000), 20 * Uint64(epochMs));
+  const Uint64 maxGcpMs = std::max(Uint64(10000), 3 * Uint64(gcpMs));
+
+  int filter[] = {15, NDB_MGM_EVENT_CATEGORY_CHECKPOINT, 0};
+  NdbLogEventHandle handle =
+      ndb_mgm_create_logevent_handle(restarter.handle, filter);
+  if (handle == nullptr) {
+    g_err << "No cluster log handle" << endl;
+    ctx->stopTest();
+    return NDBT_FAILED;
+  }
+
+  Ndb *ndb = GETNDB(step);
+  int result = NDBT_OK;
+  const NDB_TICKS start = NdbTick_getCurrentTicks();
+  Uint64 lastEpoch = 0;
+  NDB_TICKS lastEpochAt = start;
+  Uint64 maxEpochGap = 0;
+  Uint32 epochs = 0;
+  Uint32 lastSaved = 0;
+  NDB_TICKS lastSavedAt = start;
+  Uint64 maxSaveGap = 0;
+  Uint32 saves = 0;
+  Uint64 maxCommitMs = 0;
+  Uint32 commits = 0;
+  Uint32 tempErrors = 0;
+  Uint32 updates = 0;
+  for (;;) {
+    const NDB_TICKS now = NdbTick_getCurrentTicks();
+    if (NdbTick_Elapsed(start, now).seconds() >= seconds) break;
+
+    HugoOperations ops(*tab);
+    int ret = ops.startTransaction(ndb);
+    if (ret == NDBT_OK) ret = ops.pkWriteRecord(ndb, probeRow, 1, ++updates);
+    if (ret == NDBT_OK) ret = ops.execute_Commit(ndb);
+    const NDB_TICKS done = NdbTick_getCurrentTicks();
+    if (ret == NDBT_OK) {
+      Uint64 gci = 0;
+      if (ops.getTransaction()->getGCI(&gci) != 0) {
+        g_err << "No GCI of a committed transaction" << endl;
+        result = NDBT_FAILED;
+      } else {
+        commits++;
+        maxCommitMs =
+            std::max(maxCommitMs, NdbTick_Elapsed(now, done).milliSec());
+        if (gci != lastEpoch) {
+          if (lastEpoch != 0) {
+            const Uint64 gap = NdbTick_Elapsed(lastEpochAt, done).milliSec();
+            maxEpochGap = std::max(maxEpochGap, gap);
+            epochs++;
+          }
+          lastEpoch = gci;
+          lastEpochAt = done;
+        }
+      }
+    } else if (ops.getNdbError().status == NdbError::TemporaryError) {
+      tempErrors++;
+    } else {
+      g_err << "The probe failed: " << ops.getNdbError() << endl;
+      result = NDBT_FAILED;
+    }
+    ops.closeTransaction(ndb);
+
+    struct ndb_logevent event;
+    while (ndb_logevent_get_next(handle, &event, 0) > 0) {
+      if (event.type == NDB_LE_GlobalCheckpointCompleted &&
+          event.GlobalCheckpointCompleted.gci > lastSaved) {
+        const NDB_TICKS at = NdbTick_getCurrentTicks();
+        if (lastSaved != 0) {
+          const Uint64 gap = NdbTick_Elapsed(lastSavedAt, at).milliSec();
+          maxSaveGap = std::max(maxSaveGap, gap);
+          saves++;
+        }
+        lastSaved = event.GlobalCheckpointCompleted.gci;
+        lastSavedAt = at;
+      }
+    }
+    if (result != NDBT_OK) break;
+    NdbSleep_MilliSleep(50);
+  }
+  const NDB_TICKS end = NdbTick_getCurrentTicks();
+  ctx->stopTest();
+  ndb_mgm_destroy_logevent_handle(&handle);
+
+  /* An epoch or a GCP save that has not ended by the end of the run */
+  const Uint64 epochOpen = NdbTick_Elapsed(lastEpochAt, end).milliSec();
+  const Uint64 saveOpen = NdbTick_Elapsed(lastSavedAt, end).milliSec();
+  maxEpochGap = std::max(maxEpochGap, epochOpen);
+  maxSaveGap = std::max(maxSaveGap, saveOpen);
+  g_err << "Under load for " << seconds << " s: " << commits
+        << " probe commits (longest " << maxCommitMs << " ms, " << tempErrors
+        << " temporary errors), " << epochs << " epochs (longest "
+        << maxEpochGap << " ms, limit " << maxEpochMs << " ms), " << saves
+        << " GCP saves (longest " << maxSaveGap << " ms, limit " << maxGcpMs
+        << " ms)" << endl;
+  if (result != NDBT_OK) return result;
+  if (epochs == 0 || maxEpochGap > maxEpochMs) {
+    g_err << "Epochs did not keep their pace under the load" << endl;
+    result = NDBT_FAILED;
+  }
+  if (saves == 0 || maxSaveGap > maxGcpMs) {
+    g_err << "GCP saves did not keep their pace under the load" << endl;
     result = NDBT_FAILED;
   }
   return result;
@@ -17035,12 +17239,24 @@ TESTCASE("DurableCrashAbortAfterCommit",
 TESTCASE("DurableDelayedComplete",
          "RONDB-1150, __DurableCommits=1: the primaries get COMPLETE 3 s "
          "late (5183); a committed read sees the rows as before, a locking "
-         "read waits, the API is acknowledged after the complete phase") {
+         "read waits, a row that the transaction read keeps its shared "
+         "lock, the API is acknowledged after the complete phase") {
   TC_PROPERTY("DurableWriterState", Uint32(0));
   INITIALIZER(runDurableNeedsDurable);
   INITIALIZER(runLoadTable);
   STEP(runDurableDelayedCompleteWriter);
   STEP(runDurableDelayedCompleteReader);
+  STEP(runDurableDelayedCompleteLocker);
+  FINALIZER(runClearTable);
+}
+TESTCASE("DurableGcpUnderLoad",
+         "RONDB-1150, __DurableCommits=1 (X4.12): under an update load, "
+         "epochs and GCP saves keep their pace") {
+  TC_PROPERTY("DurableLoadSeconds", Uint32(30));
+  INITIALIZER(runDurableNeedsDurable);
+  INITIALIZER(runLoadTable);
+  STEPS(runPkUpdateUntilStopped, 4);
+  STEP(runDurableGcpWatch);
   FINALIZER(runClearTable);
 }
 NDBT_TESTSUITE_END(testNodeRestart)

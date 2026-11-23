@@ -1,0 +1,25 @@
+--source include/have_ndb.inc
+
+# RONDB-1150 X4.12: with durable commits a transaction stays in TC's GCP
+# list until its complete phase ends. Under the update load of four
+# threads for 30 s, epochs and GCP saves keep their pace: the test program
+# fails when an epoch takes longer than 20 TimeBetweenEpochs (at least
+# 2 s) or a GCP save longer than 3 TimeBetweenGlobalCheckpoints (at least
+# 10 s), far below the lag at which DIH's GCP monitor warns.
+
+let NDBAPITEST_NAME=testNodeRestart;
+let NDBAPITEST_ARGS=-n DurableGcpUnderLoad --records=1000 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+# NDBT creates and drops TEST_DB.T1 directly through the NDB API. A mysqld
+# whose metadata change monitor happens to see the table creates the
+# database TEST_DB and never removes it, and the check of the test case
+# fails. Drop it on both mysqlds: DROP DATABASE IF EXISTS is not
+# distributed from a mysqld that does not have the database.
+--connect(s2,127.0.0.1,root,,test,$MASTER_MYPORT1,)
+--disable_warnings
+DROP DATABASE IF EXISTS TEST_DB;
+--connection default
+DROP DATABASE IF EXISTS TEST_DB;
+--enable_warnings
+--disconnect s2

@@ -397,9 +397,9 @@ Crash after the local commit of a durable write at COMPLETE, before
 COMPLETE to the next replica or COMPLETED.
 
 5183:
-Delay COMPLETE at the primary replica of a durable write by 3 s, once
-per operation, while the backups have committed it (testNodeRestart -n
-DurableDelayedComplete).
+Delay COMPLETE at the primary replica of a durable write or locking read
+by 3 s, once per operation, while the backups have committed it
+(testNodeRestart -n DurableDelayedComplete).
 
 5184:
 Crash after an ABORT with AF_AFTER_COMMIT of rule F is persistent,

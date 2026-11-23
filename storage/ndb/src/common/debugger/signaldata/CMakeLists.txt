@@ -126,3 +126,8 @@ ADD_CONVENIENCE_LIBRARY(ndbsignaldata
   UtilPrepare.cpp
   UtilSequence.cpp
   )
+
+# RONDB-1150: the packed COMMIT of a durable transaction (ZCOMMIT_DURABLE),
+# checked by PackedSignal::verify() and printed
+NDB_ADD_TEST(packed_signal-t packed_signal-t.cpp
+  LIBS ndbmgmapi ndbtrace ndblogger ndbgeneral ndbportlib)

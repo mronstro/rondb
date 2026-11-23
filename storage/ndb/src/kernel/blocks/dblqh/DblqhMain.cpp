@@ -15424,9 +15424,10 @@ void Dblqh::execCOMPLETE(Signal *signal) {
             0 &&
         signal->getSendersBlockRef() != reference()) {
       /**
-       * RONDB-1150 (X4.14): the primary of a durable write gets its
-       * COMPLETE 3 s late, once, so that a test can read the row while
-       * the backups have committed and the primary has not (L)
+       * RONDB-1150 (X4.14): the primary of a durable write or locking
+       * read gets its COMPLETE 3 s late, once, so that a test can read the
+       * row while the backups have committed and the primary has not, or
+       * lock a row that the transaction read (L)
        */
       jam();
       sendSignalWithDelay(cownref, GSN_COMPLETE, signal, 3000,
@@ -16110,7 +16111,7 @@ void Dblqh::tupcommit_conf(Signal *signal,
   if (dirtyOp != ZTRUE) {
     if (ERROR_INSERTED(5182) &&
         (tcPtrP->m_flags & TcConnectionrec::OP_DURABLE) != 0 &&
-        activeCreat == Fragrecord::AC_NORMAL &&
+        activeCreat == Fragrecord::AC_NORMAL && tcPtrP->operation != ZREAD &&
         (seqNoReplica != 0 ||
          (tcPtrP->m_flags & TcConnectionrec::OP_LOCAL_COMMIT_AT_COMPLETE) !=
              0)) {
@@ -17536,12 +17537,12 @@ void Dblqh::abortStateHandlerLab(Signal *signal,
  * that at COMPLETE, and so does the primary (redoLocalCommitAtComplete()).
  * A COMMIT record written for the operation gets an ABORT with
  * AF_AFTER_COMMIT, persistent before the lock is released and ABORTCONF
- * sent; then the normal abort, which writes no second ABORT. Committed
- * locally already are a read on the primary, which has nothing to undo,
- * and an operation of a node restart's copy (AC_NR_COPY), which cannot be
- * undone: the starting node gives up its restart, and copies the
- * fragment again in the next one, as its data cannot be restored from
- * before its restart is done (DI-10).
+ * sent; then the normal abort, which writes no second ABORT. A locking
+ * read on the primary holds its lock until COMPLETE as well, so the abort
+ * releases it. Committed locally already is an operation of a node
+ * restart's copy (AC_NR_COPY), which cannot be undone: the starting node
+ * gives up its restart, and copies the fragment again in the next one, as
+ * its data cannot be restored from before its restart is done (DI-10).
  */
 void Dblqh::abortAfterCommitLab(Signal *signal,
                                 const TcConnectionrecPtr tcConnectptr) {
@@ -17557,7 +17558,11 @@ void Dblqh::abortAfterCommitLab(Signal *signal,
   if (unlikely(committedLocally)) {
     if (state == TcConnectionrec::COMMITTED &&
         (regTcPtr->operation == ZREAD || regTcPtr->operation == ZREAD_EX)) {
-      /* Its lock is released and nothing changed: only the answer */
+      /**
+       * A read committed without OP_DURABLE: none of a durable
+       * transaction gets here, as its locking reads commit at COMPLETE.
+       * Its lock is released and nothing changed: only the answer.
+       */
       jam();
       continueAfterLogAbortWriteLab(signal, tcConnectptr);
       return;

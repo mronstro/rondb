@@ -238,15 +238,15 @@ the ones marked * need your decision, see §5):
 
 | # | Issue | Proposal |
 |---|---|---|
-| DI-1* | A dirty write's COMPLETE record would give a false "T complete" in step B, and its GCI comes from LQH, not TC | Flag such records (`CPF_SELF`), or turn dirty writes into normal writes in durable mode; pick phase-2 records by `CF_DURABLE` |
+| DI-1* | A dirty write's COMPLETE record would give a false "T complete" in step B, and its GCI comes from LQH, not TC | Flag such records (`CPF_SELF`), or turn dirty writes into normal writes in durable mode; pick phase-2 records by `CF_DURABLE`. **Decided (Q-B1):** flag them (X4 part 5a) |
 | DI-2 | Step B's rescan starts before the tail, so a COMPLETE from before the tail with a reused transid could give a false hit or a false "corrupt log" crash | Count a COMPLETE only after a tail COMMIT of the same transaction in the same part; drop the step-A crash check |
 | DI-3 | The exchange grows with the square of the number of log parts | Aggregate per node in the DBLQH proxy; the verdicts do not change |
 | DI-4 | All parts need the same G' for SR_HEAD | DONE carries each part's highest GCI; in-doubt entries carry gci_hi |
-| DI-5* | API node-id hold-back: GCIs can differ by one between data nodes | Hold back until the save of f+1 |
+| DI-5* | API node-id hold-back: GCIs can differ by one between data nodes | Hold back until the save of f+1. **Decided (Q-B8)** (X4 part 5a) |
 | DI-6 | A rule-F abort after `commitGciHandling` must unlink the operation from its GcpRecord, or the GCP stops | In X4.10 |
-| DI-7* | A COMPLETE from the failed TC may be executed after the takeover's LQH_TRANSREQ scan, so "was any COMPLETE sent?" can be answered wrongly | Check in code and in the TLA+ model; marker bit or opCount |
+| DI-7* | A COMPLETE from the failed TC may be executed after the takeover's LQH_TRANSREQ scan, so "was any COMPLETE sent?" can be answered wrongly | Check in code and in the TLA+ model; marker bit or opCount. **Taken (Q-B9):** opCount; LQH drops such a COMPLETE (X4 part 4b) |
 | DI-8 | D4 with all nodes present hits `ndbrequire(!allNodes)` (`NdbcntrMain.cpp:2780`) | A clear `progError` instead |
-| DI-9* | Read locks under invariant L | Decide whether shared locks are released at COMMIT or at COMPLETE |
+| DI-9* | Read locks under invariant L | Decide whether shared locks are released at COMMIT or at COMPLETE. **Decided (Q-B2):** at COMPLETE (X4 part 6) |
 
 ---
 
