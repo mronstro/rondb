@@ -817,6 +817,13 @@ so 8322's test in `complete010Lab` never held. `copyApi()` now copies
 the flag. Nothing else reads `TF_DURABLE` in the complete phase: the rule-F
 tests are in the commit-phase states and the takeover builds its own record.
 
+Found in testing (2026-11-24, Linux): `DurableGcpUnderLoad` ran until
+MTR's 900 s timeout. The watch step read the cluster log with a timeout of
+0, which `ndb_logevent_get_next()` takes as "wait for the next event", so
+it never got past its first drain and never stopped the update threads. It
+now waits 50 ms for the first event (the pause between two probes) and
+1 ms for each one after, and fails when the log handle reports an error.
+
 **Risks:** the hottest commit code changes (`tupcommit_conf`, queued-log,
 parallel and takeover paths); the abort-after-commit path is new in LQH
 and TC; longer lock hold on hot rows (measured in X8.3).

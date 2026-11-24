@@ -13212,8 +13212,16 @@ int runDurableGcpWatch(NDBT_Context *ctx, NDBT_Step *step) {
     }
     ops.closeTransaction(ndb);
 
+    /**
+     * Take the events that have arrived. A timeout of 0 would wait for
+     * the next event without end, so the wait is the 50 ms between two
+     * probes, and 1 ms once an event has come.
+     */
     struct ndb_logevent event;
-    while (ndb_logevent_get_next(handle, &event, 0) > 0) {
+    unsigned waitMs = 50;
+    int got;
+    while ((got = ndb_logevent_get_next(handle, &event, waitMs)) > 0) {
+      waitMs = 1;
       if (event.type == NDB_LE_GlobalCheckpointCompleted &&
           event.GlobalCheckpointCompleted.gci > lastSaved) {
         const NDB_TICKS at = NdbTick_getCurrentTicks();
@@ -13226,8 +13234,12 @@ int runDurableGcpWatch(NDBT_Context *ctx, NDBT_Step *step) {
         lastSavedAt = at;
       }
     }
+    if (got < 0) {
+      g_err << "Lost the cluster log: "
+            << ndb_logevent_get_latest_error_msg(handle) << endl;
+      result = NDBT_FAILED;
+    }
     if (result != NDBT_OK) break;
-    NdbSleep_MilliSleep(50);
   }
   const NDB_TICKS end = NdbTick_getCurrentTicks();
   ctx->stopTest();
