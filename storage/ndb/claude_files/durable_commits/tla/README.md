@@ -11,8 +11,17 @@ DI-2 rule of step B (`../impl_next_steps.md` §13).
 (plan revision 14), as it caused findings 1 and 2 and the guarantees hold
 without it; the code no longer has it, nor X4.9's drop of a late COMPLETE.
 The model keeps both as switches, and their configurations as the
-evidence. Dirty writes are best effort (finding 3 accepted, DI-1).
-Finding 4 is upstream's race; a ticket of its own is proposed.
+evidence. Dirty writes are best effort: phase 2 skips a dirty write in the
+tail and step C invalidates its COMMIT, so its replicas never differ
+(finding 3, DI-1). Finding 4 is upstream's race; a ticket of its own is
+proposed.
+
+**To check (2026-11-24): the COMPLETE without a fence.** Without rule F
+the commit point is the last COMMIT persisted: after it every restart
+commits T by the count rule. A COMPLETE then needs no fence before the
+row is visible; it only lets step A decide T in its own log part. The
+`MC_lazy*` configurations check that, with every crash cut of the log
+parts; `MC_lazy_nofallback` is the control.
 
 ## Running it
 
@@ -51,13 +60,16 @@ committed.
 | `LoseMsg` | a signal a failed node had not sent yet is lost | |
 | `TakeoverScan`, `TakeoverDecide`, `TO*` | LQH_TRANSREQ reports (operation records, commit-ack markers); CS_FAIL_PREPARED/COMMITTING/COMMITTED/COMPLETED; `takeOverCompleteSent()`; COMMITREQ, COMPLETEREQ, ABORTREQ | X4.9 |
 | `DirtyWrite` | PREPARE, COMMIT (opCount 0) and COMPLETE `CPF_SELF` behind one barrier, local commit, then the next replica | X4.13 |
-| `Phase2` | step A (hash table, COMPLETE executes the queue, `CPF_SELF` its own COMMIT, ABORT takes the queue out), step B (hits, with the DI-2 rule), step C (verdicts with the count rule) | plan §5.2, X5.3-X5.5 |
+| `Phase2` | step A (hash table, COMPLETE executes the queue, `CPF_SELF` its own COMMIT or, with `SkipDirty`, a dirty write's COMMIT invalidated; ABORT takes the queue out), step B (hits, with the DI-2 rule), step C (verdicts with the count rule) | plan §5.2, X5.3-X5.5 |
+| `CrashLogs` | what a crash leaves of each log part: a prefix holding at least the records up to its last barrier (`pers`) | design E11 |
 | `SRStarts` | the starting nodes; stale ones (recorded by a starting node) take no part; at least one non-stale node per node group | plan §5.4-5.5, X6.3-X6.4 |
 
-Every REDO record is persistent when it is written: the barriers of C, K
-and F come before the signal that depends on the record, so a record
-written and not persisted is the same as one not written. Each invariant
-is checked in every state, as the logs a crash would leave.
+A COMMIT (C), a rule-F ABORT (F) and a dirty write are fenced before the
+signal that depends on them, which persists their log part up to them;
+so is a COMPLETE (K), unless `LazyComplete`. Each invariant is checked in
+every state, for every crash cut: each log part keeps a prefix that holds
+at least its persisted records, as the restart's end of log is the first
+position that is not a valid record.
 
 Constants that switch parts on and off: `RuleF`, `TakeoverFCommitted`
 (the takeover aborts by rule F also when every operation reports
@@ -65,7 +77,11 @@ Committed, unless `takeOverCompleteSent()`, as X4 codes it; FALSE is the
 candidate fix of finding 1), `DropLateComplete`, `LateFromFailedTc` (a
 signal received from a failed node may run after LQH_TRANSREQ; without it,
 it runs before or is lost), `DI2Rule`, `PartialSR`, `MaxFailures`,
-`Dirty`.
+`Dirty`, `LazyComplete` (a COMPLETE is not fenced; the next barrier of its
+log part persists it), `SkipDirty` (phase 2 skips a dirty write in the
+tail and step C invalidates its COMMIT; else its `CPF_SELF` COMPLETE
+applies it) and `Fallback` (step C's count rule; off only in a control).
+G1 and `VisibleStays` do not cover dirty writes, which are best effort.
 
 ## Invariants
 
@@ -107,7 +123,14 @@ finding, and so is a run that finds none where one is expected.
 | `MC_rulef_twofail` | as `MC_rulef`, 2 node failures, all but `NoLqhCrash` | `G2Whole` violated: finding 2 |
 | `MC_late_drop` | rule F on, the takeover as X4 codes it, late signals from a failed node, X4.9's drop; all but `NoLqhCrash` (finding 4), `VisibleStays` and `CompleteExcludesAbort` (finding 1) | no error |
 | `MC_no_drop_complete` | as `MC_late_drop` without the drop | `AbortStays` violated: the drop of X4.9 is needed |
-| `MC_dirty` | a dirty write | `G2Whole` violated: finding 3, accepted |
+| `MC_dirty` | a dirty write that phase 2 applies (X4.13 as coded), as the evidence | `G2Whole` violated: finding 3 |
+| `MC_dirty_skip` | a dirty write that phase 2 skips (decided 2026-11-24) | no error |
+| `MC_lazy` | as `MC_x4`, the COMPLETE not fenced | no error |
+| `MC_lazy_late` | as `MC_x4_late`, the COMPLETE not fenced | no error |
+| `MC_lazy_twofail_partial` | as `MC_x4_twofail_partial`, the COMPLETE not fenced | no error |
+| `MC_lazy_repeatable` | as `MC_repeatable`, the COMPLETE not fenced | no error |
+| `MC_lazy_dirty` | as `MC_dirty_skip`, the COMPLETE not fenced | no error |
+| `MC_lazy_nofallback` | as `MC_lazy` without the count rule: a control that the crash cuts lose COMPLETEs and that the count rule then decides | `VisibleStays` violated |
 | `MC_late_tc` | late signals from a failed node | `NoLqhCrash` violated: finding 4 |
 | `MC_no_di2` | without the DI-2 rule | `G2Whole` violated: the DI-2 rule is needed |
 

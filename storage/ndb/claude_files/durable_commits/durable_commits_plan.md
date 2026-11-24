@@ -108,7 +108,9 @@ All paths are relative to `storage/ndb/`.
   and two node failures and partial restarts, as the node-failure file
   keeps a failed replica's COMMITs out of the count rule (§5.4). No ABORT
   follows a COMMIT now: step A ignores ABORTs, step B reports only "T
-  complete", and step C has no veto.
+  complete", and step C has no veto. Dirty writes are best effort: phase 2
+  skips them in the tail and step C invalidates their COMMITs, as applying
+  them could leave a row's replicas different (DI-1).
 
 ---
 
@@ -687,7 +689,7 @@ So every invalidation flag is persistent before phase 4 writes SR_HEAD and
 | Threat | Guard |
 |---|---|
 | Two transactions with one transid in the tail share a hash entry (an API process restarts its counter at 0) | Failed API node id held back until the GCP save of the GCI after its failure (X4.11, DI-5) |
-| A dirty write's COMPLETE reports "T complete" for operations some replica lacks | Dirty writes become normal writes in durable mode, proposed (Q-B1, DI-1) |
+| A dirty write's COMPLETE reports "T complete" for operations some replica lacks | Dirty writes are best effort (2026-11-24): phase 2 skips a dirty write in the tail and step C invalidates its COMMIT, so the replicas of its row never differ; it is durable from its GCP save, as without durable commits (DI-1) |
 | A wrong opCount passes or fails the count rule wrongly | Counted at LQHKEYCONF for every logged write, trigger operations included; IgnoreError failures have no COMMIT; takeover rebuilds it from LQH_TRANSCONF (X4.2, X4.9) |
 | A takeover TC misjudges whether a COMPLETE was sent | Missing operations or replicas in the takeover reports; the in-flight COMPLETE race checked in TLA+ (DI-7, Q-B9) |
 | A durable T depends on a non-durable one around g | Phase 2 only for GCI ≥ g and only when R_gcp ≥ g − 1 (§2.2) |

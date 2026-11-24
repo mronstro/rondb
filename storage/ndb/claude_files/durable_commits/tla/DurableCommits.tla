@@ -7,8 +7,9 @@
 (* in TC and in the takeover, the takeover's "was a COMPLETE sent?"        *)
 (* (X4.9, DI-7), dirty writes with CPF_SELF (X4.13, DI-1), and the         *)
 (* node-failure file (plan s.5.4). Every data node can crash at any state: *)
-(* the REDO records are persistent when written, so the logs of a state    *)
-(* are what a cluster restart reads. The invariants run the restart's      *)
+(* each log part keeps the records up to its last barrier, and with        *)
+(* LazyComplete any of the COMPLETEs written after it, in log order; a     *)
+(* cluster restart reads what is kept. The invariants run the restart's    *)
 (* phase 2 (plan s.5.2, X5.3-X5.5: step A, the exchange of step B, the     *)
 (* verdicts of step C with the count rule) on the logs of the starting     *)
 (* nodes that are not stale, and check G1-G3 of plan s.1 against what was  *)
@@ -49,7 +50,15 @@ CONSTANTS
                       \* LQH_TRANSREQ
     DI2Rule,          \* X5.4: step B counts a COMPLETE or ABORT of T only
                       \* after a tail COMMIT of T in the same part
-    PartialSR         \* also check restarts where only some nodes start
+    PartialSR,        \* also check restarts where only some nodes start
+    LazyComplete,     \* a COMPLETE is not fenced: the next barrier of its
+                      \* log part persists it, as the commit point is the
+                      \* last COMMIT persisted
+    SkipDirty,        \* phase 2 skips a dirty write in the tail and step C
+                      \* invalidates its COMMIT (best effort, DI-1); else
+                      \* its CPF_SELF COMPLETE applies it (X4.13)
+    Fallback          \* step C commits by the count rule too, not only on
+                      \* "T complete" (D5; off only to show it is needed)
 
 NoTxn == "none"
 
@@ -69,7 +78,8 @@ VARIABLES
                 \* an abort of t after the commit decision had released it
     vis,        \* vis[t]: a write of t was visible on some replica
     api,        \* api[t]: what the API was told
-    log,        \* log[n]: the REDO records of node n, persistent
+    log,        \* log[n]: the REDO records of node n, in the order written
+    pers,       \* pers[n]: the records of log[n] up to its last barrier
     msgs,       \* COMMIT and COMPLETE signals in flight
     reports,    \* reports[t]: <<r, n, state>> from LQH_TRANSCONF
     markers,    \* markers[t]: nodes with a commit-ack marker of t at the scan
@@ -78,8 +88,9 @@ VARIABLES
 
 failVars == <<alive, failCount, nfRec>>
 toVars == <<reports, markers, scanned>>
+logVars == <<log, pers>>
 vars == <<failVars, tcState, path, seenFail, rep, lock, hist, abortRel,
-          learnedBy, vis, api, log, msgs, toVars, lqhCrash>>
+          learnedBy, vis, api, logVars, msgs, toVars, lqhCrash>>
 
 -----------------------------------------------------------------------------
 (* Replicas and records *)
@@ -142,6 +153,7 @@ Init ==
     /\ vis = [t \in Txns |-> FALSE]
     /\ api = [t \in Txns |-> "none"]
     /\ log = OldLog
+    /\ pers = [n \in Nodes |-> Len(OldLog[n])]
     /\ msgs = {}
     /\ reports = [t \in Txns |-> {}]
     /\ markers = [t \in Txns |-> {}]
@@ -170,7 +182,7 @@ Prepare(t, r, n) ==
                        IF <<r, n>> \in abortRel[u] THEN learnedBy[u] \cup {t}
                                                    ELSE learnedBy[u]]
     /\ UNCHANGED <<failVars, tcState, path, seenFail, abortRel, vis, api,
-                   log, msgs, toVars, lqhCrash>>
+                   logVars, msgs, toVars, lqhCrash>>
 
 \* An abort before the commit decision (deadlock timeout, node failure):
 \* no REDO record of t exists
@@ -187,7 +199,7 @@ PrepareAbort(t) ==
     /\ lock' = [r \in Rows |-> [n \in Nodes |->
                    IF lock[r][n] = t THEN NoTxn ELSE lock[r][n]]]
     /\ UNCHANGED <<failVars, path, seenFail, hist, abortRel, learnedBy, vis,
-                   log, msgs, toVars, lqhCrash>>
+                   logVars, msgs, toVars, lqhCrash>>
 
 -----------------------------------------------------------------------------
 (* The commit phase: DIVERIFYCONF, then COMMIT to the last replica of     *)
@@ -213,7 +225,7 @@ StartCommit(t, p) ==
     /\ path' = [path EXCEPT ![t] = p]
     /\ msgs' = msgs \cup CommitMsgs(t, p)
     /\ UNCHANGED <<failVars, seenFail, rep, lock, hist, abortRel, learnedBy,
-                   vis, api, log, toVars, lqhCrash>>
+                   vis, api, logVars, toVars, lqhCrash>>
 
 \* C: the COMMIT record is persistent before COMMITTED or the COMMIT passed
 \* on. L: no replica commits locally at COMMIT. A COMMIT for an operation
@@ -227,12 +239,13 @@ DeliverCommit(m) ==
        IN IF n \in alive /\ rep[t][r][n] = "prepared"
           THEN /\ rep' = [rep EXCEPT ![t][r][n] = "committed"]
                /\ log' = [log EXCEPT ![n] = Append(@, CommitRec(t, r))]
+               /\ pers' = [pers EXCEPT ![n] = Len(log[n]) + 1]
                /\ msgs' = (msgs \ {m}) \cup
                      (IF m.fwd /\ Before(t, r, n) # {}
                       THEN {Msg("COMMIT", t, r, n, PrevLive(t, r, n), TRUE)}
                       ELSE {})
           ELSE /\ msgs' = msgs \ {m}
-               /\ UNCHANGED <<rep, log>>
+               /\ UNCHANGED <<rep, logVars>>
     /\ UNCHANGED <<failVars, tcState, path, seenFail, lock, hist, abortRel,
                    learnedBy, vis, api, toVars, lqhCrash>>
 
@@ -259,7 +272,7 @@ CommitPhaseDone(t) ==
     /\ tcState' = [tcState EXCEPT ![t] = "completing"]
     /\ msgs' = msgs \cup CompleteMsgs(t, path[t])
     /\ UNCHANGED <<failVars, path, seenFail, rep, lock, hist, abortRel,
-                   learnedBy, vis, api, log, toVars, lqhCrash>>
+                   learnedBy, vis, api, logVars, toVars, lqhCrash>>
 
 \* K and L: the COMPLETE record is persistent before the local commit, the
 \* lock release and the COMPLETE passed on. X4.9 (DI-7): a COMPLETE for an
@@ -277,6 +290,8 @@ DeliverComplete(m) ==
           THEN /\ rep' = [rep EXCEPT ![t][r][n] = "done"]
                /\ log' = [log EXCEPT ![n] =
                              Append(@, CompleteRec(t, r, FALSE))]
+               /\ pers' = IF LazyComplete THEN pers
+                         ELSE [pers EXCEPT ![n] = Len(log[n]) + 1]
                /\ lock' = [lock EXCEPT ![r][n] = NoTxn]
                /\ vis' = [vis EXCEPT ![t] = TRUE]
                /\ msgs' = (msgs \ {m}) \cup
@@ -285,7 +300,7 @@ DeliverComplete(m) ==
                                 TRUE)}
                       ELSE {})
           ELSE /\ msgs' = msgs \ {m}
-               /\ UNCHANGED <<rep, log, lock, vis>>
+               /\ UNCHANGED <<rep, logVars, lock, vis>>
     /\ UNCHANGED <<failVars, tcState, path, seenFail, hist, abortRel,
                    learnedBy, api, toVars, lqhCrash>>
 
@@ -297,7 +312,7 @@ CompletePhaseDone(t) ==
     /\ tcState' = [tcState EXCEPT ![t] = "done"]
     /\ api' = [api EXCEPT ![t] = "committed"]
     /\ UNCHANGED <<failVars, path, seenFail, rep, lock, hist, abortRel,
-                   learnedBy, vis, log, msgs, toVars, lqhCrash>>
+                   learnedBy, vis, logVars, msgs, toVars, lqhCrash>>
 
 -----------------------------------------------------------------------------
 (* A participant fails while TC runs (X4.8). In the commit phase rule F  *)
@@ -312,7 +327,7 @@ FailReaction(t) ==
     /\ CASE tcState[t] = "committing" /\ RuleF ->
               /\ tcState' = [tcState EXCEPT ![t] = "abortingF"]
               /\ UNCHANGED <<path, msgs>>
-         [] tcState[t] = "committing" ->
+         [] tcState[t] = "committing" /\ ~RuleF ->
               /\ path' = [path EXCEPT ![t] = "parallel"]
               /\ msgs' = msgs \cup
                     UNION {{Msg("COMMIT", t, r, TC[t], n, FALSE) :
@@ -329,7 +344,7 @@ FailReaction(t) ==
                               : r \in TxnRows[t]}
               /\ UNCHANGED tcState
     /\ UNCHANGED <<failVars, rep, lock, hist, abortRel, learnedBy, vis, api,
-                   log, toVars, lqhCrash>>
+                   logVars, toVars, lqhCrash>>
 
 \* F: ABORTREQ with FLAG_AFTER_COMMIT. A replica with a COMMIT record
 \* persists an ABORT with AF_AFTER_COMMIT before it releases the lock. The
@@ -347,6 +362,9 @@ AbortFAt(t, r, n) ==
     /\ log' = IF rep[t][r][n] = "committed"
               THEN [log EXCEPT ![n] = Append(@, AbortRec(t, r))]
               ELSE log
+    /\ pers' = IF rep[t][r][n] = "committed"
+               THEN [pers EXCEPT ![n] = Len(log[n]) + 1]
+               ELSE pers
     /\ UNCHANGED <<failVars, tcState, path, seenFail, hist, learnedBy, vis,
                    api, msgs, toVars, lqhCrash>>
 
@@ -364,7 +382,7 @@ AbortFDone(t) ==
     /\ tcState' = [tcState EXCEPT ![t] = "abortedF"]
     /\ api' = [api EXCEPT ![t] = "aborted"]
     /\ UNCHANGED <<failVars, path, seenFail, rep, lock, hist, abortRel,
-                   learnedBy, vis, log, msgs, toVars, lqhCrash>>
+                   learnedBy, vis, logVars, msgs, toVars, lqhCrash>>
 
 -----------------------------------------------------------------------------
 (* A node failure. Every survivor records it in its node-failure file    *)
@@ -390,7 +408,7 @@ NodeFail(x) ==
                  THEN "unknown" ELSE api[t]]
     /\ msgs' = {m \in msgs : m.to # x}
     /\ UNCHANGED <<path, seenFail, rep, lock, hist, abortRel, learnedBy, vis,
-                   log, toVars, lqhCrash>>
+                   logVars, toVars, lqhCrash>>
 
 \* A signal that a failed node had not sent yet is lost with it
 LoseMsg(m) ==
@@ -398,7 +416,7 @@ LoseMsg(m) ==
     /\ m.from \notin alive
     /\ msgs' = msgs \ {m}
     /\ UNCHANGED <<failVars, tcState, path, seenFail, rep, lock, hist,
-                   abortRel, learnedBy, vis, api, log, toVars, lqhCrash>>
+                   abortRel, learnedBy, vis, api, logVars, toVars, lqhCrash>>
 
 -----------------------------------------------------------------------------
 (* The takeover (X4.9). LQH_TRANSREQ to every live node: each operation  *)
@@ -422,7 +440,7 @@ TakeoverScan(t, n) ==
                      THEN @ \cup {n} ELSE @]
     /\ scanned' = [scanned EXCEPT ![t] = @ \cup {n}]
     /\ UNCHANGED <<failVars, tcState, path, seenFail, rep, lock, hist,
-                   abortRel, learnedBy, vis, api, log, msgs, lqhCrash>>
+                   abortRel, learnedBy, vis, api, logVars, msgs, lqhCrash>>
 
 \* takeOverCompleteSent(): fewer logged writes reported than the opCount,
 \* or a reported operation with a replica on a node that answered without
@@ -449,9 +467,10 @@ TakeoverDecide(t) ==
     /\ LET Pr == {k \in reports[t] : k[3] = "prepared"}
            Co == {k \in reports[t] : k[3] = "committed"}
            next == CASE reports[t] = {} /\ markers[t] # {} -> "done"
-                     [] reports[t] = {} -> "lost"
-                     [] Co = {} -> "toAbort"
-                     [] Pr # {} -> (IF RuleF THEN "toAbortF" ELSE "toCommit")
+                     [] reports[t] = {} /\ markers[t] = {} -> "lost"
+                     [] reports[t] # {} /\ Co = {} -> "toAbort"
+                     [] Co # {} /\ Pr # {} ->
+                            (IF RuleF THEN "toAbortF" ELSE "toCommit")
                      [] OTHER -> (IF AbortFCommitted(t) THEN "toAbortF"
                                                          ELSE "toComplete")
        IN /\ tcState' = [tcState EXCEPT ![t] = next]
@@ -459,7 +478,7 @@ TakeoverDecide(t) ==
                                           [] next = "lost" -> "unknown"
                                           [] OTHER -> api[t]]
     /\ UNCHANGED <<failVars, path, seenFail, rep, lock, hist, abortRel,
-                   learnedBy, vis, log, msgs, toVars, lqhCrash>>
+                   learnedBy, vis, logVars, msgs, toVars, lqhCrash>>
 
 \* ABORTREQ without the flag: LQH aborts a Prepared operation; for a
 \* Committed one abortStateHandlerLab requires NEW_FROM_TC and stops the
@@ -477,7 +496,7 @@ TOAbortAt(t, r, n) ==
             /\ abortRel' = [abortRel EXCEPT ![t] = @ \cup {<<r, n>>}]
             /\ UNCHANGED lqhCrash
     /\ UNCHANGED <<failVars, tcState, path, seenFail, hist, learnedBy, vis,
-                   api, log, msgs, toVars>>
+                   api, logVars, msgs, toVars>>
 
 TOAbortDone(t) ==
     /\ tcState[t] = "toAbort"
@@ -486,7 +505,7 @@ TOAbortDone(t) ==
     /\ tcState' = [tcState EXCEPT ![t] = "aborted"]
     /\ api' = [api EXCEPT ![t] = "aborted"]
     /\ UNCHANGED <<failVars, path, seenFail, rep, lock, hist, abortRel,
-                   learnedBy, vis, log, msgs, toVars, lqhCrash>>
+                   learnedBy, vis, logVars, msgs, toVars, lqhCrash>>
 
 \* COMMITREQ to the operations reported Prepared, as a durable COMMIT
 TOCommitAt(t, r, n) ==
@@ -496,6 +515,7 @@ TOCommitAt(t, r, n) ==
     /\ rep[t][r][n] = "prepared"
     /\ rep' = [rep EXCEPT ![t][r][n] = "committed"]
     /\ log' = [log EXCEPT ![n] = Append(@, CommitRec(t, r))]
+    /\ pers' = [pers EXCEPT ![n] = Len(log[n]) + 1]
     /\ UNCHANGED <<failVars, tcState, path, seenFail, lock, hist, abortRel,
                    learnedBy, vis, api, msgs, toVars, lqhCrash>>
 
@@ -505,7 +525,7 @@ TOCommitDone(t) ==
            k[2] \in alive => rep[t][k[1]][k[2]] # "prepared"
     /\ tcState' = [tcState EXCEPT ![t] = "toComplete"]
     /\ UNCHANGED <<failVars, path, seenFail, rep, lock, hist, abortRel,
-                   learnedBy, vis, api, log, msgs, toVars, lqhCrash>>
+                   learnedBy, vis, api, logVars, msgs, toVars, lqhCrash>>
 
 \* COMPLETEREQ of the takeover, which LQH executes also for an operation
 \* reported to it
@@ -516,6 +536,8 @@ TOCompleteAt(t, r, n) ==
     /\ rep[t][r][n] = "committed"
     /\ rep' = [rep EXCEPT ![t][r][n] = "done"]
     /\ log' = [log EXCEPT ![n] = Append(@, CompleteRec(t, r, FALSE))]
+    /\ pers' = IF LazyComplete THEN pers
+              ELSE [pers EXCEPT ![n] = Len(log[n]) + 1]
     /\ lock' = [lock EXCEPT ![r][n] = NoTxn]
     /\ vis' = [vis EXCEPT ![t] = TRUE]
     /\ UNCHANGED <<failVars, tcState, path, seenFail, hist, abortRel,
@@ -529,7 +551,7 @@ TOCompleteDone(t) ==
     /\ tcState' = [tcState EXCEPT ![t] = "done"]
     /\ api' = [api EXCEPT ![t] = "committed"]
     /\ UNCHANGED <<failVars, path, seenFail, rep, lock, hist, abortRel,
-                   learnedBy, vis, log, msgs, toVars, lqhCrash>>
+                   learnedBy, vis, logVars, msgs, toVars, lqhCrash>>
 
 -----------------------------------------------------------------------------
 (* Dirty writes (X4.13, Q-B1): each replica in chain order writes PREPARE,*)
@@ -554,6 +576,7 @@ DirtyWrite(t, r, n) ==
     /\ vis' = [vis EXCEPT ![t] = TRUE]
     /\ log' = [log EXCEPT ![n] =
                   @ \o <<CommitRec(t, r), CompleteRec(t, r, TRUE)>>]
+    /\ pers' = [pers EXCEPT ![n] = Len(log[n]) + 2]
     /\ UNCHANGED <<failVars, tcState, path, seenFail, lock, abortRel, api,
                    msgs, toVars, lqhCrash>>
 
@@ -567,7 +590,7 @@ DirtyDone(t) ==
     /\ tcState' = [tcState EXCEPT ![t] = "done"]
     /\ api' = [api EXCEPT ![t] = "committed"]
     /\ UNCHANGED <<failVars, path, seenFail, rep, lock, hist, abortRel,
-                   learnedBy, vis, log, msgs, toVars, lqhCrash>>
+                   learnedBy, vis, logVars, msgs, toVars, lqhCrash>>
 
 -----------------------------------------------------------------------------
 
@@ -613,8 +636,9 @@ TxnSeq(s) == [i \in 1..Len(s) |-> s[i].txn]
 Tids == {TransId[t] : t \in Txns \cup {OldTxn}}
 
 \* Step A, in log order. q: the hash table, a FIFO of COMMIT records per
-\* transid; applied: the COMMITs executed; alist: the COMMITs that an
-\* ABORT with AF_AFTER_COMMIT took out, invalidated in step C. fl: the
+\* transid; applied: the COMMITs executed; alist: the COMMITs invalidated
+\* in step C without a verdict, those that an ABORT with AF_AFTER_COMMIT
+\* took out and, with SkipDirty, a dirty write's (opCount 0). fl: the
 \* transids whose COMMITs in this part are invalidated (RF_INVALIDATED)
 \* by an earlier restart, never queued or counted. A record of OldTxn
 \* (GCI <= R_gcp) is phase 1's.
@@ -624,13 +648,16 @@ StepA(rec, fl, st) ==
     IF ~rec.tail THEN st
     ELSE CASE rec.type = "COMMIT" ->
                 (IF rec.tid \in fl THEN st
+                 ELSE IF SkipDirty /\ rec.opc = 0
+                 THEN [st EXCEPT !.alist = @ \cup {rec}]
                  ELSE [st EXCEPT !.q[rec.tid] = Append(@, rec)])
-           [] rec.type = "COMPLETE" /\ rec.self ->
+           [] rec.type = "COMPLETE" /\ rec.self /\ SkipDirty -> st
+           [] rec.type = "COMPLETE" /\ rec.self /\ ~SkipDirty ->
                 \* CPF_SELF: only the dirty write's own COMMIT (DI-1)
                 (LET own == {c \in Range(st.q[rec.tid]) : c.row = rec.row}
                  IN [st EXCEPT !.applied = @ \o Keep(st.q[rec.tid], own),
                                !.q[rec.tid] = Keep(@, Range(@) \ own)])
-           [] rec.type = "COMPLETE" ->
+           [] rec.type = "COMPLETE" /\ ~rec.self ->
                 [st EXCEPT !.applied = @ \o st.q[rec.tid],
                            !.q[rec.tid] = <<>>]
            [] rec.type = "ABORT" ->
@@ -665,12 +692,13 @@ SumOver(S, f) ==
     IF S = {} THEN 0
     ELSE LET g == CHOOSE h \in S : TRUE IN f[g] + SumOver(S \ {g}, f)
 
-\* Phase 2 on the nodes P. Step C: commit on "T complete", or when no "T
-\* aborted" came and every node of each node group counts the same (none =
-\* 0), the node groups adding up to opCount (X5.5, the fallback of D5).
-Phase2(P, fl) ==
-    LET A == [n \in P |-> ScanA(log[n], fl[n], InitA)]
-        B == [n \in P |-> ScanB(log[n], {}, [c |-> {}, a |-> {}])]
+\* Phase 2 on the logs L of the nodes P. Step C: commit on "T complete",
+\* or when no "T aborted" came and every node of each node group counts the
+\* same (none = 0), the node groups adding up to opCount (X5.5, the
+\* fallback of D5).
+Phase2(L, P, fl) ==
+    LET A == [n \in P |-> ScanA(L[n], fl[n], InitA)]
+        B == [n \in P |-> ScanB(L[n], {}, [c |-> {}, a |-> {}])]
         CH == UNION {B[n].c : n \in P}
         AH == UNION {B[n].a : n \in P}
         U == UNION {{x \in Tids : A[n].q[x] # <<>>} : n \in P}
@@ -681,9 +709,10 @@ Phase2(P, fl) ==
             /\ SumOver(NodeGroups,
                        [g \in NodeGroups |->
                            Cnt(CHOOSE n \in P : NG[n] = g, x)]) = Opc(x)
-        Committed == {x \in U : x \in CH \/ (x \notin AH /\ CountRule(x))}
+        Committed ==
+            {x \in U : x \in CH \/ (Fallback /\ x \notin AH /\ CountRule(x))}
         Queued(n) == UNION {Range(A[n].q[x]) : x \in Tids}
-        StepC(n) == Keep(log[n], {c \in Queued(n) : c.tid \in Committed})
+        StepC(n) == Keep(L[n], {c \in Queued(n) : c.tid \in Committed})
     IN [final |-> [n \in P |-> A[n].applied \o StepC(n)],
         committed |-> Committed,
         queued |-> [n \in P |-> Queued(n)],
@@ -703,7 +732,20 @@ SRAllowed(S) == \A g \in NodeGroups : \E n \in SRNodes(S) : NG[n] = g
 SRStarts ==
     {S \in (IF PartialSR THEN SUBSET Nodes ELSE {Nodes}) : SRAllowed(S)}
 NoFlags == [n \in Nodes |-> {}]
-SR(S) == Phase2(SRNodes(S), NoFlags)
+SR(L, S) == Phase2(L, SRNodes(S), NoFlags)
+
+\* The crash keeps of each log part a prefix that holds at least the
+\* records up to its last barrier: the restart's end of log is the first
+\* position that is not a valid record, and nothing after it is read
+\* (pmem_redo_design.md E11)
+RECURSIVE CutFns(_)
+CutFns(N) ==
+    IF N = {} THEN {[n \in {} |-> 0]}
+    ELSE LET x == CHOOSE y \in N : TRUE
+         IN {[n \in N |-> IF n = x THEN k ELSE f[n]] :
+                k \in pers[x]..Len(log[x]), f \in CutFns(N \ {x})}
+CrashLogs ==
+    {[n \in Nodes |-> SubSeq(log[n], 1, c[n])] : c \in CutFns(Nodes)}
 
 -----------------------------------------------------------------------------
 (* Invariants. Each holds for a crash of every node in any state.         *)
@@ -733,27 +775,31 @@ CompleteExcludesAbort ==
           /\ \E n \in Nodes : \E c \in Range(log[n]) :
                  c.type = "ABORT" /\ c.txn = t)
 
-\* G1: an acknowledged commit survives
+\* G1: an acknowledged commit survives; a dirty write is best effort
 G1 ==
-    \A S \in SRStarts : LET res == SR(S) IN
-        \A t \in Txns : api[t] = "committed" => t \in SRTxns(res)
+    \A L \in CrashLogs : \A S \in SRStarts :
+        LET res == SR(L, S) IN
+        \A t \in Txns \ Dirty : api[t] = "committed" => t \in SRTxns(res)
 
 \* G2: whole transactions; every starting replica of each row of T has T
 G2Whole ==
-    \A S \in SRStarts : LET res == SR(S) IN
+    \A L \in CrashLogs : \A S \in SRStarts :
+        LET res == SR(L, S) IN
         \A t \in SRTxns(res) : \A r \in TxnRows[t] :
             \A n \in SRNodes(S) \cap RowNodes(r) :
                 t \in Range(RowSeq(res, n, r))
 
 \* G3: the starting replicas of a row are identical
 G3Same ==
-    \A S \in SRStarts : LET res == SR(S) IN
+    \A L \in CrashLogs : \A S \in SRStarts :
+        LET res == SR(L, S) IN
         \A r \in Rows : \A n1, n2 \in SRNodes(S) \cap RowNodes(r) :
             RowSeq(res, n1, r) = RowSeq(res, n2, r)
 
 \* Plan s.6: each row gets the surviving writes in the order of its locks
 RowOrder ==
-    \A S \in SRStarts : LET res == SR(S) IN
+    \A L \in CrashLogs : \A S \in SRStarts :
+        LET res == SR(L, S) IN
         \A r \in Rows : \A n \in SRNodes(S) \cap RowNodes(r) :
             RowSeq(res, n, r) = Keep(hist[r][n], SRTxns(res))
 
@@ -763,32 +809,37 @@ RowOrder ==
 \* which a later commit of T does not contradict while no write of T was
 \* visible (VisibleStays).
 AbortStays ==
-    \A S \in SRStarts : LET res == SR(S) IN
+    \A L \in CrashLogs : \A S \in SRStarts :
+        LET res == SR(L, S) IN
         \A t \in Txns :
             (api[t] = "aborted" \/ learnedBy[t] \cap SRTxns(res) # {}) =>
                 t \notin SRTxns(res)
 
-\* ... and a transaction that was visible on a replica is applied
+\* ... and a transaction that was visible on a replica is applied, but a
+\* dirty write, which is best effort
 VisibleStays ==
-    \A S \in SRStarts : LET res == SR(S) IN
-        \A t \in Txns : vis[t] => t \in SRTxns(res)
+    \A L \in CrashLogs : \A S \in SRStarts :
+        LET res == SR(L, S) IN
+        \A t \in Txns \ Dirty : vis[t] => t \in SRTxns(res)
 
 \* Plan s.5.6: the next restart, at R = G' after phase 3, replays the old
 \* tail's COMMITs that step C did not invalidate, in log order, and gets
 \* the same rows as phase 2
 NextSR ==
-    \A S \in SRStarts : LET res == SR(S) IN
+    \A L \in CrashLogs : \A S \in SRStarts :
+        LET res == SR(L, S) IN
         \A n \in SRNodes(S) :
             LET flagged == {c \in res.queued[n] : c.tid \notin res.committed}
                                \cup res.alist[n]
-                replay == Keep(log[n], {c \in Range(log[n]) :
-                                           c.tail /\ c.type = "COMMIT"}
-                                       \ flagged)
+                replay == Keep(L[n], {c \in Range(L[n]) :
+                                         c.tail /\ c.type = "COMMIT"}
+                                     \ flagged)
             IN replay = res.final[n]
 
 \* X5.5: in-doubt transactions committed in step C share no row in a part
 NoSharedRowInDoubt ==
-    \A S \in SRStarts : LET res == SR(S) IN
+    \A L \in CrashLogs : \A S \in SRStarts :
+        LET res == SR(L, S) IN
         \A n \in SRNodes(S) :
             \A c1, c2 \in {c \in res.queued[n] : c.tid \in res.committed} :
                 c1.row = c2.row => c1.tid = c2.tid
@@ -802,12 +853,12 @@ FlagPairs(P, res) ==
                c.tid = p[2] /\ p[2] \notin res.committed}
 
 Repeatable ==
-    \A S \in SRStarts :
+    \A L \in CrashLogs : \A S \in SRStarts :
         LET P == SRNodes(S)
-            res == Phase2(P, NoFlags)
+            res == Phase2(L, P, NoFlags)
         IN \A F \in SUBSET FlagPairs(P, res) :
                LET fl == [n \in Nodes |-> {p[2] : p \in {q \in F : q[1] = n}}]
-                   res2 == Phase2(P, fl)
+                   res2 == Phase2(L, P, fl)
                IN /\ res2.committed = res.committed
                   /\ res2.final = res.final
 

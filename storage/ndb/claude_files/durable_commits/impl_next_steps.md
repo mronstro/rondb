@@ -191,7 +191,7 @@ step B with the DI-2 rule, step C with the count rule, stale nodes, partial
 restarts). Every invariant runs phase 2 on the logs of the state, as a
 crash of every node would leave them, and checks G1, G2, G3, the row order
 of plan §6, the next restart, a rerun after a crash in step C, and that
-no ndbrequire of DBLQH fails. Fifteen configurations of 2 node groups × 2
+no ndbrequire of DBLQH fails. Twenty-two configurations of 2 node groups × 2
 replicas and 2 transactions; `run_tlc.sh` runs them all.
 
 The two runs (TLC, a second per configuration, a minute for the largest):
@@ -223,7 +223,10 @@ The two runs (TLC, a second per configuration, a minute for the largest):
   takeover can abort by rule F when every operation reports Committed.
 Decided (2026-11-24): rule F is dropped, which takes findings 1 and 2 with
 it (the model keeps it as a switch, as the evidence); dirty writes are best
-effort (finding 3, DI-1). Proposed: finding 4, upstream's race, in a
+effort, skipped by phase 2 in the tail and invalidated in step C (finding
+3, DI-1). To check: without rule F the commit point is the last COMMIT
+persisted, so a COMPLETE needs no fence and only lets step A decide T
+locally (`MC_lazy*`, with every crash cut of the log parts). Proposed: finding 4, upstream's race, in a
 ticket of its own. Without rule F there are no "T aborted" hits, so how step B
 counts an invalidated COMMIT for the DI-2 rule no longer matters.
 
@@ -961,9 +964,11 @@ In `execSr` (`DblqhMain.cpp:38962`) [V], when `durableTail`:
   queued COMMITs in FIFO order: copy the COMMIT from the mapping,
   `readCommitLog` (`42763`), `checkIfExecLog` (`40928-40955`), read the
   PREPARE through its reference, `execLogRecord` (`39478`) [V], with the
-  record's gci_lo. Remove the entry. COMPLETE without entry: ignore. COMPLETE
-  with `CPF_SELF`: execute only its own COMMIT (DI-1). ABORT: ignore
-  (written only before a commit decision; rule F is dropped).
+  record's gci_lo. Remove the entry. COMPLETE without entry: ignore. COMMIT
+  of a dirty write (opCount 0): never executed, invalidated in step C, and
+  its `CPF_SELF` COMPLETE ignored (best effort, DI-1, decided 2026-11-24).
+  ABORT: ignore (written only before a commit decision; rule F is
+  dropped).
 - Keep per part `maxGciExecuted`.
 - Drop the plan's "COMMIT after COMPLETE of T ⇒ crash" check: the preferred
   variant has no memory of executed transids, and with transid reuse it
@@ -1501,7 +1506,7 @@ Step 1 adds the persist counters per part (E19).
 
 | # | Issue | Evidence | Proposal |
 |---|---|---|---|
-| DI-1 | **Dirty writes.** (a) A dirty write of T writes PREPARE + COMMIT + COMPLETE at prepare time. In step B its COMPLETE makes another part report "T complete", which commits T's in-doubt normal operations even when some replica lacks their COMMIT: T half applied. (b) Dirty writes are driven by LQH, not by TC's COMMIT flag, and take their GCI from LQH (`DblqhMain.cpp:10314`) [V], so "GCI ≥ g" and "durable" can disagree around activation | `doWritePrepareLog` `13566-13584` [V]; TC drops dirty writes at LQHKEYCONF (`9546`) [V] | Either TC turns dirty writes into normal writes when durable is active, or the COMPLETE of a dirty write gets flag `CPF_SELF`: step A executes only its own COMMIT, step B ignores it, opCount excludes it. Select phase-2 records by `CF_DURABLE`, with GCI ≥ g as a cross-check. LQH learns "durable active" from GCP_SAVEREQ (X7.2) |
+| DI-1 | **Dirty writes.** (a) A dirty write of T writes PREPARE + COMMIT + COMPLETE at prepare time. In step B its COMPLETE makes another part report "T complete", which commits T's in-doubt normal operations even when some replica lacks their COMMIT: T half applied. (b) Dirty writes are driven by LQH, not by TC's COMMIT flag, and take their GCI from LQH (`DblqhMain.cpp:10314`) [V], so "GCI ≥ g" and "durable" can disagree around activation | `doWritePrepareLog` `13566-13584` [V]; TC drops dirty writes at LQHKEYCONF (`9546`) [V] | Either TC turns dirty writes into normal writes when durable is active, or the COMPLETE of a dirty write gets flag `CPF_SELF`: step A executes only its own COMMIT, step B ignores it, opCount excludes it. Select phase-2 records by `CF_DURABLE`, with GCI ≥ g as a cross-check. LQH learns "durable active" from GCP_SAVEREQ (X7.2). Decided (2026-11-24): best effort; phase 2 skips a dirty write in the tail and step C invalidates its COMMIT, as applying it can leave a row's replicas different (TLA+ model, finding 3). X4.13's durable path for dirty writes can then go |
 | DI-2 | **Step B can see COMPLETE and ABORT records from before the tail.** The rescan starts at the start mbyte, which reaches back into GCIs ≤ R through `logLastPrepRef`. A restarted API that reuses a transid after the hold-back can put an old COMPLETE in range: false "T complete" (half-applied T), or a false "corrupt log" crash when T is in the part's own in-doubt set. Step A's "COMMIT after COMPLETE ⇒ crash" cannot be checked in the preferred variant (no memory of executed transids) and would also fire falsely | `srLogLimits` `38671` [V]; transid = prefix + per-process counter (`Ndbif.cpp:262-284`, `ndb_cluster_connection.cpp:815`) [V] | In the rescan, count a COMPLETE or flagged ABORT of T only if a durable tail COMMIT of T came before it in the same part (a COMPLETE always follows that op's COMMIT in its part). Drop the step-A crash check |
 | DI-3 | **Exchange volume.** Part-to-part messages are O(L²) for L parts cluster-wide (48 nodes × 32 parts: 2.4 M messages) | plan §5.2 step B | Aggregate per node in DblqhProxy (X5.4); counts are per node in the fallback anyway, so the verdicts do not change |
 | DI-4 | **G' needs global data before phase 4.** Each part writes G' into SR_HEAD, but G' is the max over all parts | plan §5.3 | DONE carries each worker's step-A max; in-doubt entries carry gci_hi; every worker computes the same G' (X5.5) |
@@ -1526,7 +1531,7 @@ the answers are kept; the last column follows them.
 | Q1 | Should TCKEY_FAILCONF carry the GCI (API change)? | Q-B4, taken: no change |
 | Q2 | Error code for rule-F aborts: reuse 4010 / `ZNODEFAIL_BEFORE_COMMIT`, or a new temporary error "aborted after commit due to node failure"? | Moot: rule F dropped (2026-11-24), error 268 removed |
 | Q3 | A forced start to R for a node group with only stale nodes (D4)? | Q-B5, proposed: no forced start in the first version |
-| Q4 | Dirty writes: `CPF_SELF` COMPLETE, or convert them to normal writes (DI-1)? | Q-B1, answered: `CPF_SELF` (X4 part 5a) |
+| Q4 | Dirty writes: `CPF_SELF` COMPLETE, or convert them to normal writes (DI-1)? | Q-B1, answered: `CPF_SELF` (X4 part 5a). Then (2026-11-24): best effort, phase 2 skips them in the tail |
 | Q5 | Read locks in durable transactions: release at COMMIT (proposed) or at COMPLETE (DI-9)? | Q-B2, answered: at COMPLETE (X4 part 6) |
 | Q6 | `SET DurableCommits=0` online: accept as pending until the next cluster restart (proposed) or refuse? | Q-B6, proposed: accepted as pending |
 | Q7 | Block activation while a node restart runs (proposed), or allow it? | Q-B7, proposed: yes |
