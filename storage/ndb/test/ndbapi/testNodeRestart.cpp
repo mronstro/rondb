@@ -12613,15 +12613,9 @@ int runTakeoverReadBackupRYW(NDBT_Context *ctx, NDBT_Step *step) {
  *   8321  the TC, with the COMMIT of the first operation sent
  *   8322  the TC, with the COMPLETE of the first operation sent
  *
- * DurableRuleF turns rule F on (DUMP 2561 1) for the case. Without it a
- * failure in the commit phase commits the transaction on the replicas
- * left, as before durable commits. With it the transaction is aborted
- * unless a COMPLETE was sent: the API gets 268 from its TC, or 4010 after
- * a takeover. The transaction is committed by TC_COMMITREQ after
- * execute_NoCommit, and the API drops TCKEY_FAILREF in that send state
- * (sendTC_COMMIT); it reports 4010 at TAKE_OVERTCCONF instead, which no
- * node sends before the takeover is done. The victim restarts in NOSTART
- * (DUMP 2602 1) and is started again.
+ * A failure in the commit or complete phase commits the transaction on
+ * the replicas left, as before durable commits, also after a takeover.
+ * The victim restarts in NOSTART (DUMP 2602 1) and is started again.
  * ------------------------------------------------------------------------ */
 int runDurableNeedsDurable(NDBT_Context *ctx, NDBT_Step *step) {
   NdbConfig conf;
@@ -12641,21 +12635,6 @@ int runDurableNeedsDurable(NDBT_Context *ctx, NDBT_Step *step) {
     return NDBT_SKIPPED;
   }
   return NDBT_OK;
-}
-
-/* Rule F on or off on every data node but skipNode */
-static int setDurableRuleF(NdbRestarter &restarter, int on,
-                           int skipNode = 0) {
-  const int dump[] = {DumpStateOrd::TcDurableRuleF, on};
-  for (int i = 0; i < restarter.getNumDbNodes(); i++) {
-    const int node = restarter.getDbNodeId(i);
-    if (node == skipNode) continue;
-    if (restarter.dumpStateOneNode(node, dump, 2) != 0) {
-      g_err << "DUMP 2561 " << on << " failed on node " << node << endl;
-      return -1;
-    }
-  }
-  return 0;
 }
 
 /* Whether a replica of Hugo row `row` is on data node `node` */
@@ -12713,13 +12692,12 @@ static const char *commitStatusName(NdbTransaction::CommitStatusType s) {
 
 /**
  * Commits the update of [start, start + rows) on TC node tcNode, waits
- * for each victim to stop and for the outcome, and checks the outcome:
- * expectCommit, else aborted with expectError (0: any error)
+ * for each victim to stop and for the outcome, and checks that the
+ * transaction committed
  */
 static int durableCommitAndCheck(Ndb *ndb, const NdbDictionary::Table *tab,
                                  int tcNode, int start, int rows,
-                                 const int *victims, int numVictims,
-                                 bool expectCommit, int expectError) {
+                                 const int *victims, int numVictims) {
   const int updates = 1;  // runLoadTable wrote updates value 0
   HugoOperations ops(*tab);
   if (ops.startTransaction(ndb, tcNode, 0) != NDBT_OK ||
@@ -12753,20 +12731,13 @@ static int durableCommitAndCheck(Ndb *ndb, const NdbDictionary::Table *tab,
   const int code = trans->getNdbError().code;
   g_err << "The transaction is " << commitStatusName(status) << ", error "
         << code << endl;
-  if (expectCommit) {
-    if (status != NdbTransaction::Committed) {
-      g_err << "Expected the transaction committed" << endl;
-      result = NDBT_FAILED;
-    }
-  } else if (status != NdbTransaction::Aborted ||
-             (expectError != 0 && code != expectError)) {
-    g_err << "Expected the transaction aborted with error " << expectError
-          << endl;
+  if (status != NdbTransaction::Committed) {
+    g_err << "Expected the transaction committed" << endl;
     result = NDBT_FAILED;
   }
   ops.closeTransaction(ndb);
   if (result == NDBT_OK &&
-      checkDurableRows(ndb, tab, start, rows, expectCommit ? updates : 0,
+      checkDurableRows(ndb, tab, start, rows, updates,
                        "after the outcome") != NDBT_OK) {
     result = NDBT_FAILED;
   }
@@ -12796,10 +12767,6 @@ int runDurableCrash(NDBT_Context *ctx, NDBT_Step *step) {
   }
   const int code = ctx->getProperty("DurableErrorInsert", Uint32(0));
   const bool onTc = ctx->getProperty("DurableOnTc", Uint32(0)) != 0;
-  const int ruleF = ctx->getProperty("DurableRuleF", Uint32(0));
-  const bool expectCommit =
-      ctx->getProperty("DurableExpectCommit", Uint32(1)) != 0;
-  const int expectError = ctx->getProperty("DurableExpectError", Uint32(0));
   const NdbDictionary::Table *tab = ctx->getTab();
   const int records = ctx->getNumRecords();
   const int rows = std::min(records, 64);
@@ -12812,8 +12779,8 @@ int runDurableCrash(NDBT_Context *ctx, NDBT_Step *step) {
      * The first operation's COMPLETE goes to its last replica, which
      * passes it on towards the primary. With the primary on the TC's node
      * the replicas left complete the operation, and free it, before the TC
-     * stops: the takeover finds it unreported, the sign that a COMPLETE
-     * was sent, and completes the transaction also with rule F.
+     * stops: the takeover finds it unreported and completes the
+     * transaction.
      */
     start = -1;
     for (int r = 0; r + rows <= records; r++) {
@@ -12836,100 +12803,25 @@ int runDurableCrash(NDBT_Context *ctx, NDBT_Step *step) {
     return NDBT_SKIPPED;
   }
   g_err << "Error insert " << code << " on node " << victim << ", TC on node "
-        << tcNode << ", rule F " << (ruleF ? "on" : "off") << ", rows "
-        << start << "-" << start + rows - 1 << ", " << rowsOnVictim
-        << " with a replica on node " << victim << endl;
+        << tcNode << ", rows " << start << "-" << start + rows - 1 << ", "
+        << rowsOnVictim << " with a replica on node " << victim << endl;
 
   const int restartOnError[] = {DumpStateOrd::CmvmiSetRestartOnErrorInsert, 1};
   if (restarter.dumpStateOneNode(victim, restartOnError, 2) != 0 ||
-      setDurableRuleF(restarter, ruleF) != 0 ||
       restarter.insertErrorInNode(victim, code) != 0) {
     restarter.insertErrorInNode(victim, 0);
-    setDurableRuleF(restarter, 0);
     return NDBT_FAILED;
   }
 
   Ndb *ndb = GETNDB(step);
-  int result = durableCommitAndCheck(ndb, tab, tcNode, start, rows, &victim,
-                                     1, expectCommit, expectError);
-  setDurableRuleF(restarter, 0, victim);
+  int result =
+      durableCommitAndCheck(ndb, tab, tcNode, start, rows, &victim, 1);
   if (durableRestartVictims(restarter, &victim, 1) != NDBT_OK) {
     return NDBT_FAILED;
   }
   if (result == NDBT_OK &&
-      checkDurableRows(ndb, tab, start, rows, expectCommit ? 1 : 0,
+      checkDurableRows(ndb, tab, start, rows, 1,
                        "after the victim restarted") != NDBT_OK) {
-    result = NDBT_FAILED;
-  }
-  return result;
-}
-
-/**
- * 5184: rule F aborts the transaction after a replica stopped with its
- * COMMIT persistent (5180), and a replica in another node group stops
- * with its ABORT with AF_AFTER_COMMIT persistent. The TC and one replica
- * of each node group are left: the transaction is aborted (268).
- */
-int runDurableCrashAbortAfterCommit(NDBT_Context *ctx, NDBT_Step *step) {
-  NdbRestarter restarter;
-  if (restarter.waitClusterStarted(30) != 0) {
-    g_err << "Cluster is not started" << endl;
-    return NDBT_FAILED;
-  }
-  if (restarter.getNumNodeGroups() < 2) {
-    g_err << "Need at least two node groups" << endl;
-    return NDBT_SKIPPED;
-  }
-  const NdbDictionary::Table *tab = ctx->getTab();
-  const int rows = std::min(ctx->getNumRecords(), 64);
-  const int tcNode = restarter.getMasterNodeId();
-  const int victims[2] = {
-      restarter.getRandomNodeSameNodeGroup(tcNode, rand()),
-      restarter.getRandomNodeOtherNodeGroup(tcNode, rand())};
-  if (victims[0] <= 0 || victims[1] <= 0) {
-    g_err << "No victims next to the master node " << tcNode << endl;
-    return NDBT_FAILED;
-  }
-  int rowsOn[2] = {0, 0};
-  for (int r = 0; r < rows; r++) {
-    for (int v = 0; v < 2; v++) {
-      if (rowHasReplicaOn(tab, r, victims[v])) rowsOn[v]++;
-    }
-  }
-  if (rowsOn[0] == 0 || rowsOn[1] == 0) {
-    g_err << "The rows do not have replicas on both victims" << endl;
-    return NDBT_SKIPPED;
-  }
-  g_err << "Error insert 5180 on node " << victims[0] << ", 5184 on node "
-        << victims[1] << ", TC on node " << tcNode << ", rule F on" << endl;
-
-  const int restartOnError[] = {DumpStateOrd::CmvmiSetRestartOnErrorInsert, 1};
-  if (restarter.dumpStateOneNode(victims[0], restartOnError, 2) != 0 ||
-      restarter.dumpStateOneNode(victims[1], restartOnError, 2) != 0 ||
-      setDurableRuleF(restarter, 1) != 0 ||
-      restarter.insertErrorInNode(victims[1], 5184) != 0 ||
-      restarter.insertErrorInNode(victims[0], 5180) != 0) {
-    restarter.insertErrorInNode(victims[0], 0);
-    restarter.insertErrorInNode(victims[1], 0);
-    setDurableRuleF(restarter, 0);
-    return NDBT_FAILED;
-  }
-
-  Ndb *ndb = GETNDB(step);
-  int result = durableCommitAndCheck(ndb, tab, tcNode, 0, rows, victims, 2,
-                                     false, 268);
-  for (int i = 0; i < restarter.getNumDbNodes(); i++) {
-    const int node = restarter.getDbNodeId(i);
-    if (node == victims[0] || node == victims[1]) continue;
-    const int dump[] = {DumpStateOrd::TcDurableRuleF, 0};
-    restarter.dumpStateOneNode(node, dump, 2);
-  }
-  if (durableRestartVictims(restarter, victims, 2) != NDBT_OK) {
-    return NDBT_FAILED;
-  }
-  if (result == NDBT_OK &&
-      checkDurableRows(ndb, tab, 0, rows, 0, "after the victims restarted") !=
-          NDBT_OK) {
     result = NDBT_FAILED;
   }
   return result;
@@ -17169,24 +17061,11 @@ TESTCASE("DurableCrashCommit",
   STEP(runDurableCrash);
   FINALIZER(runClearTable);
 }
-TESTCASE("DurableCrashCommitRuleF",
-         "RONDB-1150, __DurableCommits=1: a replica stops with its durable "
-         "COMMIT persistent (5180); rule F aborts the transaction (268)") {
-  TC_PROPERTY("DurableErrorInsert", Uint32(5180));
-  TC_PROPERTY("DurableRuleF", Uint32(1));
-  TC_PROPERTY("DurableExpectCommit", Uint32(0));
-  TC_PROPERTY("DurableExpectError", Uint32(268));
-  INITIALIZER(runDurableNeedsDurable);
-  INITIALIZER(runLoadTable);
-  STEP(runDurableCrash);
-  FINALIZER(runClearTable);
-}
 TESTCASE("DurableCrashComplete",
          "RONDB-1150, __DurableCommits=1: a replica stops with its COMPLETE "
          "persistent, before the local commit (5181); the transaction "
-         "commits, also with rule F") {
+         "commits") {
   TC_PROPERTY("DurableErrorInsert", Uint32(5181));
-  TC_PROPERTY("DurableRuleF", Uint32(1));
   INITIALIZER(runDurableNeedsDurable);
   INITIALIZER(runLoadTable);
   STEP(runDurableCrash);
@@ -17194,10 +17073,8 @@ TESTCASE("DurableCrashComplete",
 }
 TESTCASE("DurableCrashLocalCommit",
          "RONDB-1150, __DurableCommits=1: a replica stops after its local "
-         "commit at COMPLETE (5182); the transaction commits, also with "
-         "rule F") {
+         "commit at COMPLETE (5182); the transaction commits") {
   TC_PROPERTY("DurableErrorInsert", Uint32(5182));
-  TC_PROPERTY("DurableRuleF", Uint32(1));
   INITIALIZER(runDurableNeedsDurable);
   INITIALIZER(runLoadTable);
   STEP(runDurableCrash);
@@ -17213,39 +17090,14 @@ TESTCASE("DurableTcCrashCommit",
   STEP(runDurableCrash);
   FINALIZER(runClearTable);
 }
-TESTCASE("DurableTcCrashCommitRuleF",
-         "RONDB-1150, __DurableCommits=1: the TC stops with the COMMIT of "
-         "the first operation sent (8321); rule F in the takeover aborts "
-         "(4010)") {
-  TC_PROPERTY("DurableErrorInsert", Uint32(8321));
-  TC_PROPERTY("DurableOnTc", Uint32(1));
-  TC_PROPERTY("DurableRuleF", Uint32(1));
-  TC_PROPERTY("DurableExpectCommit", Uint32(0));
-  TC_PROPERTY("DurableExpectError", Uint32(4010));
-  INITIALIZER(runDurableNeedsDurable);
-  INITIALIZER(runLoadTable);
-  STEP(runDurableCrash);
-  FINALIZER(runClearTable);
-}
 TESTCASE("DurableTcCrashComplete",
          "RONDB-1150, __DurableCommits=1: the TC stops with the COMPLETE of "
-         "the first operation sent (8322); the takeover completes, also "
-         "with rule F") {
+         "the first operation sent (8322); the takeover completes") {
   TC_PROPERTY("DurableErrorInsert", Uint32(8322));
   TC_PROPERTY("DurableOnTc", Uint32(1));
-  TC_PROPERTY("DurableRuleF", Uint32(1));
   INITIALIZER(runDurableNeedsDurable);
   INITIALIZER(runLoadTable);
   STEP(runDurableCrash);
-  FINALIZER(runClearTable);
-}
-TESTCASE("DurableCrashAbortAfterCommit",
-         "RONDB-1150, __DurableCommits=1, two node groups: rule F aborts "
-         "after a replica stopped at 5180, and a replica of the other node "
-         "group stops with its ABORT after commit persistent (5184)") {
-  INITIALIZER(runDurableNeedsDurable);
-  INITIALIZER(runLoadTable);
-  STEP(runDurableCrashAbortAfterCommit);
   FINALIZER(runClearTable);
 }
 TESTCASE("DurableDelayedComplete",

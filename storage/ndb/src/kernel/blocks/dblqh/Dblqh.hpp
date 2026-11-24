@@ -3383,12 +3383,7 @@ class Dblqh : public SimulatedBlock {
        * (redoLocalCommitAtComplete()), so that tupcommit_conf ends the
        * complete phase
        */
-      OP_LOCAL_COMMIT_AT_COMPLETE = 0x800,
-      /**
-       * RONDB-1150 (X4.10): an ABORTREQ with FLAG_AFTER_COMMIT, the abort
-       * of a durable transaction after its commit decision (rule F)
-       */
-      OP_ABORT_AFTER_COMMIT = 0x1000
+      OP_LOCAL_COMMIT_AT_COMPLETE = 0x800
     };
     Uint32 m_flags;
     LogPartRecord *m_log_part_ptr_p;
@@ -3437,7 +3432,7 @@ class Dblqh : public SimulatedBlock {
     /**
      * RONDB-1150, PMEM format: the end LSN of the operation's newest
      * record that must be persistent before a dependent signal is sent:
-     * its COMMIT, and from X4 its COMPLETE or rule-F ABORT. 0 if none.
+     * its COMMIT, and from X4 its COMPLETE. 0 if none.
      * Read and written only when c_redo_pmem_format is set, and last in
      * the record, so that file mode neither touches it nor has the
      * members before it moved.
@@ -4390,7 +4385,7 @@ private:
   void writeAbortLogPmem(Signal *signal, TcConnectionrec *regTcPtr,
                          LogPageRecordPtr &logPagePtr,
                          LogFileRecordPtr &logFilePtr,
-                         LogPartRecord *logPartPtrP, Uint32 flags);
+                         LogPartRecord *logPartPtrP);
   void writeCompletedGciLogPmem(Signal *signal, LogPageRecordPtr &logPagePtr,
                                 LogFileRecordPtr &logFilePtr,
                                 LogPartRecord *logPartPtrP);
@@ -4399,9 +4394,6 @@ private:
   void redoCompleteDirty(Signal *signal, TcConnectionrec *regTcPtr,
                          LogPartRecord *logPartPtrP);
   void redoCompleteDurable(Signal *signal, TcConnectionrec *regTcPtr);
-  void redoAbortAfterCommit(Signal *signal, TcConnectionrec *regTcPtr);
-  void abortAfterCommitLab(Signal *signal,
-                           const TcConnectionrecPtr tcConnectptr);
   void writeFillerPmem(Signal *signal, LogPartRecord *logPartPtrP,
                        LogPageRecordPtr &logPagePtr,
                        LogFileRecordPtr &logFilePtr, Uint32 len);
@@ -7112,12 +7104,11 @@ inline void Dblqh::redoSetDurable(TcConnectionrec *regTcPtr, Uint32 opCount) {
  * record is persistent, not at COMMIT: its row is not visible, and its
  * locks are held, until then. Asked once the COMMIT record is written,
  * for seqNoReplica 0. Also a write without a REDO record (a table
- * without logging), which writes no COMPLETE record: so that a rule-F
- * abort (X4.10) finds every write of the transaction not yet committed
- * on any replica. A locking read holds its lock until COMPLETE as well
- * (DI-9, Q-B2): no reader sees a state that the transaction's abort by
- * rule F could undo. Simple and dirty reads get no COMMIT. AC_NR_COPY
- * commits at COMMIT as before (DI-10).
+ * without logging), which writes no COMPLETE record, so that every write
+ * of the transaction becomes visible at its COMPLETE. A locking read
+ * holds its lock until COMPLETE as well, like a write (DI-9, Q-B2).
+ * Simple and dirty reads get no COMMIT. AC_NR_COPY commits at COMMIT as
+ * before (DI-10).
  */
 inline bool Dblqh::redoLocalCommitAtComplete(TcConnectionrec *regTcPtr) {
   if (unlikely(regTcPtr->m_flags & TcConnectionrec::OP_DURABLE) &&

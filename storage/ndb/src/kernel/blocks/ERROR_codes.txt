@@ -202,7 +202,7 @@ the request. Codes below 5128 stay on the LDM instances. Clearing (code
       node-failure protocol); emits [JOIN_AGG_MERGE_HELD node=N iteration=I
       coordinator=C] (extra = iteration, top bit = event sent). NF-14: the
       host record's ZNODE_DOWN must stop it
-Next DBLQH 5174 (RONDB-1150 durable commits 5180-5199: next 5185)
+Next DBLQH 5174 (RONDB-1150 durable commits 5180-5199: next 5184)
 Next DBDICT 6229
 Next DBDIH 7251
 Next DBTC 8135
@@ -400,10 +400,6 @@ COMPLETE to the next replica or COMPLETED.
 Delay COMPLETE at the primary replica of a durable write or locking read
 by 3 s, once per operation, while the backups have committed it
 (testNodeRestart -n DurableDelayedComplete).
-
-5184:
-Crash after an ABORT with AF_AFTER_COMMIT of rule F is persistent,
-before the lock is released.
 
 7165: Delay INCL_NODE_REQ in starting node yeilding error in GCP_PREPARE
 

@@ -57,20 +57,6 @@ public:
   Uint32 senderThreadSignalId;
 };
 
-/**
- * ABORTREQ, TC to LQH: theData[0-5] are the reqPtr and reqBlockref of TC,
- * transid1, transid2, and the tcBlockref and tcOprec of the transaction's
- * TC. RONDB-1150 (X4.8, X4.10): length 7 adds flags; FLAG_AFTER_COMMIT
- * asks for the abort of a durable transaction after its commit decision
- * (rule F), also from the committed state.
- */
-class AbortReq {
- public:
-  static constexpr Uint32 SignalLength = 6;
-  static constexpr Uint32 SignalLengthFlags = 7;
-  static constexpr Uint32 FLAG_AFTER_COMMIT = 1;
-};
-
 class Aborted {
   /**
    * Reciver(s)

@@ -137,8 +137,8 @@ void builders() {
   rec[1] = recordChecksum(rec, s);
   OK(checkRecordWords(rec, COMMIT_LEN, s) == R_VALID);
 
-  abortRecord(rec, AF_AFTER_COMMIT, 21, 22);
-  OK(rec[0] == makeW0(TYPE_ABORT, AF_AFTER_COMMIT, ABORT_LEN) &&
+  abortRecord(rec, 0, 21, 22);
+  OK(rec[0] == makeW0(TYPE_ABORT, 0, ABORT_LEN) &&
      rec[1] == 0 && rec[ABORT_TRANSID1] == 21 && rec[ABORT_TRANSID2] == 22);
   rec[1] = recordChecksum(rec, s);
   OK(checkRecordWords(rec, ABORT_LEN, s) == R_VALID);

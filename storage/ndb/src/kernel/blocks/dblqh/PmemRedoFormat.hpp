@@ -94,8 +94,6 @@ constexpr Uint32 TYPE_SR_HEAD = 12;
 constexpr Uint32 RF_INVALIDATED = 1u << 8;
 /* COMMIT: written under durable commits */
 constexpr Uint32 CF_DURABLE = 1u << 9;
-/* ABORT: after the operation's COMMIT (rule F) */
-constexpr Uint32 AF_AFTER_COMMIT = 1u << 9;
 /* PREPARE: the transid in words 8 and 9 */
 constexpr Uint32 PF_TRANSID = 1u << 9;
 /* COMPLETE: of a dirty write, which completes only its own COMMIT (DI-1) */
@@ -132,8 +130,8 @@ static_assert(1 + (PREPARE_MAX - 2 + PAGE_DATA_WORDS - 1) / PAGE_DATA_WORDS <=
 
 /**
  * Words an operation reserves in its log part: the COMMIT and the
- * COMPLETE or rule-F ABORT, each with the largest FILLER that closes its
- * unit, and the NEXT_MBYTE slack (format §7.3). Step 1 releases them all at
+ * COMPLETE, each with the largest FILLER that closes its unit, and the
+ * NEXT_MBYTE slack (format §7.3). Step 1 releases them all at
  * COMMIT (R5).
  */
 constexpr Uint32 RESERVE =
@@ -383,9 +381,8 @@ inline void completedGciRecord(Uint32 *rec, Uint32 gci) {
  * The words an operation keeps reserved in its log part
  * (TcConnectionrec::m_committed_log_space), and the records that release
  * them (S4.7, E13): RESERVE at the PREPARE; all of it at a COMMIT outside
- * durable commits (all of step 1) or at a normal ABORT; at a durable
- * COMMIT all but the COMPLETE's part, which its COMPLETE or rule-F ABORT
- * releases.
+ * durable commits (all of step 1) or at an ABORT; at a durable COMMIT
+ * all but the COMPLETE's part, which its COMPLETE releases.
  */
 enum Reservation : Uint32 {
   RESERVED_NONE = 0,
@@ -623,7 +620,6 @@ inline Uint32 checkFraming(Uint32 w0) {
       minLen = maxLen = COMMIT_LEN;
       break;
     case TYPE_ABORT:
-      allowed = AF_AFTER_COMMIT;
       minLen = maxLen = ABORT_LEN;
       break;
     case TYPE_FD:

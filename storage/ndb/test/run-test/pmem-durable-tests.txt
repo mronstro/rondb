@@ -23,20 +23,14 @@
 #
 # RONDB-1150 X4: the autotest cases of durable commits, run before each
 # push of commit-path code, in a build with error inserts, on the
-# .2node_durable and .4node_durable clusters of conf-pmem-nodax.cnf.
-# DurableCrashAbortAfterCommit needs two node groups and is skipped on
-# .2node_durable. The daily-basic lists run on the same clusters as the
-# regression check of durable commits (X4.14).
+# .2node_durable and .4node_durable clusters of conf-pmem-nodax.cnf. The
+# daily-basic lists run on the same clusters as the regression check of
+# durable commits (X4.14).
 #
 
-# A replica stops in the commit protocol (5180-5182), with and without
-# rule F (DUMP 2561 1)
+# A replica stops in the commit protocol (5180-5182)
 cmd: testNodeRestart
 args: -n DurableCrashCommit T1
-max-time: 900
-
-cmd: testNodeRestart
-args: -n DurableCrashCommitRuleF T1
 max-time: 900
 
 cmd: testNodeRestart
@@ -47,18 +41,9 @@ cmd: testNodeRestart
 args: -n DurableCrashLocalCommit T1
 max-time: 900
 
-# Rule F, a second replica stops during the abort after commit (5184)
-cmd: testNodeRestart
-args: -n DurableCrashAbortAfterCommit T1
-max-time: 900
-
 # The TC stops in the commit and complete phases (8321, 8322)
 cmd: testNodeRestart
 args: -n DurableTcCrashCommit T1
-max-time: 900
-
-cmd: testNodeRestart
-args: -n DurableTcCrashCommitRuleF T1
 max-time: 900
 
 cmd: testNodeRestart

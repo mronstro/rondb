@@ -242,8 +242,7 @@ void printRecord(const PartView &v, const Pos &p, const RecInfo &info,
       break;
     }
     case TYPE_ABORT:
-      ndbout_c("%s ABORT transid 0x%08x 0x%08x%s", at, t1, t2,
-               (flags & AF_AFTER_COMMIT) ? " after commit" : "");
+      ndbout_c("%s ABORT transid 0x%08x 0x%08x", at, t1, t2);
       break;
     case TYPE_COMPLETE:
       ndbout_c("%s COMPLETE transid 0x%08x 0x%08x%s", at, t1, t2,

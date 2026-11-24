@@ -211,7 +211,7 @@ the signal (write path §3).
 | Dirty write, `doWritePrepareLog` | Once for PREPARE + COMMIT + COMPLETE, before the unlock at `13579` | C, K |
 | `execCOMPLETE` | New `writeCompleteLog` + barrier before the branch at `15004` | K |
 | `execCOMPLETEREQ` | Same, before the branch at `15120` | K |
-| ABORT after COMMIT | `writeAbortLog` with `AF_AFTER_COMMIT` + barrier before the lock is released | F |
+| ABORT after COMMIT | None: rule F, which wrote it, is dropped (2026-11-24, plan revision 14) | — |
 | Abort of a prepared operation | None: a PREPARE without a COMMIT is never applied | — |
 
 The barriers run only for durable transactions (GCI ≥ g). They arrive with
@@ -305,7 +305,7 @@ Sizes in 32-bit words, including `w0` and `w1` (format §5):
 | PREPARE | 1 | 8 + key + attrinfo, rounded up to even | Header stays 8 words: the length moves into `w0`, the checksum takes the old length slot. Flag `PF_TRANSID` (2 more words) reserved, off in iteration 1 |
 | COMMIT | 2 | 12 | tableId, schemaVersion, fragId, prepare reference packed into 2 words (all four fields are `Uint16`), gci_hi, gci_lo, transid1, transid2, opCount. Flags `CF_DURABLE`, `RF_INVALIDATED` |
 | COMPLETE | 11 | 4 | transid1, transid2 |
-| ABORT | 3 | 4 | transid1, transid2. Flag `AF_AFTER_COMMIT` for rule F, so an `IgnoreError` abort of one operation does not veto the phase-2 fallback |
+| ABORT | 3 | 4 | transid1, transid2. No flags: the `AF_AFTER_COMMIT` of rule F went with the rule (2026-11-24); phase 2 ignores ABORTs |
 | COMPLETED_GCI | 8 | 4 | gci, pad |
 | NEXT_MBYTE | 7 | 2 | Uses today's 2-word `ZNEXT_LOG_SIZE` reserve |
 | FILLER | 10 | 2 + n | Pads to the next W boundary, or to the page end after the FD |
@@ -315,8 +315,7 @@ Sizes in 32-bit words, including `w0` and `w1` (format §5):
 
 - **Space reservation per operation:** COMMIT + max(COMPLETE, ABORT) + two
   FILLERs = `12 + 4 + 2·(W/4 − 2) + 2` = 46 words at W = 64, against 10
-  today. Released in two steps: at COMMIT and at COMPLETE or rule-F ABORT
-  (format §7.3).
+  today. Released in two steps: at COMMIT and at COMPLETE (format §7.3).
 - Side finding: a PREPARE can span 4 pages, not 3 (22096 attrinfo words
   plus 1023 key words); `ZMIN_READ_BUFFER_SIZE = 3` and its comment are
   stale (format §6.3).

@@ -16,7 +16,7 @@ inferred. Sizes: S ≤ 4, M 5–12, L > 12 person-days (pd).
 | Step 1 deliverable | Used by |
 |---|---|
 | `redoPersist(part)`, `redoPersistOp(op)`, per-op `m_redo_end_lsn`, per-part `m_pmem_persisted` (`pmem_redo_design.md` E7) | X4.4, X4.5, X4.10, X5.6, X8.1 |
-| COMMIT writer with transid, gci_lo, opCount (0 until X4) and flags `CF_DURABLE`, `RF_INVALIDATED`; ABORT writer with `AF_AFTER_COMMIT`; COMPLETE type 11 in the format (E13) | X4.3, X4.5, X4.10 |
+| COMMIT writer with transid, gci_lo, opCount (0 until X4) and flags `CF_DURABLE`, `RF_INVALIDATED`; ABORT writer; COMPLETE type 11 in the format (E13) | X4.3, X4.5, X4.10 |
 | Atomic `RF_INVALIDATED` store + flush (E9) | X5.2, X5.5 |
 | Exact end of log E from phase 1, zeroing `[E, end of mbyte)` (E11, E12) | X5.2–X5.6 |
 | NDBFS `OM_MAP_SYNC` and the `ndb_pmem` helpers (E14, S1, S3) | X6.1 |
@@ -34,7 +34,7 @@ If a step-1 plan names these differently, the names here follow it.
 |---|---|---|---|---|
 | X1 | TCKEY_FAILCONF after COMPLETE in takeover | S (4 pd) | — | READ_BACKUP read-your-writes after a TC failure |
 | X3 | Ledger, crash of all nodes, power-loss runs, TLA+ model | M (15 pd) | X2 (S7) | Losses only above R_gcp, measured |
-| X4 | Commit path: flag, opCount, barriers, local commit at COMPLETE, late ack, rule F, API hold-back | L (50 pd) | X2, X3 | Durable protocol running; F tested by node failures |
+| X4 | Commit path: flag, opCount, barriers, local commit at COMPLETE, late ack, API hold-back (rule F dropped) | L (50 pd) | X2, X3 | Durable protocol running; node failures tested |
 | X5 | SR phases 1–3: one scan, exchange, verdicts, raise to G' | L (50 pd) | X4 | **Zero ledger losses after a full crash, all nodes starting** |
 | X6 | Node-failure file, stale nodes, D4 check, partial SR fallback | M (17 pd) | X5 (X6.1 only X2) | Zero losses with a node failure in the tail GCI and with partial SR |
 | X7 | Online activation at g, arming, deactivation by SR, ndbinfo, version gate | M (17 pd) | X4 (X7.1–7.2), X5 | Activation on a running cluster |
@@ -182,36 +182,50 @@ coding X5.
 
 **Order:** X3.1, X3.2, X3.3; X3.4 in parallel with X4.
 
-**X3.4 state (2026-11-23): written, to be run** (`tla/`, README.md there).
-`DurableCommits.tla` holds the commit path as X4 built it (linear and
-parallel, C, K, L, A, rule F in TC and in the takeover with
+**X3.4 state (2026-11-24): run twice, every finding confirmed; rule F
+dropped, dirty writes best effort** (`tla/`, README.md there). `DurableCommits.tla` holds the commit path as X4 built it
+(linear and parallel, C, K, L, A, rule F in TC and in the takeover with
 `takeOverCompleteSent()`, X4.9's drop of a late COMPLETE, dirty writes with
 `CPF_SELF`, the node-failure file) and phase 2 as X5 plans it (step A,
 step B with the DI-2 rule, step C with the count rule, stale nodes, partial
 restarts). Every invariant runs phase 2 on the logs of the state, as a
 crash of every node would leave them, and checks G1, G2, G3, the row order
 of plan §6, the next restart, a rerun after a crash in step C, and that
-no ndbrequire of DBLQH fails. Twelve configurations of 2 node groups × 2
-replicas and 2 transactions; `run_tlc.sh` runs them all. Expected from
-traces worked out by hand, to be confirmed by TLC:
-- no error with rule F off (X4 as committed), also with partial restarts
-  and two node failures, and with rule F on for every invariant but one;
+no ndbrequire of DBLQH fails. Fifteen configurations of 2 node groups × 2
+replicas and 2 transactions; `run_tlc.sh` runs them all.
+
+The two runs (TLC, a second per configuration, a minute for the largest):
+- rule F off (X4 as committed): no error, with one and two node failures
+  and partial restarts. Within the model G1-G3 hold without rule F;
 - rule F in the takeover aborts a transaction that was visible on the node
   that failed with its TC (the TC on the backup, which gets the linear
-  COMPLETE first): relevant before X5 turns rule F on;
+  COMPLETE first): confirmed, and it breaks "a COMPLETE excludes a rule-F
+  ABORT" too. It hid the other rule-F checks, so the model now has the
+  candidate fix as a switch: the takeover aborts by rule F only when an
+  operation reports Prepared, and completes when all report Committed;
 - with two node failures the takeover completes a transaction whose rule-F
   abort had begun, as an operation freed by an abort looks like one freed
-  at COMPLETE: a COMPLETE and an ABORT of one transaction, applied to half
-  its rows;
+  at COMPLETE: confirmed, with or without the candidate fix. The shortest
+  case needs no ABORT record: the aborted operation was still Prepared, so
+  the transaction is acknowledged and applied to half its rows while the
+  cluster runs. The first run had stopped at an invariant that was too
+  strict (a lock taken after a rule-F abort counted as learning the abort
+  even when the taker could never commit; plan §5.6's "only once every
+  live replica persisted its ABORT" holds for writers, not readers);
 - a dirty write with `CPF_SELF` ends on the primary only after a crash
-  between the replicas (DI-1, Q-B1's other variant avoids it);
+  between the replicas (DI-1, Q-B1's other variant avoids it): confirmed;
 - a COMMIT that runs after LQH_TRANSREQ makes the takeover's plain abort
-  hit an ndbrequire (as upstream; with one failure only if a signal of
-  the failed node can run after LQH_TRANSREQ, with two always);
-- without X4.9's drop of a late COMPLETE, or without the DI-2 rule, the
-  model finds the violations those rules prevent.
-The model counts an invalidated COMMIT as a tail COMMIT for the DI-2 rule,
-so a rerun keeps its "T aborted" hits; X5.4 should do the same.
+  hit an ndbrequire (as upstream): confirmed with one failure and a signal
+  of the failed node run after LQH_TRANSREQ, and with two failures without
+  one;
+- without the DI-2 rule the model finds the violation it prevents:
+  confirmed, and X4.9's drop of a late COMPLETE is needed while the
+  takeover can abort by rule F when every operation reports Committed.
+Decided (2026-11-24): rule F is dropped, which takes findings 1 and 2 with
+it (the model keeps it as a switch, as the evidence); dirty writes are best
+effort (finding 3, DI-1). Proposed: finding 4, upstream's race, in a
+ticket of its own. Without rule F there are no "T aborted" hits, so how step B
+counts an invalidated COMMIT for the DI-2 rule no longer matters.
 
 **State (2026-11-21): re-scoped after step 1, extended, to be tested.**
 Step 1 built most of this harness, as the GCP-saved ledger of
@@ -255,8 +269,8 @@ opCount and `CF_DURABLE`; failed API node ids are held back.
 - A primary row is not visible to READ_COMMITTED or locking readers before
   its COMPLETE record is persistent (test with EI 5183).
 - No commit ack before the last COMPLETED, on any path.
-- Node failure in the COMMIT phase aborts the transaction (F), with ABORT
-  `AF_AFTER_COMMIT` on every replica that had a COMMIT record.
+- Node failure in the COMMIT phase commits the transaction on the
+  replicas left (rule F dropped 2026-11-24).
 - Ledger: still losses above R_gcp (no phase 2 yet), none below.
 
 ### 4.1 Path table (plan §3.4)
@@ -318,7 +332,7 @@ opCount and `CF_DURABLE`; failed API node ids are held back.
   transid in a part~~. Dropped in part 6: `ndb_redo_pmem_durable_commit`
   reads every REDO file with the reader and checks each transaction's
   COMMITs against its opCount. A wrong opCount only matters for the
-  partial-SR fallback (risk 5).
+  partial-SR fallback (risk 4).
 
 ### X4.3 Signal formats: durable flag and opCount (M, 5 pd)
 
@@ -354,7 +368,7 @@ opCount and `CF_DURABLE`; failed API node ids are held back.
 | 4 | `doWritePrepareLog` (dirty write) | PREPARE, COMMIT (`13577`), COMPLETE; one `redoPersist` before the unlock (`13579`), so before `localCommitLab` (`13583`) [V] | C, K |
 | 7 | `execCOMPLETE` | X4.5 + barrier before the branch at `15004` [V] | K |
 | 8 | `execCOMPLETEREQ` | same, before the branch at `15120` [V] | K |
-| 10 | rule-F abort | X4.10 | F |
+| 10 | rule-F abort (dropped 2026-11-24) | — | — |
 
 - Only for `OP_DURABLE` ops. Non-durable ops keep the step-1 rules.
 - **Debug check (E7):** assert `m_redo_end_lsn <= m_pmem_persisted` for
@@ -403,7 +417,7 @@ X4.1 covers the normal path, X1 the takeover. Audit the other TCKEYCONF,
 TC_COMMITCONF and TCKEY_FAILCONF senders; `ndbassert(!TF_DURABLE)` where
 `sendApiCommitSignal` would send.
 
-### X4.8 Rule F in TC, normal path (M, 6 pd)
+### X4.8 Rule F in TC, normal path (M, 6 pd) — dropped 2026-11-24
 
 - **Trigger.** `timeOutFoundLab`, states CS_COMMITTING and CS_COMMIT_SENT
   (`DbtcMain.cpp:12033-12069`) [V], reached at once after a participant
@@ -434,7 +448,7 @@ TC_COMMITCONF and TCKEY_FAILCONF senders; `ndbassert(!TF_DURABLE)` where
 - Late COMMITTED/COMMITCONF after the switch are ignored by
   `setup_fail_data`, as today.
 
-### X4.9 Rule F in takeover (M, 6 pd)
+### X4.9 Rule F in takeover (M, 6 pd) — rule F dropped 2026-11-24
 
 - `initApiConnectFail` (`16139`) and `updateApiStateFail` (`16540`) [V]
   record, per transaction, the durable flag and opCount from Committed
@@ -461,7 +475,7 @@ TC_COMMITCONF and TCKEY_FAILCONF senders; `ndbassert(!TF_DURABLE)` where
 - Race to verify: an in-flight COMPLETE from the failed TC executed after
   the LQH_TRANSREQ scan passed that op (DI-7).
 
-### X4.10 Rule F in LQH: abort from the committed state (M, 5 pd)
+### X4.10 Rule F in LQH: abort from the committed state (M, 5 pd) — dropped 2026-11-24
 
 - `execABORTREQ` (`DblqhMain.cpp:16310`) [V]: length 7 with
   `flags & ABORT_AFTER_COMMIT` sets new `OP_ABORT_AFTER_COMMIT = 0x2000`.
@@ -522,9 +536,9 @@ GCP_SAVEREQ flag; interim: the start-time config).
 - MTR/ATRT with error inserts (§12.2): crash after COMMIT persisted and
   before COMMITTED (5180); after COMPLETE persisted and before local commit
   (5181); delayed COMPLETE at the primary with concurrent READ_COMMITTED and
-  locking readers (5183, checks L); node failure in COMMIT phase (F);
-  TC crash with half the COMMITs sent (8321) and after the first COMPLETE
-  (8322); crash during ABORT after commit (5184).
+  locking readers (5183, checks L); node failure in COMMIT phase (commits
+  on the replicas left); TC crash with half the COMMITs sent (8321) and
+  after the first COMPLETE (8322).
 - The ledger under node failures: every acked commit survives node
   failures (no full crash) — regression of today's guarantee.
 - The `daily-basic` lists with `DurableCommits=1` in a test mode, run by
@@ -536,6 +550,31 @@ X4.10 → X4.8 → X4.9 → X4.11 → X4.13; X4.12 and X4.14 alongside.
 **State (2026-11-24): tested.** The X4 test run passed once the two
 faults it found were fixed (the notes after part 6). The "to be tested"
 of each part below is history.
+
+**Rule F dropped (2026-11-24).** The TLA+ model (X3.4) showed that rule F
+in a takeover can abort a transaction already visible on the failed node,
+and that a TC failing during a rule-F abort leaves a takeover that
+completes the transaction on the rows the abort had not reached:
+acknowledged, and applied to half its rows. Without rule F the model holds
+G1-G3 with one and two node failures and partial restarts. Removed in
+"RONDB-1150: drop rule F, the abort after the commit decision":
+- TC: the rule-F abort in the commit phase and in the takeover
+  (`ZABORT_AFTER_COMMIT_SETUP`, `TF_ABORT_AFTER_COMMIT`,
+  `durableParticipantFailed()`, `takeOverCompleteSent()`,
+  `takeOverAbortAfterCommit()`, the takeover's count of logged writes and
+  `fillTcConnectFailNodes()`, `handleGcp` at the end of the abort), `DUMP
+  2561`, error 268.
+- LQH: ABORTREQ's flags (`AbortReq`), `abortAfterCommitLab`,
+  `redoAbortAfterCommit()`, `OP_ABORT_AFTER_COMMIT`, exit code 7201, error
+  insert 5184, X4.9's drop of a late COMPLETE (DI-7), and LQH_TRANSCONF's
+  `prevNodeId` (19 words now). The PMEM format's `AF_AFTER_COMMIT`.
+- Tests: `DurableCrashCommitRuleF`, `DurableTcCrashCommitRuleF`,
+  `DurableCrashAbortAfterCommit`.
+Kept: the durable takeover commit (`durableOpCount`), and the primary's
+local commit at COMPLETE for every write of a durable transaction, also
+to a table without logging (part 4a), so that its writes become visible
+together. The notes of parts 4a, 4b, 5b and 6 below describe rule F as it
+was.
 
 **State (2026-11-23).** X4 comes in six parts, each a commit tested
 before the next: (1) X4.1-X4.3; (2) X4.5 and X4.4; (3) X4.6 and X4.7;
@@ -860,8 +899,8 @@ now waits 50 ms for the first event (the pause between two probes) and
 1 ms for each one after, and fails when the log handle reports an error.
 
 **Risks:** the hottest commit code changes (`tupcommit_conf`, queued-log,
-parallel and takeover paths); the abort-after-commit path is new in LQH
-and TC; longer lock hold on hot rows (measured in X8.3).
+parallel and takeover paths); longer lock hold on hot rows (measured in
+X8.3).
 
 ---
 
@@ -879,9 +918,9 @@ replicas, and raises the restorable GCI to G'.
 - The next SR after a durable SR works with no new traffic (R = G') and
   with traffic.
 - Partial SR in durable mode is refused until X6 (X5.8).
-- Rule F on by default (`Dbtc::c_durable_rule_f`, X4 part 4a), once
-  step A reads the ABORTs with `AF_AFTER_COMMIT`; `DUMP 2561 0` stays
-  for tests.
+- No rule F (dropped 2026-11-24, X3.4): no ABORT follows a COMMIT, so
+  step A ignores ABORTs, step B reports only COMPLETE hits and step C has
+  no veto.
 
 ### X5.1 Phase-2 parameters (S, 2 pd)
 
@@ -923,8 +962,8 @@ In `execSr` (`DblqhMain.cpp:38962`) [V], when `durableTail`:
   `readCommitLog` (`42763`), `checkIfExecLog` (`40928-40955`), read the
   PREPARE through its reference, `execLogRecord` (`39478`) [V], with the
   record's gci_lo. Remove the entry. COMPLETE without entry: ignore. COMPLETE
-  with `CPF_SELF`: execute only its own COMMIT (DI-1). ABORT
-  `AF_AFTER_COMMIT`: move the entry's COMMITs to the part's abort list.
+  with `CPF_SELF`: execute only its own COMMIT (DI-1). ABORT: ignore
+  (written only before a commit decision; rule F is dropped).
 - Keep per part `maxGciExecuted`.
 - Drop the plan's "COMMIT after COMPLETE of T ⇒ crash" check: the preferred
   variant has no memory of executed transids, and with transid reuse it
@@ -946,8 +985,8 @@ as with part-to-part messages (DI-3).
 | B1 | worker → own proxy | `SR_TAIL_INDOUBT_REP` | the worker's in-doubt set: `(transid1, transid2, count, gci_hi)`, counts summed over its parts |
 | B2 | proxy → proxies of all SR nodes (itself included) | `SR_TAIL_INDOUBT_REP` | the node's merged set, in batches, `last` flag and total |
 | B3 | proxy → own workers | `SR_TAIL_INDOUBT_REP` | each received batch, unchanged |
-| B4 | worker (after `last` from every SR node) | — | rescan own parts from the stored start to E for COMPLETE and `AF_AFTER_COMMIT` ABORT of T ∈ U, counting a record only after a durable tail COMMIT of T in the same part (DI-2) |
-| B5 | worker → proxy → all proxies → all workers | `SR_TAIL_HIT_REP` | `(transid1, transid2, kind = COMPLETE | ABORTED)` |
+| B4 | worker (after `last` from every SR node) | — | rescan own parts from the stored start to E for COMPLETE of T ∈ U, counting a record only after a durable tail COMMIT of T in the same part (DI-2) |
+| B5 | worker → proxy → all proxies → all workers | `SR_TAIL_HIT_REP` | `(transid1, transid2)`: T complete |
 | B6 | worker → proxy; proxy (all workers done) → all proxies; proxy (all nodes done) → workers | `SR_TAIL_DONE_REP` | node, `maxGciExecuted` of step A, hits and entries sent |
 
 - **U** is the union over all nodes, with a count per node. Every worker
@@ -981,15 +1020,15 @@ For each T in the worker's own in-doubt sets:
 | Condition | Verdict |
 |---|---|
 | a COMPLETE hit for T | commit |
-| no ABORTED hit, and for every node group all SR nodes of it report the same count (absent = 0), and the counts of the node groups add up to opCount (from T's COMMIT records; assert they agree) | commit (fallback, D5) |
+| for every node group all SR nodes of it report the same count (absent = 0), and the counts of the node groups add up to opCount (from T's COMMIT records; assert they agree) | commit (fallback, D5) |
 | otherwise | abort |
 
 - Commit: execute the queued COMMITs FIFO. In-doubt transactions of one
   part never share a row (§6 of the plan: a later writer needs the
   earlier one's COMPLETE in that part), so their order does not matter
   [I, from the proof].
-- Abort: `RF_INVALIDATED` on each COMMIT of T and on the abort list; flush
-  per batch, one fence at the end.
+- Abort: `RF_INVALIDATED` on each COMMIT of T; flush per batch, one fence
+  at the end.
 - **G'** = max(all `maxGciExecuted` from DONE, gci_hi of every T in U with
   verdict commit). Every worker computes it from the same data (DI-4).
 - Counters for ndbinfo: in-doubt, committed by COMPLETE, committed by
@@ -1280,7 +1319,7 @@ holds: the dependent signals wait for the fence.
   `tc_pack` containers, flushed in the same call [V]. Non-temporal copies
   are issued at append time ("flush early, fence late").
 - New state `WAIT_REDO_PERSIST`: `abortStateHandlerLab` reports it as
-  Committed only after the fence (research §6.2); rule F waits for it;
+  Committed only after the fence (research §6.2);
   `DblqhState.hpp` and `DblqhStateDesc.cpp` for ndbinfo.
 - Unpacked sends (COMMITCONF, COMPLETECONF, takeover answers) check
   `m_redo_end_lsn` and persist synchronously.
@@ -1307,7 +1346,7 @@ path, `memmap=` for software cost only.
 `src/kernel/blocks/dblqh/redoLogReader/{reader.cpp, records.cpp,
 records.hpp}` [V]. Step 1 (S6) teaches it the format; X8 adds: COMPLETE
 records with `CPF_SELF`, COMMIT `CF_DURABLE`/`RF_INVALIDATED`, transid,
-gci_lo, opCount, ABORT `AF_AFTER_COMMIT`, SR_HEAD; `--transid` to follow
+gci_lo, opCount, SR_HEAD; `--transid` to follow
 one transaction; `--simulate-sr R g` to list per part what step A would
 execute and leave in doubt (support tool).
 
@@ -1320,7 +1359,7 @@ Edit `latex/<slug>.tex`, regenerate with `./update-md <slug>`, commit both
 |---|---|
 | `rondb_checkpoints_global_redo` | REDO on PMEM, COMMIT/COMPLETE records, persist rule, SR phase 2 and 3 |
 | `rondb_resiliency_model` | G1–G3, when they hold (armed, all or partial SR), stale nodes, D4 |
-| `rondb_failure_protocols` | Rule F, node-failure file, API node-id hold-back |
+| `rondb_failure_protocols` | Node failures in the commit phase (commit on the replicas left), node-failure file, API node-id hold-back |
 | `rondb_nonblocking_2pc`, `rondb_concurrency_control` | Local commit at COMPLETE, lock hold, ack timing |
 | `rondb_advanced_fs_config`, `rondb_hardware_setup` | `FileSystemPathRedoLog`, CXL PMEM, `memmap=` for tests |
 | `rondb_advanced_config`, `rondb_config` | `DurableCommits`, `RedoLogMode`, `RedoPersistScheme` |
@@ -1383,7 +1422,7 @@ proxy and worker.
 | GSN | Sender → receiver | Content | Scope | Receiver checks |
 |---|---|---|---|---|
 | `SR_TAIL_INDOUBT_REP` | DBLQH worker → DBLQH proxy (local); proxy → proxies of SR nodes; proxy → workers | node, batch no, flags (last), total; section `(transid1, transid2, count, gci_hi)`×n | Remote | sender block DBLQH; sender node ∈ `m_sr_nodes`; state = phase-2 exchange; section length multiple of 4 and ≤ batch max; batch numbers in sequence |
-| `SR_TAIL_HIT_REP` | same route | node, batch no; section `(transid1, transid2, kind)`×n | Remote | as above; kind ∈ {COMPLETE, ABORTED} |
+| `SR_TAIL_HIT_REP` | same route | node, batch no; section `(transid1, transid2)`×n, each T complete | Remote | as above |
 | `SR_TAIL_DONE_REP` | same route | node, maxGciExecuted, entries sent, hits sent | Remote | as above; totals match what arrived |
 | `DURABLE_ACTIVATE_REQ` | CMVMI → DIH (local); DIH → master DIH | node, senderRef, redoMode, version, request (activate) | Remote | sender block CMVMI (local) or DBDIH; master only; sender an alive data node |
 | `DURABLE_ACTIVATE_CONF` | master DIH → DIH → CMVMI | g, state | Remote | sender is the master DIH |
@@ -1406,7 +1445,6 @@ proxy and worker.
 | PACKED_SIGNAL | code `ZCOMMIT_DURABLE = 8`, 6 words | X4.3 |
 | COMMIT (unpacked) | length 6 | X4.3 |
 | COMMITREQ | length 10 (opCount, flags) | X4.3 |
-| ABORTREQ | length 7 (flag after commit) | X4.10 |
 | LQH_TRANSCONF | length 19 (opCount, durable) | X4.3 |
 | DIVERIFYCONF (direct and queued) | `theData[4]` durable, length 5 | X4.1 |
 | GCP_PREPARE, GCP_COMMIT | flags word (activate g) | X7.2 |
@@ -1441,7 +1479,7 @@ LQH codes below 5180.
 
 | Block | Range | Codes |
 |---|---|---|
-| DBLQH | 5180–5199 | 5180 crash after COMMIT persisted, before COMMITTED/forward; 5181 after COMPLETE persisted, before local commit; 5182 after local commit, before COMPLETE/COMPLETED; 5183 delay COMPLETE at primary 3 s; 5184 crash after ABORT `AF_AFTER_COMMIT` persisted, before release; 5185 skip COMPLETE records (debug, forces fallback); 5186 SR crash after step A; 5187 during the step-B rescan; 5188 mid-invalidation in step C; 5189 after SR_HEAD, before START_RECCONF; 5190 step-B batch size 1 |
+| DBLQH | 5180–5199 | 5180 crash after COMMIT persisted, before COMMITTED/forward; 5181 after COMPLETE persisted, before local commit; 5182 after local commit, before COMPLETE/COMPLETED; 5183 delay COMPLETE at primary 3 s; 5184 unused (was the crash after a rule-F ABORT); 5185 skip COMPLETE records (debug, forces fallback); 5186 SR crash after step A; 5187 during the step-B rescan; 5188 mid-invalidation in step C; 5189 after SR_HEAD, before START_RECCONF; 5190 step-B batch size 1 |
 | DBTC | 8320–8339 | 8320 takeover delays COMPLETEREQ 2 s (X1); 8321 crash after the COMMIT of the first operation; 8322 after its COMPLETE; 8323 treat the next node failure as a participant failure; 8324 crash takeover TC during the F abort |
 | DBDIH | 7260–7279 | 7260 crash master after GCP_PREPARE(activate); 7261 crash after GCP_COMMIT(g), before save of g − 1; 7262 crash during COPY_GCIREQ(RESTART_DURABLE); 7263 delay activation |
 | QMGR | 990–998 | 990 crash after the node-failure record, before PREP_FAILCONF; 991 skip the record (negative test) |
@@ -1468,8 +1506,8 @@ Step 1 adds the persist counters per part (E19).
 | DI-3 | **Exchange volume.** Part-to-part messages are O(L²) for L parts cluster-wide (48 nodes × 32 parts: 2.4 M messages) | plan §5.2 step B | Aggregate per node in DblqhProxy (X5.4); counts are per node in the fallback anyway, so the verdicts do not change |
 | DI-4 | **G' needs global data before phase 4.** Each part writes G' into SR_HEAD, but G' is the max over all parts | plan §5.3 | DONE carries each worker's step-A max; in-doubt entries carry gci_hi; every worker computes the same G' (X5.5) |
 | DI-5 | **API hold-back is per data node.** A transaction of the dead process committed through another node's TC can get a GCI one above the local hold-back GCI (failure detection skew, in-flight TCKEYREQ) [I] | `execAPI_FAILCONF` `5768` [V] | Hold back until the GCP save of f + 1 |
-| DI-6 | **Abort after `commitGciHandling`.** No abort follows the commit point today, so the abort path never unlinks the ApiConnect from its GcpRecord; GCP_TCFINISHED would never come | `commitGciHandling` `7825`, `handleGcp` `9415` [V] | The F paths call `handleGcp` (X4.8, X4.9) |
-| DI-7 | **Takeover: was a COMPLETE sent?** LQH frees the op at COMPLETE. Detection by missing ops (opCount) and missing live replicas works if no COMPLETE from the failed TC is executed after the LQH_TRANSREQ scan passed that op. `checkNodeFailSequence` orders LQH_TRANSREQ after NODE_FAILREP only | `SimulatedBlock.cpp:5313-5340` [V] | Verify that signals received from the failed node are executed before LQH_TRANSREQ (add a test with a delayed COMPLETE); fallback: a "complete seen" bit in the LQH commit-ack marker, with markers on every LDM in durable mode |
+| DI-6 | **Abort after `commitGciHandling`.** No abort follows the commit point today, so the abort path never unlinks the ApiConnect from its GcpRecord; GCP_TCFINISHED would never come | `commitGciHandling` `7825`, `handleGcp` `9415` [V] | Moot: rule F dropped (2026-11-24); no abort follows the commit point |
+| DI-7 | **Takeover: was a COMPLETE sent?** LQH frees the op at COMPLETE. Detection by missing ops (opCount) and missing live replicas works if no COMPLETE from the failed TC is executed after the LQH_TRANSREQ scan passed that op. `checkNodeFailSequence` orders LQH_TRANSREQ after NODE_FAILREP only | `SimulatedBlock.cpp:5313-5340` [V] | Moot: rule F dropped (2026-11-24), and with it the takeover's question and X4.9's drop of a late COMPLETE. The TLA+ model showed the drop needed only while the takeover could abort by rule F |
 | DI-8 | **D4 with all nodes present** crashes the master on `ndbrequire(!allNodes)` | `NdbcntrMain.cpp:2780` [V] | `progError` with node group and stale nodes (X6.4) |
 | DI-9 | **Reads under L.** L speaks of "an operation", but reads have no COMPLETE record | plan §3.1 | **Decided (Q-B2):** read locks are released at COMPLETE, like write locks (X4 part 6) |
 | DI-10 | **`AC_NR_COPY`/`AC_IGNORED` at COMPLETE** (write path Q10). The starting node cannot be in an SR whose tail holds that GCI: it refuses GCP saves until its restart is done, so `lastCompletedGCI` stays below R [I] | `execGCP_SAVEREQ` refusal (research §2.9) | No COMPLETE record for them; `AC_NR_COPY` keeps local commit at COMMIT |
@@ -1486,14 +1524,14 @@ the answers are kept; the last column follows them.
 | # | Question | State |
 |---|---|---|
 | Q1 | Should TCKEY_FAILCONF carry the GCI (API change)? | Q-B4, taken: no change |
-| Q2 | Error code for rule-F aborts: reuse 4010 / `ZNODEFAIL_BEFORE_COMMIT`, or a new temporary error "aborted after commit due to node failure"? | Q-B3, answered: new temporary error 268 (TC); a takeover's abort reaches the API as TCKEY_FAILREF (4031), or 4010 after TC_COMMITREQ |
+| Q2 | Error code for rule-F aborts: reuse 4010 / `ZNODEFAIL_BEFORE_COMMIT`, or a new temporary error "aborted after commit due to node failure"? | Moot: rule F dropped (2026-11-24), error 268 removed |
 | Q3 | A forced start to R for a node group with only stale nodes (D4)? | Q-B5, proposed: no forced start in the first version |
 | Q4 | Dirty writes: `CPF_SELF` COMPLETE, or convert them to normal writes (DI-1)? | Q-B1, answered: `CPF_SELF` (X4 part 5a) |
 | Q5 | Read locks in durable transactions: release at COMMIT (proposed) or at COMPLETE (DI-9)? | Q-B2, answered: at COMPLETE (X4 part 6) |
 | Q6 | `SET DurableCommits=0` online: accept as pending until the next cluster restart (proposed) or refuse? | Q-B6, proposed: accepted as pending |
 | Q7 | Block activation while a node restart runs (proposed), or allow it? | Q-B7, proposed: yes |
 | Q8 | Hold-back until the save of f or f + 1 (DI-5)? | Q-B8, answered: f + 1 (X4 part 5a) |
-| Q9 | Takeover detection by opCount and missing replicas (proposed) or by a marker bit (DI-7)? | Q-B9, taken: opCount (X4 part 4b), checked again with the TLA+ model |
+| Q9 | Takeover detection by opCount and missing replicas (proposed) or by a marker bit (DI-7)? | Moot: rule F dropped (2026-11-24) |
 | Q10 | Where the node-failure file lives when `FileSystemPathRedoLog` has one path per NUMA node (proposed: the first path)? | Q-B10, proposed: under the REDO path of NUMA node 0 |
 | Q11 | Memory for the step-A hash table at SR, its limit, and what to do when it is exhausted | Q-B11, proposed: sized from the transaction records; out of memory stops the SR |
 | Q12 | Force the parallel COMMITREQ/COMPLETEREQ path for durable transactions (2 serial persists instead of 2R)? Decide from X8.3 | Q-B12, taken: no; measure first |

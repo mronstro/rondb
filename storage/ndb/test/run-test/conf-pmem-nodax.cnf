@@ -213,8 +213,7 @@ __RedoLogPmemTestMode=nodax
 __DurableCommits=1
 
 #
-# .4node_durable - .4node with durable commits; two node groups, as
-# testNodeRestart -n DurableCrashAbortAfterCommit needs
+# .4node_durable - .4node with durable commits, two node groups
 #
 
 [cluster_config.4node_durable]

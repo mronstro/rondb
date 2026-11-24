@@ -15435,18 +15435,6 @@ void Dblqh::execCOMPLETE(Signal *signal) {
       return;
     }
     TRACE_OP(regTcPtr, "COMPLETE");
-    if (unlikely(regTcPtr->abortState == TcConnectionrec::NEW_FROM_TC) &&
-        (regTcPtr->m_flags & TcConnectionrec::OP_DURABLE) != 0) {
-      /**
-       * RONDB-1150 (X4.9, DI-7): a late COMPLETE of the failed TC, or one
-       * passed on by another replica, for a durable operation already
-       * reported to the takeover TC. That TC decides from the reports
-       * whether a COMPLETE was sent, and sends COMPLETEREQ or, by rule F,
-       * ABORTREQ: a commit here would make its decision wrong.
-       */
-      jam();
-      return;
-    }
     if (unlikely(c_redo_pmem_format) &&
         regTcPtr->m_committed_log_space == PmemRedo::RESERVED_TAIL) {
       /* RONDB-1150 (X4.5, barrier 7 of X4.4): K */
@@ -15557,17 +15545,6 @@ void Dblqh::execCOMPLETEREQ(Signal *signal) {
   switch (regTcPtr->transactionState) {
   case TcConnectionrec::COMMITTED:
     jam();
-    if (unlikely(regTcPtr->abortState == TcConnectionrec::NEW_FROM_TC) &&
-        (regTcPtr->m_flags & TcConnectionrec::OP_DURABLE) != 0 &&
-        reqBlockref == old_blockref) {
-      /**
-       * RONDB-1150 (X4.9, DI-7): a late COMPLETEREQ of the failed TC itself
-       * for a durable operation already reported to the takeover TC, as a
-       * late COMPLETE in execCOMPLETE
-       */
-      jam();
-      return;
-    }
     regTcPtr->reqBlockref = reqBlockref;
     regTcPtr->reqRef = reqPtr;
     regTcPtr->abortState = TcConnectionrec::REQ_FROM_TC_COMMIT;
@@ -16873,18 +16850,13 @@ void Dblqh::execABORTREQ(Signal *signal) {
   Uint32 transid2 = signal->theData[3];
   BlockReference old_blockref = signal->theData[4];
   Uint32 tcOprec = signal->theData[5];
-  /* RONDB-1150 (X4.10): rule F, the abort after the commit decision */
-  const Uint32 flags = signal->getLength() >= AbortReq::SignalLengthFlags
-                           ? signal->theData[6]
-                           : 0;
 
   if (ERROR_INSERTED(5006)) {
     systemErrorLab(signal, __LINE__);
   }
   if (ERROR_INSERTED(5016)) {
     CLEAR_ERROR_INSERT_VALUE;
-    sendSignalWithDelay(cownref, GSN_ABORTREQ, signal, 2000,
-                        signal->getLength());
+    sendSignalWithDelay(cownref, GSN_ABORTREQ, signal, 2000, 6);
     return;
   }  // if
   ndbassert(m_fragment_lock_status == FRAGMENT_UNLOCKED);
@@ -16936,10 +16908,6 @@ void Dblqh::execABORTREQ(Signal *signal) {
   regTcPtr->reqBlockref = reqBlockref;
   regTcPtr->reqRef = reqPtr;
   regTcPtr->abortState = TcConnectionrec::REQ_FROM_TC_ABORT;
-  if (unlikely((flags & AbortReq::FLAG_AFTER_COMMIT) != 0)) {
-    jam();
-    regTcPtr->m_flags |= TcConnectionrec::OP_ABORT_AFTER_COMMIT;
-  }
 
   abortStateHandlerLab(signal, tcConnectptr);
   return;
@@ -17353,21 +17321,6 @@ void Dblqh::abortStateHandlerLab(Signal *signal,
       // the dirty writes are not REDO logged.
       /* -----------------------------------------------------------------------
        */
-      if (unlikely(regTcPtr->m_flags &
-                   TcConnectionrec::OP_ABORT_AFTER_COMMIT) &&
-          regTcPtr->abortState == TcConnectionrec::REQ_FROM_TC_ABORT) {
-        /**
-         * RONDB-1150 (X4.10): rule F. TUP's loop over the row wrote the
-         * COMMIT record, the operation's own COMMIT has not come. In PMEM
-         * mode a COMMIT record waits in the log queue only with the error
-         * inserts of that queue.
-         */
-        jam();
-        ndbrequire(regTcPtr->transactionState ==
-                   TcConnectionrec::LOG_COMMIT_WRITTEN_WAIT_SIGNAL);
-        abortAfterCommitLab(signal, tcConnectptr);
-        return;
-      }
       ndbrequire(regTcPtr->abortState == TcConnectionrec::NEW_FROM_TC);
       sendLqhTransconf(signal, LqhTransConf::Prepared, tcConnectptr);
       return;
@@ -17468,23 +17421,6 @@ void Dblqh::abortStateHandlerLab(Signal *signal,
          */
         return;
       }  // if
-      if (unlikely(regTcPtr->m_flags &
-                   TcConnectionrec::OP_ABORT_AFTER_COMMIT) &&
-          regTcPtr->abortState == TcConnectionrec::REQ_FROM_TC_ABORT) {
-        /**
-         * RONDB-1150 (X4.10): rule F. A write of a durable transaction
-         * commits locally at COMPLETE, after which TC sends no such abort,
-         * and in PMEM mode a COMMIT record waits in the log queue only with
-         * the error inserts of that queue: here only an operation of a
-         * node restart's copy, which commits at COMMIT.
-         */
-        jam();
-        ndbrequire(regTcPtr->transactionState ==
-                       TcConnectionrec::WAIT_TUP_COMMIT &&
-                   regTcPtr->activeCreat == Fragrecord::AC_NR_COPY);
-        abortAfterCommitLab(signal, tcConnectptr);
-        return;
-      }
       ndbrequire(regTcPtr->abortState == TcConnectionrec::NEW_FROM_TC);
       jam();
       /* -----------------------------------------------------------------------
@@ -17498,14 +17434,6 @@ void Dblqh::abortStateHandlerLab(Signal *signal,
       return;
     case TcConnectionrec::COMMITTED:
       jam();
-      if (unlikely(regTcPtr->m_flags &
-                   TcConnectionrec::OP_ABORT_AFTER_COMMIT) &&
-          regTcPtr->abortState == TcConnectionrec::REQ_FROM_TC_ABORT) {
-        /* RONDB-1150 (X4.10): rule F */
-        jam();
-        abortAfterCommitLab(signal, tcConnectptr);
-        return;
-      }
       ndbrequire(regTcPtr->abortState == TcConnectionrec::NEW_FROM_TC);
       /* -----------------------------------------------------------------------
        */
@@ -17528,69 +17456,6 @@ void Dblqh::abortStateHandlerLab(Signal *signal,
   }  // switch
   abortCommonLab(signal, tcConnectptr);
 }  // Dblqh::abortStateHandlerLab()
-
-/**
- * RONDB-1150 (X4.10): rule F, the abort of an operation of a durable
- * transaction after the commit decision, from an ABORTREQ with
- * FLAG_AFTER_COMMIT. TC sends it before any COMPLETE of the transaction,
- * so no write of it is committed locally on any replica: a backup does
- * that at COMPLETE, and so does the primary (redoLocalCommitAtComplete()).
- * A COMMIT record written for the operation gets an ABORT with
- * AF_AFTER_COMMIT, persistent before the lock is released and ABORTCONF
- * sent; then the normal abort, which writes no second ABORT. A locking
- * read on the primary holds its lock until COMPLETE as well, so the abort
- * releases it. Committed locally already is an operation of a node
- * restart's copy (AC_NR_COPY), which cannot be undone: the starting node
- * gives up its restart, and copies the fragment again in the next one, as
- * its data cannot be restored from before its restart is done (DI-10).
- */
-void Dblqh::abortAfterCommitLab(Signal *signal,
-                                const TcConnectionrecPtr tcConnectptr) {
-  TcConnectionrec *const regTcPtr = tcConnectptr.p;
-  const TcConnectionrec::TransactionState state = regTcPtr->transactionState;
-  const bool committedLocally =
-      (state == TcConnectionrec::COMMITTED ||
-       state == TcConnectionrec::WAIT_TUP_COMMIT) &&
-      (regTcPtr->activeCreat == Fragrecord::AC_NR_COPY ||
-       (regTcPtr->seqNoReplica == 0 &&
-        (regTcPtr->m_flags & TcConnectionrec::OP_LOCAL_COMMIT_AT_COMPLETE) ==
-            0));
-  if (unlikely(committedLocally)) {
-    if (state == TcConnectionrec::COMMITTED &&
-        (regTcPtr->operation == ZREAD || regTcPtr->operation == ZREAD_EX)) {
-      /**
-       * A read committed without OP_DURABLE: none of a durable
-       * transaction gets here, as its locking reads commit at COMPLETE.
-       * Its lock is released and nothing changed: only the answer.
-       */
-      jam();
-      continueAfterLogAbortWriteLab(signal, tcConnectptr);
-      return;
-    }
-    jam();
-    ndbrequire(regTcPtr->activeCreat == Fragrecord::AC_NR_COPY);
-    progError(__LINE__, NDBD_EXIT_ABORT_AFTER_COMMIT_DURING_NR,
-              "A rule-F abort of an operation committed during the copy");
-    return;
-  }
-  if (regTcPtr->logWriteState == TcConnectionrec::WRITTEN) {
-    /**
-     * The COMMIT record is written, durable, and took the operation off
-     * the log part's list (removeLogTcrec): continueAbortLab must neither
-     * write an ABORT nor remove it again
-     */
-    jam();
-    ndbrequire(regTcPtr->m_committed_log_space == PmemRedo::RESERVED_TAIL);
-    redoAbortAfterCommit(signal, regTcPtr);
-    regTcPtr->logWriteState = TcConnectionrec::NOT_STARTED;
-    if (ERROR_INSERTED(5184)) {
-      redoPmemCrashPoint(5184, nullptr,
-                         "an ABORT with AF_AFTER_COMMIT persistent, before "
-                         "the lock is released");
-    }
-  }
-  abortCommonLab(signal, tcConnectptr);
-}  // Dblqh::abortAfterCommitLab()
 
 void Dblqh::abortErrorLab(Signal *signal, TcConnectionrecPtr tcConnectptr,
                           Uint32 errorCode) {
@@ -18754,7 +18619,6 @@ void Dblqh::scanMarkers(Signal *signal, Uint32 tcNodeFail,
       lqhTransConf->operationStatus = LqhTransConf::LastTransConf;
       lqhTransConf->maxInstanceId = tcNodeFailPtr.p->maxInstanceId;
       lqhTransConf->durableOpCount = 0;
-      lqhTransConf->prevNodeId = 0;
       sendSignal(tcNodeFailPtr.p->newTcBlockref, GSN_LQH_TRANSCONF, signal,
                  LqhTransConf::SignalLength, JBB);
       return;
@@ -44924,18 +44788,11 @@ void Dblqh::sendLqhTransconf(Signal *signal, LqhTransConf::OperationStatus stat,
   lqhTransConf->fragId          = tcConnectptr.p->fragmentid;
   /**
    * RONDB-1150 (X4.9): a durable operation's opCount, so that the takeover
-   * TC commits durably and can count the transaction's writes, and the
-   * node of the previous replica, which LQHKEYREQ came from, so that it
-   * knows the node of a primary that does not report
+   * TC commits durably
    */
   lqhTransConf->durableOpCount =
       (tcConnectptr.p->m_flags & TcConnectionrec::OP_DURABLE)
           ? (LqhTransConf::DURABLE_FLAG | tcConnectptr.p->m_op_count)
-          : 0;
-  lqhTransConf->prevNodeId =
-      (tcConnectptr.p->seqNoReplica != 0 &&
-       refToMain(tcConnectptr.p->clientBlockref) == DBLQH)
-          ? refToNode(tcConnectptr.p->clientBlockref)
           : 0;
 
   TcNodeFailRecord::TcFailStatus failStatus = tcNodeFailPtr.p->tcFailStatus;
@@ -45033,8 +44890,7 @@ void Dblqh::writeAbortLog(Signal *signal, TcConnectionrec *regTcPtr,
                           LogFileRecordPtr &logFilePtr,
                           LogPartRecord *logPartPtrP) {
   if (unlikely(c_redo_pmem_format)) {
-    writeAbortLogPmem(signal, regTcPtr, logPagePtr, logFilePtr, logPartPtrP,
-                      0);
+    writeAbortLogPmem(signal, regTcPtr, logPagePtr, logFilePtr, logPartPtrP);
     return;
   }
   if ((ZABORT_LOG_SIZE + ZNEXT_LOG_SIZE) >
@@ -49631,9 +49487,9 @@ void Dblqh::increment_committed_mbytes(LogPartRecord *logPartPtrP,
                                        TcConnectionrec *regTcPtr) {
   if (unlikely(c_redo_pmem_format)) {
     /**
-     * RONDB-1150, PMEM format: the COMMIT and the COMPLETE or rule-F
-     * ABORT, each with the FILLER that closes its write unit, and the
-     * NEXT_MBYTE (S4.7). release_committed_words() gives them back.
+     * RONDB-1150, PMEM format: the COMMIT and the COMPLETE, each with
+     * the FILLER that closes its write unit, and the NEXT_MBYTE (S4.7).
+     * release_committed_words() gives them back.
      */
     ndbassert(regTcPtr->m_committed_log_space == PmemRedo::RESERVED_NONE);
     logPartPtrP->m_committed_words += PmemRedo::RESERVE;

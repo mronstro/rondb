@@ -221,23 +221,15 @@ void Dblqh::writeCommitLogPmem(Signal *signal, TcConnectionrec *regTcPtr,
                           durable);
 }
 
-/**
- * S4.4: an ABORT (format §5.3). flags is 0 from today's callers; with
- * AF_AFTER_COMMIT (rule F, X4) a dependent signal waits for it.
- */
+/* S4.4: an ABORT (format §5.3) */
 void Dblqh::writeAbortLogPmem(Signal *signal, TcConnectionrec *regTcPtr,
                               LogPageRecordPtr &logPagePtr,
                               LogFileRecordPtr &logFilePtr,
-                              LogPartRecord *logPartPtrP, Uint32 flags) {
+                              LogPartRecord *logPartPtrP) {
   Uint32 rec[PmemRedo::ABORT_LEN];
-  PmemRedo::abortRecord(rec, flags, regTcPtr->transid[0],
-                        regTcPtr->transid[1]);
+  PmemRedo::abortRecord(rec, 0, regTcPtr->transid[0], regTcPtr->transid[1]);
   redoAppendFixed(signal, logPartPtrP, logPagePtr, logFilePtr, rec,
                   PmemRedo::ABORT_LEN);
-  if (flags & PmemRedo::AF_AFTER_COMMIT) {
-    regTcPtr->m_redo_end_lsn =
-        redoPosLsn(logPartPtrP, logFilePtr.p, logPagePtr.p);
-  }
   release_committed_words(logPartPtrP, regTcPtr, PmemRedo::AT_ABORT, false);
 }
 
@@ -349,31 +341,6 @@ void Dblqh::redoCompleteDirty(Signal *signal, TcConnectionrec *regTcPtr,
   }
   jam();
   writeCompleteLog(signal, regTcPtr, logPartPtrP, PmemRedo::CPF_SELF);
-}
-
-/**
- * X4.10, barrier 10 of X4.4: rule F. An operation whose durable COMMIT
- * kept the COMPLETE's part of its reservation (RESERVED_TAIL) is aborted
- * after the commit decision: its ABORT with AF_AFTER_COMMIT, written from
- * that part, is persistent before the lock is released and before
- * ABORTCONF, so that a restart finds the abort with the COMMIT.
- */
-void Dblqh::redoAbortAfterCommit(Signal *signal, TcConnectionrec *regTcPtr) {
-  ndbassert(regTcPtr->m_committed_log_space == PmemRedo::RESERVED_TAIL);
-  LogPartRecord *const logPartPtrP = regTcPtr->m_log_part_ptr_p;
-  lock_log_part(logPartPtrP);
-  LogPageRecordPtr logPagePtr;
-  LogFileRecordPtr logFilePtr;
-  logFilePtr.i = logPartPtrP->currentLogfile;
-  ptrCheckGuard(logFilePtr, logPartPtrP->my_block->clogFileFileSize,
-                logPartPtrP->my_block->logFileRecord);
-  logPagePtr.i = logFilePtr.p->currentLogpage;
-  ptrCheckGuard(logPagePtr, logPartPtrP->logPageFileSize,
-                logPartPtrP->logPageRecord);
-  writeAbortLogPmem(signal, regTcPtr, logPagePtr, logFilePtr, logPartPtrP,
-                    PmemRedo::AF_AFTER_COMMIT);
-  redoPersistCommit(signal, logPartPtrP, regTcPtr);
-  unlock_log_part(logPartPtrP);
 }
 
 /**

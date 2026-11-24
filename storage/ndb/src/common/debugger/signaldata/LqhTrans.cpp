@@ -57,7 +57,6 @@ bool printLQH_TRANSCONF(FILE *output, const Uint32 *theData, Uint32 len,
   }
   if (len >= LqhTransConf::SignalLength_DURABLE) {
     fprintf(output, " durableOpCount: %x\n", sig->durableOpCount);
-    fprintf(output, " prevNodeId: %u\n", sig->prevNodeId);
   }
   return true;
 }

@@ -6,6 +6,10 @@ Status: design draft, subtask of plan revision 6 (`durable_commits_plan.md`
 path), `pmem_redo_recovery.md` (recovery). Where this format depends on them,
 §11 states the assumption or requirement.
 
+**2026-11-24: rule F is dropped** (plan revision 14). The ABORT record has
+no flag; `AF_AFTER_COMMIT` and everything this document says about a
+rule-F ABORT are gone from the format and the code.
+
 Paths are relative to `storage/ndb/`. Short names:
 `DblqhMain.cpp` = `src/kernel/blocks/dblqh/DblqhMain.cpp`,
 `Dblqh.hpp` = `src/kernel/blocks/dblqh/Dblqh.hpp`,
@@ -31,7 +35,7 @@ inferred. Nothing was built or run.
 | FILLER | Type 10, 2 + n words, checksum over its header. Written at every persist barrier to close the current write unit W. In the last unit of an mbyte, NEXT_MBYTE closes it instead |
 | COMMIT | 12 words (48 B): adds transid, gci_lo, opCount; the 4 prepare-reference fields packed into 2 |
 | COMPLETE | 4 words (16 B): header + transid |
-| ABORT | 4 words; flag `AF_AFTER_COMMIT` marks a rule-F abort |
+| ABORT | 4 words, no flags |
 | INVALID_COMMIT | A flag bit in the COMMIT header, set by one 4-byte store. Type 9 is retired |
 | Overhead | Small update: 116 B today → 192 / 256 / 512 B at W = 64 / 128 / 256. Large update: 476 B → 576 / 640 / 768 B (§8) |
 | Checksum code | `ndb_xxh3` (`util/ndb_xxh3.h`): XXH3 with AVX2 chosen at run time on x86-64, SSE2 otherwise, NEON on aarch64 (§9) |
@@ -111,8 +115,7 @@ cannot be mixed by accident.
 | Flag bit | Name | Types | Meaning | In checksum |
 |---|---|---|---|---|
 | 0 (`w0` bit 8) | `RF_INVALIDATED` | COMMIT | Cancelled by SR; replaces type 9 | **No** (mutable) |
-| 1 | `CF_DURABLE` | COMMIT | Written under the durable protocol (GCI ≥ g). A COMPLETE or a rule-F ABORT is expected | Yes |
-| 1 | `AF_AFTER_COMMIT` | ABORT | Rule F: this operation's COMMIT record was written before | Yes |
+| 1 | `CF_DURABLE` | COMMIT | Written under the durable protocol (GCI ≥ g). A COMPLETE is expected | Yes |
 | 1 | `PF_TRANSID` | PREPARE | Words 8–9 hold the transid | Yes |
 | 1 | `CPF_SELF` | COMPLETE | A dirty write's (X4.13, DI-1): completes only its own COMMIT; step B of phase 2 ignores it | Yes |
 | 2–7 | — | — | Reserved, 0 | Yes |
@@ -359,7 +362,7 @@ persisted (invariant K).
 
 | Word | Field | Today (`writeAbortLog`, `43542-43559`) [V] |
 |---|---|---|
-| 0 | `w0`: type 3, flag `AF_AFTER_COMMIT`, len 4 | type 3 |
+| 0 | `w0`: type 3, len 4 | type 3 |
 | 1 | checksum | transid1 |
 | 2 | transid1 | transid2 |
 | 3 | transid2 | — |
@@ -367,15 +370,10 @@ persisted (invariant K).
 - Today ABORT is written when a prepared operation aborts
   (`17095-17125`, queued variant `896-904`) [V]. That ABORT needs no
   persistence: no COMMIT exists for the operation.
-- Rule F writes an ABORT after the operation's COMMIT, sets
-  `AF_AFTER_COMMIT`, and persists it before the lock is released.
-- Why the flag: with `IgnoreError`, one operation of T can abort in the
-  prepare phase (normal ABORT carrying T's transid) while other operations of
-  T commit. Without the flag, phase 2 step B would send "T aborted" for that
-  record and veto the fallback (plan §5.2, §5.5). The flag makes steps A and B
-  act only on rule-F aborts [I].
-- The plan's "operation identity" is not included. Phase 2 needs only the
-  transid. Open question 3 discusses adding the COMMIT record's position.
+- No ABORT follows a COMMIT (rule F is dropped), so phase 2 ignores
+  ABORTs. With `IgnoreError` one operation of T can abort in the prepare
+  phase while other operations of T commit; its ABORT carries T's transid
+  and must not count against T, which ignoring ABORTs ensures.
 
 ### 5.5 COMPLETED_GCI (type 8), 4 words
 
@@ -436,7 +434,7 @@ framing.
 | `writeKey`, `writeAttrinfoLab` | `14262-14308` | Unchanged copy; then pad, hash the body in the log pages one piece per page, mix with `w0` and `S`, store `w1` |
 | `checkNewMbyte` | `14188-14214` | Pad and optional transid in the size |
 | `writeCommitLog` | `43566-43621` | 12 words; then (durable) close the unit and persist; two-step reservation (§7.3) |
-| `writeAbortLog` | `43542-43559` | 4 words; with rule F, flag, close and persist |
+| `writeAbortLog` | `43542-43559` | 4 words |
 | `writeCompletedGciLog` | `43631-43662` | 4 words |
 | `writeNextLog` | `43801-44003` | 2-word NEXT_MBYTE with checksum; barrier before the next mbyte's header |
 | `writeFileHeaderOpen` | `36073-36161` | FD with checksum; FILLER to page end |
@@ -519,8 +517,7 @@ is written twice (P1).
 | COMMIT, durable | Immediately (C) | Yes |
 | COMMIT, non-durable | At GCP save | Only at GCP save |
 | COMPLETE | Immediately (K) | Yes |
-| ABORT, rule F | Immediately | Yes |
-| ABORT, normal | No | No |
+| ABORT | No | No |
 | COMPLETED_GCI | At GCP save | Yes |
 | NEXT_MBYTE | At the mbyte switch | It is the closer |
 
@@ -534,7 +531,7 @@ tail-problem limit `free_mb ≤ 4 + committed_mb` (`43975-43979`) [V].
 New reservation, with `F = W/4 - 2` (largest filler in words):
 
 ```
-R = (12 + F) + (4 + F) + 2      COMMIT + filler, COMPLETE or rule-F ABORT + filler, NEXT_MBYTE slack
+R = (12 + F) + (4 + F) + 2      COMMIT + filler, COMPLETE + filler, NEXT_MBYTE slack
 ```
 
 | W | F | R (words) | Today |
@@ -545,9 +542,7 @@ R = (12 + F) + (4 + F) + 2      COMMIT + filler, COMPLETE or rule-F ABORT + fill
 | non-durable (no filler at COMMIT) | 0 | 14 | 10 |
 
 Release in two steps: `12 + F` at `writeCommitLog`, the rest at
-`writeCompleteLog` or the rule-F `writeAbortLog`. A normal ABORT releases
-all of R. COMPLETE and rule-F ABORT are never both written for one operation
-(plan §3.1, F) [I].
+`writeCompleteLog`. An ABORT releases all of R.
 
 Example: 1 million operations in flight at W = 256 reserve about 540 MB per
 part. With the default 16 GB per part this only moves the tail-problem limit.
@@ -669,12 +664,11 @@ Changes:
    Stop the page walk at the first invalid record and print it as "end of
    valid log", with the reason.
 4. **Types:** 12-word COMMIT with unpacked prepare reference, transid, gci_lo,
-   opCount and the INVALIDATED flag; COMPLETE; ABORT with
-   `AF_AFTER_COMMIT`; COMPLETED_GCI; NEXT_MBYTE; FILLER (print only with
+   opCount and the INVALIDATED flag; COMPLETE; ABORT; COMPLETED_GCI; NEXT_MBYTE; FILLER (print only with
    `--dump`); FD with the new offsets; SR_HEAD.
 5. **New options:** `--transid=T1,T2` to print only one transaction's records;
-   `--in-doubt` to list transids with a COMMIT and no COMPLETE or rule-F ABORT
-   after a given position. This helps debug SR phase 2.
+   `--in-doubt` to list transids with a COMMIT and no COMPLETE after a given
+   position. This helps debug SR phase 2.
 6. **I/O:** a DAX file is an ordinary file, so `pread` works. The PMEM format
    is not encrypted (§12, point 6), so the reader skips `ndbxfrm`
    (`reader.cpp:209-223`) for it.
@@ -784,18 +778,15 @@ Read after this document was written. To settle when the drafts are merged.
    (`research_pmem_hardware.md`).
 2. **Phase-4 zeroing on PMEM.** Keep it (lap-only ordering), or rely on
    restartGen and the `(lap, restartGen)` drop (§4.4)? Recovery decides.
-3. **Rule-F ABORT content.** Add the COMMIT record's position (+2 words) so
-   that step C can invalidate it without keeping the queue, and so that
-   `redoLogReader` can pair them?
+3. **Rule-F ABORT content.** Moot: rule F is dropped.
 4. **GCI in COMPLETE.** Adding gci_hi (4 → 6 words with pad) would let phase 2
    check that a COMPLETE in the tail has a GCI ≥ g. Free at W ≥ 64 when
    persisted alone, a cost when batched. Not proposed for now.
 5. **Transid in PREPARE** (`PF_TRANSID`). It would let recovery check that a
    back-reference points to the right transaction. Off in iteration 1; turn
    on in debug builds?
-6. **A COMMIT after a rule-F ABORT of the same T in one part.** The format
-   treats it as a protocol violation. P3 must confirm that takeover can never
-   produce it.
+6. **A COMMIT after a rule-F ABORT of the same T in one part.** Moot: rule
+   F is dropped.
 7. **16-bit length.** Enough for 23130-word PREPAREs and 8160-word FDs. A
    future row-size increase beyond about 65000 words would need a wider field.
 8. **The last-file word.** Drop it (recommended) or keep it as a mutable word
@@ -815,7 +806,7 @@ Read after this document was written. To settle when the drafts are merged.
 5. Close the current unit at every barrier with a FILLER, or with NEXT_MBYTE
    in the last unit of an mbyte; reserve `R = 18 + 2F` words per operation and
    release it in two steps (§7).
-6. COMMIT = 12 words, COMPLETE = 4, ABORT = 4 with `AF_AFTER_COMMIT`,
+6. COMMIT = 12 words, COMPLETE = 4, ABORT = 4,
    COMPLETED_GCI = 4, NEXT_MBYTE = 2; INVALID_COMMIT becomes a flag set by one
    4-byte store (§5).
 7. Drop the rewrite of page 0 of file 0 on PMEM.

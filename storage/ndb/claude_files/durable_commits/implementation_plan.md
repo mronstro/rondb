@@ -30,7 +30,7 @@ and not calibrated against past RonDB work.
 | X1 | Takeover ack after COMPLETE (3 places in DBTC). Independent; also fixes READ_BACKUP read-your-writes after takeover today | 4 pd | `impl_next_steps.md` §2 |
 | **X2** | **Step 1: the REDO log on PMEM at today's durability** (S1–S7) | **116–122 pd** | §2 below and the three `impl_step1_*` files |
 | X3 | Test harness: acknowledged-commit ledger, crash of all nodes, power-loss runs, TLA+ model | 15 pd | `impl_next_steps.md` §3 |
-| X4 | Commit path: durable flag, opCount, barriers C and K, primary commit at COMPLETE, late ack, rule F, API node-id hold-back | 50 pd | §4 |
+| X4 | Commit path: durable flag, opCount, barriers C and K, primary commit at COMPLETE, late ack, API node-id hold-back (rule F dropped) | 50 pd | §4 |
 | X5 | Restart: one scan with the hash table, exchange between log parts, verdicts with count fallback, SR_HEAD, raise to G' | 50 pd | §5 |
 | X6 | Node failures: node-failure file, stale nodes, at least one non-stale node per node group, partial SR | 17 pd | §6 |
 | X7 | Online activation at GCI g, armed after the save of g−1, deactivation by SR, ndbinfo, version gate | 17 pd | §7 |
@@ -64,7 +64,7 @@ one person counts only this chain.)
 | M0.4 | S7 | Power-loss emulation is part of the tests run before every push of PMEM code (§2.4): no loss at or below R_gcp |
 | M1 | X1 | READ_BACKUP read-your-writes after TC takeover |
 | M2 | X3 | The ledger measures the loss above R_gcp after a full crash (expected until M4) |
-| M3 | X4 | Durable protocol on: rows visible only after COMPLETE is persistent, ack after the last COMPLETED, rule-F aborts; commit latency measured |
+| M3 | X4 | Durable protocol on: rows visible only after COMPLETE is persistent, ack after the last COMPLETED; commit latency measured |
 | M4 | X5 | **Zero ledger losses after a full crash or power loss with all nodes starting**; repeatable SR |
 | M5 | X6 | Zero losses with node failures in the tail GCI and partial SR; a clear refusal when a node group has only stale nodes |
 | M6 | X7 | `DurableCommits` activated on a running cluster; armed state in ndbinfo |
@@ -211,7 +211,7 @@ Detail and `file:line` references are in `impl_next_steps.md`.
 |---|---|---|
 | X1 | Move TCKEY_FAILCONF after COMPLETE in the three takeover paths | READ_BACKUP read-your-writes after takeover |
 | X3 | Ledger of acknowledged commits (extends `testRestartGci`); crash of all nodes; power-loss runs with step 1's emulation; TLA+ model of C/K/L/A/F and the restart, checked before X5.4 | Loss above R_gcp measured |
-| X4 | Durable flag set at DIVERIFYCONF (GCI ≥ g); opCount in TC and takeover; `redoPersistOp` at the E8 points; primary's local commit moved to COMPLETE; `writeCompleteLog`; TF_LATE_COMMIT forced; rule F in TC, takeover and LQH (abort from the committed state, ABORT with `AF_AFTER_COMMIT`); API node-id hold-back in QMGR | M3 |
+| X4 | Durable flag set at DIVERIFYCONF (GCI ≥ g); opCount in TC and takeover; `redoPersistOp` at the E8 points; primary's local commit moved to COMPLETE; `writeCompleteLog`; TF_LATE_COMMIT forced; API node-id hold-back in QMGR (rule F, built in X4 part 4, dropped 2026-11-24 after the TLA+ model) | M3 |
 | X5 | One scan with the per-part hash table; step B exchange; step C verdicts with the count fallback; flag invalidation; SR_HEAD; raising the restorable GCI to G' in sysfile, DIH, LQH, Backup, NDBCNTR and the replica intervals | M4 |
 | X6 | Node-failure file written by QMGR before PREP_FAILCONF; records sent with CNTR_START_REQ; stale nodes in `m_withLogNotRestorable`; unsafe shutdown → stale; at least one non-stale node per node group | M5 |
 | X7 | `DurableCommits` config; activation GCI g through GCP_PREPARE/GCP_COMMIT; sysfile field; armed after the save of g−1; deactivation by SR; version gate; ndbinfo `durable_commits` | M6 |
@@ -224,7 +224,7 @@ for other data-node-only signals):
 | Signal | Route | Purpose |
 |---|---|---|
 | `SR_TAIL_INDOUBT_REP` | DBLQH worker → DBLQH proxy → proxies of the SR nodes → workers | Step B: in-doubt sets (transid, count, gci_hi), batched |
-| `SR_TAIL_HIT_REP` | same | Step B: "T complete" or "T aborted" |
+| `SR_TAIL_HIT_REP` | same | Step B: "T complete" |
 | `SR_TAIL_DONE_REP` | same | Step B: done, with the part's highest executed GCI so all parts agree on G' |
 | `DURABLE_ACTIVATE_REQ/CONF/REF` | CMVMI → DIH → master DIH | Activation |
 
@@ -238,13 +238,13 @@ the ones marked * need your decision, see §5):
 
 | # | Issue | Proposal |
 |---|---|---|
-| DI-1* | A dirty write's COMPLETE record would give a false "T complete" in step B, and its GCI comes from LQH, not TC | Flag such records (`CPF_SELF`), or turn dirty writes into normal writes in durable mode; pick phase-2 records by `CF_DURABLE`. **Decided (Q-B1):** flag them (X4 part 5a) |
+| DI-1* | A dirty write's COMPLETE record would give a false "T complete" in step B, and its GCI comes from LQH, not TC | Flag such records (`CPF_SELF`), or turn dirty writes into normal writes in durable mode; pick phase-2 records by `CF_DURABLE`. **Decided (Q-B1):** flag them (X4 part 5a). Dirty writes are best effort (2026-11-24): the TLA+ model shows one can end on one replica only after a crash between the replicas, which is accepted |
 | DI-2 | Step B's rescan starts before the tail, so a COMPLETE from before the tail with a reused transid could give a false hit or a false "corrupt log" crash | Count a COMPLETE only after a tail COMMIT of the same transaction in the same part; drop the step-A crash check |
 | DI-3 | The exchange grows with the square of the number of log parts | Aggregate per node in the DBLQH proxy; the verdicts do not change |
 | DI-4 | All parts need the same G' for SR_HEAD | DONE carries each part's highest GCI; in-doubt entries carry gci_hi |
 | DI-5* | API node-id hold-back: GCIs can differ by one between data nodes | Hold back until the save of f+1. **Decided (Q-B8)** (X4 part 5a) |
-| DI-6 | A rule-F abort after `commitGciHandling` must unlink the operation from its GcpRecord, or the GCP stops | In X4.10 |
-| DI-7* | A COMPLETE from the failed TC may be executed after the takeover's LQH_TRANSREQ scan, so "was any COMPLETE sent?" can be answered wrongly | Check in code and in the TLA+ model; marker bit or opCount. **Taken (Q-B9):** opCount; LQH drops such a COMPLETE (X4 part 4b) |
+| DI-6 | A rule-F abort after `commitGciHandling` must unlink the operation from its GcpRecord, or the GCP stops | Moot: rule F dropped (2026-11-24) |
+| DI-7* | A COMPLETE from the failed TC may be executed after the takeover's LQH_TRANSREQ scan, so "was any COMPLETE sent?" can be answered wrongly | Check in code and in the TLA+ model; marker bit or opCount. **Taken (Q-B9):** opCount; LQH drops such a COMPLETE (X4 part 4b). Moot: rule F dropped (2026-11-24), the drop with it |
 | DI-8 | D4 with all nodes present hits `ndbrequire(!allNodes)` (`NdbcntrMain.cpp:2780`) | A clear `progError` instead |
 | DI-9* | Read locks under invariant L | Decide whether shared locks are released at COMMIT or at COMPLETE. **Decided (Q-B2):** at COMPLETE (X4 part 6) |
 
@@ -261,7 +261,7 @@ the ones marked * need your decision, see §5):
 | Files | REDO files stay `D<8+p>/DBLQH/S<n>.FragLog`, under the REDO path of the part's NUMA node |
 | ndbinfo | `redo_log_pmem` (step 1); `durable_commits`, `durable_commit_stats`, `node_failure_records` (later steps) |
 | Error inserts | DBLQH 5155–5172 (step 1), 5180–5199 (later); DBTC 8320–8339; DBDIH 7260–7279; QMGR 990–998; NDBCNTR 1040–1049 |
-| DUMP | 2368–2370 (step 1); TC 2561, rule F on or off until X5 (X4) |
+| DUMP | 2368–2370 (step 1) |
 | Platforms | Linux x86_64, Linux ARM64, macOS ARM64 (Q-A5); not macOS x86_64 |
 | Tests | Unit tests with `NDB_ADD_TEST` and `TAPTEST`; MTR with `--defaults-extra-file=suite/ndb/pmem_redo.cnf` (`nodax`) or `pmem_redo_dax.cnf` (`memmap=`, `MTR_NDB_PMEM_DIR`); autotest lists `pmem-redo-tests.txt` and `pmem-redo-long-tests.txt` with about 50 existing restart cases in PMEM mode; no CI, the pusher runs them (§2.4) |
 
@@ -291,13 +291,13 @@ the ones marked * need your decision, see §5):
 |---|---|---|
 | Q-B1 | Dirty writes in durable mode (DI-1): flag their records, or turn them into normal writes? | **Answered (2026-11-21):** flag them. LQH writes PREPARE, COMMIT (`CF_DURABLE`, opCount 0) and COMPLETE with `CPF_SELF` behind one barrier; phase 2 treats `CPF_SELF` apart (DI-1) |
 | Q-B2 | Read locks (DI-9): released at COMMIT or at COMPLETE? | **Answered (2026-11-21):** at COMPLETE, like write locks |
-| Q-B3 | Error code for a rule-F abort | **Answered (2026-11-21):** a new temporary error, retryable |
+| Q-B3 | Error code for a rule-F abort | **Answered (2026-11-21):** a new temporary error, retryable. Moot: rule F dropped (2026-11-24) |
 | Q-B4 | Should TCKEY_FAILCONF carry the GCI? | **Taken (2026-11-21):** no change |
 | Q-B5 | Forced start to R_gcp when a node group has only stale nodes? | No forced start in the first version |
 | Q-B6 | `SET DurableCommits=0` on a running cluster: accepted as pending until the next SR, or refused? | Accepted as pending |
 | Q-B7 | Block activation while a node restart runs? | Yes |
 | Q-B8 | API node-id hold-back until the save of f or of f+1 (DI-5)? | **Answered (2026-11-21):** f+1 |
-| Q-B9 | Takeover: decide "any COMPLETE sent?" by opCount or by a marker bit (DI-7)? | **Taken (2026-11-21):** opCount in X4.9, checked again with the TLA+ model (X3.4) |
+| Q-B9 | Takeover: decide "any COMPLETE sent?" by opCount or by a marker bit (DI-7)? | **Taken (2026-11-21):** opCount in X4.9. Moot: rule F dropped (2026-11-24) |
 | Q-B10 | Path of the node-failure file | Under the REDO path of NUMA node 0 |
 | Q-B11 | Memory for the step-A hash table, and what happens when it runs out | Sized from the transaction-record count; out of memory stops the SR with a clear message |
 | Q-B12 | Force durable transactions onto the parallel commit path? | **Taken (2026-11-21):** no; measure first |

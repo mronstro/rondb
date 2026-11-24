@@ -8,20 +8,13 @@
 #  - DurableCrashCommit: its durable COMMIT persistent, before COMMITTED
 #    or COMMIT to the next replica (5180); the transaction commits on the
 #    replica left.
-#  - DurableCrashCommitRuleF: the same with rule F (DUMP 2561 1); the
-#    transaction is aborted after the commit decision (268).
 #  - DurableCrashComplete: its COMPLETE persistent, before the local
-#    commit (5181); the transaction commits, also with rule F.
+#    commit (5181); the transaction commits.
 #  - DurableCrashLocalCommit: after the local commit at COMPLETE, before
-#    COMPLETE goes on (5182); the transaction commits, also with rule F.
-# DurableCrashAbortAfterCommit (5184) needs two node groups: autotest.
+#    COMPLETE goes on (5182); the transaction commits.
 
 let NDBAPITEST_NAME=testNodeRestart;
 let NDBAPITEST_ARGS=-n DurableCrashCommit --records=1000 T1;
---source suite/ndb/include/run_ndbapitest.inc
-
-let NDBAPITEST_NAME=testNodeRestart;
-let NDBAPITEST_ARGS=-n DurableCrashCommitRuleF --records=1000 T1;
 --source suite/ndb/include/run_ndbapitest.inc
 
 let NDBAPITEST_NAME=testNodeRestart;

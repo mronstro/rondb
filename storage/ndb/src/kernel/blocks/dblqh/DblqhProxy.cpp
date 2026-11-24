@@ -1976,7 +1976,6 @@ void DblqhProxy::sendLQH_TRANSCONF(Signal *signal, Uint32 ssId) {
     conf->operationStatus = LqhTransConf::LastTransConf;
     conf->maxInstanceId = ss.m_maxInstanceId;
     conf->durableOpCount = 0;
-    conf->prevNodeId = 0;
     sendSignal(ss.m_req.senderRef, GSN_LQH_TRANSCONF,
                signal, LqhTransConf::SignalLength, JBB);
   }

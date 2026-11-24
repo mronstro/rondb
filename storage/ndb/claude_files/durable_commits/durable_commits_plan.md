@@ -1,6 +1,7 @@
 # RONDB-1150 — Durable commits across a cluster restart: master plan
 
-Status: **Revision 13, 2026-11-13. Decisions D0–D8 are settled (§11). The
+Status: **Revision 14, 2026-11-24 (rule F dropped). Decisions D0–D8 are
+settled (§11). The
 first implementation step, the REDO log on persistent memory, is designed in
 `pmem_redo_design.md` (planning subtask P2 done) and implemented; progress on
 it is in `step1_phases.md`. The implementation plan for all phases is
@@ -98,6 +99,16 @@ All paths are relative to `storage/ndb/`.
   rule of §3.1 now names the count rule, which step C applies with every
   node starting too, not only in a partial SR. The API node-id hold-back
   waits for the GCI after the failure (DI-5).
+- **Revision 14** (X3.4, the TLA+ model in `tla/`). Invariant F, rule F, is
+  dropped. The model found that a takeover's rule-F abort can abort a
+  transaction already visible on the failed node, and that a TC failing
+  during a rule-F abort leaves a takeover that completes the transaction
+  on the rows the abort had not reached: acknowledged and applied to half
+  its rows, at run time. Without rule F the model keeps G1-G3 with one
+  and two node failures and partial restarts, as the node-failure file
+  keeps a failed replica's COMMITs out of the count rule (§5.4). No ABORT
+  follows a COMMIT now: step A ignores ABORTs, step B reports only "T
+  complete", and step C has no veto.
 
 ---
 
@@ -253,10 +264,14 @@ The full design is `pmem_redo_design.md`. In short:
 | **K** | A replica persists a COMPLETE record before it makes the operation visible (TUP real commit, ACC_COMMITREQ) and before it forwards COMPLETE or sends COMPLETED. One COMPLETE record per operation (D7) | New `writeCompleteLog` in `execCOMPLETE`/`execCOMPLETEREQ` (`DblqhMain.cpp:15004-15017, 15120-15140`), before `localCommitLab` |
 | **L** | No replica makes an operation visible, or releases its lock, before its COMPLETE record is persistent. The primary's local commit moves from COMMIT (`commitReqLab`, `15267`; twin at `921-927`) to COMPLETE (a seq-0 branch in `execCOMPLETE`, which today calls only `completeTransLastLab`, `15010-15013`) | `tupcommit_conf` (`15552-15615`) needs an operation flag to pick commit-reply or complete-last |
 | **A** | The API ack (TCKEYCONF/TC_COMMITCONF, and TCKEY_FAILCONF after takeover) is sent only after the **last** COMPLETED (D6) | TF_LATE_COMMIT forced on in durable mode (`DbtcMain.cpp:5616-5627`, `9302-9307`). The takeover ack moves to `check_finished_complete_handling` (`15886-15915`) |
-| **F** | If a participating node fails before TC has sent any COMPLETE for T, T is aborted (review 3, answer to D3). A replica that already persisted its COMMIT record for T persists an ABORT record carrying the transid before it drops the buffered commit and releases the lock | TC node-failure handling and takeover (P3). LQH needs an abort path from the committed state. The takeover TC must be able to tell whether any COMPLETE was sent, although LQH releases its operation record after COMPLETE |
 
-TC sends COMPLETE only after every COMMITTED (or COMMITCONF). With C, K, L,
-A and F:
+Rule F, the abort of T when a participating node failed before any
+COMPLETE was sent (review 3's answer to D3), was dropped in revision 14: a
+failure in the commit phase commits T on the replicas left, as without
+durable commits, and the failed node is stale (§5.4).
+
+TC sends COMPLETE only after every COMMITTED (or COMMITCONF). With C, K, L
+and A:
 
 - **COMPLETE ⇒ every COMMIT is executable.** If any replica has a COMPLETE
   record for T, every live replica of every T operation has a persistent
@@ -267,8 +282,8 @@ A and F:
 
 **Survival rule:** T survives if a COMPLETE record for T is found in some
 starting REDO log part, or if the count rule of §5.5 finds a COMMIT record
-of each of T's operations on every starting replica and no ABORT from rule
-F. Otherwise it is aborted. Step C applies the count rule whether all nodes
+of each of T's operations on every starting replica. Otherwise it is
+aborted. Step C applies the count rule whether all nodes
 start or not; with all nodes starting it commits a T whose COMMITs are all
 persistent and which has no COMPLETE, which nobody saw. §5.6 shows that
 this applies every transaction whole.
@@ -324,10 +339,10 @@ accordingly, and so does the number of lock waiters that fit within
   rows visible only at COMPLETE, so a client could read its own row and get
   the old value.
 
-### 3.4 Paths to check against C, K, L, A and F (subtask P3)
+### 3.4 Paths to check against C, K, L and A (subtask P3)
 
 - linear and parallel commit/complete;
-- takeover COMMITREQ/COMPLETEREQ, and the abort decision of F;
+- takeover COMMITREQ/COMPLETEREQ;
 - dirty writes, which commit at prepare time and need a COMPLETE record
   written along with their COMMIT;
 - `AC_NR_COPY`, which commits at COMMIT during node restart;
@@ -349,7 +364,7 @@ accordingly, and so does the number of lock waiters that fit within
 | g | The GCI at which durable commits were activated (§2.2) |
 | tail | REDO records of a log part with GCI > R_gcp. Normally only the last GCI; it also holds the GCI before it if the crash came while that GCI's GCP save was still running. Epochs (gci_lo) matter only for global replication and play no part here |
 | log part | A REDO log part on a starting node; the unit that scans, exchanges and executes in phase 2 |
-| in-doubt (in a log part) | A transid with COMMIT records in that part's tail and no COMPLETE or ABORT record for it there |
+| in-doubt (in a log part) | A transid with COMMIT records in that part's tail and no COMPLETE record for it there |
 | G' | The highest GCI applied in phase 2; the new restorable GCI |
 
 ---
@@ -391,7 +406,7 @@ each row's order.
 | COMMIT | Append a reference to the record to the FIFO queue of its transid in the part's hash table (create the entry if needed) |
 | COMPLETE, entry has COMMITs | Execute the queued COMMITs in FIFO order through their backward references, as today's replay does, using the record's GCI64. Remove the entry |
 | COMPLETE, no entry | Ignore: a later operation's COMPLETE of a transaction already executed, or a transaction with GCI ≤ R_gcp |
-| ABORT flagged `AF_AFTER_COMMIT` (F) | Remove the entry; its COMMIT records are invalidated in step C. An unflagged ABORT (a prepared operation aborted, for example with `IgnoreError`) is ignored |
+| ABORT | Ignore: written only for an operation aborted before the commit decision, which has no COMMIT (a prepared operation aborted, for example with `IgnoreError`) |
 
 - No COMMIT of T can follow a COMPLETE of T in the same log part, because
   COMPLETE is sent only after every COMMITTED. A violation is a crash
@@ -408,13 +423,12 @@ each row's order.
    the fallback in §5.5). The COMMIT records themselves stay local: they
    are executed or invalidated by the verdict.
 2. A part that has received the in-doubt sets of all parts scans its tail
-   again, looking only at COMPLETE and ABORT records. For one whose transid
-   is in the received sets:
+   again, looking only at COMPLETE records. For one whose transid is in the
+   received sets:
    - a COMPLETE whose transid is in the part's own in-doubt set means a
      corrupt log (step A would have executed it): crash;
-   - otherwise send "T complete" (or "T aborted" for an ABORT flagged
-     `AF_AFTER_COMMIT`) to each part that listed T, and remove T from the
-     received set.
+   - otherwise send "T complete" to each part that listed T, and remove T
+     from the received set.
 3. The part then sends "done" to every part. Signal order between two block
    instances is kept, so all of a part's "T complete" messages arrive
    before its "done". The done message also carries the part's highest
@@ -432,7 +446,7 @@ For each transaction still in the part's in-doubt set:
 | Condition | Verdict |
 |---|---|
 | "T complete" received | Commit: execute the queued COMMITs in FIFO order |
-| Otherwise, fallback (§5.5): the counts received for T pass the node-group rule, and no "T aborted" was received | Commit, as above |
+| Otherwise, fallback (§5.5): the counts received for T pass the node-group rule | Commit, as above |
 | Otherwise | Abort: mark T's COMMIT records invalidated in place, one atomic flag store each (`pmem_redo_design.md` E9) |
 
 - Every part computes the verdict from the same exchanged data, so all parts
@@ -472,8 +486,10 @@ the second scan, but the table holds every transaction of the tail.
 ### 5.4 A node failure in the tail GCI (D3)
 
 Review 4 agreed: a node failure in the tail GCI creates a problem that does
-not exist without this feature. Rule F covers transactions in flight at the
-failure; this is about transactions that **start after** it.
+not exist without this feature. A transaction in flight at the failure
+commits on the replicas left, and the failed node's records of it do not
+count, as the node is stale (step 4 below); this is about transactions
+that **start after** it.
 
 1. Node X fails. NODE_FAILREP removes X from the in-memory distribution;
    DIH starts writing the table files that mark X's replicas as crashed
@@ -551,8 +567,8 @@ failure; this is about transactions that **start after** it.
   after every COMMITTED.
 - A transaction with every COMMIT but no COMPLETE may correctly go either
   way: the commit was decided and nobody saw it.
-- A "T aborted" from step B (rule F) vetoes the fallback, so it never
-  revives a transaction that was aborted at run time.
+- No transaction is aborted at run time after its commit decision, so
+  the fallback cannot revive one.
 
 **A node group with only stale nodes starting (D4).**
 
@@ -588,8 +604,8 @@ gathers why phase 2 still applies T whole or not at all.
    T, or none applies any. A node outside the SR gets T's rows by copy at
    its node restart.
 2. **The right side.** T is applied if any of its rows was visible or the
-   API was told it committed; not applied if rule F aborted it and anyone
-   could have learned that.
+   API was told it committed; not applied if the API was told it
+   aborted.
 3. **The same answer every time.** A crash during the SR, and every later
    SR, give the same verdict.
 
@@ -600,13 +616,12 @@ gathers why phase 2 still applies T whole or not at all.
 | PREPARE | — | Nothing by itself; read only through a COMMIT's back-reference (C5) |
 | COMMIT (transid, GCI, opCount) | COMMITTED is sent or COMMIT passed on (C) | TC decided to commit; this replica can apply the operation. A node's count is the number of T's operations in its node group it can apply |
 | COMPLETE (transid) | the row is visible, the lock released, COMPLETED sent (K, L) | Every live replica of every operation had persisted its COMMIT |
-| ABORT `AF_AFTER_COMMIT` (transid) | the lock is released and ABORTCONF sent (F) | T was aborted at run time after its commit decision |
 
 Three facts carry the argument: a COMPLETE anywhere means a persistent
 COMMIT on every live replica of every operation (TC sends COMPLETE only
 after every COMMITTED); seen or acknowledged means a COMPLETE exists (L,
-A); a COMPLETE and a rule-F ABORT exclude each other (F applies only if no
-COMPLETE was sent).
+A); no transaction is aborted after its commit decision, so a told abort
+leaves no COMMIT on a replica that is not stale.
 
 **Where the crash can cut T:**
 
@@ -616,27 +631,25 @@ COMPLETE was sent).
 | COMMIT phase | COMMITs on some replicas; no COMPLETE anywhere | No | Abort (counts differ or fall short); commit if every starting replica already has its COMMIT, also correct |
 | After the last COMMITTED, before any COMPLETE is persistent | A COMMIT on every replica, no COMPLETE | No | Commit by the count rule; abort would also be correct |
 | After the first COMPLETE is persistent | A COMMIT on every live replica; a COMPLETE, perhaps only on a node outside the SR | Possibly | Commit: "T complete", else the count rule, which always passes now |
-| After rule F | COMMITs, ABORTs on the replicas that persisted one; no COMPLETE; the failed node is stale | The abort, only once every live replica persisted its ABORT | Abort: "T aborted" vetoes the count rule. With no ABORT among the starting parts nobody can have learned of the abort, and the count rule may commit T, also correct |
 
 Where nobody saw T either verdict is correct, provided every part reaches
 the same one.
 
 **One verdict everywhere.** Step B gives every part the same inputs: U, the
-union of the in-doubt sets with each node's count, and the hits ("T
-complete", "T aborted"). The SR node set and node groups come with
-START_RECREQ and opCount from T's COMMIT records. The verdict is a function
-of these alone: commit on "T complete"; else commit if no "T aborted", every
-starting node of each node group counts the same (none = 0), and the node
-group counts add up to opCount; else abort.
+union of the in-doubt sets with each node's count, and the "T complete"
+hits. The SR node set and node groups come with START_RECREQ and opCount
+from T's COMMIT records. The verdict is a function of these alone: commit
+on "T complete"; else commit if every starting node of each node group
+counts the same (none = 0), and the node group counts add up to opCount;
+else abort.
 - The inputs are complete before anyone decides: numbered batches with
   totals checked at DONE; signal order per pair of block instances; each
   proxy forwards in arrival order and sends DONE after all its workers'
   DONEs; a node failure stops the SR as today (X5.4).
 - A part that applied T in step A found its COMPLETE, does not list T, and
-  reports "T complete" from its rescan, so every other part commits T; a
-  COMPLETE rules out a rule-F ABORT.
-- The rescan counts a COMPLETE or ABORT of T only after a durable tail
-  COMMIT of T in the same part (DI-2), so an old record of a reused transid
+  reports "T complete" from its rescan, so every other part commits T.
+- The rescan counts a COMPLETE of T only after a durable tail COMMIT of T
+  in the same part (DI-2), so an old record of a reused transid
   cannot report.
 
 **Applying or wiping T.** Commit: each part executes its own queued COMMITs
@@ -703,8 +716,8 @@ transactions is needed, and the cost is linear.
 2. **Locks are held to the COMPLETE record.** A fragment's REDO is one log
    part. On each replica a writer holds the row's X-lock from PREPARE until
    after its COMPLETE record for that operation is persistent (K, L), or
-   until its ABORT record (F). The next writer's PREPARE, COMMIT and
-   COMPLETE come after it gets the lock.
+   until it aborts, which it can only before its COMMIT. The next
+   writer's PREPARE, COMMIT and COMPLETE come after it gets the lock.
 3. **GCI monotonicity.** If T2 read or overwrote T1's write, GCI(T2) ≥
    GCI(T1) (`research_micro_gcp.md` §3.3; commits are blocked between
    GCP_PREPARE and GCP_COMMIT, `DbdihMain.cpp:18687, 18812`).
@@ -720,9 +733,8 @@ Take T1 before T2 on row r, on replica X.
    there, which is no later than COMPLETE(r). T2 is executed at its own
    first COMPLETE, after its COMMIT(r), or in step C, which is after the
    scan. Either way T1 runs first.
-3. If T1 has no COMPLETE or ABORT in X's part, T1 still held its lock on r
-   at the crash (fact 2), so no T2 follows it on r in X's log. If T1 has an
-   ABORT record, it is aborted and never executed.
+3. If T1 has no COMPLETE in X's part, T1 still held its lock on r at the
+   crash (fact 2), so no T2 follows it on r in X's log.
 4. By fact 3, a row's GCI ≤ R_gcp writes all come before its tail writes,
    so phase 1 followed by phase 2 keeps the order.
 5. By fact 1, a row's final state depends only on the sequence of surviving
@@ -764,7 +776,7 @@ whole-page checksum and no fill index on PMEM.
 | PREPARE | 8 + key + attrinfo, even | As today; the length moves into word 0, the checksum takes its slot | Reached only through the COMMIT back-reference |
 | COMMIT | 12 | tableId, schemaVersion, fragId, the PREPARE reference packed into 2 words, gci_hi, **gci_lo**, **transid**, **opCount**. Flags: durable, invalidated | Phase 2 queue; exact row GCI64 (replay sets `gci_lo = 0` today); partial-SR fallback |
 | **COMPLETE** (new) | 4 | transid. One per operation (D7) | Executes T's queued COMMITs |
-| ABORT | 4 | transid. Flag `AF_AFTER_COMMIT` when written after a COMMIT (F) | Removes T from the phase-2 queue; only flagged ABORTs veto the fallback |
+| ABORT | 4 | transid | As today; phase 2 ignores it (no ABORT follows a COMMIT) |
 | COMPLETED_GCI | 4 | gci | As today |
 | NEXT_MBYTE | 2 | — | As today, now with a checksum |
 | **FILLER** (new) | 2 + n | — | Pads to the next 64-byte boundary at every persist point |
@@ -795,8 +807,8 @@ words) takes 192 bytes per replica instead of 116 today; a 100-word update
 - LCP and the LCP-restore bound.
 - The API and SQL semantics. The only visible effect is ack timing for
   tables without READ_BACKUP.
-- **Changed:** the primary's local commit and lock release (§3.2), the ack
-  point (A), and abort after COMMIT on node failure (F).
+- **Changed:** the primary's local commit and lock release (§3.2) and the
+  ack point (A).
 
 ---
 
@@ -812,12 +824,10 @@ words) takes 192 bytes per replica instead of 116 today; a 100-word update
    paths.
 3. **Longer lock hold on the primary.** One more round. Measure hot-row
    throughput and deadlock-timeout aborts (P6).
-4. **Rule F.** Abort from the committed state is new in LQH, and the
-   takeover TC must know whether any COMPLETE was sent.
-5. **opCount on every path.** It must be right for trigger-generated
+4. **opCount on every path.** It must be right for trigger-generated
    operations, IgnoreError aborts and takeover. It matters only for the
    partial-SR fallback.
-6. **Transid uniqueness.** Phase 2 assumes a transid occurs once in a tail.
+5. **Transid uniqueness.** Phase 2 assumes a transid occurs once in a tail.
    The API's transid counter is per process and starts again at 0 when the
    API process restarts (`ndb_cluster_connection.cpp:815`; prefix in
    `Ndbif.cpp:268-280`), so a restarted API can reuse transids. Fix
@@ -826,25 +836,25 @@ words) takes 192 bytes per replica instead of 116 today; a 100-word update
    transactions then have GCI ≤ R_gcp at any later SR and never share a
    tail with the new ones. Enforce it in QMGR's API_REGREQ handling, which
    already holds an API back until its failure handling is done (P3).
-7. **Activation boundary.** Phase 2 must apply only to GCI ≥ g, and only
+6. **Activation boundary.** Phase 2 must apply only to GCI ≥ g, and only
    when R_gcp ≥ g − 1 (§2.2).
-8. **Testing.** Emulated PMEM (`memmap=`) for functional tests; power-loss
+7. **Testing.** Emulated PMEM (`memmap=`) for functional tests; power-loss
    emulation for barrier bugs. Tests on `memmap=` never catch a missing
    barrier.
-9. **Fence cost at high rates.** On CXL 2.0 persistent memory a hot LDM at
+8. **Fence cost at high rates.** On CXL 2.0 persistent memory a hot LDM at
    200k write operations per second would spend 8–80 % of its time in
    `sfence`. The adaptive scheme (`pmem_redo_design.md` §4), one fence per
    log part per scheduler round with the dependent signals held back until
    it is done, is the expected second iteration.
-10. **Device health.** An unsafe shutdown reported by the device's
+9. **Device health.** An unsafe shutdown reported by the device's
     dirty-shutdown count makes the node stale (§5.4); reading a bad block
     through the mapping kills the process. Both are checked at start, and
     the meaning of the dirty-shutdown flag must be verified per device.
-11. **Hardware supply.** Optane is gone; CXL persistent memory is new and
+10. **Hardware supply.** Optane is gone; CXL persistent memory is new and
     needs flushes. No cloud offering exists. Functional tests of the CXL
     path can use QEMU's emulated CXL Type 3 device with a persistent backend;
     performance needs real modules.
-12. **REDO encryption** works on 32 KB units and cannot be combined with
+11. **REDO encryption** works on 32 KB units and cannot be combined with
     line-level persistence; refused in iteration 1.
 
 ---
@@ -869,7 +879,7 @@ What each design document covers:
   the persist primitive and barrier placement; the shared log-part mutex;
   space reservations; end of log and invalidation at restart;
   `redoLogReader` for the new format. See `pmem_redo_design.md`.
-- **P3:** invariants C, K, L, A and F on every path in §3.4; moving the
+- **P3:** invariants C, K, L and A on every path in §3.4; moving the
   primary's local commit; `writeCompleteLog`; opCount, including takeover;
   the forced late ack and the takeover-ack move; holding back a failed API
   node id; the node-failure file write in QMGR.
@@ -894,7 +904,7 @@ What each design document covers:
 | X1 | Takeover-ack fix (TCKEY_FAILCONF after COMPLETE). Independent; it also fixes READ_BACKUP read-your-writes after takeover today |
 | X2 | **First step: the REDO log on PMEM**, in steps S1–S7 of `pmem_redo_design.md` §3: portlib XXH3 checksum and PMEM helpers; config and start checks; NDBFS mapping; record writers; write path; recovery; power-loss testing. Ends with the REDO on PMEM at today's (GCP-based) durability |
 | X3 | Test harness: ledger, crash of all nodes, power-loss emulation (losses beyond R_gcp expected until X5) |
-| X4 | Commit path: barriers, primary local commit at COMPLETE, forced late ack, rule F, opCount, API node-id hold-back |
+| X4 | Commit path: barriers, primary local commit at COMPLETE, forced late ack, opCount, API node-id hold-back |
 | X5 | SR phases 1–3. From here the ledger must show zero losses with all nodes starting |
 | X6 | Node-failure file and stale nodes; partial SR fallback; the D4 start check |
 | X7 | Online activation at a GCI; deactivation by cluster restart; ndbinfo |

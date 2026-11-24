@@ -177,9 +177,6 @@ static const ErrStruct errArray[] = {
     /* LQH */
     {NDBD_EXIT_LCP_SCAN_WATCHDOG_FAIL, XIE,
      "LCP fragment scan watchdog detected a problem.  Please report a bug."},
-    {NDBD_EXIT_ABORT_AFTER_COMMIT_DURING_NR, XRE,
-     "Node failure aborted a durable transaction that this starting node had "
-     "committed during its copy phase, the node restart starts again"},
 
     /* QMGR */
     {NDBD_EXIT_API_FAIL_HANDLING_TIMEOUT, XIE,

@@ -402,6 +402,7 @@ footer code { background: none; padding: 0; }
   <p class="eyebrow">RONDB-1150 · Plan, revision 13 · 13 November 2026</p>
   <h1>Durable commits across a cluster restart</h1>
   <p class="lede">Today a cluster restart brings the database back to the last GCI saved by the global checkpoint, so commits acknowledged in the last GCP interval can be lost. This plan makes every acknowledged commit survive a crash of all data nodes, power loss included, by putting the REDO log on persistent memory and logging one more record per operation.</p>
+  <p class="lede"><strong>Revision 14, 24 November 2026: rule F is dropped.</strong> The TLA+ model showed that aborting a transaction after its commit decision, when a node fails, can abort a transaction already visible, or leave one applied to half its rows; without it the guarantees hold. A node failure in the commit phase now commits on the replicas left, and phase 2 has no "T aborted". The parts of this page that show rule F are from revision 13; <code>durable_commits_plan.md</code> is current.</p>
   <div class="chips">
     <span class="chip ok">Research done</span>
     <span class="chip ok">All decisions settled</span>

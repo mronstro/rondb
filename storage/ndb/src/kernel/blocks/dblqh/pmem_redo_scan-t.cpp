@@ -326,7 +326,6 @@ class TestLog {
       } else if (pick < 75) {
         type = TYPE_ABORT;
         len = ABORT_LEN;
-        if (m_rng.chance(30)) flags = AF_AFTER_COMMIT;
       } else if (pick < 85) {
         type = TYPE_COMPLETE;
         len = COMPLETE_LEN;
@@ -1139,7 +1138,7 @@ bool orphans(TestLog &log, bool zeroing) {
   log.append(TYPE_COMPLETE, 0, body.data(), COMPLETE_LEN);
   log.append(TYPE_PREPARE, 0, body.data(), prepareLen(2, 30, false));
   log.append(TYPE_COMMIT, CF_DURABLE, body.data(), COMMIT_LEN);
-  log.append(TYPE_ABORT, AF_AFTER_COMMIT, body.data(), ABORT_LEN);
+  log.append(TYPE_ABORT, 0, body.data(), ABORT_LEN);
   log.append(TYPE_COMPLETED_GCI, 0, body.data(), COMPLETED_GCI_LEN);
   log.crash(CRASH_FULL, rng);
   memset(log.at(hole), 0, 4 * COMMIT_LEN);
