@@ -182,6 +182,37 @@ coding X5.
 
 **Order:** X3.1, X3.2, X3.3; X3.4 in parallel with X4.
 
+**X3.4 state (2026-11-23): written, to be run** (`tla/`, README.md there).
+`DurableCommits.tla` holds the commit path as X4 built it (linear and
+parallel, C, K, L, A, rule F in TC and in the takeover with
+`takeOverCompleteSent()`, X4.9's drop of a late COMPLETE, dirty writes with
+`CPF_SELF`, the node-failure file) and phase 2 as X5 plans it (step A,
+step B with the DI-2 rule, step C with the count rule, stale nodes, partial
+restarts). Every invariant runs phase 2 on the logs of the state, as a
+crash of every node would leave them, and checks G1, G2, G3, the row order
+of plan §6, the next restart, a rerun after a crash in step C, and that
+no ndbrequire of DBLQH fails. Twelve configurations of 2 node groups × 2
+replicas and 2 transactions; `run_tlc.sh` runs them all. Expected from
+traces worked out by hand, to be confirmed by TLC:
+- no error with rule F off (X4 as committed), also with partial restarts
+  and two node failures, and with rule F on for every invariant but one;
+- rule F in the takeover aborts a transaction that was visible on the node
+  that failed with its TC (the TC on the backup, which gets the linear
+  COMPLETE first): relevant before X5 turns rule F on;
+- with two node failures the takeover completes a transaction whose rule-F
+  abort had begun, as an operation freed by an abort looks like one freed
+  at COMPLETE: a COMPLETE and an ABORT of one transaction, applied to half
+  its rows;
+- a dirty write with `CPF_SELF` ends on the primary only after a crash
+  between the replicas (DI-1, Q-B1's other variant avoids it);
+- a COMMIT that runs after LQH_TRANSREQ makes the takeover's plain abort
+  hit an ndbrequire (as upstream; with one failure only if a signal of
+  the failed node can run after LQH_TRANSREQ, with two always);
+- without X4.9's drop of a late COMPLETE, or without the DI-2 rule, the
+  model finds the violations those rules prevent.
+The model counts an invalidated COMMIT as a tail COMMIT for the DI-2 rule,
+so a rerun keeps its "T aborted" hits; X5.4 should do the same.
+
 **State (2026-11-21): re-scoped after step 1, extended, to be tested.**
 Step 1 built most of this harness, as the GCP-saved ledger of
 `testRestartGci` (`step1_phases.md`, the side track and phase 11c), so
@@ -206,7 +237,7 @@ X3 extends it instead of a new `testDurableCommits.cpp`:
   dependency, the commits on a row keeping their GCI order; W3 (hot row),
   for X8; the BLOB variant, as Hugo writes BLOBs but cannot check them
   read back.
-- Left: X3.4 (TLA+), with X4 as planned; the protocol-point crashes of
+- Left: X3.4 (TLA+), written, see above; the protocol-point crashes of
   X3.2 (c) and a durable-commits test list come with the inserts and the
   setting of X4 and X5.
 
@@ -501,6 +532,10 @@ GCP_SAVEREQ flag; interim: the start-time config).
 
 **Order inside X4:** X4.1 → X4.2 → X4.3 → X4.5 → X4.4 → X4.6 → X4.7 →
 X4.10 → X4.8 → X4.9 → X4.11 → X4.13; X4.12 and X4.14 alongside.
+
+**State (2026-11-24): tested.** The X4 test run passed once the two
+faults it found were fixed (the notes after part 6). The "to be tested"
+of each part below is history.
 
 **State (2026-11-23).** X4 comes in six parts, each a commit tested
 before the next: (1) X4.1-X4.3; (2) X4.5 and X4.4; (3) X4.6 and X4.7;

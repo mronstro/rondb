@@ -1,0 +1,3 @@
+# TLC itself and the trace modules it writes beside the spec on a violation
+tla2tools.jar
+*_TTrace_*
