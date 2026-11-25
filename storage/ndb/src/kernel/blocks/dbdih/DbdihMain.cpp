@@ -6320,18 +6320,25 @@ void Dbdih::setNodeRecoveryStatus(Uint32 nodeId,
     nodePtr.p->is_pausable = false;
   }
 
-  const bool track_failure_at_restart_barrier =
-      getNodeState().getNodeRecovered() &&
-      (new_status == NodeRecord::NODE_FAILED ||
-       new_status == NodeRecord::NODE_FAILURE_COMPLETED);
   if (getNodeState().startLevel < NodeState::SL_STARTED &&
-      !track_failure_at_restart_barrier) {
+      !getNodeState().getNodeRecovered()) {
     jam();
     /**
      * Ignore state transitions until we are started ourselves. A node
-     * parked at the restart barrier is fully recovered and participates
-     * in normal node-failure handling, so it must record both halves of
-     * that handling even though it is still SL_STARTING.
+     * parked at the restart barrier is fully recovered: it participates
+     * in normal node-failure handling and can become master while it is
+     * still SL_STARTING, so from then on it records every transition,
+     * as a started node does.
+     *
+     * Recording only the node failure is not enough. As master it then
+     * ignored ALLOCATED_NODE_ID, INCLUDED_IN_HB_PROTOCOL and
+     * NDBCNTR_START_WAIT of the failed node's next start, completed its
+     * own start, and met NDBCNTR_STARTED with the node still in
+     * NODE_FAILURE_COMPLETED, which the ndbrequire there refuses.
+     *
+     * Nodes whose restart was under way when we recovered are in
+     * NODE_NOT_RESTARTED_YET and are handled below as for a node that
+     * has just started.
      */
     return;
   }
