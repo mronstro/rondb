@@ -770,7 +770,7 @@ class Qmgr : public SimulatedBlock {
   void timerHandlingLab(Signal *signal);
   void hbReceivedLab(Signal *signal);
   void sendCmRegrefLab(Signal *signal, BlockReference ref, CmRegRef::ErrorCode,
-                       Uint32 remote_node_version);
+                       Uint32 remote_node_version, Uint32 staleGci = 0);
   void systemErrorBecauseOtherNodeFailed(Signal *signal, Uint32 line, NodeId);
   [[noreturn]] void systemErrorLab(Signal *signal, Uint32 line,
                                    const char *message = NULL);
@@ -963,6 +963,26 @@ class Qmgr : public SimulatedBlock {
   bool c_keep_alive_send_in_progress;
   /* RONDB-1150, DUMP 2371: stop at the first report of a node failure */
   bool c_stop_on_node_failure;
+  /**
+   * RONDB-1150, X6.1: the node-failure file (NodeFailFile.hpp), mapped
+   * in start phase 3 when durable commits are on; nullptr otherwise. The
+   * failures of nodes are stored there before PREP_FAILCONF. c_nodeFailSeq
+   * is the highest seq of a record in it.
+   */
+  Uint8 *c_nodeFailBase;
+  Uint64 c_nodeFailSeq;
+  void openNodeFailFile();
+  void recordNodeFailures(const NdbNodeBitmask &nodes, Uint32 failNo);
+  /**
+   * RONDB-1150, X6.3: the GCI of the latest failure of each node that
+   * this node's file recorded, read before the election of a president,
+   * which no stale node may win: one whose failure was recorded after the
+   * GCI it runs with
+   */
+  Uint32 c_nodeFailRecGci[ABS_MAX_NDB_NODES];
+  bool nodeFailStale(Uint32 nodeId, Uint32 gci) const {
+    return gci != ZUNDEFINED_GCI_LIMIT && c_nodeFailRecGci[nodeId] > gci;
+  }
   Uint32 c_keepalive_seqnum;
 
   Timer interface_check_timer;

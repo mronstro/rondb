@@ -45,6 +45,17 @@ class CntrStartReq {
  public:
   static constexpr Uint32 OldSignalLength = 3;
   static constexpr Uint32 SignalLength = 4;
+  /**
+   * RONDB-1150, X6.2: section 0 in a system restart, when the node keeps
+   * a node-failure file: a flags word, then the latest recorded failure
+   * of each node, NF_WORDS words each: the failed node, the GCI current
+   * at its failure, the failure number.
+   */
+  static constexpr Uint32 NF_FLAGS = 0;
+  static constexpr Uint32 NF_RECORDS = 1;
+  static constexpr Uint32 NF_WORDS = 3;
+  static constexpr Uint32 NF_MAX_WORDS =
+      NF_RECORDS + NF_WORDS * ABS_MAX_NDB_NODES;
 
  private:
   Uint32 nodeId;

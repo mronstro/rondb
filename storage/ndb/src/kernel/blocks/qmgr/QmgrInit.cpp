@@ -167,6 +167,9 @@ void Qmgr::initData() {
   ctoStatus = Q_NOT_ACTIVE;
   c_keep_alive_send_in_progress = false;
   c_stop_on_node_failure = false;
+  c_nodeFailBase = nullptr;
+  c_nodeFailSeq = 0;
+  std::memset(c_nodeFailRecGci, 0, sizeof(c_nodeFailRecGci));
 
   for (nodePtr.i = 1; nodePtr.i < MAX_NODES; nodePtr.i++) {
     ptrAss(nodePtr, nodeRec);

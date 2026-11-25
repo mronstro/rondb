@@ -3041,6 +3041,16 @@ public:
     return Uint32(m_micro_gcp.m_current_gci >> 32);
   }
   Uint32 newestRestorableGci() const { return c_newest_restorable_gci; }
+  /**
+   * RONDB-1150 (X6.1): the GCI of a node failure for the node-failure
+   * file of QMGR: the current gci_hi, or the one a pending GCP_PREPARE
+   * brings, as a transaction may commit in it without the failed node.
+   */
+  Uint32 nodeFailGciHi() const {
+    const Uint64 current = m_micro_gcp.m_current_gci;
+    const Uint64 pending = m_micro_gcp.m_new_gci;
+    return Uint32((pending > current ? pending : current) >> 32);
+  }
 
   NdbNodeBitmask c_shutdownReqNodes;
   void print_lcp_state();

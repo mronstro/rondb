@@ -1274,6 +1274,54 @@ reason.
 SR allowed again in durable mode; stale nodes rejoin by node restart with
 identical replicas.
 
+**State (2026-11-25): X6.1-X6.4 written, to be built and tested.**
+- X6.1: `qmgr/NodeFailFile.hpp`, a 20 KB file `nodefail.dat` beside REDO
+  path 0 (`GlobalData::theNodeFailFileDir`, set by NDBFS), a header line
+  and two 64-byte slots per node id with an XXH3 checksum, the slot after
+  the latest written. QMGR maps it in start phase 3 when durable commits
+  are on (`openNodeFailFile()`), after NDBCNTR cleared the file system of
+  an initial start, so a new cluster starts with none; a node that cannot
+  map it does not start (D8). Before PREP_FAILCONF, `recordNodeFailures()`
+  stores "node X failed in GCI g" for each failed node, g the current or
+  the pending gci_hi (`Dbdih::nodeFailGciHi()`), one fence. Error inserts
+  990 (stop after it) and 991 (skip it).
+- Decided while coding: QMGR maps the file itself, with `ndb_pmem_map()`
+  and NDBFS's map flags, not through FSOPENREQ: its OM_INIT wants the
+  pages built by the opening block, too much for one small file that only
+  needs to exist and be mapped before the node commits anything.
+- X6.2: NDBCNTR reads the latest records with `pread()` in a system
+  restart (`readNodeFailRecords()`) and sends them as section 0 of
+  CNTR_START_REQ (`CntrStartReq::NF_*`); the master keeps the highest GCI
+  of each node's failure and the node that recorded it.
+- X6.3: in `update_withLog()`, after the GCI rule, a node whose failure
+  was recorded in a GCI after R is stale: it goes to
+  `m_withLogNotRestorable` and joins by a node restart after the system
+  restart, logged with its witness. Phase 2 and its fallback then run
+  without it.
+- First run (2026-11-25): the record was written ("node 1 failed in GCI
+  59") and sent, but node 1, the stale node, was the president, elected
+  by sysfile GCI with the tie to the lower node id, so the system restart
+  had its master left out and DIH stopped on
+  `ndbrequire(checkNodeAlive(cmasterNodeId))`. Decided: the election
+  learns staleness. QMGR reads the GCIs of its records when DIH has read
+  the sysfile (`NodeFailFile::readFailGcis()`, `c_nodeFailRecGci`); it
+  never takes a node as president candidate whose failure it recorded
+  after the GCI the node runs with (`nodeFailStale()`), in CM_REGREQ and in
+  the candidate of a CM_REGREF; its ZELECTION refusal carries that GCI in
+  word 7 (`CmRegRef::SignalLength_stale`, with the node bitmask in a
+  section; older nodes ignore the word). The stale node then runs with an
+  undefined GCI, as a node not restorable on its own, and drops itself as
+  candidate; a node whose candidate comes back with a lower GCI stands
+  again itself. The president is a node that restores, and NDBCNTR makes
+  the stale node join by a node restart as before.
+- X6.4: a node group with no node that can restore it, with every node
+  present, stops the restart with a message naming the stale nodes, in
+  place of `ndbrequire(!allNodes)` (DI-8). With one node group a stale
+  node whose only witness does not start cannot be found (plan §5.5).
+- Tests: `GciLedgerDurablePowerLoss` now crashes with DUMP 2371 in its
+  even loops and lets the nodes stop one by one at random drains in its
+  odd ones, D3. The rest of X6.8 is not written.
+
 ### X6.1 The node-failure file (M, 5 pd)
 
 - **Owner:** QMGR. **Location:** under the first `FileSystemPathRedoLog`

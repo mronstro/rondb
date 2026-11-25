@@ -113,6 +113,14 @@ class Ndbcntr : public SimulatedBlock {
     Uint32 m_logNodesCount;
 
     Uint32 m_wait_sp[ABS_MAX_NDB_NODES];
+    /**
+     * RONDB-1150, X6.2-X6.3: the highest GCI of a recorded failure of
+     * each node over the node-failure files of the starting nodes, the
+     * node that recorded it, and the nodes found stale
+     */
+    Uint32 m_nodeFailGci[ABS_MAX_NDB_NODES];
+    Uint32 m_nodeFailWitness[ABS_MAX_NDB_NODES];
+    NdbNodeBitmask m_stale;
   } c_start;
 
   struct LocalSysfile {
@@ -394,6 +402,8 @@ class Ndbcntr : public SimulatedBlock {
   void sendReadLocalSysfile(Signal *signal);
   void sendWriteLocalSysfile_initial(Signal *signal);
   void update_withLog();
+  Uint32 readNodeFailRecords(Uint32 *words);
+  void noteNodeFailRecords(Uint32 witness, const Uint32 *words, Uint32 len);
 
   void alloc_local_bat();
 

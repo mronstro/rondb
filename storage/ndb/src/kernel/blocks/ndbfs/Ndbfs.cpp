@@ -512,6 +512,9 @@ void Ndbfs::read_redo_pmem_config(const ndb_mgm_configuration_iterator *p,
           globalData.theRedoPmemPath[FsOpenReq::REDO_PATH_FS];
     }
   }
+  /* RONDB-1150, X6.1: the node-failure file lives beside REDO path 0 */
+  globalData.theNodeFailFileDir = m_base_path[get_redo_base_path(0)].c_str();
+  globalData.theNodeFailMapFlags = m_pmem_map_flags;
 }
 
 /**

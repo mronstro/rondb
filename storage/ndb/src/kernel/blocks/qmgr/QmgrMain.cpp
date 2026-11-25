@@ -82,6 +82,13 @@
 
 #include <EventLogger.hpp>
 #include "../dbdih/Dbdih.hpp"
+#include "NodeFailFile.hpp"
+#include <portlib/NdbDir.hpp>
+#include <portlib/ndb_pmem.h>
+#include <algorithm>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 extern EventLogger * g_eventLogger;
 extern NodeBitmask g_not_active_nodes;
@@ -736,6 +743,11 @@ void Qmgr::execSTTOR(Signal *signal) {
       return;
     case 3:
       jam();
+      /**
+       * RONDB-1150, X6.1: after NDBCNTR cleared the file system of an
+       * initial start, before this node takes part in commits
+       */
+      openNodeFailFile();
       break;
     case 7:
       jam();
@@ -877,6 +889,9 @@ void Qmgr::execDIH_RESTARTCONF(Signal *signal) {
   const DihRestartConf *conf =
       CAST_CONSTPTR(DihRestartConf, signal->getDataPtr());
   c_start.m_latest_gci = conf->latest_gci;
+  /* RONDB-1150, X6.3: the failures this node recorded, for the election */
+  NodeFailFile::readFailGcis(globalData.theNodeFailFileDir, getOwnNodeId(),
+                             c_nodeFailRecGci);
   sendReadLocalSysfile(signal);
 }
 
@@ -1496,6 +1511,18 @@ void Qmgr::execCM_REGREQ(Signal *signal) {
     gci = cmRegReq->latest_gci;
     start_type = cmRegReq->start_type;
   }
+  if (cpresident == ZNIL && addNodePtr.i == c_start.m_president_candidate &&
+      addNodePtr.i != getOwnNodeId() &&
+      gci < c_start.m_president_candidate_gci) {
+    /**
+     * RONDB-1150, X6.3: our candidate runs with a lower GCI than it did,
+     * as a node told it that it is stale; we stand again ourselves
+     */
+    jam();
+    c_start.m_president_candidate = getOwnNodeId();
+    c_start.m_president_candidate_gci =
+        c_start.m_latest_gci == ZUNDEFINED_GCI_LIMIT ? 0 : c_start.m_latest_gci;
+  }
 
   if (creadyDistCom == ZFALSE) {
     jam();
@@ -1568,7 +1595,7 @@ void Qmgr::execCM_REGREQ(Signal *signal) {
        * candidate.
        */
       jam();
-      if (gci != ZUNDEFINED_GCI_LIMIT &&
+      if (gci != ZUNDEFINED_GCI_LIMIT && !nodeFailStale(addNodePtr.i, gci) &&
           (gci > c_start.m_president_candidate_gci ||
            (gci == c_start.m_president_candidate_gci &&
             addNodePtr.i < c_start.m_president_candidate))) {
@@ -1578,7 +1605,10 @@ void Qmgr::execCM_REGREQ(Signal *signal) {
         DEB_STARTUP(("President candidate: %u, gci: %u", addNodePtr.i, gci));
       }
       DEB_STARTUP(("Election error to %x", Tblockref));
-      sendCmRegrefLab(signal, Tblockref, CmRegRef::ZELECTION, startingVersion);
+      sendCmRegrefLab(signal, Tblockref, CmRegRef::ZELECTION, startingVersion,
+                      nodeFailStale(addNodePtr.i, gci)
+                          ? c_nodeFailRecGci[addNodePtr.i]
+                          : 0);
       return;
     }
 
@@ -1780,7 +1810,7 @@ void Qmgr::execCM_REGREQ(Signal *signal) {
 
 void Qmgr::sendCmRegrefLab(Signal *signal, BlockReference TBRef,
                            CmRegRef::ErrorCode Terror,
-                           Uint32 remote_node_version) {
+                           Uint32 remote_node_version, Uint32 staleGci) {
   const Uint32 remoteNodeVersion = remote_node_version;
 
   CmRegRef *ref = (CmRegRef *)signal->getDataPtrSend();
@@ -1803,9 +1833,11 @@ void Qmgr::sendCmRegrefLab(Signal *signal, BlockReference TBRef,
                                 &signal->theData[CmRegRef::SignalLength_v1]);
     lsptr[0].p = &signal->theData[CmRegRef::SignalLength_v1];
     lsptr[0].sz = packed_nodebitmask_length;
+    /* RONDB-1150, X6.3: whether the receiver is stale, per our records */
+    signal->theData[CmRegRef::RECEIVER_STALE_GCI] = staleGci;
 
-    sendSignal(TBRef, GSN_CM_REGREF, signal, CmRegRef::SignalLength, JBB, lsptr,
-               1);
+    sendSignal(TBRef, GSN_CM_REGREF, signal, CmRegRef::SignalLength_stale,
+               JBB, lsptr, 1);
   } else if (packed_nodebitmask_length <= NdbNodeBitmask48::Size) {
     jam();
     c_start.m_skip_nodes.copyto(NdbNodeBitmask48::Size, ref->skip_nodes_v1);
@@ -2176,6 +2208,32 @@ void Qmgr::execCM_REGREF(Signal *signal) {
   candidate_gci = ref->candidate_latest_gci;
   start_type = ref->start_type;
 
+  /* RONDB-1150, X6.3: the sender recorded our failure after our GCI */
+  const Uint32 staleGci =
+      (signal->getNoOfSections() >= 1 &&
+       signal->getLength() >= CmRegRef::SignalLength_stale)
+          ? signal->theData[CmRegRef::RECEIVER_STALE_GCI]
+          : 0;
+  if (staleGci != 0 && TrefuseReason == CmRegRef::ZELECTION &&
+      c_start.m_latest_gci != ZUNDEFINED_GCI_LIMIT) {
+    /**
+     * We are stale (plan §5.4): the cluster committed without us after
+     * the last GCP save. We may not be president of the system restart;
+     * we run as a node not restorable on its own does, and the president
+     * makes us join by a node restart after it (NDBCNTR, X6.3).
+     */
+    jam();
+    g_eventLogger->info(
+        "QMGR: node %u recorded the failure of this node in GCI %u, after "
+        "its GCI %u; this node is stale and does not run for president",
+        TaddNodeno, staleGci, c_start.m_latest_gci);
+    c_start.m_latest_gci = ZUNDEFINED_GCI_LIMIT;
+    if (c_start.m_president_candidate == getOwnNodeId()) {
+      jam();
+      c_start.m_president_candidate_gci = 0;
+    }
+  }
+
   // check if node bitmask is in signal section
   if (signal->getNoOfSections() >= 1) {
     jam();
@@ -2277,6 +2335,7 @@ void Qmgr::execCM_REGREF(Signal *signal) {
     case CmRegRef::ZELECTION:
       jam();
       if (candidate_gci != ZUNDEFINED_GCI_LIMIT &&
+          !nodeFailStale(candidate, candidate_gci) &&
           (candidate_gci > c_start.m_president_candidate_gci ||
            (candidate_gci == c_start.m_president_candidate_gci &&
             candidate < c_start.m_president_candidate))) {
@@ -7698,6 +7757,11 @@ void Qmgr::execCLOSE_COMCONF(Signal *signal) {
      */
     jam();
     ccommitFailedNodes = cprepFailedNodes;
+    /**
+     * RONDB-1150, X6.1: the failures persistent before the president can
+     * commit them, so before any transaction commits without the nodes
+     */
+    recordNodeFailures(cprepFailedNodes, TfailureNr);
 
     signal->theData[0] = getOwnNodeId();
     signal->theData[1] = TfailureNr;
@@ -7705,6 +7769,105 @@ void Qmgr::execCLOSE_COMCONF(Signal *signal) {
   }  // if
   return;
 }  // Qmgr::execCLOSE_COMCONF()
+
+/**
+ * RONDB-1150, X6.1 (plan §5.4): the node-failure file beside REDO path 0,
+ * mapped as the REDO log is, only with durable commits. A file that is
+ * missing, of another size, or with a header of another node starts empty;
+ * an initial start has removed it with the rest of the file system. The
+ * node cannot run durable commits without it (D8).
+ */
+void Qmgr::openNodeFailFile() {
+  const Dbdih *dih = (const Dbdih *)globalData.getBlock(DBDIH, instance());
+  if (!dih->durableCommitsOn()) return;
+  const char *dir = globalData.theNodeFailFileDir;
+  ndbrequire(dir != nullptr && c_nodeFailBase == nullptr);
+  BaseString path;
+  path.assfmt("%s%s", dir, NodeFailFile::FILE_NAME);
+  char msg[300];
+  NdbDir::create(dir, NdbDir::u_rwx() | NdbDir::g_r() | NdbDir::g_x(), true);
+  const int fd = ::open(path.c_str(), O_RDWR | O_CREAT, 0600);
+  struct stat st;
+  int err = 0;
+  if (fd < 0 || fstat(fd, &st) != 0) {
+    err = errno;
+  } else if (st.st_size != NodeFailFile::FILE_BYTES &&
+             (ftruncate(fd, 0) != 0 ||
+              ftruncate(fd, NodeFailFile::FILE_BYTES) != 0)) {
+    err = errno;
+  }
+  ndb_pmem_mapping map;
+  if (err == 0) {
+    err = ndb_pmem_map(fd, NodeFailFile::FILE_BYTES,
+                       globalData.theNodeFailMapFlags, &map);
+  }
+  if (fd >= 0) ::close(fd);
+  if (err != 0) {
+    BaseString::snprintf(msg, sizeof(msg),
+                         "Durable commits need the node-failure file %s, "
+                         "which cannot be mapped: %s",
+                         path.c_str(), strerror(err));
+    progError(__LINE__, NDBD_EXIT_INVALID_CONFIG, msg);
+  }
+  c_nodeFailBase = static_cast<Uint8 *>(map.addr);
+  Uint32 line[NodeFailFile::LINE_WORDS];
+  Uint32 records = 0;
+  c_nodeFailSeq = 0;
+  const Uint32 *const header = reinterpret_cast<const Uint32 *>(c_nodeFailBase);
+  if (NodeFailFile::headerValid(header, getOwnNodeId())) {
+    for (Uint32 nodeId = 1; nodeId < ABS_MAX_NDB_NODES; nodeId++) {
+      NodeFailFile::Record r;
+      Uint32 slot;
+      if (NodeFailFile::latest(c_nodeFailBase, nodeId, &r, &slot)) {
+        records++;
+        c_nodeFailSeq = std::max(c_nodeFailSeq, r.seq);
+      }
+    }
+  } else {
+    ndb_pmem_zero(c_nodeFailBase, NodeFailFile::FILE_BYTES);
+    NodeFailFile::buildHeader(line, getOwnNodeId());
+    ndb_pmem_copy_nt(c_nodeFailBase, line, NodeFailFile::LINE_BYTES);
+    ndb_pmem_drain();
+  }
+  g_eventLogger->info(
+      "QMGR: node-failure file %s mapped%s, %u records of failed nodes",
+      path.c_str(), map.map_sync ? " with MAP_SYNC" : "", records);
+}
+
+/**
+ * RONDB-1150, X6.1: "node X failed while GCI g was current" for each node
+ * of the failure, in the slot after its latest record, one fence for all.
+ * Error insert 991 skips it (a test that must see the divergence of D3),
+ * 990 stops the node after it, before PREP_FAILCONF.
+ */
+void Qmgr::recordNodeFailures(const NdbNodeBitmask &nodes, Uint32 failNo) {
+  if (c_nodeFailBase == nullptr) return;
+  if (ERROR_INSERTED(991)) {
+    g_eventLogger->info("QMGR: error insert 991, node failures not recorded");
+    return;
+  }
+  const Dbdih *dih = (const Dbdih *)globalData.getBlock(DBDIH, instance());
+  const Uint32 gciHi = dih->nodeFailGciHi();
+  Uint32 line[NodeFailFile::LINE_WORDS];
+  for (Uint32 nodeId = nodes.find_first(); nodeId != NdbNodeBitmask::NotFound;
+       nodeId = nodes.find_next(nodeId + 1)) {
+    NodeFailFile::Record r;
+    Uint32 slot;
+    NodeFailFile::latest(c_nodeFailBase, nodeId, &r, &slot);
+    r.nodeId = nodeId;
+    r.gciHi = gciHi;
+    r.failNo = failNo;
+    r.seq = ++c_nodeFailSeq;
+    NodeFailFile::buildSlot(line, slot, r);
+    ndb_pmem_copy_nt(c_nodeFailBase + NodeFailFile::slotOffset(nodeId, slot),
+                     line, NodeFailFile::LINE_BYTES);
+    g_eventLogger->info(
+        "QMGR: node-failure file: node %u failed in GCI %u (failure %u)",
+        nodeId, gciHi, failNo);
+  }
+  ndb_pmem_drain();
+  CRASH_INSERTION(990);
+}
 
 /*---------------------------------------------------------------------------*/
 /* WE HAVE RECEIVED A CONFIRM OF THAT THIS NODE HAVE PREPARED THE FAILURE.   */

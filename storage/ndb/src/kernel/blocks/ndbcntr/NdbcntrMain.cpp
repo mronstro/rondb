@@ -26,6 +26,10 @@
 
 #define NDBCNTR_C
 #include "Ndbcntr.hpp"
+#include "../qmgr/NodeFailFile.hpp"
+#include <fcntl.h>
+#include <unistd.h>
+#include <memory>
 
 #include <ndb_limits.h>
 #include <ndb_version.h>
@@ -2169,13 +2173,77 @@ void Ndbcntr::sendCntrStartReq(Signal *signal) {
     m_max_completed_gci = c_start.m_lastGci;
   }
 
+  /**
+   * RONDB-1150, X6.2: in a system restart, the failures of nodes that
+   * this node recorded, for the master to find stale nodes (X6.3)
+   */
+  Uint32 nf[CntrStartReq::NF_MAX_WORDS];
+  const Uint32 nfLen =
+      ctypeOfStart == NodeState::ST_SYSTEM_RESTART ? readNodeFailRecords(nf)
+                                                   : 0;
   CntrStartReq *req = (CntrStartReq *)signal->getDataPtrSend();
   req->startType = ctypeOfStart;
   req->lastGci = c_start.m_lastGci;
   req->nodeId = getOwnNodeId();
   req->lastLcpId = c_start.m_lastLcpId;
+  LinearSectionPtr lsptr[3];
+  lsptr[0].p = nf;
+  lsptr[0].sz = nfLen;
   sendSignal(calcNdbCntrBlockRef(cmasterNodeId), GSN_CNTR_START_REQ, signal,
-             CntrStartReq::SignalLength, JBB);
+             CntrStartReq::SignalLength, JBB, lsptr, nfLen > 0 ? 1 : 0);
+}
+
+/**
+ * RONDB-1150, X6.2: the latest recorded failure of each node in this
+ * node's node-failure file (NodeFailFile.hpp), read before QMGR maps it,
+ * as section 0 of CNTR_START_REQ; 0 words without a valid file.
+ */
+Uint32 Ndbcntr::readNodeFailRecords(Uint32 *words) {
+  const char *dir = globalData.theNodeFailFileDir;
+  if (dir == nullptr) return 0;
+  BaseString path;
+  path.assfmt("%s%s", dir, NodeFailFile::FILE_NAME);
+  const int fd = ::open(path.c_str(), O_RDONLY);
+  if (fd < 0) return 0;
+  std::unique_ptr<Uint8[]> file(new Uint8[NodeFailFile::FILE_BYTES]);
+  const ssize_t n = ::pread(fd, file.get(), NodeFailFile::FILE_BYTES, 0);
+  ::close(fd);
+  if (n != ssize_t(NodeFailFile::FILE_BYTES) ||
+      !NodeFailFile::headerValid(reinterpret_cast<const Uint32 *>(file.get()),
+                                 getOwnNodeId())) {
+    return 0;
+  }
+  Uint32 len = CntrStartReq::NF_RECORDS;
+  words[CntrStartReq::NF_FLAGS] = 0;
+  for (Uint32 nodeId = 1; nodeId < ABS_MAX_NDB_NODES; nodeId++) {
+    NodeFailFile::Record r;
+    Uint32 slot;
+    if (!NodeFailFile::latest(file.get(), nodeId, &r, &slot)) continue;
+    words[len++] = r.nodeId;
+    words[len++] = r.gciHi;
+    words[len++] = r.failNo;
+    g_eventLogger->info(
+        "NDBCNTR: node-failure file: node %u failed in GCI %u (failure %u)",
+        r.nodeId, r.gciHi, r.failNo);
+  }
+  return len;
+}
+
+/* RONDB-1150, X6.2: the master keeps the highest GCI of each failure */
+void Ndbcntr::noteNodeFailRecords(Uint32 witness, const Uint32 *words,
+                                  Uint32 len) {
+  ndbrequire(len >= CntrStartReq::NF_RECORDS &&
+             (len - CntrStartReq::NF_RECORDS) % CntrStartReq::NF_WORDS == 0);
+  for (Uint32 i = CntrStartReq::NF_RECORDS; i < len;
+       i += CntrStartReq::NF_WORDS) {
+    const Uint32 nodeId = words[i];
+    const Uint32 gciHi = words[i + 1];
+    ndbrequire(nodeId > 0 && nodeId < ABS_MAX_NDB_NODES);
+    if (gciHi > c_start.m_nodeFailGci[nodeId]) {
+      c_start.m_nodeFailGci[nodeId] = gciHi;
+      c_start.m_nodeFailWitness[nodeId] = witness;
+    }
+  }
 }
 
 void Ndbcntr::execCNTR_START_REF(Signal *signal) {
@@ -2210,6 +2278,9 @@ void Ndbcntr::StartRecord::reset() {
 
   m_logNodesCount = 0;
   std::memset(m_wait_sp, 0, sizeof(m_wait_sp));
+  std::memset(m_nodeFailGci, 0, sizeof(m_nodeFailGci));
+  std::memset(m_nodeFailWitness, 0, sizeof(m_nodeFailWitness));
+  m_stale.clear();
 }
 
 void Ndbcntr::execCNTR_START_CONF(Signal *signal) {
@@ -2397,9 +2468,24 @@ void Ndbcntr::execCNTR_START_REQ(Signal *signal) {
   if (cmasterNodeId == 0) {
     jam();
     // Has not completed READNODES yet
+    SectionHandle handle(this, signal);
     sendSignalWithDelay(reference(), GSN_CNTR_START_REQ, signal, 100,
-                        signal->getLength());
+                        signal->getLength(), &handle);
     return;
+  }
+
+  /* RONDB-1150, X6.2: the node-failure records of the starting node */
+  Uint32 nf[CntrStartReq::NF_MAX_WORDS];
+  Uint32 nfLen = 0;
+  if (signal->getNoOfSections() > 0) {
+    jam();
+    SectionHandle handle(this, signal);
+    SegmentedSectionPtr ptr;
+    ndbrequire(handle.getSection(ptr, 0) &&
+               ptr.sz <= CntrStartReq::NF_MAX_WORDS);
+    copy(nf, ptr);
+    nfLen = ptr.sz;
+    releaseSections(handle);
   }
 
   if (cmasterNodeId != getOwnNodeId()) {
@@ -2459,6 +2545,10 @@ void Ndbcntr::execCNTR_START_REQ(Signal *signal) {
       break;
     case NodeState::ST_SYSTEM_RESTART:
       jam();
+      if (nfLen > 0) {
+        jam();
+        noteNodeFailRecords(nodeId, nf, nfLen);
+      }
       c_start.m_withLog.set(nodeId);
       ndbrequire(!(starting && lastGci > c_start.m_lastGci));
       if (starting) {
@@ -2742,6 +2832,28 @@ void Ndbcntr::update_withLog(void) {
       c_start.m_withLogNotRestorable.set(nodeId);
     }
   }
+  /**
+   * RONDB-1150, X6.3 (plan §5.4): a node whose failure a starting node
+   * recorded in a GCI after the restart's is stale. The cluster committed
+   * without it after the last GCP save, which no sysfile shows, and phase
+   * 2 would execute on its peers what it never saw. It takes no part in
+   * the system restart and joins by a node restart after it.
+   */
+  for (Uint32 nodeId = c_start.m_withLog.find_first();
+       nodeId != NdbNodeBitmask::NotFound;
+       nodeId = c_start.m_withLog.find_next(nodeId + 1)) {
+    if (c_start.m_nodeFailGci[nodeId] <= latest_gci) continue;
+    jam();
+    c_start.m_withLog.clear(nodeId);
+    c_start.m_withLogNotRestorable.set(nodeId);
+    c_start.m_stale.set(nodeId);
+    g_eventLogger->info(
+        "NDBCNTR: node %u is stale: node %u recorded its failure in GCI %u, "
+        "after the restart's GCI %u; it joins by a node restart after the "
+        "system restart",
+        nodeId, c_start.m_nodeFailWitness[nodeId],
+        c_start.m_nodeFailGci[nodeId], latest_gci);
+  }
 }
 
 bool Ndbcntr::trySystemRestart(Signal *signal) {
@@ -2776,8 +2888,26 @@ bool Ndbcntr::trySystemRestart(Signal *signal) {
         break;
       case CheckNodeGroups::Lose:
         jam();
-        // If we lose with all nodes, then we're in trouble
-        ndbrequire(!allNodes);
+        if (allNodes) {
+          /**
+           * RONDB-1150, X6.4 (DI-8): every node is here, and a node group
+           * has none that can restore it: its nodes are stale, or not
+           * restorable to the restart's GCI. A forced start to an older
+           * GCI is not offered (Q3).
+           */
+          char stale[NdbNodeBitmask::TextLength + 1];
+          char notRestorable[NdbNodeBitmask::TextLength + 1];
+          char buf[400];
+          BaseString::snprintf(
+              buf, sizeof(buf),
+              "System restart to GCI %u is not possible: a node group has "
+              "no node that can restore it; stale nodes %s, nodes not "
+              "restorable to GCI %u %s",
+              c_start.m_lastGci, c_start.m_stale.getText(stale),
+              c_start.m_lastGci,
+              c_start.m_withLogNotRestorable.getText(notRestorable));
+          progError(__LINE__, NDBD_EXIT_SR_RESTARTCONFLICT, buf);
+        }
         return false;
       case CheckNodeGroups::Partitioning: {
         jam();

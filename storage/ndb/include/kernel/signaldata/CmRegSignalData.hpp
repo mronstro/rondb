@@ -115,6 +115,15 @@ class CmRegRef {
    * in a long signal.
    */
   static constexpr Uint32 SignalLength = 7;
+  /**
+   * RONDB-1150, X6.3: with the node bitmask in a section, word 7 of a
+   * ZELECTION refusal is the GCI in which the sender recorded the failure
+   * of the receiver in its node-failure file, if it is after the GCI the
+   * receiver runs for president with, else 0. The receiver is stale: it
+   * may not be president of a system restart (Qmgr::nodeFailStale()).
+   */
+  static constexpr Uint32 SignalLength_stale = 8;
+  static constexpr Uint32 RECEIVER_STALE_GCI = 7;
 
   enum ErrorCode {
     ZBUSY = 0,           /* Only the president can send this */

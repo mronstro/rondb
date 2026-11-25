@@ -1291,14 +1291,18 @@ int ledgerStopAll(NDBT_Context *ctx, NDBT_Step *step, NdbRestarter &restarter,
 }
 
 /**
- * RONDB-1150, X5.10: with durable commits a crash of every data node must
- * be one of all at once; the node that stops last must not go on
- * committing without the others, a node failure in the tail that needs
- * the node-failure file of X6 (plan §5.4). DUMP 2371 stops each node at
- * the first report of a node failure.
+ * RONDB-1150, X5.10: with durable commits DUMP 2371 makes a crash of every
+ * data node one of all at once: each node stops at the first report of a
+ * node failure. Without it (LedgerStopTogether 0) the node that stops
+ * last may go on committing without the others, a node failure in the
+ * tail (D3, plan §5.4), which the node-failure file of X6 handles: the
+ * other node is stale and joins by a node restart.
  */
 bool ledgerStopTogether(NDBT_Context *ctx, NdbRestarter &restarter) {
-  if (ctx->getProperty("LedgerDurable", Uint32(0)) == 0) return true;
+  if (ctx->getProperty("LedgerDurable", Uint32(0)) == 0 ||
+      ctx->getProperty("LedgerStopTogether", Uint32(1)) == 0) {
+    return true;
+  }
   const int together = DumpStateOrd::QmgrStopOnNodeFailure;
   if (restarter.dumpStateAllNodes(&together, 1) != 0) {
     ndbout_c("ERR: ledger: could not send DUMP 2371");
@@ -1817,7 +1821,11 @@ int runLedgerPowerLoss(NDBT_Context *ctx, NDBT_Step *step) {
       ndbout_c("Ledger loop %d: error insert 5171 at drain %u of each LDM "
                "thread",
                l, count);
+      /* The nodes stop one by one: with durable commits a node failure in
+         the tail, D3 (X6) */
+      ctx->setProperty("LedgerStopTogether", Uint32(0));
       result = ledgerWriteCrash(ctx, step, 5171, count, false);
+      ctx->setProperty("LedgerStopTogether", Uint32(1));
       continue;
     }
     ndbout_c("Ledger loop %d: DUMP 2370 in every data node", l);

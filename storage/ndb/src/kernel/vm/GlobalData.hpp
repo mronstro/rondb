@@ -159,6 +159,14 @@ struct GlobalData {
     Uint64 dirty_shutdown;  // summed over the devices, ~0: unknown
   };
   RedoPmemPathInfo theRedoPmemPath[REDO_PMEM_PATHS];
+  /**
+   * RONDB-1150, X6.1, RedoLogMode=pmem: the directory of REDO path 0 and
+   * how NDBFS maps files there, for the node-failure file of QMGR and
+   * NDBCNTR (NodeFailFile.hpp). Set in NDBFS's READ_CONFIG_REQ; nullptr
+   * in file mode.
+   */
+  const char *theNodeFailFileDir;
+  unsigned theNodeFailMapFlags;
 
   /**
    * NodeStartLogReportFrequency, seconds between [NODE-START] progress
@@ -264,6 +272,8 @@ struct GlobalData {
       path.domain = 0;
       path.dirty_shutdown = ~Uint64(0);
     }
+    theNodeFailFileDir = nullptr;
+    theNodeFailMapFlags = 0;
     theNodeStartLogReportFrequency = 15;
     NdbTick_Invalidate(&theNodeStartTicks);
     theNodeStartLogState = NSL_STARTING;

@@ -466,6 +466,11 @@ GCP Stop so that isolation is required to remove a node.
 7248: Skip most recent LCP during a restart
 7250: Boost GCI to provoke a warning
 
+990: RONDB-1150, X6.1: crash after the node-failure file recorded a
+     failure, before PREP_FAILCONF
+991: RONDB-1150, X6.1: do not record node failures in the node-failure
+     file (a negative test: the divergence of D3 must show)
+
 7262: RONDB-1150, X5.7: crash in COPY_GCIREQ(RESTART_DURABLE), before the
       sysfile with the restorable GCI raised to G' is written
 
