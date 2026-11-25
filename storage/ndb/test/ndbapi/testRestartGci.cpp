@@ -1450,6 +1450,30 @@ int runLedgerNeedsPmem(NDBT_Context *ctx, NDBT_Step *step) {
 
 int runLedgerInit(NDBT_Context *ctx, NDBT_Step *step) {
   g_ledger.assign(ctx->getNumRecords(), LedgerRow());
+  /**
+   * RONDB-1150: the cluster decides whether commits are durable, not the
+   * test case. Every ledger case run on a cluster with __DurableCommits=1
+   * in all data nodes follows the durable rules (LedgerDurable): a node
+   * failure abort at commit (4010) is an unknown result, since phase 2 of
+   * the restart commits the transaction if its COMMITs were persistent,
+   * and a restart keeps every acknowledged transaction.
+   */
+  if (ctx->getProperty("LedgerDurable", Uint32(0)) == 0) {
+    NdbConfig conf;
+    const int dbNodes = conf.getNumDbNodes();
+    bool durable = dbNodes > 0;
+    for (int i = 0; i < dbNodes && durable; i++) {
+      Uint32 durableCommits = 0;
+      conf.getProperty(conf.getDbNodeId(i), NODE_TYPE_DB,
+                       CFG_DB_DURABLE_COMMITS, &durableCommits);
+      durable = durableCommits != 0;
+    }
+    if (durable) {
+      ndbout_c("Ledger: __DurableCommits=1 in every data node, the durable "
+               "rules apply");
+      ctx->setProperty("LedgerDurable", Uint32(1));
+    }
+  }
   ctx->setProperty(LEDGER_PAUSE, Uint32(0));
   ctx->setProperty(LEDGER_PARKED, Uint32(0));
   return NDBT_OK;
