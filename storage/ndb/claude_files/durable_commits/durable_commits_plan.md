@@ -1,7 +1,7 @@
 # RONDB-1150 — Durable commits across a cluster restart: master plan
 
-Status: **Revision 14, 2026-11-24 (rule F dropped). Decisions D0–D8 are
-settled (§11). The
+Status: **Revision 15, 2026-11-24 (rule F dropped; the COMPLETE record
+not fenced). Decisions D0–D8 are settled (§11). The
 first implementation step, the REDO log on persistent memory, is designed in
 `pmem_redo_design.md` (planning subtask P2 done) and implemented; progress on
 it is in `step1_phases.md`. The implementation plan for all phases is
@@ -111,6 +111,17 @@ All paths are relative to `storage/ndb/`.
   complete", and step C has no veto. Dirty writes are best effort: phase 2
   skips them in the tail and step C invalidates their COMMITs, as applying
   them could leave a row's replicas different (DI-1).
+- **Revision 15** (X3.4). Without rule F the commit point of T is the
+  moment every live replica of every operation has persisted its COMMIT:
+  TC learns it from the last COMMITTED, and after it every allowed restart
+  commits T by the count rule. A COMPLETE record therefore needs no fence:
+  K becomes "written before the row is visible", and the next fence in
+  its log part persists it. Where it survives, step A decides T in its own
+  part; where it does not, steps B and C do. L and A stay (visibility and
+  read-your-writes). One fence per operation less on each replica, and no
+  FILLER after a COMPLETE (32 words reserved per operation at W = 64, not
+  46). The TLA+ model checks it with every crash cut of the log parts
+  (`tla/`, `MC_lazy*`).
 
 ---
 
@@ -128,9 +139,11 @@ This is the conclusion from review 3. The rest of the plan elaborates it.
 3. With disk durable commits a **COMPLETE log record** is also written to
    the REDO log. It carries the transaction id. The **COMMIT record also
    gets the transaction id** (§7).
-4. Both COMMIT and COMPLETE records are **synced** (persisted) when written
-   (§3, invariants C and K).
-5. **Locks are held until the COMPLETE record is synced** (§3, invariant L).
+4. COMMIT records are **synced** (persisted) when written (§3, invariant
+   C). A COMPLETE record is written before the row becomes visible, and the
+   next sync in its log part persists it (K, revision 15).
+5. **Locks are held until the COMPLETE**, which TC sends once every COMMIT
+   of the transaction is synced (§3, invariant L).
 6. **Node restarts are not affected** (§8).
 7. A cluster restart first runs the **normal recovery to the GCI made
    durable by the GCP protocol**, R_gcp (§5.1).
@@ -263,8 +276,8 @@ The full design is `pmem_redo_design.md`. In short:
 | Id | Invariant | Where |
 |---|---|---|
 | **C** | A replica persists its COMMIT record, and with it the earlier PREPARE in the same log part, before it sends COMMITTED or forwards COMMIT (or COMMITCONF on the parallel path) | Barrier after `writeCommitLog` (`DblqhMain.cpp:15343`, `912`), before `commitReplyLab`. One fragment has one log part, so one barrier over the part's unpersisted range covers both |
-| **K** | A replica persists a COMPLETE record before it makes the operation visible (TUP real commit, ACC_COMMITREQ) and before it forwards COMPLETE or sends COMPLETED. One COMPLETE record per operation (D7) | New `writeCompleteLog` in `execCOMPLETE`/`execCOMPLETEREQ` (`DblqhMain.cpp:15004-15017, 15120-15140`), before `localCommitLab` |
-| **L** | No replica makes an operation visible, or releases its lock, before its COMPLETE record is persistent. The primary's local commit moves from COMMIT (`commitReqLab`, `15267`; twin at `921-927`) to COMPLETE (a seq-0 branch in `execCOMPLETE`, which today calls only `completeTransLastLab`, `15010-15013`) | `tupcommit_conf` (`15552-15615`) needs an operation flag to pick commit-reply or complete-last |
+| **K** | A replica writes a COMPLETE record before it makes the operation visible (TUP real commit, ACC_COMMITREQ) and before it forwards COMPLETE or sends COMPLETED; the next fence in its log part persists it (revision 15: no fence of its own). One COMPLETE record per operation (D7) | New `writeCompleteLog` in `execCOMPLETE`/`execCOMPLETEREQ` (`DblqhMain.cpp:15004-15017, 15120-15140`), before `localCommitLab` |
+| **L** | No replica makes an operation visible, or releases its lock, before TC's COMPLETE, which comes once every COMMIT of the transaction is persistent, and before its COMPLETE record is written. The primary's local commit moves from COMMIT (`commitReqLab`, `15267`; twin at `921-927`) to COMPLETE (a seq-0 branch in `execCOMPLETE`, which today calls only `completeTransLastLab`, `15010-15013`) | `tupcommit_conf` (`15552-15615`) needs an operation flag to pick commit-reply or complete-last |
 | **A** | The API ack (TCKEYCONF/TC_COMMITCONF, and TCKEY_FAILCONF after takeover) is sent only after the **last** COMPLETED (D6) | TF_LATE_COMMIT forced on in durable mode (`DbtcMain.cpp:5616-5627`, `9302-9307`). The takeover ack moves to `check_finished_complete_handling` (`15886-15915`) |
 
 Rule F, the abort of T when a participating node failed before any
@@ -278,9 +291,12 @@ and A:
 - **COMPLETE ⇒ every COMMIT is executable.** If any replica has a COMPLETE
   record for T, every live replica of every T operation has a persistent
   COMMIT record, which points back to a persistent PREPARE.
-- **Visible or acknowledged ⇒ a COMPLETE record exists** (K, L, A).
-- **No COMPLETE ⇒ abort is safe.** Nobody saw T and the API was not told it
-  committed.
+- **Visible or acknowledged ⇒ T passed its commit point** (L, A): every
+  live replica of every T operation has a persistent COMMIT, as TC sends
+  COMPLETE only after the last COMMITTED.
+- **Before the commit point abort is safe.** Nobody saw T and the API was
+  not told it committed. After it the count rule commits T, with or
+  without a COMPLETE record in the starting logs.
 
 **Survival rule:** T survives if a COMPLETE record for T is found in some
 starting REDO log part, or if the count rule of §5.5 finds a COMMIT record
@@ -321,17 +337,18 @@ accordingly, and so does the number of lock waiters that fit within
 
 ### 3.3 When is the disk written, and is an extra round needed?
 
-- **The rule (review 7):** the COMMIT or COMPLETE record is persisted as
-  part of handling the COMMIT or COMPLETE signal, and before the next
-  COMMIT, COMMITTED, COMPLETE or COMPLETED signal is sent. This holds
-  always: a later optimisation may delay the sync, but then it delays the
-  signal too. The local commit (visibility, lock release) also comes after
-  the barrier. One barrier covers every record written while handling the
+- **The rule (review 7, revision 15):** the COMMIT record is persisted as
+  part of handling the COMMIT signal, and before the next COMMIT or
+  COMMITTED signal is sent. This holds always: a later optimisation may
+  delay the sync, but then it delays the signal too. The COMPLETE record
+  is written before the local commit (visibility, lock release) and
+  before COMPLETE or COMPLETED goes on, with no barrier of its own. One barrier covers every record written while handling the
   signal, for example TUP's loop over the operations on one row
   (`pmem_redo_design.md` E8).
 - Each barrier costs about 200–2000 ns on the target CXL 2.0 persistent
-  memory. With 2 replicas the linear chain has 4 barriers in series, so
-  0.8–8 µs more per transaction.
+  memory. With 2 replicas the linear chain has 2 barriers in series, the
+  COMMITs, so 0.4–4 µs more per transaction (4 barriers before revision
+  15).
 - **No new message round.** The existing COMPLETE phase is the round that
   says "the COMMITs can be executed".
   - For READ_BACKUP tables the ack point is unchanged.
@@ -617,12 +634,12 @@ gathers why phase 2 still applies T whole or not at all.
 |---|---|---|
 | PREPARE | — | Nothing by itself; read only through a COMMIT's back-reference (C5) |
 | COMMIT (transid, GCI, opCount) | COMMITTED is sent or COMMIT passed on (C) | TC decided to commit; this replica can apply the operation. A node's count is the number of T's operations in its node group it can apply |
-| COMPLETE (transid) | the row is visible, the lock released, COMPLETED sent (K, L) | Every live replica of every operation had persisted its COMMIT |
+| COMPLETE (transid) | — : written before the row is visible, the lock released and COMPLETED sent (K, L), persisted by the next fence in its part | Every live replica of every operation had persisted its COMMIT |
 
 Three facts carry the argument: a COMPLETE anywhere means a persistent
 COMMIT on every live replica of every operation (TC sends COMPLETE only
-after every COMMITTED); seen or acknowledged means a COMPLETE exists (L,
-A); no transaction is aborted after its commit decision, so a told abort
+after every COMMITTED); seen or acknowledged means T passed its commit
+point, every COMMIT persistent (L, A); no transaction is aborted after its commit decision, so a told abort
 leaves no COMMIT on a replica that is not stale.
 
 **Where the crash can cut T:**
@@ -631,8 +648,8 @@ leaves no COMMIT on a replica that is not stale.
 |---|---|---|---|
 | Prepare phase | PREPAREs at most | No | Not applied: T is in no hash table |
 | COMMIT phase | COMMITs on some replicas; no COMPLETE anywhere | No | Abort (counts differ or fall short); commit if every starting replica already has its COMMIT, also correct |
-| After the last COMMITTED, before any COMPLETE is persistent | A COMMIT on every replica, no COMPLETE | No | Commit by the count rule; abort would also be correct |
-| After the first COMPLETE is persistent | A COMMIT on every live replica; a COMPLETE, perhaps only on a node outside the SR | Possibly | Commit: "T complete", else the count rule, which always passes now |
+| After the last COMMITTED (the commit point), no COMPLETE among the starting logs | A COMMIT on every starting replica that is not stale | Possibly: a COMPLETE written and not persisted | Commit by the count rule, which always passes now |
+| A COMPLETE among the starting logs | A COMMIT on every live replica; a COMPLETE, perhaps only on a node outside the SR | Possibly | Commit: "T complete", else the count rule |
 
 Where nobody saw T either verdict is correct, provided every part reaches
 the same one.
@@ -717,9 +734,12 @@ transactions is needed, and the cost is linear.
    Applying a record depends only on its own row's prior state.
 2. **Locks are held to the COMPLETE record.** A fragment's REDO is one log
    part. On each replica a writer holds the row's X-lock from PREPARE until
-   after its COMPLETE record for that operation is persistent (K, L), or
+   after its COMPLETE record for that operation is written (K, L), or
    until it aborts, which it can only before its COMMIT. The next
-   writer's PREPARE, COMMIT and COMPLETE come after it gets the lock.
+   writer's PREPARE, COMMIT and COMPLETE come after it in the log. A crash
+   keeps a prefix of each part (the end of log, `pmem_redo_design.md`
+   E11), and the next writer's COMMIT is fenced: where it survives, the
+   COMPLETE before it survives too.
 3. **GCI monotonicity.** If T2 read or overwrote T1's write, GCI(T2) ≥
    GCI(T1) (`research_micro_gcp.md` §3.3; commits are blocked between
    GCP_PREPARE and GCP_COMMIT, `DbdihMain.cpp:18687, 18812`).
@@ -735,16 +755,18 @@ Take T1 before T2 on row r, on replica X.
    there, which is no later than COMPLETE(r). T2 is executed at its own
    first COMPLETE, after its COMMIT(r), or in step C, which is after the
    scan. Either way T1 runs first.
-3. If T1 has no COMPLETE in X's part, T1 still held its lock on r at the
-   crash (fact 2), so no T2 follows it on r in X's log.
+3. If T1's COMPLETE(r) is not in X's surviving log, then by fact 2 T1
+   still held its lock on r, or the crash cut the log before its
+   COMPLETE(r); either way no COMMIT(r) of a T2 survives after it.
 4. By fact 3, a row's GCI ≤ R_gcp writes all come before its tail writes,
    so phase 1 followed by phase 2 keeps the order.
 5. By fact 1, a row's final state depends only on the sequence of surviving
    writes to it, and that sequence is preserved.
 
-**Closure.** If T2 read T1's write, the write was visible, so T1 has a
-COMPLETE record (K) and survives. If T2 overwrote T1 on X, T1's COMPLETE(r)
-is in X's log, so T1 survives. ∎
+**Closure.** If T2 read T1's write, the write was visible, so T1 passed its
+commit point and survives, by a COMPLETE or by the count rule. If T2
+overwrote T1 on X and T2 survives, T2's COMMIT(r) is in X's surviving log,
+so T1's COMPLETE(r) is too, and T1 survives. ∎
 
 **Comparison with executing through a TC.** Routing tail transactions to
 TCs would throw away the order the log already holds and rebuild it (a
@@ -752,7 +774,7 @@ topological sort, O(n + e)), and would re-fire triggers, take locks and
 ship row data. Only the commit-or-abort verdict needs coordination.
 
 **Binlog.** An epoch reaches the binlog only once every transaction in it
-has completed. Those transactions have COMPLETE records and survive, so
+has completed. Those transactions passed their commit point and survive, so
 the binlog is never ahead of the cluster. Survivors from epochs that had
 not completed are missing from the binlog; today's post-crash incident
 event covers that.

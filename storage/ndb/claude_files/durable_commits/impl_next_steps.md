@@ -224,9 +224,11 @@ The two runs (TLC, a second per configuration, a minute for the largest):
 Decided (2026-11-24): rule F is dropped, which takes findings 1 and 2 with
 it (the model keeps it as a switch, as the evidence); dirty writes are best
 effort, skipped by phase 2 in the tail and invalidated in step C (finding
-3, DI-1). To check: without rule F the commit point is the last COMMIT
-persisted, so a COMPLETE needs no fence and only lets step A decide T
-locally (`MC_lazy*`, with every crash cut of the log parts). Proposed: finding 4, upstream's race, in a
+3, DI-1). Checked by the fourth run and adopted as plan revision 15:
+without rule F the commit point is the last COMMIT persisted, so a
+COMPLETE needs no fence and only lets step A decide T locally (`MC_lazy*`,
+with every crash cut of the log parts; `MC_lazy_nofallback` the
+control). Proposed: finding 4, upstream's race, in a
 ticket of its own. Without rule F there are no "T aborted" hits, so how step B
 counts an invalidated COMMIT for the DI-2 rule no longer matters.
 
@@ -280,11 +282,11 @@ opCount and `CF_DURABLE`; failed API node ids are held back.
 
 | Path | C | K | L | A | F | Package |
 |---|---|---|---|---|---|---|
-| Linear COMMIT/COMPLETE | barrier #1 | `writeCompleteLog` + barrier in `execCOMPLETE` | primary local commit at COMPLETE | forced late ack | — | X4.4–X4.7 |
-| Parallel COMMITREQ/COMPLETEREQ (LowLatency, simple reads, failure fallback) | #1 via `commitReqLab` | barrier in `execCOMPLETEREQ` | seq-0 branch in `execCOMPLETEREQ` | late ack in `check_finished_complete_handling` | — | X4.4–X4.7 |
+| Linear COMMIT/COMPLETE | barrier #1 | `writeCompleteLog` in `execCOMPLETE`, no barrier (revision 15) | primary local commit at COMPLETE | forced late ack | — | X4.4–X4.7 |
+| Parallel COMMITREQ/COMPLETEREQ (LowLatency, simple reads, failure fallback) | #1 via `commitReqLab` | `writeCompleteLog` in `execCOMPLETEREQ`, no barrier | seq-0 branch in `execCOMPLETEREQ` | late ack in `check_finished_complete_handling` | — | X4.4–X4.7 |
 | Takeover COMMITREQ/COMPLETEREQ | as parallel | as parallel | as parallel | X1 | abort if no COMPLETE was sent | X4.9 |
 | Participant failure in COMMIT phase | — | — | — | no ack | abort after commit | X4.8, X4.10 |
-| Dirty writes | one barrier for PREPARE + COMMIT + COMPLETE | same | local commit after it | n/a (TC drops them, `releaseDirtyWrite`, `DbtcMain.cpp:9546`) [V] | — | X4.13, DI-1 |
+| Dirty writes | as step 1: not durable, phase 2 skips them in the tail (revisions 14, 15) | — | local commit after the COMMIT | n/a (TC drops them, `releaseDirtyWrite`, `DbtcMain.cpp:9546`) [V] | — | X4.13, DI-1 |
 | `AC_NR_COPY` (commits at COMMIT) | #1 | no COMPLETE record needed (DI-10) | stays at COMMIT | — | — | X4.6 |
 | Several ops on one row (`LOG_COMMIT_WRITTEN_WAIT_SIGNAL`) | one barrier after TUP's loop (`DbtupCommit.cpp:247-276`) [V] | one COMPLETE per op | as linear | — | sibling state handled | X4.3, X4.10 |
 | Queued commit-log write (`DblqhMain.cpp:909-938`) | barrier before unlock | — | seq 0 → `commitReplyLab` | — | — | X4.4, X4.6 |
@@ -368,9 +370,9 @@ opCount and `CF_DURABLE`; failed API node ids are held back.
 | 1 | `commitReqLab` | after `c_tup->execTUP_WRITELOG_REQ` (`15219`), before the branch at `15267`: `redoPersistOp(op)` [V] | C |
 | 2 | same, sibling in `LOG_COMMIT_WRITTEN_WAIT_SIGNAL` (`15257-15259`) | same call; normally a no-op | C |
 | 3 | `handle_queued_log_write` | after `writeCommitLog` (`912`), before `unlock_log_part` (`914`): `redoPersist(part)` [V] | C |
-| 4 | `doWritePrepareLog` (dirty write) | PREPARE, COMMIT (`13577`), COMPLETE; one `redoPersist` before the unlock (`13579`), so before `localCommitLab` (`13583`) [V] | C, K |
-| 7 | `execCOMPLETE` | X4.5 + barrier before the branch at `15004` [V] | K |
-| 8 | `execCOMPLETEREQ` | same, before the branch at `15120` [V] | K |
+| 4 | `doWritePrepareLog` (dirty write) | dropped in revision 15: a dirty write is not durable; step 1's benchmark switch only. Was: PREPARE, COMMIT (`13577`), COMPLETE; one `redoPersist` before the unlock (`13579`), so before `localCommitLab` (`13583`) [V] | C, K |
+| 7 | `execCOMPLETE` | dropped in revision 15: the COMPLETE is written without a fence; the next barrier in the part persists it | K |
+| 8 | `execCOMPLETEREQ` | dropped in revision 15, as 7 | K |
 | 10 | rule-F abort (dropped 2026-11-24) | — | — |
 
 - Only for `OP_DURABLE` ops. Non-durable ops keep the step-1 rules.
@@ -525,7 +527,9 @@ stay quiet under load: `DurableGcpUnderLoad` (part 6).
 
 ### X4.13 Dirty writes (S, 2 pd)
 
-See DI-1. Implement the chosen variant: either TC turns dirty writes into
+Built with `CPF_SELF` in part 5a, then undone in revision 15: a dirty
+write is best effort, written as in step 1, and phase 2 skips it in the
+tail (DI-1). The text below is the plan as it was. See DI-1. Implement the chosen variant: either TC turns dirty writes into
 normal writes when durable is active, or LQH writes PREPARE, COMMIT
 (`CF_DURABLE`, opCount 0) and COMPLETE with a new flag `CPF_SELF` and one
 barrier (#4). LQH needs to know that durable is active for this (X7.2,
@@ -578,6 +582,25 @@ local commit at COMPLETE for every write of a durable transaction, also
 to a table without logging (part 4a), so that its writes become visible
 together. The notes of parts 4a, 4b, 5b and 6 below describe rule F as it
 was.
+
+**Revision 15 (2026-11-24): the COMPLETE without a fence, dirty writes as
+in step 1.** Without rule F the commit point is the last COMMIT persisted;
+after it every restart commits the transaction by the count rule, so a
+COMPLETE needs no fence (the TLA+ model, `MC_lazy*`). In "RONDB-1150: X4,
+the COMPLETE without a fence and dirty writes as in step 1":
+- `redoCompleteDurable()` writes the COMPLETE and no barrier (7 and 8 of
+  X4.4 are gone); `m_redo_end_lsn` keeps the end of the COMMIT, so the
+  persistence checks before COMPLETED and the local commit hold. The
+  next barrier in the log part persists the COMPLETE.
+- The reservation drops the COMPLETE's FILLER: `RESERVE` 46 → 32 words,
+  the COMPLETE's part 20 → 6.
+- 5181 crashes with the COMPLETE written, not fenced.
+- Dirty writes: part 5a's durable path is undone (`redoCompleteDirty()`,
+  `c_durable_commits`, `redoSetDurable(op, 0)` and barrier 4); a dirty
+  write writes a non-durable COMMIT as in step 1, and phase 2 skips it in
+  the tail. `CPF_SELF` is gone from the format and the reader.
+The notes of parts 1-6 below describe the fenced COMPLETE and part 5a's
+dirty writes as they were.
 
 **State (2026-11-23).** X4 comes in six parts, each a commit tested
 before the next: (1) X4.1-X4.3; (2) X4.5 and X4.4; (3) X4.6 and X4.7;
@@ -964,9 +987,9 @@ In `execSr` (`DblqhMain.cpp:38962`) [V], when `durableTail`:
   queued COMMITs in FIFO order: copy the COMMIT from the mapping,
   `readCommitLog` (`42763`), `checkIfExecLog` (`40928-40955`), read the
   PREPARE through its reference, `execLogRecord` (`39478`) [V], with the
-  record's gci_lo. Remove the entry. COMPLETE without entry: ignore. COMMIT
-  of a dirty write (opCount 0): never executed, invalidated in step C, and
-  its `CPF_SELF` COMPLETE ignored (best effort, DI-1, decided 2026-11-24).
+  record's gci_lo. Remove the entry. COMPLETE without entry: ignore. A
+  tail COMMIT without `CF_DURABLE`, a dirty write's: never executed,
+  invalidated in step C (best effort, DI-1, decided 2026-11-24).
   ABORT: ignore (written only before a commit decision; rule F is
   dropped).
 - Keep per part `maxGciExecuted`.
@@ -1249,7 +1272,7 @@ file-mode node or an old version.
   writes `durableGci = g` into the sysfile in the same COPY_GCIREQ. On
   COPY_GCICONF (`19272`) [V] the state is ARMED (event, ndbinfo).
   `GCP_SAVEREQ(g − 1)` carries a flag so every LQH knows durable is active
-  before arming (for dirty writes, X4.13).
+  before arming.
 - **Master takeover.** `MASTER_GCPREQ/CONF` (`11312`, `11493`) [V] carry
   the pending and active g; the new master resumes or restarts activation.
 - **Node restart after activation.** The starting node gets g in the
@@ -1350,7 +1373,7 @@ path, `memmap=` for software cost only.
 
 `src/kernel/blocks/dblqh/redoLogReader/{reader.cpp, records.cpp,
 records.hpp}` [V]. Step 1 (S6) teaches it the format; X8 adds: COMPLETE
-records with `CPF_SELF`, COMMIT `CF_DURABLE`/`RF_INVALIDATED`, transid,
+records, COMMIT `CF_DURABLE`/`RF_INVALIDATED`, transid,
 gci_lo, opCount, SR_HEAD; `--transid` to follow
 one transaction; `--simulate-sr R g` to list per part what step A would
 execute and leave in doubt (support tool).
@@ -1484,7 +1507,7 @@ LQH codes below 5180.
 
 | Block | Range | Codes |
 |---|---|---|
-| DBLQH | 5180–5199 | 5180 crash after COMMIT persisted, before COMMITTED/forward; 5181 after COMPLETE persisted, before local commit; 5182 after local commit, before COMPLETE/COMPLETED; 5183 delay COMPLETE at primary 3 s; 5184 unused (was the crash after a rule-F ABORT); 5185 skip COMPLETE records (debug, forces fallback); 5186 SR crash after step A; 5187 during the step-B rescan; 5188 mid-invalidation in step C; 5189 after SR_HEAD, before START_RECCONF; 5190 step-B batch size 1 |
+| DBLQH | 5180–5199 | 5180 crash after COMMIT persisted, before COMMITTED/forward; 5181 after COMPLETE written (not fenced, revision 15), before local commit; 5182 after local commit, before COMPLETE/COMPLETED; 5183 delay COMPLETE at primary 3 s; 5184 unused (was the crash after a rule-F ABORT); 5185 skip COMPLETE records (debug, forces fallback); 5186 SR crash after step A; 5187 during the step-B rescan; 5188 mid-invalidation in step C; 5189 after SR_HEAD, before START_RECCONF; 5190 step-B batch size 1 |
 | DBTC | 8320–8339 | 8320 takeover delays COMPLETEREQ 2 s (X1); 8321 crash after the COMMIT of the first operation; 8322 after its COMPLETE; 8323 treat the next node failure as a participant failure; 8324 crash takeover TC during the F abort |
 | DBDIH | 7260–7279 | 7260 crash master after GCP_PREPARE(activate); 7261 crash after GCP_COMMIT(g), before save of g − 1; 7262 crash during COPY_GCIREQ(RESTART_DURABLE); 7263 delay activation |
 | QMGR | 990–998 | 990 crash after the node-failure record, before PREP_FAILCONF; 991 skip the record (negative test) |
@@ -1506,7 +1529,7 @@ Step 1 adds the persist counters per part (E19).
 
 | # | Issue | Evidence | Proposal |
 |---|---|---|---|
-| DI-1 | **Dirty writes.** (a) A dirty write of T writes PREPARE + COMMIT + COMPLETE at prepare time. In step B its COMPLETE makes another part report "T complete", which commits T's in-doubt normal operations even when some replica lacks their COMMIT: T half applied. (b) Dirty writes are driven by LQH, not by TC's COMMIT flag, and take their GCI from LQH (`DblqhMain.cpp:10314`) [V], so "GCI ≥ g" and "durable" can disagree around activation | `doWritePrepareLog` `13566-13584` [V]; TC drops dirty writes at LQHKEYCONF (`9546`) [V] | Either TC turns dirty writes into normal writes when durable is active, or the COMPLETE of a dirty write gets flag `CPF_SELF`: step A executes only its own COMMIT, step B ignores it, opCount excludes it. Select phase-2 records by `CF_DURABLE`, with GCI ≥ g as a cross-check. LQH learns "durable active" from GCP_SAVEREQ (X7.2). Decided (2026-11-24): best effort; phase 2 skips a dirty write in the tail and step C invalidates its COMMIT, as applying it can leave a row's replicas different (TLA+ model, finding 3). X4.13's durable path for dirty writes can then go |
+| DI-1 | **Dirty writes.** (a) A dirty write of T writes PREPARE + COMMIT + COMPLETE at prepare time. In step B its COMPLETE makes another part report "T complete", which commits T's in-doubt normal operations even when some replica lacks their COMMIT: T half applied. (b) Dirty writes are driven by LQH, not by TC's COMMIT flag, and take their GCI from LQH (`DblqhMain.cpp:10314`) [V], so "GCI ≥ g" and "durable" can disagree around activation | `doWritePrepareLog` `13566-13584` [V]; TC drops dirty writes at LQHKEYCONF (`9546`) [V] | Either TC turns dirty writes into normal writes when durable is active, or the COMPLETE of a dirty write gets flag `CPF_SELF`: step A executes only its own COMMIT, step B ignores it, opCount excludes it. Select phase-2 records by `CF_DURABLE`, with GCI ≥ g as a cross-check. LQH learns "durable active" from GCP_SAVEREQ (X7.2). Decided (2026-11-24): best effort; phase 2 skips a dirty write in the tail and step C invalidates its COMMIT, as applying it can leave a row's replicas different (TLA+ model, finding 3). X4.13's durable path for dirty writes is undone (revision 15) |
 | DI-2 | **Step B can see COMPLETE and ABORT records from before the tail.** The rescan starts at the start mbyte, which reaches back into GCIs ≤ R through `logLastPrepRef`. A restarted API that reuses a transid after the hold-back can put an old COMPLETE in range: false "T complete" (half-applied T), or a false "corrupt log" crash when T is in the part's own in-doubt set. Step A's "COMMIT after COMPLETE ⇒ crash" cannot be checked in the preferred variant (no memory of executed transids) and would also fire falsely | `srLogLimits` `38671` [V]; transid = prefix + per-process counter (`Ndbif.cpp:262-284`, `ndb_cluster_connection.cpp:815`) [V] | In the rescan, count a COMPLETE or flagged ABORT of T only if a durable tail COMMIT of T came before it in the same part (a COMPLETE always follows that op's COMMIT in its part). Drop the step-A crash check |
 | DI-3 | **Exchange volume.** Part-to-part messages are O(L²) for L parts cluster-wide (48 nodes × 32 parts: 2.4 M messages) | plan §5.2 step B | Aggregate per node in DblqhProxy (X5.4); counts are per node in the fallback anyway, so the verdicts do not change |
 | DI-4 | **G' needs global data before phase 4.** Each part writes G' into SR_HEAD, but G' is the max over all parts | plan §5.3 | DONE carries each worker's step-A max; in-doubt entries carry gci_hi; every worker computes the same G' (X5.5) |

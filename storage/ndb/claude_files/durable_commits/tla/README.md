@@ -21,7 +21,9 @@ the commit point is the last COMMIT persisted: after it every restart
 commits T by the count rule. A COMPLETE then needs no fence before the
 row is visible; it only lets step A decide T in its own log part. The
 `MC_lazy*` configurations check that, with every crash cut of the log
-parts; `MC_lazy_nofallback` is the control.
+parts; `MC_lazy_nofallback` is the control. The fourth run passed, and
+the code follows it since plan revision 15: the `MC_lazy*` configurations
+are X4 as committed, the `MC_x4*` ones the fenced COMPLETE before.
 
 ## Running it
 
@@ -111,7 +113,7 @@ finding, and so is a run that finds none where one is expected.
 
 | Configuration | Settings | Expected |
 |---|---|---|
-| `MC_x4` | X4 as committed (no rule F, no drop of a late COMPLETE), full restart | no error |
+| `MC_x4` | X4 of plan revision 14 (no rule F, no drop of a late COMPLETE, the COMPLETE fenced), full restart | no error |
 | `MC_x4_partial` | as `MC_x4`, partial restarts too (X6) | no error |
 | `MC_x4_twofail` | as `MC_x4`, 2 node failures, all but `NoLqhCrash` | no error |
 | `MC_x4_twofail_partial` | as `MC_x4_twofail`, partial restarts too | no error |
@@ -125,7 +127,7 @@ finding, and so is a run that finds none where one is expected.
 | `MC_no_drop_complete` | as `MC_late_drop` without the drop | `AbortStays` violated: the drop of X4.9 is needed |
 | `MC_dirty` | a dirty write that phase 2 applies (X4.13 as coded), as the evidence | `G2Whole` violated: finding 3 |
 | `MC_dirty_skip` | a dirty write that phase 2 skips (decided 2026-11-24) | no error |
-| `MC_lazy` | as `MC_x4`, the COMPLETE not fenced | no error |
+| `MC_lazy` | as `MC_x4`, the COMPLETE not fenced: X4 as committed since plan revision 15 | no error |
 | `MC_lazy_late` | as `MC_x4_late`, the COMPLETE not fenced | no error |
 | `MC_lazy_twofail_partial` | as `MC_x4_twofail_partial`, the COMPLETE not fenced | no error |
 | `MC_lazy_repeatable` | as `MC_repeatable`, the COMPLETE not fenced | no error |

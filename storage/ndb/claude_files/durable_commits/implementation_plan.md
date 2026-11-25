@@ -30,7 +30,7 @@ and not calibrated against past RonDB work.
 | X1 | Takeover ack after COMPLETE (3 places in DBTC). Independent; also fixes READ_BACKUP read-your-writes after takeover today | 4 pd | `impl_next_steps.md` §2 |
 | **X2** | **Step 1: the REDO log on PMEM at today's durability** (S1–S7) | **116–122 pd** | §2 below and the three `impl_step1_*` files |
 | X3 | Test harness: acknowledged-commit ledger, crash of all nodes, power-loss runs, TLA+ model | 15 pd | `impl_next_steps.md` §3 |
-| X4 | Commit path: durable flag, opCount, barriers C and K, primary commit at COMPLETE, late ack, API node-id hold-back (rule F dropped) | 50 pd | §4 |
+| X4 | Commit path: durable flag, opCount, barrier C, COMPLETE record (K, not fenced since plan revision 15), primary commit at COMPLETE, late ack, API node-id hold-back (rule F dropped) | 50 pd | §4 |
 | X5 | Restart: one scan with the hash table, exchange between log parts, verdicts with count fallback, SR_HEAD, raise to G' | 50 pd | §5 |
 | X6 | Node failures: node-failure file, stale nodes, at least one non-stale node per node group, partial SR | 17 pd | §6 |
 | X7 | Online activation at GCI g, armed after the save of g−1, deactivation by SR, ndbinfo, version gate | 17 pd | §7 |
@@ -238,7 +238,7 @@ the ones marked * need your decision, see §5):
 
 | # | Issue | Proposal |
 |---|---|---|
-| DI-1* | A dirty write's COMPLETE record would give a false "T complete" in step B, and its GCI comes from LQH, not TC | Flag such records (`CPF_SELF`), or turn dirty writes into normal writes in durable mode; pick phase-2 records by `CF_DURABLE`. **Decided (Q-B1):** flag them (X4 part 5a). Dirty writes are best effort (2026-11-24): phase 2 skips a dirty write in the tail and step C invalidates its COMMIT, as applying it can leave a row's replicas different (TLA+ model) |
+| DI-1* | A dirty write's COMPLETE record would give a false "T complete" in step B, and its GCI comes from LQH, not TC | Flag such records (`CPF_SELF`), or turn dirty writes into normal writes in durable mode; pick phase-2 records by `CF_DURABLE`. **Decided (Q-B1):** flag them (X4 part 5a). Dirty writes are best effort (2026-11-24): phase 2 skips a dirty write in the tail and step C invalidates its COMMIT, as applying it can leave a row's replicas different (TLA+ model); written as in step 1 again (revision 15) |
 | DI-2 | Step B's rescan starts before the tail, so a COMPLETE from before the tail with a reused transid could give a false hit or a false "corrupt log" crash | Count a COMPLETE only after a tail COMMIT of the same transaction in the same part; drop the step-A crash check |
 | DI-3 | The exchange grows with the square of the number of log parts | Aggregate per node in the DBLQH proxy; the verdicts do not change |
 | DI-4 | All parts need the same G' for SR_HEAD | DONE carries each part's highest GCI; in-doubt entries carry gci_hi |

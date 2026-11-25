@@ -3432,7 +3432,8 @@ class Dblqh : public SimulatedBlock {
     /**
      * RONDB-1150, PMEM format: the end LSN of the operation's newest
      * record that must be persistent before a dependent signal is sent:
-     * its COMMIT, and from X4 its COMPLETE. 0 if none.
+     * its COMMIT, a durable one from X4; never its COMPLETE, which is
+     * not fenced (K). 0 if none.
      * Read and written only when c_redo_pmem_format is set, and last in
      * the record, so that file mode neither touches it nor has the
      * members before it moved.
@@ -4390,9 +4391,7 @@ private:
                                 LogFileRecordPtr &logFilePtr,
                                 LogPartRecord *logPartPtrP);
   void writeCompleteLog(Signal *signal, TcConnectionrec *regTcPtr,
-                        LogPartRecord *logPartPtrP, Uint32 flags);
-  void redoCompleteDirty(Signal *signal, TcConnectionrec *regTcPtr,
-                         LogPartRecord *logPartPtrP);
+                        LogPartRecord *logPartPtrP);
   void redoCompleteDurable(Signal *signal, TcConnectionrec *regTcPtr);
   void writeFillerPmem(Signal *signal, LogPartRecord *logPartPtrP,
                        LogPageRecordPtr &logPagePtr,
@@ -5765,11 +5764,6 @@ public:
    */
   bool c_redo_pmem_format;
   /**
-   * RONDB-1150 (X4.13): __DurableCommits, read at start until X7 tells LQH
-   * at GCP_SAVEREQ; a dirty write then writes its COMPLETE with CPF_SELF
-   */
-  bool c_durable_commits;
-  /**
    * RONDB-1150, PMEM format (impl_step1_lqh_write.md S5.8, Q-A11):
    * c_redo_pmem_persist_commit is the benchmark switch of DUMP 2368 0|1,
    * a barrier at the C places of E8 for every COMMIT;
@@ -7101,7 +7095,7 @@ inline void Dblqh::redoSetDurable(TcConnectionrec *regTcPtr, Uint32 opCount) {
 /**
  * RONDB-1150 (X4.6): invariant L. The primary replica of a write of a
  * durable transaction commits locally at COMPLETE, after its COMPLETE
- * record is persistent, not at COMMIT: its row is not visible, and its
+ * record is written, not at COMMIT: its row is not visible, and its
  * locks are held, until then. Asked once the COMMIT record is written,
  * for seqNoReplica 0. Also a write without a REDO record (a table
  * without logging), which writes no COMPLETE record, so that every write

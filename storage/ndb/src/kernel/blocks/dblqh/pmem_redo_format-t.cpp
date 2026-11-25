@@ -218,7 +218,7 @@ void framing() {
 
   /* Flags of other types, and the reserved ones */
   OK(checkFraming(makeW0(TYPE_COMPLETE, 1u << 10, 4)) == R_FLAGS);
-  OK(checkFraming(makeW0(TYPE_COMPLETE, CPF_SELF, 4)) == R_VALID);
+  OK(checkFraming(makeW0(TYPE_COMPLETE, 1u << 9, 4)) == R_FLAGS);
   OK(checkFraming(makeW0(TYPE_COMMIT, 1u << 10, 12)) == R_FLAGS);
   OK(checkFraming(makeW0(TYPE_FILLER, 1u << 15, 4)) == R_FLAGS);
   OK(checkFraming(makeW0(TYPE_COMMIT, RF_INVALIDATED | CF_DURABLE, 12)) ==
@@ -322,7 +322,7 @@ void sizes() {
     OK(HEADER_WORDS + len + W_WORDS <= CONTROL_AREA_WORD);
   }
 
-  OK(RESERVE == 46 && RESERVE_AT_COMMIT == 26);
+  OK(RESERVE == 32 && RESERVE_AT_COMMIT == 26);
   OK(CONTROL_AREA_WORD == 8128 && W_WORDS == 16 && PAGE_DATA_WORDS == 8160);
 
   /* The LSN grows along the log, across files and laps */

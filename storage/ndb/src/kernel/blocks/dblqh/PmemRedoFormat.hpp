@@ -96,8 +96,6 @@ constexpr Uint32 RF_INVALIDATED = 1u << 8;
 constexpr Uint32 CF_DURABLE = 1u << 9;
 /* PREPARE: the transid in words 8 and 9 */
 constexpr Uint32 PF_TRANSID = 1u << 9;
-/* COMPLETE: of a dirty write, which completes only its own COMMIT (DI-1) */
-constexpr Uint32 CPF_SELF = 1u << 9;
 
 inline Uint32 makeW0(Uint32 type, Uint32 flags, Uint32 len) {
   return type | flags | (len << 16);
@@ -129,13 +127,13 @@ static_assert(1 + (PREPARE_MAX - 2 + PAGE_DATA_WORDS - 1) / PAGE_DATA_WORDS <=
               "a PREPARE spans at most PREPARE_MAX_PAGES pages");
 
 /**
- * Words an operation reserves in its log part: the COMMIT and the
- * COMPLETE, each with the largest FILLER that closes its unit, and the
- * NEXT_MBYTE slack (format §7.3). Step 1 releases them all at
- * COMMIT (R5).
+ * Words an operation reserves in its log part: the COMMIT with the
+ * largest FILLER that closes its unit, the COMPLETE, which is not fenced
+ * and closes none (plan revision 15), and the NEXT_MBYTE slack (format
+ * §7.3). Step 1 releases them all at COMMIT (R5).
  */
 constexpr Uint32 RESERVE =
-    (COMMIT_LEN + FILLER_MAX) + (COMPLETE_LEN + FILLER_MAX) + NEXT_MBYTE_LEN;
+    (COMMIT_LEN + FILLER_MAX) + COMPLETE_LEN + NEXT_MBYTE_LEN;
 constexpr Uint32 RESERVE_AT_COMMIT = COMMIT_LEN + FILLER_MAX;
 
 /* Record words (format §5); words 0 and 1 are w0 and w1 */
@@ -362,9 +360,8 @@ inline void abortRecord(Uint32 *rec, Uint32 flags, Uint32 transid1,
   rec[ABORT_TRANSID2] = transid2;
 }
 
-inline void completeRecord(Uint32 *rec, Uint32 flags, Uint32 transid1,
-                           Uint32 transid2) {
-  rec[0] = makeW0(TYPE_COMPLETE, flags, COMPLETE_LEN);
+inline void completeRecord(Uint32 *rec, Uint32 transid1, Uint32 transid2) {
+  rec[0] = makeW0(TYPE_COMPLETE, 0, COMPLETE_LEN);
   rec[1] = 0;
   rec[ABORT_TRANSID1] = transid1;
   rec[ABORT_TRANSID2] = transid2;
@@ -637,7 +634,6 @@ inline Uint32 checkFraming(Uint32 w0) {
       maxLen = PAGE_DATA_WORDS;
       break;
     case TYPE_COMPLETE:
-      allowed = CPF_SELF;
       minLen = maxLen = COMPLETE_LEN;
       break;
     case TYPE_SR_HEAD:

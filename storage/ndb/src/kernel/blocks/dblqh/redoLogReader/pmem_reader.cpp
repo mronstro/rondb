@@ -245,8 +245,7 @@ void printRecord(const PartView &v, const Pos &p, const RecInfo &info,
       ndbout_c("%s ABORT transid 0x%08x 0x%08x", at, t1, t2);
       break;
     case TYPE_COMPLETE:
-      ndbout_c("%s COMPLETE transid 0x%08x 0x%08x%s", at, t1, t2,
-               (flags & CPF_SELF) ? " self" : "");
+      ndbout_c("%s COMPLETE transid 0x%08x 0x%08x", at, t1, t2);
       break;
     case TYPE_COMPLETED_GCI:
       ndbout_c("%s COMPLETED_GCI gci %u", at, recWord(v, p, COMPLETED_GCI_GCI));

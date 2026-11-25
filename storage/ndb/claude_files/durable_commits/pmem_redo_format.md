@@ -8,7 +8,9 @@ path), `pmem_redo_recovery.md` (recovery). Where this format depends on them,
 
 **2026-11-24: rule F is dropped** (plan revision 14). The ABORT record has
 no flag; `AF_AFTER_COMMIT` and everything this document says about a
-rule-F ABORT are gone from the format and the code.
+rule-F ABORT are gone from the format and the code. **Plan revision 15:**
+the COMPLETE record is not fenced, and closes no write unit; a dirty
+write is not durable and writes no COMPLETE, so `CPF_SELF` is gone too.
 
 Paths are relative to `storage/ndb/`. Short names:
 `DblqhMain.cpp` = `src/kernel/blocks/dblqh/DblqhMain.cpp`,
@@ -117,7 +119,6 @@ cannot be mixed by accident.
 | 0 (`w0` bit 8) | `RF_INVALIDATED` | COMMIT | Cancelled by SR; replaces type 9 | **No** (mutable) |
 | 1 | `CF_DURABLE` | COMMIT | Written under the durable protocol (GCI ≥ g). A COMPLETE is expected | Yes |
 | 1 | `PF_TRANSID` | PREPARE | Words 8–9 hold the transid | Yes |
-| 1 | `CPF_SELF` | COMPLETE | A dirty write's (X4.13, DI-1): completes only its own COMMIT; step B of phase 2 ignores it | Yes |
 | 2–7 | — | — | Reserved, 0 | Yes |
 
 ### 3.3 What the checksum covers
@@ -516,7 +517,7 @@ is written twice (P1).
 | PREPARE | With the next barrier in its part | No |
 | COMMIT, durable | Immediately (C) | Yes |
 | COMMIT, non-durable | At GCP save | Only at GCP save |
-| COMPLETE | Immediately (K) | Yes |
+| COMPLETE | With the next barrier in its part (K, plan revision 15) | No |
 | ABORT | No | No |
 | COMPLETED_GCI | At GCP save | Yes |
 | NEXT_MBYTE | At the mbyte switch | It is the closer |
@@ -531,21 +532,21 @@ tail-problem limit `free_mb ≤ 4 + committed_mb` (`43975-43979`) [V].
 New reservation, with `F = W/4 - 2` (largest filler in words):
 
 ```
-R = (12 + F) + (4 + F) + 2      COMMIT + filler, COMPLETE + filler, NEXT_MBYTE slack
+R = (12 + F) + 4 + 2      COMMIT + filler, COMPLETE (no filler, revision 15), NEXT_MBYTE slack
 ```
 
 | W | F | R (words) | Today |
 |---|---|---|---|
-| 64 B | 14 | 46 | 10 |
-| 128 B | 30 | 78 | 10 |
-| 256 B | 62 | 142 | 10 |
+| 64 B | 14 | 32 | 10 |
+| 128 B | 30 | 48 | 10 |
+| 256 B | 62 | 80 | 10 |
 | non-durable (no filler at COMMIT) | 0 | 14 | 10 |
 
 Release in two steps: `12 + F` at `writeCommitLog`, the rest at
 `writeCompleteLog`. An ABORT releases all of R.
 
-Example: 1 million operations in flight at W = 256 reserve about 540 MB per
-part. With the default 16 GB per part this only moves the tail-problem limit.
+Example: 1 million operations in flight at W = 256 reserve about 320 MB per
+part (540 MB with the fenced COMPLETE before revision 15). With the default 16 GB per part this only moves the tail-problem limit.
 
 ---
 
@@ -575,7 +576,11 @@ COMPLETE bytes. Page headers add 0.4 % everywhere and are left out.
 |---|---|---|---|---|---|
 | Small update (2 key, 10 AI) | 116 B | 144 B (1.24×) | 192 B (1.66×) | 256 B (2.21×) | 512 B (4.41×) |
 | Large update (2 key, 100 AI) | 476 B | 504 B (1.06×) | 576 B (1.21×) | 640 B (1.34×) | 768 B (1.61×) |
-| Small dirty write (PREPARE + COMMIT + COMPLETE, one barrier) | 116 B | 144 B | 192 B | 256 B | 256 B |
+| Small dirty write (PREPARE + COMMIT + COMPLETE, one barrier; before revision 15) | 116 B | 144 B | 192 B | 256 B | 256 B |
+
+Since plan revision 15 a COMPLETE is not fenced and shares its unit with
+the records after it, and a dirty write is written as in step 1, so the
+figures above for a durable update and a dirty write are upper bounds.
 
 - "No close" means appending without fillers and flushing a partly written
   line again. It is shown as the lower bound; whether it is acceptable is a
@@ -729,7 +734,7 @@ Read after this document was written. To settle when the drafts are merged.
 | INVALID_COMMIT | Flag bit, excluded from the checksum | Recovery: store type 9 in the type byte, checksum computed as if the type were COMMIT | Equivalent. The flag needs no special case in the checksum routine |
 | Orphans after a restart | `restartGen` in the checksum suffix (no space cost), with a fresh mbyte after each restart | Recovery: zero `[H, end of last mbyte)` and keep writing in the head page; a generation is rejected as "a word per record" | Zeroing alone is sound. `restartGen` costs no word here, since it comes from the page header. It only helps if writing restarts at a fresh mbyte; otherwise keep it constant |
 | Header image | Words 4, 5, 8, 11, 12–14, 17–20 are 0 on PMEM; checksum over the final words | Write path: records built in DRAM pages, new bytes copied to PMEM | The copy of a page's first 128 bytes must be the PMEM header image (§4.1), not the DRAM header with its fill index and links |
-| Filler worst case | `W/4 − 2` words (gaps are even) | Write path: `W − 4` bytes; 14-word COMMIT | Use 12 words and `W/4 − 2`: R = 46 words at W = 64 (write path: 48) |
+| Filler worst case | `W/4 − 2` words (gaps are even) | Write path: `W − 4` bytes; 14-word COMMIT | Use 12 words and `W/4 − 2`: R = 46 words at W = 64 (write path: 48); 32 since the COMPLETE closes no unit (revision 15) |
 
 ---
 
@@ -804,8 +809,8 @@ Read after this document was written. To settle when the drafts are merged.
 4. Use option A for spanning records, with the rule that every crossed page
    header must be valid (§6).
 5. Close the current unit at every barrier with a FILLER, or with NEXT_MBYTE
-   in the last unit of an mbyte; reserve `R = 18 + 2F` words per operation and
-   release it in two steps (§7).
+   in the last unit of an mbyte; reserve `R = 18 + F` words per operation and
+   release it in two steps (§7; `18 + 2F` before revision 15).
 6. COMMIT = 12 words, COMPLETE = 4, ABORT = 4,
    COMPLETED_GCI = 4, NEXT_MBYTE = 2; INVALID_COMMIT becomes a flag set by one
    4-byte store (§5).

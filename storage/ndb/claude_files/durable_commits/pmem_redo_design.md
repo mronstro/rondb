@@ -208,9 +208,9 @@ the signal (write path §3).
 |---|---|---|
 | `commitReqLab` | After TUP's `TUP_WRITELOG_REQ` loop over the operations on the row, before the branch at `DblqhMain.cpp:15267` | C |
 | Queued commit, `handle_queued_log_write` | After `writeCommitLog` (`912`), before the unlock | C |
-| Dirty write, `doWritePrepareLog` | Once for PREPARE + COMMIT + COMPLETE, before the unlock at `13579` | C, K |
-| `execCOMPLETE` | New `writeCompleteLog` + barrier before the branch at `15004` | K |
-| `execCOMPLETEREQ` | Same, before the branch at `15120` | K |
+| Dirty write, `doWritePrepareLog` | As in step 1: a dirty write is not durable, and phase 2 skips it in the tail (plan revisions 14, 15; DI-1) | — |
+| `execCOMPLETE` | New `writeCompleteLog`, no barrier: the next one in the part persists it (plan revision 15) | K |
+| `execCOMPLETEREQ` | Same | K |
 | ABORT after COMMIT | None: rule F, which wrote it, is dropped (2026-11-24, plan revision 14) | — |
 | Abort of a prepared operation | None: a PREPARE without a COMMIT is never applied | — |
 
@@ -313,9 +313,11 @@ Sizes in 32-bit words, including `w0` and `w1` (format §5):
 | SR_HEAD | 12 | 6 | R_gcp, G', restart sequence (content owned by P4) |
 | NEXT_LOG_RECORD, INVALID_COMMIT | 6, 9 | — | Retired |
 
-- **Space reservation per operation:** COMMIT + max(COMPLETE, ABORT) + two
-  FILLERs = `12 + 4 + 2·(W/4 − 2) + 2` = 46 words at W = 64, against 10
-  today. Released in two steps: at COMMIT and at COMPLETE (format §7.3).
+- **Space reservation per operation:** COMMIT + its FILLER + COMPLETE +
+  NEXT_MBYTE slack = `12 + (W/4 − 2) + 4 + 2` = 32 words at W = 64,
+  against 10 today (46 before plan revision 15, when the COMPLETE closed
+  its own unit). Released in two steps: at COMMIT and at COMPLETE (format
+  §7.3).
 - Side finding: a PREPARE can span 4 pages, not 3 (22096 attrinfo words
   plus 1023 key words); `ZMIN_READ_BUFFER_SIZE = 3` and its comment are
   stale (format §6.3).

@@ -12607,7 +12607,8 @@ int runTakeoverReadBackupRYW(NDBT_Context *ctx, NDBT_Step *step) {
  *
  *   5180  a replica, its durable COMMIT persistent, before COMMITTED or
  *         COMMIT to the next replica
- *   5181  a replica, its COMPLETE persistent, before the local commit
+ *   5181  a replica, its COMPLETE written (not fenced), before the local
+ *         commit
  *   5182  a replica, committed locally at COMPLETE, before COMPLETE to
  *         the next replica or COMPLETED
  *   8321  the TC, with the COMMIT of the first operation sent
@@ -17063,7 +17064,7 @@ TESTCASE("DurableCrashCommit",
 }
 TESTCASE("DurableCrashComplete",
          "RONDB-1150, __DurableCommits=1: a replica stops with its COMPLETE "
-         "persistent, before the local commit (5181); the transaction "
+         "written, before the local commit (5181); the transaction "
          "commits") {
   TC_PROPERTY("DurableErrorInsert", Uint32(5181));
   INITIALIZER(runDurableNeedsDurable);

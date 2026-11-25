@@ -143,15 +143,9 @@ void builders() {
   rec[1] = recordChecksum(rec, s);
   OK(checkRecordWords(rec, ABORT_LEN, s) == R_VALID);
 
-  completeRecord(rec, 0, 31, 32);
+  completeRecord(rec, 31, 32);
   OK(rec[0] == makeW0(TYPE_COMPLETE, 0, COMPLETE_LEN) && rec[1] == 0 &&
      rec[ABORT_TRANSID1] == 31 && rec[ABORT_TRANSID2] == 32);
-  rec[1] = recordChecksum(rec, s);
-  OK(checkRecordWords(rec, COMPLETE_LEN, s) == R_VALID);
-
-  completeRecord(rec, CPF_SELF, 33, 34);
-  OK(rec[0] == makeW0(TYPE_COMPLETE, CPF_SELF, COMPLETE_LEN) &&
-     rec[ABORT_TRANSID1] == 33 && rec[ABORT_TRANSID2] == 34);
   rec[1] = recordChecksum(rec, s);
   OK(checkRecordWords(rec, COMPLETE_LEN, s) == R_VALID);
 
@@ -187,7 +181,7 @@ void fixedRecords(Log &log) {
   Uint32 recs[5][COMMIT_LEN];
   commitRecord(recs[0], 0, 11, 12, 13, 0, 300, 4000, 301, 14, 15, 16, 17, 0);
   abortRecord(recs[1], 0, 21, 22);
-  completeRecord(recs[2], 0, 31, 32);
+  completeRecord(recs[2], 31, 32);
   completedGciRecord(recs[3], 41);
   recs[4][0] = makeW0(TYPE_SR_HEAD, 0, SR_HEAD_LEN);
   for (Uint32 i = 2; i < SR_HEAD_LEN; i++) recs[4][i] = 60 + i;
@@ -308,9 +302,9 @@ void reservation() {
   OK(releasedWords(RESERVED_FULL, AT_COMMIT, true, &after) ==
          RESERVE_AT_COMMIT &&
      after == RESERVED_TAIL);
-  OK(releasedWords(RESERVED_TAIL, AT_COMPLETE, true, &after) == 20 &&
+  OK(releasedWords(RESERVED_TAIL, AT_COMPLETE, true, &after) == 6 &&
      after == RESERVED_NONE);
-  OK(releasedWords(RESERVED_TAIL, AT_ABORT, false, &after) == 20 &&
+  OK(releasedWords(RESERVED_TAIL, AT_ABORT, false, &after) == 6 &&
      after == RESERVED_NONE);
 
   /* Records that cannot come in the state */
@@ -320,10 +314,9 @@ void reservation() {
   OK(releasedWords(RESERVED_TAIL, AT_COMMIT, true, &after) == 0);
   OK(releasedWords(RESERVED_FULL, AT_COMPLETE, true, &after) == 0);
 
-  /* The COMMIT, then the COMPLETE or rule-F ABORT, each closing its unit */
+  /* The COMMIT closing its unit, then the COMPLETE, which closes none */
   OK(RESERVE_AT_COMMIT >= COMMIT_LEN + FILLER_MAX);
-  OK(RESERVE - RESERVE_AT_COMMIT >=
-     std::max(COMPLETE_LEN, ABORT_LEN) + FILLER_MAX + NEXT_MBYTE_LEN);
+  OK(RESERVE - RESERVE_AT_COMMIT >= COMPLETE_LEN + NEXT_MBYTE_LEN);
 }
 
 }  // namespace

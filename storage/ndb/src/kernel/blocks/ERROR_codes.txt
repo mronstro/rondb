@@ -389,8 +389,8 @@ Crash after a durable COMMIT record is persistent, before COMMITTED or
 COMMIT to the next replica.
 
 5181:
-Crash after a durable COMPLETE record is persistent, before the local
-commit.
+Crash after a durable COMPLETE record is written, not fenced, before the
+local commit.
 
 5182:
 Crash after the local commit of a durable write at COMPLETE, before
