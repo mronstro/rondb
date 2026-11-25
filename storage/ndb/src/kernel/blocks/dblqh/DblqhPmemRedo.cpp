@@ -38,6 +38,7 @@
 #include <ndb_limits.h>
 #include <algorithm>
 #include <cstring>
+#include <new>
 #include "Dblqh.hpp"
 #include "PmemRedoScan.hpp"
 #include "portlib/ndb_pmem.h"
@@ -1459,21 +1460,28 @@ void Dblqh::redoPmemSrError(const LogPartRecord *logPartPtrP,
 }
 
 /**
- * S6.5: a COMMIT of the PMEM format (format §5.2) after its w0: where its
- * PREPARE is, and its GCI. The replay uses neither gci_lo nor the
- * transid, as with readCommitLog().
+ * S6.5: a COMMIT of the PMEM format (format §5.2) after its w0, its words
+ * from w1 on into rec: where its PREPARE is, and its GCI. The replay uses
+ * neither gci_lo nor the transid, as with readCommitLog(); step A of
+ * phase 2 queues rec (X5.3).
  */
 void Dblqh::readCommitLogPmem(CommitLogRecord *commitLogRecord,
                               const TcConnectionrecPtr tcConnectptr,
-                              LogPageRecordPtr &logPagePtr,
+                              Uint32 *rec, LogPageRecordPtr &logPagePtr,
                               LogFileRecord *logFilePtrP,
                               LogPartRecord *logPartPtrP) {
   ndbassert(!m_is_in_query_thread);
-  Uint32 rec[PmemRedo::COMMIT_LEN];
-  rec[0] = 0;
   for (Uint32 i = 1; i < PmemRedo::COMMIT_LEN; i++) {
     rec[i] = readLogword(logPagePtr, logFilePtrP, logPartPtrP);
   }
+  redoCommitFields(commitLogRecord, tcConnectptr, rec, logPartPtrP);
+}
+
+/* The fields of the COMMIT in rec that its replay uses */
+void Dblqh::redoCommitFields(CommitLogRecord *commitLogRecord,
+                             const TcConnectionrecPtr tcConnectptr,
+                             const Uint32 *rec,
+                             const LogPartRecord *logPartPtrP) {
   tcConnectptr.p->tableref = rec[PmemRedo::COMMIT_TABLE_ID];
   tcConnectptr.p->schemaVersion = rec[PmemRedo::COMMIT_SCHEMA_VERSION];
   tcConnectptr.p->fragmentid = rec[PmemRedo::COMMIT_FRAG_ID];
@@ -1517,6 +1525,127 @@ void Dblqh::redoPmemCheckPrepare(const LogPartRecord *logPartPtrP,
     redoPmemSrError(logPartPtrP, pos, reason,
                     "a COMMIT does not refer to a valid PREPARE");
   }
+}
+
+/**
+ * X5.2: round 0 of the REDO execution starts in the part at start, and
+ * phase 2 runs on its durable tail. The rescan of step B starts there
+ * too (X5.4).
+ */
+void Dblqh::redoTailStart(LogPartRecord *logPartPtrP,
+                          const PmemRedo::Pos &start) {
+  ndbrequire(logPartPtrP->m_tail == nullptr);
+  logPartPtrP->m_tail = new (std::nothrow) PmemRedo::TailTable();
+  if (logPartPtrP->m_tail == nullptr) {
+    progError(__LINE__, NDBD_EXIT_MEMALLOC,
+              "Phase 2 of the restart: no memory for the step-A table");
+  }
+  logPartPtrP->m_tail_exec = PmemRedo::TAIL_NIL;
+  logPartPtrP->m_tail_exec_first = PmemRedo::TAIL_NIL;
+  logPartPtrP->m_tail_found_last = false;
+  logPartPtrP->m_tail_start = start;
+  logPartPtrP->m_tail_max_gci = 0;
+}
+
+/**
+ * X5.3, step A: a durable COMMIT of the tail at pos, its words in rec,
+ * queued with the others of its transaction until a COMPLETE of it. Only
+ * records with CF_DURABLE come here; their GCI is at least g (DI-1).
+ */
+void Dblqh::redoTailCommit(LogPartRecord *logPartPtrP,
+                           const PmemRedo::Pos &pos, const Uint32 *rec) {
+  if (rec[PmemRedo::COMMIT_GCI_HI] < c_sr_durable_gci) {
+    redoPmemSrError(logPartPtrP, pos, PmemRedo::R_VALID,
+                    "a durable COMMIT of the tail has a GCI below g, the "
+                    "GCI of the activation of durable commits");
+  }
+  switch (logPartPtrP->m_tail->addCommit(pos, rec)) {
+    case PmemRedo::TAIL_OK:
+      return;
+    case PmemRedo::TAIL_MISMATCH:
+      redoPmemSrError(logPartPtrP, pos, PmemRedo::R_VALID,
+                      "two COMMITs of a transaction in the durable tail "
+                      "differ in GCI or opCount");
+    default:
+      progError(__LINE__, NDBD_EXIT_MEMALLOC,
+                "Phase 2 of the restart: out of memory for the step-A "
+                "table of the durable tail");
+  }
+}
+
+/**
+ * X5.3, step A: a COMPLETE of the tail. The COMMITs of its transaction
+ * queued in the part are executed in log order before the scan reads on;
+ * none are queued when they were executed at an earlier COMPLETE, or are
+ * of a GCI up to R.
+ */
+void Dblqh::redoTailComplete(LogPartRecord *logPartPtrP, Uint32 transid1,
+                             Uint32 transid2) {
+  ndbrequire(logPartPtrP->m_tail_exec == PmemRedo::TAIL_NIL);
+  PmemRedo::TailTable &tail = *logPartPtrP->m_tail;
+  const Uint32 first = tail.takeComplete(transid1, transid2);
+  if (first == PmemRedo::TAIL_NIL) return;
+  const Uint32 gci = tail.commit(first).rec[PmemRedo::COMMIT_GCI_HI];
+  if (gci > logPartPtrP->m_tail_max_gci) logPartPtrP->m_tail_max_gci = gci;
+  logPartPtrP->m_tail_exec = first;
+  logPartPtrP->m_tail_exec_first = first;
+}
+
+/**
+ * X5.3: the next COMMIT that a COMPLETE handed over, executed as a COMMIT
+ * of a GCI up to R: its PREPARE read through the reference, then
+ * LQHKEYREQ to the replica on this node, with the GCI of the record. true
+ * when the execution started; the scan goes on when it is done, at the
+ * record after the COMPLETE.
+ */
+bool Dblqh::redoTailExecNext(Signal *signal, LogPageRecordPtr logPagePtr,
+                             LogFileRecordPtr logFilePtr,
+                             LogPartRecordPtr logPartPtr) {
+  LogPartRecord *const partP = logPartPtr.p;
+  PmemRedo::TailTable &tail = *partP->m_tail;
+  const Uint32 c = partP->m_tail_exec;
+  const PmemRedo::TailCommit commit = tail.commit(c);
+  partP->m_tail_exec = tail.nextCommit(c);
+  if (partP->m_tail_exec == PmemRedo::TAIL_NIL) {
+    tail.releaseCommits(partP->m_tail_exec_first);
+    partP->m_tail_exec_first = PmemRedo::TAIL_NIL;
+  }
+  TcConnectionrecPtr tcConnectptr;
+  tcConnectptr.i = partP->logTcConrec;
+  ndbrequire(tcConnect_pool.getValidPtr(tcConnectptr));
+  CommitLogRecord commitLogRecord;
+  redoCommitFields(&commitLogRecord, tcConnectptr, commit.rec, partP);
+  tcConnectptr.p->gci_lo = commit.rec[PmemRedo::COMMIT_GCI_LO];
+  partP->execSrExecuteIndex = 0;
+  if (checkIfExecLog(signal, tcConnectptr, partP) != ZOK) {
+    /* A table dropped since, or no replica of the fragment here */
+    jam();
+    partP->m_redoWorkStats.m_opsSkipped++;
+    return false;
+  }
+  redoPmemCheckPrepare(partP, commit.pos, commitLogRecord);
+  execSrCommit(signal, tcConnectptr, &commitLogRecord, logPagePtr,
+               logFilePtr, logPartPtr);
+  return true;
+}
+
+/**
+ * X5.3: while phase 2 runs, no fragment writes REDO, as the durable tail
+ * executes on fragments that have completed their REDO up to R (on is
+ * false); once round 0 is done on every node they log again, those that
+ * are active (on is true). Only DBLQH executes REDO during the restart.
+ */
+void Dblqh::redoTailSetLogFlags(bool on) {
+  FragrecordPtr fragPtr;
+  fragPtr.i = RNIL64;
+  if (!c_lcp_complete_fragments.first(fragPtr)) return;
+  do {
+    if (!on) {
+      fragPtr.p->logFlag = Fragrecord::STATE_FALSE;
+    } else if (fragPtr.p->fragStatus == Fragrecord::FSACTIVE) {
+      fragPtr.p->logFlag = Fragrecord::STATE_TRUE;
+    }
+  } while (c_lcp_complete_fragments.next(fragPtr));
 }
 
 /**

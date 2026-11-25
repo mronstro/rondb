@@ -228,8 +228,8 @@ effort, skipped by phase 2 in the tail and invalidated in step C (finding
 without rule F the commit point is the last COMMIT persisted, so a
 COMPLETE needs no fence and only lets step A decide T locally (`MC_lazy*`,
 with every crash cut of the log parts; `MC_lazy_nofallback` the
-control). Proposed: finding 4, upstream's race, in a
-ticket of its own. Without rule F there are no "T aborted" hits, so how step B
+control). Decided (2026-11-25): finding 4, upstream's race, gets a
+ticket of its own, outside RONDB-1150. Without rule F there are no "T aborted" hits, so how step B
 counts an invalidated COMMIT for the DI-2 rule no longer matters.
 
 **State (2026-11-21): re-scoped after step 1, extended, to be tested.**
@@ -947,6 +947,49 @@ replicas, and raises the restorable GCI to G'.
 - No rule F (dropped 2026-11-24, X3.4): no ABORT follows a COMMIT, so
   step A ignores ABORTs, step B reports only COMPLETE hits and step C has
   no veto.
+
+**State (2026-11-25): X5.1-X5.3 written, to be built and tested; phase 2
+stays off until X5.7.** `Dbdih::SR_DURABLE_TAIL` is false, so DIH never
+sets `DF_TAIL` and every restart restores to R as before; the code of
+X5.2 and X5.3 runs only once X5.4-X5.7 are in and the switch goes. What
+there is:
+- X5.1: section 1 of START_RECREQ (`StartRecReq::DURABLE_*`): g, the
+  flags (`DF_TAIL`), the node group of each SR node. DIH sends it in a
+  system restart when g != 0 (`srDurableParams()`), the LQH proxy
+  forwards it, DBLQH keeps it (`c_sr_durable_gci`, `c_sr_durable_tail`,
+  `c_sr_node_group`). DIH logs at `completeRestartLab()` whether phase 2
+  runs, and why not. g is the configured one until X5.7 puts it in the
+  sysfile.
+- Decided while coding: phase 2 runs only if every replica is restored
+  from its own node's REDO alone, in one round (`m_sr_tail_own_log`,
+  cleared in `sendStartFragreq()`). Step A executes the tail in round 0 on
+  the replica of its own node, so a replica that takes REDO from another
+  node or in a later round (error insert 7072 forces that) would get the
+  tail too early. Otherwise the restart restores to R and DIH logs a
+  warning; X6 revisits it with stale nodes.
+- X5.2: in round 0 the part reads to E (`srLogLimits()` takes E's mbyte
+  as the stop), the COMPLETED_GCI of R no longer ends it
+  (`m_tail_found_last`), a durable COMMIT of the tail is kept and queued,
+  one without `CF_DURABLE` is invalidated as before. In later rounds a
+  durable tail COMMIT is left alone.
+- X5.3: `PmemRedoTail.hpp/.cpp`, `TailTable` per part, queued COMMITs
+  with their position and words; at a COMPLETE they are executed in log
+  order before the scan reads on (`redoTailComplete()`,
+  `redoTailExecNext()`, `execSrCommit()` split out of `execSr()`), on the
+  replica of this node, with the record's gci_lo. `checkIfExecLog()` and
+  `execLogRecord()` route tail COMMITs there.
+- Decided while coding: no fragment writes REDO in round 0 of a restart
+  with phase 2 (`redoTailSetLogFlags()`, `sendSTART_FRAGCONF()`), as a
+  fragment with no REDO to run is active before the tail executes on it;
+  they log again when round 0 is done on every node
+  (`execSrCompletedLab()`).
+- `TailUnion` for steps B and C is written (U, the DI-2 rescan rule, the
+  fallback, G') and unit tested, not yet used.
+- `pmem_redo_tail-t`: the step-A table, growth, U, the fallback with and
+  without a missing COMMIT, the rescan rule, G'.
+- The LQH proxy now imports the sections of START_RECREQ once, not once
+  per worker; `sendSignalNoRelease()` copies them, so each worker's import
+  but the last was never released.
 
 ### X5.1 Phase-2 parameters (S, 2 pd)
 

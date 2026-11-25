@@ -48,6 +48,20 @@ class StartRecReq {
   static constexpr Uint32 SignalLength = 6;
   static constexpr Uint32 SignalLength_v1 = 6 + NdbNodeBitmask48::Size;
 
+  /**
+   * RONDB-1150, X5.1: section 1, sent in a system restart when durable
+   * commits govern its tail (g != 0): g, the flags, then the node group
+   * of each SR node in the order of sr_nodes, for the fallback of
+   * phase 2 (plan §5.5).
+   */
+  static constexpr Uint32 DURABLE_GCI = 0;
+  static constexpr Uint32 DURABLE_FLAGS = 1;
+  static constexpr Uint32 DURABLE_NODE_GROUPS = 2;
+  static constexpr Uint32 DURABLE_MAX_WORDS =
+      DURABLE_NODE_GROUPS + ABS_MAX_NDB_NODES;
+  /* Phase 2 runs on the tail after the restart's GCI R (R >= g - 1) */
+  static constexpr Uint32 DF_TAIL = 1;
+
  private:
   Uint32 receivingNodeId;
   Uint32 senderRef;

@@ -1532,6 +1532,8 @@ void DblqhProxy::execSTART_RECREQ(Signal *signal) {
   }
 
   StartRecReq *req = (StartRecReq *)signal->getDataPtr();
+  Uint32 durable[StartRecReq::DURABLE_MAX_WORDS];
+  Uint32 durableLen = 0;
   if (signal->getNoOfSections() >= 1) {
     jam();
     Uint32 senderVersion =
@@ -1543,12 +1545,23 @@ void DblqhProxy::execSTART_RECREQ(Signal *signal) {
     ndbrequire(ptr.sz <= NdbNodeBitmask::Size);
     memset(req->sr_nodes, 0, sizeof(req->sr_nodes));
     copy(req->sr_nodes, ptr);
+    if (handle.m_cnt >= 2) {
+      /* RONDB-1150, X5.1: the parameters of phase 2 */
+      jam();
+      ndbrequire(handle.getSection(ptr, 1));
+      ndbrequire(ptr.sz >= StartRecReq::DURABLE_NODE_GROUPS &&
+                 ptr.sz <= StartRecReq::DURABLE_MAX_WORDS);
+      copy(durable, ptr);
+      durableLen = ptr.sz;
+    }
     releaseSections(handle);
   } else {
     memset(req->sr_nodes + NdbNodeBitmask48::Size, 0, _NDB_NBM_DIFF_BYTES);
   }
   Ss_START_RECREQ &ss = ssSeize<Ss_START_RECREQ>();
   ss.m_req = *req;
+  memcpy(ss.m_durable, durable, 4 * durableLen);
+  ss.m_durableLen = durableLen;
   ss.restoreFragCompletedCount = 0;
   ss.undoDDCompletedCount = 0;
   ss.execREDOLogCompletedCount = 0;
@@ -1682,11 +1695,22 @@ void DblqhProxy::sendSTART_RECREQ(Signal *signal, Uint32 ssId,
 
   req->senderRef = reference();
   req->senderData = ssId;
-  LinearSectionPtr lsptr[3];
-  lsptr[0].p = req->sr_nodes;
-  lsptr[0].sz = NdbNodeBitmask::getPackedLengthInWords(req->sr_nodes);
-  ndbrequire(import(handle->m_ptr[0], lsptr[0].p, lsptr[0].sz));
-  handle->m_cnt = 1;
+  if (handle->m_cnt == 0) {
+    /**
+     * Imported once: sendSignalNoRelease() copies the sections for each
+     * worker, and sendREQ() releases them after the last one.
+     */
+    jam();
+    ndbrequire(import(handle->m_ptr[0], req->sr_nodes,
+                      NdbNodeBitmask::getPackedLengthInWords(req->sr_nodes)));
+    handle->m_cnt = 1;
+    if (ss.m_durableLen > 0) {
+      /* RONDB-1150, X5.1: the parameters of phase 2 */
+      jam();
+      ndbrequire(import(handle->m_ptr[1], ss.m_durable, ss.m_durableLen));
+      handle->m_cnt = 2;
+    }
+  }
   sendSignalNoRelease(workerRef(ss.m_worker), GSN_START_RECREQ, signal,
                       StartRecReq::SignalLength, JBB, handle);
 }

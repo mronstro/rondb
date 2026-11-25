@@ -38726,6 +38726,8 @@ void Dblqh::execSTART_RECREQ(Signal *signal) {
 
   jamEntry();
   StartRecReq *const req = (StartRecReq *)&signal->theData[0];
+  Uint32 durable[StartRecReq::DURABLE_MAX_WORDS];
+  Uint32 durableLen = 0;
 
   if (signal->getNoOfSections() >= 1) {
     jam();
@@ -38738,6 +38740,15 @@ void Dblqh::execSTART_RECREQ(Signal *signal) {
     ndbrequire(ptr.sz <= NdbNodeBitmask::Size);
     memset(req->sr_nodes, 0, sizeof(req->sr_nodes));
     copy(req->sr_nodes, ptr);
+    if (handle.m_cnt >= 2) {
+      /* RONDB-1150, X5.1: the parameters of phase 2 */
+      jam();
+      ndbrequire(handle.getSection(ptr, 1));
+      ndbrequire(ptr.sz >= StartRecReq::DURABLE_NODE_GROUPS &&
+                 ptr.sz <= StartRecReq::DURABLE_MAX_WORDS);
+      copy(durable, ptr);
+      durableLen = ptr.sz;
+    }
     releaseSections(handle);
   } else {
     memset(req->sr_nodes + NdbNodeBitmask48::Size, 0, _NDB_NBM_DIFF_BYTES);
@@ -38780,6 +38791,43 @@ void Dblqh::execSTART_RECREQ(Signal *signal) {
   } else {
     jam();
     cstartRecReqData = RNIL;
+  }
+
+  /**
+   * RONDB-1150, X5.1: DIH sends the parameters of phase 2 in a system
+   * restart under durable commits, with the node group of each SR node
+   * in the order of m_sr_nodes.
+   */
+  c_sr_durable_gci = 0;
+  c_sr_durable_tail = false;
+  if (durableLen > 0) {
+    jam();
+    ndbrequire(durableLen ==
+               StartRecReq::DURABLE_NODE_GROUPS + m_sr_nodes.count());
+    c_sr_durable_gci = durable[StartRecReq::DURABLE_GCI];
+    c_sr_durable_tail =
+        (durable[StartRecReq::DURABLE_FLAGS] & StartRecReq::DF_TAIL) != 0;
+    ndbrequire(c_sr_durable_gci != 0 &&
+               (!c_sr_durable_tail ||
+                crestartNewestGci + 1 >= c_sr_durable_gci));
+    Uint32 i = StartRecReq::DURABLE_NODE_GROUPS;
+    for (Uint32 nodeId = m_sr_nodes.find_first();
+         nodeId != NdbNodeBitmask::NotFound;
+         nodeId = m_sr_nodes.find_next(nodeId + 1)) {
+      c_sr_node_group[nodeId] = Uint16(durable[i++]);
+    }
+    if (instance() <= 1) {
+      g_eventLogger->info(
+          "LDM(%u): durable commits from GCI %u; phase 2 %s on the tail "
+          "after GCI %u",
+          instance(), c_sr_durable_gci,
+          c_sr_durable_tail ? "runs" : "does not run", crestartNewestGci);
+    }
+    if (c_sr_durable_tail) {
+      /* X5.3: those restored with no REDO to execute logged since */
+      jam();
+      redoTailSetLogFlags(false);
+    }
   }
 
   {
@@ -39316,8 +39364,13 @@ void Dblqh::sendSTART_FRAGCONF(Signal *signal) {
    *
    * This method is called when we are sure that we have completed any REDO
    * log execution needed.
+   *
+   * RONDB-1150, X5.3: the durable tail executes in round 0 on fragments
+   * done with their REDO up to R, without logging; they log once round 0
+   * is done on every node (execSrCompletedLab()).
    */
-  fragptr.p->logFlag = Fragrecord::STATE_TRUE;
+  fragptr.p->logFlag =
+      redoTailRound0() ? Fragrecord::STATE_FALSE : Fragrecord::STATE_TRUE;
   fragptr.p->fragStatus = Fragrecord::FSACTIVE;
 
   signal->theData[0] = fragptr.p->srUserptr;
@@ -39405,6 +39458,21 @@ void Dblqh::execEXEC_SRCONF(Signal *signal) {
 
 void Dblqh::execSrCompletedLab(Signal *signal) {
   csrPhasesCompleted++;
+  if (c_sr_durable_tail && csrPhasesCompleted == 1) {
+    /**
+     * RONDB-1150, X5.3: round 0 is done on every node, and with it phase
+     * 2 on the durable tail. The fragments log again, and the step-A
+     * tables go; step C (X5.5) decides their in-doubt sets before.
+     */
+    jam();
+    redoTailSetLogFlags(true);
+    LogPartRecordPtr logPartPtr;
+    for (logPartPtr.i = 0; logPartPtr.i < clogPartFileSize; logPartPtr.i++) {
+      ptrAss(logPartPtr, logPartRecord);
+      delete logPartPtr.p->m_tail;
+      logPartPtr.p->m_tail = nullptr;
+    }
+  }
   restart_synch_state(signal, COMPLETED_REDO_LOG_EXEC_SYNCH,
                       ZCONTINUE_REDO_LOG_EXEC_COMPLETED);
 }
@@ -39792,6 +39860,23 @@ void Dblqh::srLogLimits(Signal *signal) {
    * ----------------------------------------------------------------------- */
   while (true) {
     ndbrequire(tmbyte < clogFileSize);
+    if (logPartPtr.p->logExecState == LogPartRecord::LES_SEARCH_STOP &&
+        c_redo_pmem_format && redoTailRound0() &&
+        logPartPtr.p->logPartState == LogPartRecord::SR_THIRD_PHASE_STARTED) {
+      /**
+       * RONDB-1150, X5.2: round 0 reads the durable tail, up to E. E may
+       * be in the file after the last one, whose last-file slot was not
+       * written (W3).
+       */
+      jam();
+      LogFileRecordPtr endFilePtr;
+      findLogfile(signal, logPartPtr.p->m_pmem_end.fileNo, logPartPtr.p,
+                  &endFilePtr);
+      logPartPtr.p->stopLogfile = endFilePtr.i;
+      logPartPtr.p->stopMbyte =
+          logPartPtr.p->m_pmem_end.pageNo >> ZTWOLOG_NO_PAGES_IN_MBYTE;
+      logPartPtr.p->logExecState = LogPartRecord::LES_SEARCH_START;
+    }
     if (logPartPtr.p->logExecState == LogPartRecord::LES_SEARCH_STOP) {
       if (logFilePtr.p->logMaxGciCompleted[tmbyte] <=
           logPartPtr.p->logLastGci) {
@@ -39967,6 +40052,13 @@ void Dblqh::openExecSrStartLab(Signal *signal, LogFileRecordPtr logFilePtr,
     logPartPtrP->m_pmem_exec_lap = PmemRedo::lapAt(
         logPartPtrP->m_pmem_end, logFilePtr.p->fileNo,
         logPartPtrP->startMbyte * ZPAGES_IN_MBYTE, ZPAGE_HEADER_SIZE);
+    if (redoTailRound0()) {
+      jam();
+      redoTailStart(logPartPtrP,
+                    PmemRedo::mbyteStart(logFilePtr.p->fileNo,
+                                         logPartPtrP->startMbyte,
+                                         logPartPtrP->m_pmem_exec_lap));
+    }
   }
   /* ------------------------------------------------------------------------
    *     WE NEED A TC CONNECT RECORD TO HANDLE EXECUTION OF LOG RECORDS.
@@ -40075,6 +40167,7 @@ void Dblqh::execSr(Signal *signal) {
   LogFileRecordPtr nextLogFilePtr;
   LogPageRecordPtr tmpLogPagePtr;
   Uint32 logWord;
+  Uint32 pmemW0 = 0;
   Uint32 line;
   const char *crash_msg = 0;
   LogPageRecordPtr logPagePtr;
@@ -40203,6 +40296,14 @@ void Dblqh::execSr(Signal *signal) {
         return;
       }  // if
     }    // if
+    if (logPartPtr.p->m_tail_exec != PmemRedo::TAIL_NIL) {
+      /* RONDB-1150, X5.3: the COMMITs that a COMPLETE handed over */
+      jam();
+      if (redoTailExecNext(signal, logPagePtr, logFilePtr, logPartPtr)) {
+        return;
+      }
+      continue;
+    }
     if (c_redo_pmem_format) {
       /**
        * RONDB-1150 (recovery plan S6.5): a record of the PMEM format at
@@ -40220,6 +40321,13 @@ void Dblqh::execSr(Signal *signal) {
       const PmemRedo::Pos &end = logPartPtr.p->m_pmem_end;
       if (pos.fileNo == end.fileNo && pos.pageNo == end.pageNo &&
           pos.pageIndex == end.pageIndex && pos.lap == end.lap) {
+        if (redoTailRound0() && logPartPtr.p->m_tail_found_last) {
+          /* X5.2: the end of the durable tail, and of round 0 */
+          jam();
+          logPartPtr.p->logExecState = LogPartRecord::LES_EXEC_LOG_COMPLETED;
+          send_runredo_event(signal, logPartPtr.p, logPartPtr.p->logLastGci);
+          continue;
+        }
         redoPmemSrError(logPartPtr.p, pos, logPartPtr.p->m_pmem_end_reason,
                         "end of log wo/ having found last GCI");
       }
@@ -40234,6 +40342,7 @@ void Dblqh::execSr(Signal *signal) {
       ndbassert((w0 | PmemRedo::RF_INVALIDATED) ==
                 (info.w0 | PmemRedo::RF_INVALIDATED));
       const Uint32 len = PmemRedo::w0Len(w0);
+      pmemW0 = w0;
       logWord = PmemRedo::w0Type(w0);
       switch (logWord) {
         case ZCOMMIT_TYPE:
@@ -40254,8 +40363,23 @@ void Dblqh::execSr(Signal *signal) {
           stepAhead(signal, len - 1, logPagePtr, logFilePtr.p, logPartPtr.p);
           logPartPtr.p->m_redoWorkStats.m_opsSkipped++;
           continue;
+        case PmemRedo::TYPE_COMPLETE:
+          if (redoTailRound0()) {
+            /* X5.3: step A executes the COMMITs queued for it */
+            jam();
+            readLogword(logPagePtr, logFilePtr.p, logPartPtr.p);
+            const Uint32 transid1 =
+                readLogword(logPagePtr, logFilePtr.p, logPartPtr.p);
+            const Uint32 transid2 =
+                readLogword(logPagePtr, logFilePtr.p, logPartPtr.p);
+            redoTailComplete(logPartPtr.p, transid1, transid2);
+            continue;
+          }
+          jam();
+          stepAhead(signal, len - 1, logPagePtr, logFilePtr.p, logPartPtr.p);
+          continue;
         default:
-          /* FD (V5 placed it), FILLER, COMPLETE, SR_HEAD */
+          /* FD (V5 placed it), FILLER, SR_HEAD */
           jam();
           stepAhead(signal, len - 1, logPagePtr, logFilePtr.p, logPartPtr.p);
           continue;
@@ -40289,20 +40413,37 @@ void Dblqh::execSr(Signal *signal) {
          */
       case ZCOMMIT_TYPE: {
         CommitLogRecord commitLogRecord;
+        Uint32 rec[PmemRedo::COMMIT_LEN];
         jam();
         TcConnectionrecPtr tcConnectptr;
         tcConnectptr.i = logPartPtr.p->logTcConrec;
         ndbrequire(tcConnect_pool.getValidPtr(tcConnectptr));
         if (c_redo_pmem_format) {
           jam();
-          readCommitLogPmem(&commitLogRecord, tcConnectptr, logPagePtr,
+          rec[0] = pmemW0;
+          readCommitLogPmem(&commitLogRecord, tcConnectptr, rec, logPagePtr,
                             logFilePtr.p, logPartPtr.p);
         } else {
           readCommitLog(signal, &commitLogRecord, tcConnectptr, logPagePtr,
                         logFilePtr, logPartPtr.p);
         }
         ndbassert(!m_is_in_query_thread);
-        if (tcConnectptr.p->gci_hi > crestartNewestGci) {
+        if (c_redo_pmem_format && redoTailGci(tcConnectptr.p->gci_hi) &&
+            (pmemW0 & PmemRedo::CF_DURABLE) != 0) {
+          /**
+           * RONDB-1150, X5.2: a durable COMMIT of the tail stays; step A
+           * queues it in round 0 (X5.3). A COMMIT without CF_DURABLE, a
+           * dirty write's, is invalidated below (DI-1).
+           */
+          jam();
+          if (csrPhasesCompleted == 0) {
+            jam();
+            const PmemRedo::Pos pos = {
+                logFilePtr.p->fileNo, logPartPtr.p->prevFilepage,
+                logPartPtr.p->savePageIndex, logPartPtr.p->m_pmem_exec_lap};
+            redoTailCommit(logPartPtr.p, pos, rec);
+          }
+        } else if (tcConnectptr.p->gci_hi > crestartNewestGci) {
           jam();
           /*---------------------------------------------------------------------------*/
           /* THIS LOG RECORD MUST BE IGNORED. IT IS PART OF A GLOBAL CHECKPOINT
@@ -40349,49 +40490,9 @@ void Dblqh::execSr(Signal *signal) {
                   logPartPtr.p->savePageIndex, logPartPtr.p->m_pmem_exec_lap};
               redoPmemCheckPrepare(logPartPtr.p, commitPos, commitLogRecord);
             }
-            //*---------------------------------------------------------------------------*/
-            /* IN A NODE RESTART WE WILL NEVER END UP HERE SINCE NO FRAGMENTS
-             * HAVE BEEN  */
-            /* DEFINED YET. THUS NO EXTRA CHECKING FOR NODE RESTART IS
-             * NECESSARY.        */
-            /*---------------------------------------------------------------------------*/
-            logPartPtr.p->savePageIndex =
-                logPagePtr.p->logPageWord[ZCURR_PAGE_INDEX];
-            tcConnectptr.p->fragmentptr = fragptr.i;
-            findPageRef(signal, &commitLogRecord, logPagePtr, logPartPtr.p);
-            logPartPtr.p->execSrLogPageIndex = commitLogRecord.startPageIndex;
-            if (logPagePtr.i != RNIL) {
-              jam();
-              logPagePtr.p->logPageWord[ZCURR_PAGE_INDEX] =
-                  commitLogRecord.startPageIndex;
-              logPartPtr.p->execSrLogPage = logPagePtr.i;
-              execLogRecord(signal, logPagePtr, logFilePtr, logPartPtr.p);
-              return;
-            }  // if
-            logPartPtr.p->execSrStartPageNo = commitLogRecord.startPageNo;
-            logPartPtr.p->execSrStopPageNo = commitLogRecord.stopPageNo;
-            findLogfile(signal, commitLogRecord.fileNo, logPartPtr.p,
-                        &logFilePtr);
-            logPartPtr.p->execSrExecLogFile = logFilePtr.i;
-            if (logFilePtr.i == logPartPtr.p->currentLogfile) {
-              jam();
-              LogFileOperationRecordPtr lfoPtr;
-              Uint32 cnt = 1 + logPartPtr.p->execSrStopPageNo -
-                           logPartPtr.p->execSrStartPageNo;
-              evict(logPartPtr.p->m_redo_page_cache, cnt, logPartPtr.p);
-              readExecLog(signal, lfoPtr, logFilePtr, logPartPtr.p);
-              lfoPtr.p->lfoState = LogFileOperationRecord::READ_EXEC_LOG;
-              return;
-            } else {
-              jam();
-              /*---------------------------------------------------------------------------*/
-              /* THE FILE IS CURRENTLY NOT OPEN. WE MUST OPEN IT BEFORE WE CAN
-               * READ FROM   */
-              /* THE FILE. */
-              /*---------------------------------------------------------------------------*/
-              openFileRw_cache(signal, logFilePtr);
-              return;
-            }  // if
+            execSrCommit(signal, tcConnectptr, &commitLogRecord, logPagePtr,
+                         logFilePtr, logPartPtr);
+            return;
           }    // if
           else {
             logPartPtr.p->m_redoWorkStats.m_opsSkipped++;
@@ -40556,6 +40657,12 @@ void Dblqh::execSr(Signal *signal) {
                                   logPartPtr.p->logLap);
             }
           }  // if
+          if (c_redo_pmem_format && redoTailRound0()) {
+            /* RONDB-1150, X5.2: round 0 reads on to E, the durable tail */
+            jam();
+            logPartPtr.p->m_tail_found_last = true;
+            break;
+          }
           /*---------------------------------------------------------------------------*/
           /* THERE IS NO NEED OF EXECUTING PAST THIS LINE SINCE THERE WILL ONLY
            * BE LOG */
@@ -40624,6 +40731,55 @@ crash:
 
   progError(__LINE__, NDBD_EXIT_SR_REDOLOG, buf);
 }  // Dblqh::execSr()
+
+/**
+ * The COMMIT in tcConnectptr and commitLogRecord executed: its PREPARE
+ * found in the page cache, or read from the log, then execLogRecord().
+ * checkIfExecLog() has set fragptr; the scan goes on after the record at
+ * the current position of logPagePtr when the execution is done.
+ */
+void Dblqh::execSrCommit(Signal *signal, const TcConnectionrecPtr tcConnectptr,
+                         CommitLogRecord *commitLogRecord,
+                         LogPageRecordPtr logPagePtr,
+                         LogFileRecordPtr logFilePtr,
+                         LogPartRecordPtr logPartPtr) {
+  /*---------------------------------------------------------------------------*/
+  /* IN A NODE RESTART WE WILL NEVER END UP HERE SINCE NO FRAGMENTS HAVE BEEN  */
+  /* DEFINED YET. THUS NO EXTRA CHECKING FOR NODE RESTART IS NECESSARY.        */
+  /*---------------------------------------------------------------------------*/
+  logPartPtr.p->savePageIndex = logPagePtr.p->logPageWord[ZCURR_PAGE_INDEX];
+  tcConnectptr.p->fragmentptr = fragptr.i;
+  findPageRef(signal, commitLogRecord, logPagePtr, logPartPtr.p);
+  logPartPtr.p->execSrLogPageIndex = commitLogRecord->startPageIndex;
+  if (logPagePtr.i != RNIL) {
+    jam();
+    logPagePtr.p->logPageWord[ZCURR_PAGE_INDEX] =
+        commitLogRecord->startPageIndex;
+    logPartPtr.p->execSrLogPage = logPagePtr.i;
+    execLogRecord(signal, logPagePtr, logFilePtr, logPartPtr.p);
+    return;
+  }  // if
+  logPartPtr.p->execSrStartPageNo = commitLogRecord->startPageNo;
+  logPartPtr.p->execSrStopPageNo = commitLogRecord->stopPageNo;
+  findLogfile(signal, commitLogRecord->fileNo, logPartPtr.p, &logFilePtr);
+  logPartPtr.p->execSrExecLogFile = logFilePtr.i;
+  if (logFilePtr.i == logPartPtr.p->currentLogfile) {
+    jam();
+    LogFileOperationRecordPtr lfoPtr;
+    Uint32 cnt =
+        1 + logPartPtr.p->execSrStopPageNo - logPartPtr.p->execSrStartPageNo;
+    evict(logPartPtr.p->m_redo_page_cache, cnt, logPartPtr.p);
+    readExecLog(signal, lfoPtr, logFilePtr, logPartPtr.p);
+    lfoPtr.p->lfoState = LogFileOperationRecord::READ_EXEC_LOG;
+  } else {
+    jam();
+    /*-------------------------------------------------------------------------*/
+    /* THE FILE IS CURRENTLY NOT OPEN. WE MUST OPEN IT BEFORE WE CAN READ FROM */
+    /* THE FILE.                                                               */
+    /*-------------------------------------------------------------------------*/
+    openFileRw_cache(signal, logFilePtr);
+  }  // if
+}  // Dblqh::execSrCommit()
 
 /*---------------------------------------------------------------------------*/
 /* THIS SIGNAL IS ONLY RECEIVED TO BE CAPTURED IN THE SIGNAL LOG. IT IS      */
@@ -40720,9 +40876,15 @@ void Dblqh::execLogRecord(Signal *signal, LogPageRecordPtr logPagePtr,
   readAttrinfo(logPagePtr, tcConnectptr, logPartPtrP);
   initReqinfoExecSr(signal, tcConnectptr);
   arrGuard(logPartPtrP->execSrExecuteIndex, MAX_REPLICAS);
-  BlockReference ref =
-      fragptr.p->execSrBlockref[logPartPtrP->execSrExecuteIndex];
-  tcConnectptr.p->nextReplica = refToNode(ref);
+  if (redoTailGci(tcConnectptr.p->gci_hi)) {
+    /* RONDB-1150, X5.3: the durable tail, on the replica of this node */
+    jam();
+    tcConnectptr.p->nextReplica = cownNodeid;
+  } else {
+    BlockReference ref =
+        fragptr.p->execSrBlockref[logPartPtrP->execSrExecuteIndex];
+    tcConnectptr.p->nextReplica = refToNode(ref);
+  }
   tcConnectptr.p->connectState = TcConnectionrec::LOG_CONNECTED;
   tcConnectptr.p->tcOprec = tcConnectptr.i;
   tcConnectptr.p->tcHashKeyHi = 0;
@@ -42178,6 +42340,20 @@ Uint32 Dblqh::checkIfExecLog(Signal *signal,
   bool success = get_table_frag_record_can_fail(tcConnectptr.p->tableref,
                                                 tcConnectptr.p->fragmentid,
                                                 tabptr, fragptr, instance);
+  if (redoTailGci(tcConnectptr.p->gci_hi)) {
+    /**
+     * RONDB-1150, X5.3: a COMMIT of the durable tail executes once, on
+     * the replica of this node, which has its REDO up to R from this
+     * node's log alone (DIH checks it, X5.1)
+     */
+    jam();
+    if (success && logPartPtrP->execSrExecuteIndex == 0 &&
+        table_version_major(tabptr.p->schemaVersion) ==
+            table_version_major(tcConnectptr.p->schemaVersion)) {
+      return ZOK;
+    }
+    return ZNOT_OK;
+  }
   if (success && (table_version_major(tabptr.p->schemaVersion) ==
                   table_version_major(tcConnectptr.p->schemaVersion))) {
     if (fragptr.p->execSrStatus != Fragrecord::IDLE) {
@@ -43270,6 +43446,9 @@ void Dblqh::initialiseRecordsLab(Signal* signal, Uint32 data,
     m_sr_nodes.clear();
     m_sr_exec_sr_req.clear();
     m_sr_exec_sr_conf.clear();
+    c_sr_durable_gci = 0;
+    c_sr_durable_tail = false;
+    std::memset(c_sr_node_group, 0xFF, sizeof(c_sr_node_group));
     ccurrentGcprec = RNIL;
     caddNodeState = ZFALSE;
     cstartRecReq = SRR_INITIAL; // Initial
@@ -43638,6 +43817,12 @@ void Dblqh::initLogpart(Signal *signal, LogPartRecordPtr logPartPtr) {
   logPartPtr.p->m_pmem_unsafe_shutdown = false;
   logPartPtr.p->m_pmem_gci_end_lsn = 0;
   logPartPtr.p->m_pmem_zero_crash = 0;
+  logPartPtr.p->m_tail = nullptr;
+  logPartPtr.p->m_tail_exec = PmemRedo::TAIL_NIL;
+  logPartPtr.p->m_tail_exec_first = PmemRedo::TAIL_NIL;
+  logPartPtr.p->m_tail_found_last = false;
+  logPartPtr.p->m_tail_start = PmemRedo::Pos{0, 0, 0, 0};
+  logPartPtr.p->m_tail_max_gci = 0;
   NdbLogPartInfo lpinfo(instance());
   ndbrequire(lpinfo.partCount == clogPartFileSize);
   logPartPtr.p->logPartNo = lpinfo.partNo[logPartPtr.i];

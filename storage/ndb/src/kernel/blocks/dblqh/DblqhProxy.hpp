@@ -319,6 +319,9 @@ class DblqhProxy : public LocalProxy {
      */
     static const char *name() { return "START_RECREQ"; }
     StartRecReq m_req;
+    // RONDB-1150, X5.1: section 1 of the request, 0 words when not sent
+    Uint32 m_durable[StartRecReq::DURABLE_MAX_WORDS];
+    Uint32 m_durableLen;
     Uint32 phaseToSend;
     Uint32 restoreFragCompletedCount;
     Uint32 undoDDCompletedCount;

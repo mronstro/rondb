@@ -62,6 +62,7 @@
 #include <signaldata/NodeRecoveryStatusRep.hpp>
 #include "NdbAggregationCommon.hpp"
 #include "PmemRedoScan.hpp"
+#include "PmemRedoTail.hpp"
 #include "kernel/DblqhState.hpp"
 
 // primary key is stored in TUP
@@ -2381,6 +2382,24 @@ class Dblqh : public SimulatedBlock {
      */
     Uint64 m_pmem_gci_end_lsn;
     Uint64 m_pmem_zero_crash;
+    /**
+     * RONDB-1150, X5.2-X5.5: phase 2 of a system restart on the durable
+     * tail, from round 0 of the REDO execution to step C:
+     *   m_tail            the step-A table of the part (PmemRedoTail.hpp)
+     *   m_tail_exec       the next COMMIT that a COMPLETE handed over,
+     *                     executed before the scan reads on; TAIL_NIL
+     *   m_tail_exec_first the first of them, released after the last
+     *   m_tail_found_last the scan passed the COMPLETED_GCI of the
+     *                     restart's GCI, so it ends at E
+     *   m_tail_start      where round 0 started, for the rescan (X5.4)
+     *   m_tail_max_gci    the highest GCI that step A executed
+     */
+    PmemRedo::TailTable *m_tail;
+    Uint32 m_tail_exec;
+    Uint32 m_tail_exec_first;
+    bool m_tail_found_last;
+    PmemRedo::Pos m_tail_start;
+    Uint32 m_tail_max_gci;
 
   };  // Size 164 Bytes
   typedef Ptr<LogPartRecord> LogPartRecordPtr;
@@ -4496,10 +4515,37 @@ private:
                                     const PmemRedo::Pos &pos, Uint32 reason,
                                     const char *what);
   void readCommitLogPmem(CommitLogRecord *commitLogRecord,
-                         const TcConnectionrecPtr tcConnectptr,
+                         const TcConnectionrecPtr tcConnectptr, Uint32 *rec,
                          LogPageRecordPtr &logPagePtr,
                          LogFileRecord *logFilePtrP,
                          LogPartRecord *logPartPtrP);
+  void redoCommitFields(CommitLogRecord *commitLogRecord,
+                        const TcConnectionrecPtr tcConnectptr,
+                        const Uint32 *rec, const LogPartRecord *logPartPtrP);
+  /**
+   * RONDB-1150, X5.2-X5.3: phase 2 on the durable tail runs in round 0 of
+   * the REDO execution, and no fragment writes REDO until round 0 is
+   * done on every node, as the tail executes without logging.
+   */
+  bool redoTailRound0() const {
+    return c_sr_durable_tail && csrPhasesCompleted == 0;
+  }
+  bool redoTailGci(Uint32 gci) const {
+    return c_sr_durable_tail && gci > crestartNewestGci;
+  }
+  void redoTailSetLogFlags(bool on);
+  void redoTailStart(LogPartRecord *logPartPtrP, const PmemRedo::Pos &start);
+  void redoTailCommit(LogPartRecord *logPartPtrP, const PmemRedo::Pos &pos,
+                      const Uint32 *rec);
+  void redoTailComplete(LogPartRecord *logPartPtrP, Uint32 transid1,
+                        Uint32 transid2);
+  bool redoTailExecNext(Signal *signal, LogPageRecordPtr logPagePtr,
+                        LogFileRecordPtr logFilePtr,
+                        LogPartRecordPtr logPartPtr);
+  void execSrCommit(Signal *signal, const TcConnectionrecPtr tcConnectptr,
+                    CommitLogRecord *commitLogRecord,
+                    LogPageRecordPtr logPagePtr, LogFileRecordPtr logFilePtr,
+                    LogPartRecordPtr logPartPtr);
   void redoPmemCheckPrepare(const LogPartRecord *logPartPtrP,
                             const PmemRedo::Pos &commitPos,
                             const CommitLogRecord &commitLogRecord);
@@ -5388,6 +5434,14 @@ public:
   NdbNodeBitmask m_sr_nodes;
   NdbNodeBitmask m_sr_exec_sr_req;
   NdbNodeBitmask m_sr_exec_sr_conf;
+  /**
+   * RONDB-1150, X5.1: the parameters of phase 2 from START_RECREQ: g, 0
+   * when durable commits do not govern the tail; whether phase 2 runs on
+   * the tail after crestartNewestGci; the node group of each SR node.
+   */
+  Uint32 c_sr_durable_gci;
+  bool c_sr_durable_tail;
+  Uint16 c_sr_node_group[ABS_MAX_NDB_NODES];
 
   /* -------------------------------------------------------------------------
    */

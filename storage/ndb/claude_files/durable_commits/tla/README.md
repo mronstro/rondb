@@ -13,8 +13,8 @@ without it; the code no longer has it, nor X4.9's drop of a late COMPLETE.
 The model keeps both as switches, and their configurations as the
 evidence. Dirty writes are best effort: phase 2 skips a dirty write in the
 tail and step C invalidates its COMMIT, so its replicas never differ
-(finding 3, DI-1). Finding 4 is upstream's race; a ticket of its own is
-proposed.
+(finding 3, DI-1). Finding 4 is upstream's race; it gets a ticket of
+its own, outside RONDB-1150 (decided 2026-11-25).
 
 **To check (2026-11-24): the COMPLETE without a fence.** Without rule F
 the commit point is the last COMMIT persisted: after it every restart

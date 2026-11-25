@@ -49,3 +49,6 @@ NDB_ADD_TEST(pmem_redo_writer-t pmem_redo_writer-t.cpp PmemRedoScan.cpp
 # The control area of a log part: the config line and the last-file slots.
 NDB_ADD_TEST(pmem_redo_slot-t pmem_redo_slot-t.cpp PmemRedoScan.cpp
   LIBS ndbgeneral ndbportlib)
+# Phase 2 of a restart on the durable tail: the step-A table, U, verdicts.
+NDB_ADD_TEST(pmem_redo_tail-t pmem_redo_tail-t.cpp PmemRedoTail.cpp
+  PmemRedoScan.cpp LIBS ndbgeneral ndbportlib)

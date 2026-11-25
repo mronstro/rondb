@@ -490,14 +490,25 @@ void Dbdih::sendSTART_RECREQ(Signal *signal, Uint32 nodeId, Uint32 extra) {
   m_sr_nodes.copyto(NdbNodeBitmask::Size, req->sr_nodes);
   Uint32 packed_length = m_sr_nodes.getPackedLengthInWords();
 
+  /**
+   * RONDB-1150, X5.1: in a system restart under durable commits, section
+   * 1 with the parameters of phase 2. extra is RNIL in a system restart
+   * (completeRestartLab()), a take-over record in nr_run_redo().
+   */
+  Uint32 durable[StartRecReq::DURABLE_MAX_WORDS];
+  const char *why = nullptr;
+  const Uint32 durableLen = extra == RNIL ? srDurableParams(durable, &why) : 0;
+
   if (ndbd_send_node_bitmask_in_section(
           getNodeInfo(refToNode(ref)).m_version)) {
     jam();
     LinearSectionPtr lsptr[3];
     lsptr[0].p = req->sr_nodes;
     lsptr[0].sz = NdbNodeBitmask::getPackedLengthInWords(req->sr_nodes);
+    lsptr[1].p = durable;
+    lsptr[1].sz = durableLen;
     sendSignal(ref, GSN_START_RECREQ, signal, StartRecReq::SignalLength, JBB,
-               lsptr, 1);
+               lsptr, durableLen > 0 ? 2 : 1);
   } else if (packed_length <= NdbNodeBitmask48::Size) {
     sendSignal(ref, GSN_START_RECREQ, signal, StartRecReq::SignalLength_v1,
                JBB);
@@ -512,6 +523,46 @@ void Dbdih::sendSTART_RECREQ(Signal *signal, Uint32 nodeId, Uint32 extra) {
   signal->theData[4] = SYSFILE->newestRestorableGCI;
   sendSignal(CMVMI_REF, GSN_EVENT_REP, signal, 5, JBB);
 }  // Dbdih::sendSTART_RECREQ()
+
+/**
+ * RONDB-1150, X5.1: the words of section 1 of START_RECREQ, 0 when
+ * durable commits do not govern the tail; *why says why phase 2 does
+ * not run on it when they do. g is the configured one until X5.7 records
+ * it in the sysfile, where a restart reads the mode that wrote the tail
+ * (plan §2.2). Phase 2 needs R >= g - 1, as a durable transaction may
+ * depend on one of a GCI below g.
+ */
+Uint32 Dbdih::srDurableParams(Uint32 *words, const char **why) {
+  const Uint32 g = m_micro_gcp.m_durable_gci;
+  if (g == 0) {
+    jam();
+    return 0;
+  }
+  const Uint32 R = SYSFILE->newestRestorableGCI;
+  Uint32 flags = 0;
+  if (R + 1 < g) {
+    jam();
+    *why = "the restart's GCI is below g - 1";
+  } else if (!m_sr_tail_own_log) {
+    jam();
+    *why = "a replica is restored from the REDO log of another node";
+  } else if (!SR_DURABLE_TAIL) {
+    jam();
+    *why = "phase 2 is not yet on (X5.7)";
+  } else {
+    jam();
+    flags |= StartRecReq::DF_TAIL;
+  }
+  words[StartRecReq::DURABLE_GCI] = g;
+  words[StartRecReq::DURABLE_FLAGS] = flags;
+  Uint32 len = StartRecReq::DURABLE_NODE_GROUPS;
+  for (Uint32 nodeId = m_sr_nodes.find_first();
+       nodeId != NdbNodeBitmask::NotFound;
+       nodeId = m_sr_nodes.find_next(nodeId + 1)) {
+    words[len++] = getNodeGroup(nodeId);
+  }
+  return len;
+}
 
 void Dbdih::sendSTOP_ME_REQ(Signal *signal, Uint32 nodeId, Uint32 extra) {
   if (nodeId != getOwnNodeId()) {
@@ -21256,6 +21307,27 @@ void Dbdih::completeRestartLab(Signal *signal) {
    * DBLQH instances; the wait for the other nodes' START_RECCONF is
    * armed when its own arrives, see execSTART_RECCONF.
    */
+  {
+    /* RONDB-1150, X5.1: whether phase 2 runs on the tail after R */
+    Uint32 durable[StartRecReq::DURABLE_MAX_WORDS];
+    const char *why = nullptr;
+    if (srDurableParams(durable, &why) > 0) {
+      jam();
+      if (why == nullptr) {
+        g_eventLogger->info(
+            "DIH: system restart to GCI %u, then phase 2 on the durable "
+            "tail (g %u)",
+            SYSFILE->newestRestorableGCI,
+            durable[StartRecReq::DURABLE_GCI]);
+      } else {
+        g_eventLogger->warning(
+            "DIH: system restart to GCI %u; durable commits after it are "
+            "lost, as phase 2 does not run: %s (g %u)",
+            SYSFILE->newestRestorableGCI, why,
+            durable[StartRecReq::DURABLE_GCI]);
+      }
+    }
+  }
   sendLoopMacro(START_RECREQ, sendSTART_RECREQ, RNIL);
 }  // completeRestartLab()
 
@@ -27395,6 +27467,19 @@ void Dbdih::sendStartFragreq(Signal *signal, TabRecordPtr tabPtr,
 
     startFragReq->nodeRestorableGci =
         SYSFILE->lastCompletedGCI[replicaPtr.p->dataNodeId];
+    /**
+     * RONDB-1150, X5.1: phase 2 executes the tail of a node's REDO log in
+     * round 0 on its own replicas, after their REDO up to R. A replica
+     * restored with the REDO log of another node, or in more than one
+     * round, would get the tail too early.
+     */
+    const Uint32 noLogNodes = replicaPtr.p->noLogNodes;
+    if (noLogNodes > 1 ||
+        (noLogNodes == 1 &&
+         replicaPtr.p->logNodeId[0] != replicaPtr.p->dataNodeId)) {
+      jam();
+      m_sr_tail_own_log = false;
+    }
     sendSignal(ref, GSN_START_FRAGREQ, signal, StartFragReq::SignalLength, JBB);
   }  // for
 }  // Dbdih::sendStartFragreq()
