@@ -87,10 +87,13 @@ class StartRecConf {
 
  public:
   static constexpr Uint32 SignalLength = 2;
+  /* RONDB-1150, X5.7: restorableGci, G' after phase 2, else R */
+  static constexpr Uint32 SignalLength_durable = 3;
 
  private:
   Uint32 startingNodeId;
   Uint32 senderData;
+  Uint32 restorableGci;
 };
 
 #undef JAM_FILE_ID

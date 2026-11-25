@@ -421,11 +421,13 @@ comment at `233-240`) [V]. The new record uses exactly that reserve.
 - As today, the entries for the file itself are stale when the FD is written;
   recovery reads them from the mbyte headers (`42283-42287`) [V].
 
-### 5.9 SR_HEAD (type 12), 6 words, placeholder
+### 5.9 SR_HEAD (type 12), 6 words
 
-`[w0: type 12, len 6 | checksum | R_gcp | G' | restartGen | 0]`. Plan §5.3. The
-recovery subtask owns its content; the format reserves the type and the
-framing.
+`[w0: type 12, len 6 | checksum | R_gcp | G' | g | 0]` (X5.6,
+`srHeadRecord()`). Phase 4 of a restart with phase 2 writes it at the head,
+E of the durable tail, followed by `COMPLETED_GCI(G')`. Nothing reads it but
+`ndb_redo_log_reader`; a later restart skips it. The plan's restart sequence
+gave way to g, which tells what governed that tail.
 
 ### 5.10 Writers and readers to change
 

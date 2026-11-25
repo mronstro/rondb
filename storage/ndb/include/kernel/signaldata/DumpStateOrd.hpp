@@ -217,6 +217,13 @@ class DumpStateOrd {
     // __RedoLogPmemPowerLossEmulation: [seed [keep [tear]]], a power loss
     // of the REDO log now, then the node stops as after a crash
     LqhPmemPowerLoss = 2370,
+    // RONDB-1150 (X5.10), error-insert builds, a test setting: the data
+    // node stops at the first report of a node failure, before it can
+    // commit without the failed node (QMGR). With the power-loss
+    // emulation that stop is a power loss, so all data nodes lose the
+    // power as at once; without it the node that fails last could commit
+    // alone, a node failure in the tail (plan §5.4, X6).
+    QmgrStopOnNodeFailure = 2371,
 
     TupDumpOneScanRec = 2380,
     TupSaveCopyTupleCount = 2381,

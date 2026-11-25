@@ -2260,12 +2260,20 @@ class Dbdih : public SimulatedBlock {
    * GCI R. Phase 2 executes the tail of a log part in round 0 on the
    * fragments of its own node, so every replica must be restored from
    * its own REDO log alone; sendStartFragreq() clears m_sr_tail_own_log
-   * when one is not. The tail stays off until X5.7 raises the restorable
-   * GCI to G' (SR_DURABLE_TAIL), and restarts restore to R as before.
+   * when one is not. SR_DURABLE_TAIL turns phase 2 off for all restarts.
    */
-  static constexpr bool SR_DURABLE_TAIL = false;
+  static constexpr bool SR_DURABLE_TAIL = true;
   bool m_sr_tail_own_log;
   Uint32 srDurableParams(Uint32 *words, const char **why);
+  /**
+   * RONDB-1150, X5.7: G', the GCI that phase 2 raised the restart to, the
+   * same in the START_RECCONF of every SR node; 0 until the first. Above
+   * R, the master raises the restorable GCI to it with COPY_GCIREQ
+   * (RESTART_DURABLE) before the restart goes on.
+   */
+  Uint32 c_sr_gci_prime;
+  void srRaiseRestorableGci(Signal *);
+  void startRecConfAllLab(Signal *);
 
   struct GcpMonitor {
     struct {

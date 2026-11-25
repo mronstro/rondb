@@ -50,6 +50,7 @@
 #include <signaldata/DropDb.hpp>
 #include <signaldata/CopyActive.hpp>
 #include <signaldata/CopyFrag.hpp>
+#include <signaldata/SrTail.hpp>
 #include <signaldata/CreateTab.hpp>
 #include <signaldata/CteLookup.hpp>
 #include <signaldata/CteScan.hpp>
@@ -403,6 +404,9 @@ class FsReadWriteReq;
 #endif
 /* RONDB-1150: the zeroing of phase 4 of a restart in the PMEM format */
 #define ZPMEM_SR_ZERO 63
+/* RONDB-1150, X5.4: step B of phase 2, the in-doubt set sent, the rescan */
+#define ZSR_TAIL_SEND 64
+#define ZSR_TAIL_RESCAN 65
 
 /* ------------------------------------------------------------------------- */
 /*        NODE STATE DURING SYSTEM RESTART, VARIABLES CNODES_SR_STATE        */
@@ -2393,6 +2397,9 @@ class Dblqh : public SimulatedBlock {
      *                     restart's GCI, so it ends at E
      *   m_tail_start      where round 0 started, for the rescan (X5.4)
      *   m_tail_max_gci    the highest GCI that step A executed
+     *   m_tail_phase      TAIL_SCAN to E, TAIL_AT_END waiting for step
+     *                     B, TAIL_VERDICTS in step C
+     *   m_tail_verdict    the next entry of m_tail that step C decides
      */
     PmemRedo::TailTable *m_tail;
     Uint32 m_tail_exec;
@@ -2400,6 +2407,8 @@ class Dblqh : public SimulatedBlock {
     bool m_tail_found_last;
     PmemRedo::Pos m_tail_start;
     Uint32 m_tail_max_gci;
+    Uint8 m_tail_phase;
+    Uint32 m_tail_verdict;
 
   };  // Size 164 Bytes
   typedef Ptr<LogPartRecord> LogPartRecordPtr;
@@ -4533,7 +4542,67 @@ private:
   bool redoTailGci(Uint32 gci) const {
     return c_sr_durable_tail && gci > crestartNewestGci;
   }
+  enum { TAIL_SCAN = 0, TAIL_AT_END = 1, TAIL_VERDICTS = 2 };
   void redoTailSetLogFlags(bool on);
+  /**
+   * RONDB-1150, X5.4-X5.5: steps B and C of phase 2 in this worker
+   * (SrTail.hpp, impl_next_steps.md X5.4):
+   *   m_union        U, the in-doubt sets of the SR nodes
+   *   m_hits         the transactions that some part found complete,
+   *                  applied to U when every node is done
+   *   m_partsAtEnd   parts whose scan reached E; then the in-doubt set
+   *                  goes out from (m_sendPart, m_sendEntry), m_sent
+   *                  entries so far
+   *   m_nodesLast    nodes whose in-doubt set has arrived, the entries
+   *                  of each in m_nodeEntries
+   *   m_rescanPart, m_rescanPos  where the rescan of step B is
+   *   m_hitBuf, m_hitCount, m_hitsSent  hits not yet sent, and sent
+   *   m_hitsReceived the hit entries that arrived
+   *   m_gciPrime     G', once every node is done
+   *   m_srNodeList   the SR nodes, for the fallback of step C
+   */
+  struct SrTailWorker {
+    PmemRedo::TailUnion *m_union;
+    PmemRedo::TailUnion *m_hits;
+    Uint32 m_partsAtEnd;
+    Uint32 m_sendPart;
+    Uint32 m_sendEntry;
+    Uint32 m_sent;
+    NdbNodeBitmask m_nodesLast;
+    Uint32 m_nodeEntries[ABS_MAX_NDB_NODES];
+    Uint32 m_rescanPart;
+    PmemRedo::Pos m_rescanPos;
+    Uint32 m_hitBuf[SrTailRep::MAX_ENTRIES * SrTailRep::HIT_WORDS];
+    Uint32 m_hitCount;
+    Uint32 m_hitsSent;
+    Uint32 m_hitsReceived;
+    Uint32 m_gciPrime;
+    Uint32 m_srNodeList[ABS_MAX_NDB_NODES];
+    Uint32 m_noSrNodes;
+    Uint32 m_committedByComplete;
+    Uint32 m_committedByFallback;
+    Uint32 m_aborted;
+    Uint32 m_buf[SrTailRep::MAX_ENTRIES * SrTailRep::INDOUBT_WORDS];
+  } c_srTail;
+  void redoTailInitWorker();
+  void redoTailFreeWorker();
+  void redoTailPartAtEnd(Signal *signal);
+  void redoTailHeadAtEnd(LogPartRecord *logPartPtrP);
+  void redoTailWriteSrHead(Signal *signal, LogPartRecord *logPartPtrP);
+  void redoTailSendIndoubt(Signal *signal);
+  void redoTailRescanStart(Signal *signal);
+  void redoTailRescan(Signal *signal);
+  void redoTailSendHits(Signal *signal);
+  bool redoTailNextVerdict(LogPartRecord *logPartPtrP);
+  void execSR_TAIL_INDOUBT_REP(Signal *signal);
+  void execSR_TAIL_HIT_REP(Signal *signal);
+  void execSR_TAIL_DONE_REP(Signal *signal);
+  /* From the DBLQH proxy of this node, the only sender to a worker */
+  bool redoTailFromProxy(const Signal *signal) const {
+    const BlockReference ref = signal->getSendersBlockRef();
+    return refToMain(ref) == DBLQH && refToInstance(ref) == 0 &&
+           refToNode(ref) == cownNodeid;
+  }
   void redoTailStart(LogPartRecord *logPartPtrP, const PmemRedo::Pos &start);
   void redoTailCommit(LogPartRecord *logPartPtrP, const PmemRedo::Pos &pos,
                       const Uint32 *rec);

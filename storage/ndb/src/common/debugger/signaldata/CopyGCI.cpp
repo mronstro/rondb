@@ -44,6 +44,9 @@ static void print(char *buf, size_t buf_len, CopyGCIReq::CopyReason r) {
     case CopyGCIReq::INITIAL_START_COMPLETED:
       BaseString::snprintf(buf, buf_len, "INITIAL_START_COMPLETED");
       break;
+    case CopyGCIReq::RESTART_DURABLE:
+      BaseString::snprintf(buf, buf_len, "RESTART_DURABLE");
+      break;
     default:
       BaseString::snprintf(buf, buf_len, "<Unknown>");
   }

@@ -1,0 +1,15 @@
+!include ../my.cnf
+
+# RONDB-1150 X5.10: as ndb_redo_pmem_durable_ledger.cnf; a data node that
+# fails as another stops in a system restart starts again
+# (StopOnError=0), so that the error inserts of phase 2 act in system
+# restarts.
+[cluster_config.1]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+__DurableCommits=1
+NoOfFragmentLogFiles=5
+FragmentLogFileSize=4M
+TimeBetweenLocalCheckpoints=6
+TimeBetweenGlobalCheckpoints=500
+StopOnError=0

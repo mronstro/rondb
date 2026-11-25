@@ -1,0 +1,51 @@
+--source include/big_test.inc
+--source include/have_ndb.inc
+--source have_ndb_error_insert.inc
+
+# RONDB-1150 X5.10: the ledger of testRestartGci with durable commits
+# and the error inserts of phase 2. Each crash (5186 after step A, 5187
+# after the rescan of step B, 5188 in step C, 5189 after SR_HEAD, 7262 in
+# COPY_GCIREQ(RESTART_DURABLE)) is set in every data node after a system
+# restart with abort, and the next system restart stops at it; the
+# restart after it reaches the same verdicts. 5185 (every verdict from
+# the node-group counts) and 5190 (one entry per batch of step B) change
+# phase 2 without a stop. Every acknowledged transaction stays.
+
+# NDBT creates TEST_DB.T1 directly through the NDB API. Keep both
+# mysqlds stopped so metadata discovery cannot import the API table;
+# on a case-insensitive file system it retries CREATE DATABASE TEST_DB
+# after each system restart and fails.
+--connect(s2,127.0.0.1,root,,test,$MASTER_MYPORT1,)
+--connection default
+--echo # Shutting down mysqld 1
+--let $mysqld_name=mysqld.1.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld1_file_name= $_expect_file_name
+
+--connection s2
+--echo # Shutting down mysqld 2
+--let $mysqld_name=mysqld.2.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld2_file_name= $_expect_file_name
+
+let NDBAPITEST_CLEANUP_QUERY=;
+let NDBAPITEST_NAME=testRestartGci;
+
+--echo == 1 == the error inserts of phase 2 of a system restart
+let NDBAPITEST_ARGS=-n GciLedgerDurableCrashPoints -l 1 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+--connection default
+--echo # Starting mysqld 1
+--let $_expect_file_name= $expect_mysqld1_file_name
+--let $mysqld_name=mysqld.1.1
+--source include/start_mysqld.inc
+
+--connection s2
+--echo # Starting mysqld 2
+--let $_expect_file_name= $expect_mysqld2_file_name
+--let $mysqld_name=mysqld.2.1
+--source include/start_mysqld.inc
+
+--connection default
+--disconnect s2

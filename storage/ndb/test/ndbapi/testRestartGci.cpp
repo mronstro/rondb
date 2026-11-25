@@ -1065,6 +1065,12 @@ int ledgerCheckRestart(NDBT_Context *ctx, NDBT_Step *step, const char *what,
   Uint32 restartGci = 0;
   if (!ledgerRestartGci(pNdb, restarter, &restartGci)) return NDBT_FAILED;
   ndbout_c("Ledger: restart GCI %u", restartGci);
+  /**
+   * RONDB-1150, X5: with durable commits a restart keeps every
+   * acknowledged transaction, after a crash too; the restart GCI is G',
+   * up to which phase 2 executed the durable tail.
+   */
+  allKept = allKept || ctx->getProperty("LedgerDurable", Uint32(0)) != 0;
   return ledgerVerify(ctx, step, (Uint64(restartGci) << 32) | 0xffffffff,
                       what, allKept);
 }
@@ -1284,6 +1290,23 @@ int ledgerStopAll(NDBT_Context *ctx, NDBT_Step *step, NdbRestarter &restarter,
   return res;
 }
 
+/**
+ * RONDB-1150, X5.10: with durable commits a crash of every data node must
+ * be one of all at once; the node that stops last must not go on
+ * committing without the others, a node failure in the tail that needs
+ * the node-failure file of X6 (plan §5.4). DUMP 2371 stops each node at
+ * the first report of a node failure.
+ */
+bool ledgerStopTogether(NDBT_Context *ctx, NdbRestarter &restarter) {
+  if (ctx->getProperty("LedgerDurable", Uint32(0)) == 0) return true;
+  const int together = DumpStateOrd::QmgrStopOnNodeFailure;
+  if (restarter.dumpStateAllNodes(&together, 1) != 0) {
+    ndbout_c("ERR: ledger: could not send DUMP 2371");
+    return false;
+  }
+  return true;
+}
+
 /* A crash error insert of the write path in every data node */
 int ledgerWriteCrash(NDBT_Context *ctx, NDBT_Step *step, Uint32 code,
                      Uint32 extra, bool clean) {
@@ -1292,7 +1315,10 @@ int ledgerWriteCrash(NDBT_Context *ctx, NDBT_Step *step, Uint32 code,
   char what[64];
   BaseString::snprintf(what, sizeof(what), "error insert %u", code);
   ndbout_c("Ledger: %s in every data node while the writers write", what);
-  if (!ledgerArm(restarter, nodes, code, extra)) return NDBT_FAILED;
+  if (!ledgerStopTogether(ctx, restarter) ||
+      !ledgerArm(restarter, nodes, code, extra)) {
+    return NDBT_FAILED;
+  }
   return ledgerStopAll(ctx, step, restarter, nodes, what, clean);
 }
 
@@ -1395,17 +1421,23 @@ int ledgerRestartCrashNR(NDBT_Context *ctx, NDBT_Step *step, Uint32 code,
  */
 int runLedgerNeedsPmem(NDBT_Context *ctx, NDBT_Step *step) {
   const bool powerLoss = ctx->getProperty("LedgerPowerLoss", Uint32(0)) != 0;
+  const bool durable = ctx->getProperty("LedgerDurable", Uint32(0)) != 0;
   NdbConfig conf;
   for (int i = 0; i < conf.getNumDbNodes(); i++) {
     const int node = conf.getDbNodeId(i);
     Uint32 mode = NDB_REDO_LOG_MODE_FILE;
     Uint32 emul = 0;
+    Uint32 durableCommits = 0;
     conf.getProperty(node, NODE_TYPE_DB, CFG_DB_REDO_LOG_MODE, &mode);
     conf.getProperty(node, NODE_TYPE_DB, CFG_DB_REDO_PMEM_POWER_LOSS_EMUL,
                      &emul);
-    if (mode != NDB_REDO_LOG_MODE_PMEM || (powerLoss && emul == 0)) {
-      ndbout_c("Node %d: this test needs RedoLogMode=pmem%s", node,
-               powerLoss ? " and __RedoLogPmemPowerLossEmulation=1" : "");
+    conf.getProperty(node, NODE_TYPE_DB, CFG_DB_DURABLE_COMMITS,
+                     &durableCommits);
+    if (mode != NDB_REDO_LOG_MODE_PMEM || (powerLoss && emul == 0) ||
+        (durable && durableCommits == 0)) {
+      ndbout_c("Node %d: this test needs RedoLogMode=pmem%s%s", node,
+               powerLoss ? " and __RedoLogPmemPowerLossEmulation=1" : "",
+               durable ? " and __DurableCommits=1" : "");
       return NDBT_SKIPPED;
     }
   }
@@ -1494,8 +1526,19 @@ int runLedgerWriter(NDBT_Context *ctx, NDBT_Step *step) {
     const bool committed = res == 0 &&
                            hugoOps.getTransaction()->getGCI(&gci) == 0 &&
                            gci != 0;
+    /**
+     * RONDB-1150, X5: with durable commits a transaction whose COMMITs are
+     * persistent commits at the restart, also when every data node fails
+     * before the API learns it. The API reports that as a node failure
+     * abort (4010, Ndb::abortTransactionsAfterNodeFailure()), so such an
+     * error at commit is an unknown result here.
+     */
+    const bool durableUnknown =
+        ctx->getProperty("LedgerDurable", Uint32(0)) != 0 &&
+        err.status == NdbError::TemporaryError &&
+        err.classification == NdbError::NodeRecoveryError;
     if (committed || err.status == NdbError::UnknownResult ||
-        err.status == NdbError::Success) {
+        err.status == NdbError::Success || durableUnknown) {
       /* Committed, or perhaps */
       for (Uint32 i = 0; i < nRows; i++) {
         LedgerRow &row = g_ledger[r0 + i];
@@ -1613,6 +1656,97 @@ int runLedgerTornTail(NDBT_Context *ctx, NDBT_Step *step) {
 }
 
 /**
+ * RONDB-1150, X5.10: a system restart with abort while the writers write,
+ * then one with abort with the writers parked, which restarts from G' and
+ * replays the old tail as the REDO up to it: with durable commits every
+ * acknowledged transaction stays in both.
+ */
+int runLedgerDurableSR(NDBT_Context *ctx, NDBT_Step *step) {
+  const Uint32 seconds = ctx->getProperty("LedgerSeconds", Uint32(5));
+  int result = NDBT_OK;
+  for (int l = 0; l < ctx->getNumLoops() && result == NDBT_OK; l++) {
+    if (!ledgerSleep(ctx, seconds)) {
+      result = NDBT_FAILED;
+      break;
+    }
+    ndbout_c("Ledger loop %d", l);
+    result = ledgerSystemRestart(ctx, step);
+    if (result != NDBT_OK) break;
+    NdbRestarter restarter;
+    ndbout_c("Ledger: system restart with abort, the writers parked");
+    if (!ledgerPause(ctx) || restarter.restartAll(false, false, true) != 0) {
+      result = NDBT_FAILED;
+      break;
+    }
+    result = ledgerCheckRestart(ctx, step, "system restart without writes",
+                                true);
+    ledgerResume(ctx);
+  }
+  ctx->stopTest();
+  return result;
+}
+
+/**
+ * RONDB-1150, X5.10: the error inserts of phase 2 in system restarts with
+ * StopOnError=0, set in every data node in NOSTART after a system restart
+ * with abort. Those that stop a node (5186-5189, 7262) must act within
+ * LEDGER_RESTART_ATTEMPTS restarts; the next restart reaches the same
+ * verdicts and keeps every acknowledged transaction. 5185 (every verdict
+ * from the counts) and 5190 (one entry per batch) change phase 2 without
+ * a stop: the restart with them is checked.
+ */
+const Uint32 LEDGER_DURABLE_CRASH_CODES[] = {5186, 5187, 5188, 5189, 7262};
+const Uint32 LEDGER_DURABLE_MODE_CODES[] = {5185, 5190};
+
+int runLedgerDurableCrashPoints(NDBT_Context *ctx, NDBT_Step *step) {
+  const Uint32 seconds = ctx->getProperty("LedgerSeconds", Uint32(5));
+  if (!ledgerStartsAgainOnError()) {
+    ndbout_c("Ledger: this test needs StopOnError=0 in every data node");
+    ctx->stopTest();
+    return NDBT_SKIPPED;
+  }
+  int result = NDBT_OK;
+  for (int l = 0; l < ctx->getNumLoops() && result == NDBT_OK; l++) {
+    for (Uint32 code : LEDGER_DURABLE_CRASH_CODES) {
+      bool acted = false;
+      for (Uint32 a = 0; a < LEDGER_RESTART_ATTEMPTS && !acted; a++) {
+        if (!ledgerSleep(ctx, seconds)) {
+          result = NDBT_FAILED;
+          break;
+        }
+        ndbout_c("Ledger loop %d: error insert %u, attempt %u", l, code,
+                 a + 1);
+        result = ledgerRestartCrashSR(ctx, step, code, &acted);
+        if (result != NDBT_OK) break;
+      }
+      if (result != NDBT_OK) break;
+      if (!acted) {
+        ndbout_c("ERR: ledger: error insert %u did not act in %u restarts",
+                 code, LEDGER_RESTART_ATTEMPTS);
+        result = NDBT_FAILED;
+        break;
+      }
+    }
+    for (Uint32 code : LEDGER_DURABLE_MODE_CODES) {
+      if (result != NDBT_OK) break;
+      if (!ledgerSleep(ctx, seconds)) {
+        result = NDBT_FAILED;
+        break;
+      }
+      ndbout_c("Ledger loop %d: error insert %u", l, code);
+      bool acted = false;
+      result = ledgerRestartCrashSR(ctx, step, code, &acted);
+      if (result == NDBT_OK && acted) {
+        ndbout_c("ERR: ledger: error insert %u stopped a node", code);
+        result = NDBT_FAILED;
+      }
+    }
+  }
+  ctx->stopTest();
+  return result;
+}
+
+/**
  * Each crash error insert of the PMEM REDO log in turn. One of the write
  * path is set in every data node while the writers write, and each node
  * stops at it. One of a restart is set in NOSTART: with StopOnError=0 in
@@ -1691,6 +1825,7 @@ int runLedgerPowerLoss(NDBT_Context *ctx, NDBT_Step *step) {
     const std::vector<int> nodes = ledgerDataNodes(restarter);
     const int powerLoss = DumpStateOrd::LqhPmemPowerLoss;
     if (!ledgerNoStartOnCrash(restarter, nodes) ||
+        !ledgerStopTogether(ctx, restarter) ||
         restarter.dumpStateAllNodes(&powerLoss, 1) != 0) {
       result = NDBT_FAILED;
       break;
@@ -1834,6 +1969,46 @@ TESTCASE("GciLedgerPowerLoss",
   INITIALIZER(runLedgerInit);
   STEPS(runLedgerWriter, LEDGER_WRITERS);
   STEP(runLedgerPowerLoss);
+  FINALIZER(runDropTable);
+}
+TESTCASE("GciLedgerDurableSR",
+         "RONDB-1150 (X5.10), PMEM mode with __DurableCommits: as "
+         "GciLedgerSR, each system restart with abort followed by one with "
+         "the writers parked; every acknowledged transaction stays") {
+  TC_PROPERTY("LedgerSeconds", Uint32(5));
+  TC_PROPERTY("LedgerDurable", Uint32(1));
+  INITIALIZER(runLedgerNeedsPmem);
+  INITIALIZER(runCreateTable);
+  INITIALIZER(runLedgerInit);
+  STEPS(runLedgerWriter, LEDGER_WRITERS);
+  STEP(runLedgerDurableSR);
+  FINALIZER(runDropTable);
+}
+TESTCASE("GciLedgerDurablePowerLoss",
+         "RONDB-1150 (X5.10), PMEM mode with __DurableCommits and "
+         "__RedoLogPmemPowerLossEmulation: as GciLedgerPowerLoss; every "
+         "acknowledged transaction stays") {
+  TC_PROPERTY("LedgerSeconds", Uint32(5));
+  TC_PROPERTY("LedgerPowerLoss", Uint32(1));
+  TC_PROPERTY("LedgerDurable", Uint32(1));
+  INITIALIZER(runLedgerNeedsPmem);
+  INITIALIZER(runCreateTable);
+  INITIALIZER(runLedgerInit);
+  STEPS(runLedgerWriter, LEDGER_WRITERS);
+  STEP(runLedgerPowerLoss);
+  FINALIZER(runDropTable);
+}
+TESTCASE("GciLedgerDurableCrashPoints",
+         "RONDB-1150 (X5.10), PMEM mode with __DurableCommits and "
+         "StopOnError=0: the error inserts of phase 2 of a system restart, "
+         "5185-5190 and 7262; every acknowledged transaction stays") {
+  TC_PROPERTY("LedgerSeconds", Uint32(2));
+  TC_PROPERTY("LedgerDurable", Uint32(1));
+  INITIALIZER(runLedgerNeedsPmem);
+  INITIALIZER(runCreateTable);
+  INITIALIZER(runLedgerInit);
+  STEPS(runLedgerWriter, LEDGER_WRITERS);
+  STEP(runLedgerDurableCrashPoints);
   FINALIZER(runDropTable);
 }
 NDBT_TESTSUITE_END(testRestartGci)

@@ -539,10 +539,23 @@ Uint32 Dbdih::srDurableParams(Uint32 *words, const char **why) {
     return 0;
   }
   const Uint32 R = SYSFILE->newestRestorableGCI;
+  bool allAtR = true;
+  for (Uint32 nodeId = m_sr_nodes.find_first();
+       nodeId != NdbNodeBitmask::NotFound;
+       nodeId = m_sr_nodes.find_next(nodeId + 1)) {
+    allAtR &= SYSFILE->lastCompletedGCI[nodeId] == R;
+  }
   Uint32 flags = 0;
   if (R + 1 < g) {
     jam();
     *why = "the restart's GCI is below g - 1";
+  } else if (!allAtR) {
+    /**
+     * A node restorable only to a GCI below R takes the records after its
+     * own GCI for its tail; such a node is stale (X6.3).
+     */
+    jam();
+    *why = "a starting node is restorable only to a GCI below the restart's";
   } else if (!m_sr_tail_own_log) {
     jam();
     *why = "a replica is restored from the REDO log of another node";
@@ -1224,6 +1237,22 @@ void Dbdih::execCOPY_GCIREQ(Signal *signal) {
       ok = true;
       jam();
       break;
+    case CopyGCIReq::RESTART_DURABLE: {
+      /**
+       * RONDB-1150, X5.7: R raised to G' (srRaiseRestorableGci()), on
+       * disk below and here in memory, as RESTART set it to R
+       */
+      ok = true;
+      jam();
+      CRASH_INSERTION(7262);
+      const Uint32 newest = SYSFILE->newestRestorableGCI;
+      ndbrequire(newest >= c_newest_restorable_gci);
+      m_micro_gcp.m_old_gci = Uint64(newest) << 32;
+      crestartGci = newest;
+      c_newest_restorable_gci = newest;
+      m_micro_gcp.m_current_gci = Uint64(newest + 1) << 32;
+      break;
+    }
     case CopyGCIReq::RESTART_NR:
       jam();
       setNodeGroups();
@@ -19432,6 +19461,12 @@ void Dbdih::execCOPY_GCICONF(Signal *signal) {
       ok = true;
       jam();
       break;
+    case CopyGCIReq::RESTART_DURABLE:
+      /* RONDB-1150, X5.7: every node has G' on disk; the restart goes on */
+      ok = true;
+      jam();
+      startRecConfAllLab(signal);
+      break;
     case CopyGCIReq::IDLE:
       ok = false;
       jam();
@@ -21311,6 +21346,7 @@ void Dbdih::completeRestartLab(Signal *signal) {
     /* RONDB-1150, X5.1: whether phase 2 runs on the tail after R */
     Uint32 durable[StartRecReq::DURABLE_MAX_WORDS];
     const char *why = nullptr;
+    c_sr_gci_prime = 0;
     if (srDurableParams(durable, &why) > 0) {
       jam();
       if (why == nullptr) {
@@ -21384,6 +21420,28 @@ void Dbdih::execSTART_RECCONF(Signal *signal) {
 
   /* No take over record in the system restart case here */
   ndbrequire(senderData == RNIL);
+  {
+    /**
+     * RONDB-1150, X5.7: G' of the node, R without phase 2. Every node
+     * computed it from the same data (DI-4), so all must agree.
+     */
+    const Uint32 gciPrime =
+        signal->getLength() >= StartRecConf::SignalLength_durable
+            ? signal->theData[2]
+            : SYSFILE->newestRestorableGCI;
+    ndbrequire(gciPrime >= SYSFILE->newestRestorableGCI);
+    if (c_sr_gci_prime == 0) {
+      jam();
+      c_sr_gci_prime = gciPrime;
+    } else if (c_sr_gci_prime != gciPrime) {
+      char buf[160];
+      BaseString::snprintf(buf, sizeof(buf),
+                           "Phase 2 of the restart: node %u raised the "
+                           "restart to GCI %u, another node to GCI %u",
+                           senderNodeId, gciPrime, c_sr_gci_prime);
+      progError(__LINE__, NDBD_EXIT_SR_REDOLOG, buf);
+    }
+  }
   if (senderNodeId == getOwnNodeId()) {
     jam();
     /**
@@ -21403,7 +21461,44 @@ void Dbdih::execSTART_RECCONF(Signal *signal) {
     jam();
     nsl_stop_step();
   }
+  if (c_sr_gci_prime > SYSFILE->newestRestorableGCI) {
+    jam();
+    srRaiseRestorableGci(signal);
+    return;
+  }
+  startRecConfAllLab(signal);
+}
 
+/**
+ * RONDB-1150, X5.7 (plan §5.3): every SR node has executed the durable
+ * tail up to G' and written COMPLETED_GCI(G') at the head of each log
+ * part. The restorable GCI becomes G' on every node, in the sysfile and
+ * in memory, before the restart's LCP and its first GCP: newest
+ * restorable GCI, the last completed GCI of each SR node, and the GCIs of
+ * the micro GCP, so that the first new GCI is above G'. The LCP-restore
+ * bound of this restart stays R. A crash before every node has written
+ * the sysfile restarts from R or G', with the same verdicts (plan §5.6).
+ */
+void Dbdih::srRaiseRestorableGci(Signal *signal) {
+  const Uint32 R = SYSFILE->newestRestorableGCI;
+  g_eventLogger->info(
+      "DIH: phase 2 of the restart executed the durable tail; the "
+      "restorable GCI goes from %u to %u",
+      R, c_sr_gci_prime);
+  infoEvent("Phase 2 of the restart raised the restorable GCI from %u to %u",
+            R, c_sr_gci_prime);
+  SYSFILE->newestRestorableGCI = c_sr_gci_prime;
+  for (Uint32 nodeId = m_sr_nodes.find_first();
+       nodeId != NdbNodeBitmask::NotFound;
+       nodeId = m_sr_nodes.find_next(nodeId + 1)) {
+    ndbrequire(SYSFILE->lastCompletedGCI[nodeId] <= c_sr_gci_prime);
+    SYSFILE->lastCompletedGCI[nodeId] = c_sr_gci_prime;
+  }
+  copyGciLab(signal, CopyGCIReq::RESTART_DURABLE);
+}
+
+/* Every SR node has sent START_RECCONF, and R is raised to G' if needed */
+void Dbdih::startRecConfAllLab(Signal *signal) {
   /**
    * Remove each node that has to TO from LCP/LQH
    */
@@ -21482,7 +21577,7 @@ void Dbdih::execSTART_RECCONF(Signal *signal) {
   } else {
     ndbabort();
   }
-}  // Dbdih::execSTART_RECCONF()
+}  // Dbdih::startRecConfAllLab()
 
 void Dbdih::copyNodeLab(Signal *signal, Uint32 decrement_outstanding) {
   /* ----------------------------------------------------------------------- */

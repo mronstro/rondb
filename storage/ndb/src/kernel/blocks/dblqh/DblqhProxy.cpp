@@ -31,6 +31,9 @@
 #include "dbtup/DbtupJitGlue.hpp"
 #include <ndbd_exit_codes.h>   /* NDBD_EXIT_INVALID_CONFIG */
 #include <BaseString.hpp>
+#include <algorithm>
+#include <cstring>
+#include <new>
 #include "dbtup/jit/jit1.h"
 #include "dbtup/jit/ndb_jit_bridge.h"
 
@@ -264,6 +267,12 @@ DblqhProxy::DblqhProxy(Block_context &ctx)
                &DblqhProxy::execJOIN_AGG_NODE_FAIL_REP);
   addRecSignal(GSN_CONTINUEB,
                &DblqhProxy::execCONTINUEB);
+
+  // RONDB-1150, X5.4: phase 2 of a system restart
+  addRecSignal(GSN_SR_TAIL_INDOUBT_REP, &DblqhProxy::execSR_TAIL_INDOUBT_REP);
+  addRecSignal(GSN_SR_TAIL_HIT_REP, &DblqhProxy::execSR_TAIL_HIT_REP);
+  addRecSignal(GSN_SR_TAIL_DONE_REP, &DblqhProxy::execSR_TAIL_DONE_REP);
+  c_srTail.m_merged = nullptr;
 }
 
 DblqhProxy::~DblqhProxy() {
@@ -1562,6 +1571,8 @@ void DblqhProxy::execSTART_RECREQ(Signal *signal) {
   ss.m_req = *req;
   memcpy(ss.m_durable, durable, 4 * durableLen);
   ss.m_durableLen = durableLen;
+  ss.m_restorableGci = 0;
+  srTailInit(req, durable, durableLen);
   ss.restoreFragCompletedCount = 0;
   ss.undoDDCompletedCount = 0;
   ss.execREDOLogCompletedCount = 0;
@@ -1727,6 +1738,11 @@ void DblqhProxy::execSTART_RECCONF(Signal *signal) {
 
   Uint32 ssId = conf->senderData;
   Ss_START_RECREQ &ss = ssFind<Ss_START_RECREQ>(ssId);
+  /* RONDB-1150, X5.7: G' after phase 2, R otherwise, in every worker */
+  ndbrequire(signal->getLength() == StartRecConf::SignalLength_durable);
+  ndbrequire(ss.m_restorableGci == 0 ||
+             ss.m_restorableGci == conf->restorableGci);
+  ss.m_restorableGci = conf->restorableGci;
   recvCONF(signal, ss);
 }
 
@@ -1755,8 +1771,9 @@ void DblqhProxy::sendSTART_RECCONF(Signal *signal, Uint32 ssId) {
     StartRecConf *conf = (StartRecConf *)signal->getDataPtrSend();
     conf->startingNodeId = getOwnNodeId();
     conf->senderData = ss.m_req.senderData;
+    conf->restorableGci = ss.m_restorableGci;
     sendSignal(ss.m_req.senderRef, GSN_START_RECCONF, signal,
-               StartRecConf::SignalLength, JBB);
+               StartRecConf::SignalLength_durable, JBB);
   } else {
     ndbabort();
   }
@@ -4385,3 +4402,211 @@ DblqhProxy::continueJoinAggTeardown(Signal *signal, Uint32 aggStateKey) {
 }
 
 BLOCK_FUNCTIONS(DblqhProxy)
+
+/**
+ * RONDB-1150, X5.4: step B of phase 2 of a system restart. The workers
+ * send their in-doubt sets here; once all have, the node's set, with the
+ * counts of its workers summed, goes to the proxies of the SR nodes, and
+ * each proxy passes what it gets to its workers. Hits and DONE follow the
+ * same route. A node failure stops the restart, so there is no failure
+ * handling; a malformed signal from a data node is a bug (ndbrequire).
+ */
+void DblqhProxy::srTailInit(const StartRecReq *req, const Uint32 *durable,
+                            Uint32 durableLen) {
+  delete c_srTail.m_merged;
+  c_srTail.m_merged = nullptr;
+  if (durableLen == 0 ||
+      (durable[StartRecReq::DURABLE_FLAGS] & StartRecReq::DF_TAIL) == 0) {
+    return;
+  }
+  c_srTail.m_merged = new (std::nothrow) PmemRedo::TailUnion();
+  if (c_srTail.m_merged == nullptr) {
+    progError(__LINE__, NDBD_EXIT_MEMALLOC,
+              "Phase 2 of the restart: no memory for the in-doubt sets");
+  }
+  c_srTail.m_srNodes.assign(NdbNodeBitmask::Size, req->sr_nodes);
+  c_srTail.m_workersLast = 0;
+  std::memset(c_srTail.m_workerEntries, 0, sizeof(c_srTail.m_workerEntries));
+  c_srTail.m_workersDone = 0;
+  c_srTail.m_maxGci = 0;
+  c_srTail.m_hits = 0;
+  c_srTail.m_hitsDone = 0;
+  c_srTail.m_entries = 0;
+  c_srTail.m_nodesDone.clear();
+  c_srTail.m_maxGciAll = 0;
+  c_srTail.m_hitsAll = 0;
+}
+
+/**
+ * From a worker of this node (true), or from the proxy of an SR node,
+ * this one included; nodeId is the node the signal speaks for.
+ */
+bool DblqhProxy::srTailFromWorker(Signal *signal, Uint32 nodeId) {
+  ndbrequire(c_srTail.m_merged != nullptr);
+  const BlockReference senderRef = signal->getSendersBlockRef();
+  if (refToInstance(senderRef) != 0) {
+    ndbrequire(refToNode(senderRef) == getOwnNodeId() &&
+               nodeId == getOwnNodeId());
+    return true;
+  }
+  ndbrequire(refToMain(senderRef) == DBLQH &&
+             c_srTail.m_srNodes.get(refToNode(senderRef)));
+  return false;
+}
+
+/* The signal as received, with its section, to every worker */
+void DblqhProxy::srTailToWorkers(Signal *signal, GlobalSignalNumber gsn,
+                                 SectionHandle *handle) {
+  const Uint32 len = signal->getLength();
+  for (Uint32 i = 0; i < c_workers; i++) {
+    sendSignalNoRelease(workerRef(i), gsn, signal, len, JBB, handle);
+  }
+  releaseSections(*handle);
+}
+
+void DblqhProxy::execSR_TAIL_INDOUBT_REP(Signal *signal) {
+  jamEntry();
+  ndbrequire(signal->getLength() == SrTailRep::SignalLength);
+  const SrTailRep rep = *(const SrTailRep *)signal->getDataPtr();
+  ndbrequire(rep.count <= SrTailRep::MAX_ENTRIES);
+  SectionHandle handle(this, signal);
+  ndbrequire(handle.m_cnt == (rep.count > 0 ? 1u : 0u));
+  if (!srTailFromWorker(signal, rep.nodeId)) {
+    jam();
+    ndbrequire(rep.nodeId == refToNode(signal->getSendersBlockRef()));
+    srTailToWorkers(signal, GSN_SR_TAIL_INDOUBT_REP, &handle);
+    return;
+  }
+  /* The in-doubt set of a worker, into the node's */
+  jam();
+  if (rep.count > 0) {
+    jam();
+    SegmentedSectionPtr ptr;
+    ndbrequire(handle.getSection(ptr, 0));
+    ndbrequire(ptr.sz == rep.count * SrTailRep::INDOUBT_WORDS);
+    copy(c_srTail.m_buf, ptr);
+    for (Uint32 i = 0; i < rep.count; i++) {
+      const Uint32 *const w = &c_srTail.m_buf[i * SrTailRep::INDOUBT_WORDS];
+      const PmemRedo::TailResult res =
+          c_srTail.m_merged->merge(getOwnNodeId(), w[0], w[1], w[2], w[3],
+                                   w[4]);
+      if (res == PmemRedo::TAIL_NO_MEMORY) {
+        progError(__LINE__, NDBD_EXIT_MEMALLOC,
+                  "Phase 2 of the restart: out of memory for the in-doubt "
+                  "set of the node");
+      }
+      ndbrequire(res == PmemRedo::TAIL_OK);
+    }
+  }
+  releaseSections(handle);
+  const Uint32 w = workerIndex(refToInstance(signal->getSendersBlockRef()));
+  c_srTail.m_workerEntries[w] += rep.count;
+  if ((rep.flags & SrTailRep::F_LAST) == 0) return;
+  ndbrequire(c_srTail.m_workerEntries[w] == rep.total);
+  c_srTail.m_workersLast++;
+  if (c_srTail.m_workersLast == c_workers) {
+    jam();
+    srTailSendNodeSet(signal);
+  }
+}
+
+/* The in-doubt set of this node to the proxies of the SR nodes */
+void DblqhProxy::srTailSendNodeSet(Signal *signal) {
+  const PmemRedo::TailUnion &merged = *c_srTail.m_merged;
+  const NodeReceiverGroup rg(DBLQH, c_srTail.m_srNodes);
+  const Uint32 own = getOwnNodeId();
+  Uint32 e = 0;
+  do {
+    Uint32 n = 0;
+    for (; e < merged.size() && n < SrTailRep::MAX_ENTRIES; e++, n++) {
+      const PmemRedo::TailUnion::Entry &t = *merged.entry(e);
+      Uint32 *const w = &c_srTail.m_buf[n * SrTailRep::INDOUBT_WORDS];
+      w[0] = t.transid1;
+      w[1] = t.transid2;
+      w[2] = merged.count(t, own);
+      w[3] = t.gciHi;
+      w[4] = t.opCount;
+    }
+    SrTailRep *rep = (SrTailRep *)signal->getDataPtrSend();
+    rep->nodeId = own;
+    rep->flags = e == merged.size() ? SrTailRep::F_LAST : 0;
+    rep->count = n;
+    rep->total = merged.size();
+    LinearSectionPtr lsptr[3];
+    lsptr[0].p = c_srTail.m_buf;
+    lsptr[0].sz = n * SrTailRep::INDOUBT_WORDS;
+    sendSignal(rg, GSN_SR_TAIL_INDOUBT_REP, signal, SrTailRep::SignalLength,
+               JBB, lsptr, n > 0 ? 1 : 0);
+  } while (e < merged.size());
+  c_srTail.m_entries = merged.size();
+  g_eventLogger->info(
+      "DBLQH: phase 2 of the restart: %u transactions of the durable tail "
+      "in doubt in this node",
+      merged.size());
+}
+
+void DblqhProxy::execSR_TAIL_HIT_REP(Signal *signal) {
+  jamEntry();
+  ndbrequire(signal->getLength() == SrTailRep::SignalLength);
+  const SrTailRep rep = *(const SrTailRep *)signal->getDataPtr();
+  ndbrequire(rep.count > 0 && rep.count <= SrTailRep::MAX_ENTRIES);
+  SectionHandle handle(this, signal);
+  ndbrequire(handle.m_cnt == 1);
+  if (srTailFromWorker(signal, rep.nodeId)) {
+    /* Hits of a worker, to every SR node as they come */
+    jam();
+    c_srTail.m_hits += rep.count;
+    sendSignal(NodeReceiverGroup(DBLQH, c_srTail.m_srNodes),
+               GSN_SR_TAIL_HIT_REP, signal, SrTailRep::SignalLength, JBB,
+               &handle);
+    return;
+  }
+  jam();
+  srTailToWorkers(signal, GSN_SR_TAIL_HIT_REP, &handle);
+}
+
+void DblqhProxy::execSR_TAIL_DONE_REP(Signal *signal) {
+  jamEntry();
+  ndbrequire(signal->getLength() == SrTailDoneRep::SignalLength &&
+             signal->getNoOfSections() == 0);
+  const SrTailDoneRep rep = *(const SrTailDoneRep *)signal->getDataPtr();
+  SrTailDoneRep *const out = (SrTailDoneRep *)signal->getDataPtrSend();
+  if (srTailFromWorker(signal, rep.nodeId)) {
+    /* A worker has sent all its hits */
+    jam();
+    ndbrequire(c_srTail.m_workersLast == c_workers &&
+               c_srTail.m_workersDone < c_workers);
+    c_srTail.m_workersDone++;
+    c_srTail.m_maxGci = std::max(c_srTail.m_maxGci, rep.maxGciExecuted);
+    c_srTail.m_hitsDone += rep.hits;
+    if (c_srTail.m_workersDone < c_workers) return;
+    ndbrequire(c_srTail.m_hitsDone == c_srTail.m_hits);
+    out->nodeId = getOwnNodeId();
+    out->maxGciExecuted = c_srTail.m_maxGci;
+    out->hits = c_srTail.m_hits;
+    out->entries = c_srTail.m_entries;
+    sendSignal(NodeReceiverGroup(DBLQH, c_srTail.m_srNodes),
+               GSN_SR_TAIL_DONE_REP, signal, SrTailDoneRep::SignalLength,
+               JBB);
+    return;
+  }
+  /* An SR node is done; its hits came before, on the same route */
+  jam();
+  const Uint32 nodeId = refToNode(signal->getSendersBlockRef());
+  ndbrequire(rep.nodeId == nodeId && !c_srTail.m_nodesDone.get(nodeId));
+  c_srTail.m_nodesDone.set(nodeId);
+  c_srTail.m_maxGciAll = std::max(c_srTail.m_maxGciAll, rep.maxGciExecuted);
+  c_srTail.m_hitsAll += rep.hits;
+  if (!c_srTail.m_nodesDone.equal(c_srTail.m_srNodes)) return;
+  jam();
+  out->nodeId = 0;
+  out->maxGciExecuted = c_srTail.m_maxGciAll;
+  out->hits = c_srTail.m_hitsAll;
+  out->entries = 0;
+  for (Uint32 i = 0; i < c_workers; i++) {
+    sendSignal(workerRef(i), GSN_SR_TAIL_DONE_REP, signal,
+               SrTailDoneRep::SignalLength, JBB);
+  }
+  delete c_srTail.m_merged;
+  c_srTail.m_merged = nullptr;
+}

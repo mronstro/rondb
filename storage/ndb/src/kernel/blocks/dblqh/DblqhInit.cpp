@@ -651,6 +651,10 @@ Dblqh::Dblqh(Block_context &ctx, Uint32 instanceNumber, Uint32 blockNo)
     addRecSignal(GSN_START_EXEC_SR, &Dblqh::execSTART_EXEC_SR);
     addRecSignal(GSN_EXEC_SRREQ, &Dblqh::execEXEC_SRREQ);
     addRecSignal(GSN_EXEC_SRCONF, &Dblqh::execEXEC_SRCONF);
+    // RONDB-1150, X5.4: phase 2 of a system restart
+    addRecSignal(GSN_SR_TAIL_INDOUBT_REP, &Dblqh::execSR_TAIL_INDOUBT_REP);
+    addRecSignal(GSN_SR_TAIL_HIT_REP, &Dblqh::execSR_TAIL_HIT_REP);
+    addRecSignal(GSN_SR_TAIL_DONE_REP, &Dblqh::execSR_TAIL_DONE_REP);
 
     addRecSignal(GSN_ALTER_TAB_REQ, &Dblqh::execALTER_TAB_REQ);
     addRecSignal(GSN_SEND_PUSH_ABORTCONF, &Dblqh::execSEND_PUSH_ABORTCONF);

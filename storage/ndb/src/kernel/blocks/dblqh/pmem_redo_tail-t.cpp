@@ -227,6 +227,18 @@ void stepsBC() {
   OK(!u.fallbackCommits(*t1, sr2, 2, ng));
 }
 
+/* The DBLQH proxy merges the parts of its workers into its node's set */
+void mergeParts() {
+  TailUnion u;
+  OK(u.merge(2, 1, 1, 2, 10, 5) == TAIL_OK);
+  OK(u.merge(2, 1, 1, 3, 10, 5) == TAIL_OK);
+  OK(u.merge(2, 2, 2, 1, 11, 1) == TAIL_OK);
+  OK(u.merge(2, 1, 1, 1, 12, 5) == TAIL_MISMATCH);
+  OK(u.size() == 2);
+  OK(u.count(*u.find(1, 1), 2) == 5 && u.count(*u.find(2, 2), 2) == 1);
+  OK(u.add(2, 2, 2, 1, 11, 1) == TAIL_DUPLICATE);
+}
+
 /* U grows past its first capacity */
 void manyInDoubt() {
   Uint16 ng[4] = {0xFFFF, 0, 0, 0xFFFF};
@@ -252,6 +264,7 @@ TAPTEST(pmem_redo_tail) {
   stepA();
   manyTransactions();
   stepsBC();
+  mergeParts();
   manyInDoubt();
   return 1;
 }

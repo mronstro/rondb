@@ -149,6 +149,12 @@ class TailUnion {
   /* Step B: node reported count COMMITs of the transaction, in doubt */
   TailResult add(Uint32 nodeId, Uint32 transid1, Uint32 transid2,
                  Uint32 count, Uint32 gciHi, Uint32 opCount);
+  /**
+   * As add(), but a second report of the node adds to its count: the
+   * DBLQH proxy merges the parts of its workers into the node's set.
+   */
+  TailResult merge(Uint32 nodeId, Uint32 transid1, Uint32 transid2,
+                   Uint32 count, Uint32 gciHi, Uint32 opCount);
   Entry *find(Uint32 transid1, Uint32 transid2);
   const Entry *find(Uint32 transid1, Uint32 transid2) const;
   Uint32 size() const { return m_used; }
@@ -192,6 +198,8 @@ class TailUnion {
   Uint32 bucket(Uint32 transid1, Uint32 transid2) const;
   bool grow();
   bool growCounts();
+  TailResult add(Uint32 nodeId, Uint32 transid1, Uint32 transid2,
+                 Uint32 count, Uint32 gciHi, Uint32 opCount, bool sum);
 
   Entry *m_entries = nullptr;  // dense, never removed
   Uint32 m_entryCap = 0;

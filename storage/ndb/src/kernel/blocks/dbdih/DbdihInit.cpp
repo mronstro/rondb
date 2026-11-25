@@ -51,6 +51,7 @@ void Dbdih::initData() {
   callocated_frags = 0;
   m_set_up_multi_trp_in_node_restart = false;
   m_sr_tail_own_log = true;
+  c_sr_gci_prime = 0;
   cpageFileSize = ZPAGEREC;
 
   // Records with constant sizes

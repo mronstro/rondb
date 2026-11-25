@@ -26,6 +26,7 @@
 
 #include <RefConvert.hpp>
 #include <signaldata/StartFragReq.hpp>
+#include <signaldata/SrTail.hpp>
 #include <signaldata/StartRec.hpp>
 
 bool printSTART_REC_REQ(FILE *output, const Uint32 *theData, Uint32 len,
@@ -88,5 +89,24 @@ bool printSTART_FRAG_REQ(FILE *output, const Uint32 *theData, Uint32 len,
     fprintf(output, "\nnodeRestorableGci: 0 (from older version)");
   }
   fprintf(output, "\n");
+  return true;
+}
+
+/* RONDB-1150, X5.4: phase 2 of a system restart */
+bool printSR_TAIL_REP(FILE *output, const Uint32 *theData, Uint32 len,
+                      Uint16 /*recBlockNo*/) {
+  if (len != SrTailRep::SignalLength) return false;
+  const SrTailRep *sig = (const SrTailRep *)theData;
+  fprintf(output, " nodeId: %u flags: 0x%x count: %u total: %u\n",
+          sig->nodeId, sig->flags, sig->count, sig->total);
+  return true;
+}
+
+bool printSR_TAIL_DONE_REP(FILE *output, const Uint32 *theData, Uint32 len,
+                           Uint16 /*recBlockNo*/) {
+  if (len != SrTailDoneRep::SignalLength) return false;
+  const SrTailDoneRep *sig = (const SrTailDoneRep *)theData;
+  fprintf(output, " nodeId: %u maxGciExecuted: %u hits: %u entries: %u\n",
+          sig->nodeId, sig->maxGciExecuted, sig->hits, sig->entries);
   return true;
 }

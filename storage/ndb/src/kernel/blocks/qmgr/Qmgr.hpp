@@ -961,6 +961,8 @@ class Qmgr : public SimulatedBlock {
   QmgrState ctoStatus;
   bool cHbSent;
   bool c_keep_alive_send_in_progress;
+  /* RONDB-1150, DUMP 2371: stop at the first report of a node failure */
+  bool c_stop_on_node_failure;
   Uint32 c_keepalive_seqnum;
 
   Timer interface_check_timer;

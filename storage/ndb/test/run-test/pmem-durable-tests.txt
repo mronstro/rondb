@@ -74,3 +74,11 @@ max-time: 2700
 cmd: testRestartGci
 args: -n GciLedgerSRReadBackup -l 2 T1
 max-time: 1800
+
+# X5.10: phase 2 of a system restart executes the durable tail; every
+# acknowledged commit survives each system restart with abort, and the
+# restart after it from G' without writes (two node groups on
+# .4node_durable)
+cmd: testRestartGci
+args: -n GciLedgerDurableSR -l 5 T1
+max-time: 3600

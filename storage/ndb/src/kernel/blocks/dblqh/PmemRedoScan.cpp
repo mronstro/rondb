@@ -46,6 +46,10 @@ Uint32 recordWord(const PartView &v, const Pos &p, Uint32 k) {
 
 }  // namespace
 
+void readRecord(const PartView &v, const Pos &p, Uint32 *out, Uint32 n) {
+  for (Uint32 k = 0; k < n; k++) out[k] = recordWord(v, p, k);
+}
+
 Pos nextMbyteStart(const Geom &g, const Pos &p) {
   const Uint32 mbyte = p.pageNo / PAGES_IN_MBYTE + 1;
   if (mbyte < g.fileSizeMb) return mbyteStart(p.fileNo, mbyte, p.lap);

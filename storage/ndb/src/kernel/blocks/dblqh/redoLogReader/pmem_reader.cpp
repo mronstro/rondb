@@ -260,8 +260,9 @@ void printRecord(const PartView &v, const Pos &p, const RecInfo &info,
       ndbout_c("%s FILLER len %u", at, len);
       break;
     case TYPE_SR_HEAD:
-      ndbout_c("%s SR_HEAD 0x%08x 0x%08x 0x%08x 0x%08x", at, recWord(v, p, 2),
-               recWord(v, p, 3), recWord(v, p, 4), recWord(v, p, 5));
+      ndbout_c("%s SR_HEAD R %u G' %u g %u", at,
+               recWord(v, p, SR_HEAD_R), recWord(v, p, SR_HEAD_G_PRIME),
+               recWord(v, p, SR_HEAD_DURABLE_GCI));
       break;
     default:
       break;

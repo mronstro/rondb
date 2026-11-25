@@ -948,8 +948,11 @@ replicas, and raises the restorable GCI to G'.
   step A ignores ABORTs, step B reports only COMPLETE hits and step C has
   no veto.
 
-**State (2026-11-25): X5.1-X5.3 written, to be built and tested; phase 2
-stays off until X5.7.** `Dbdih::SR_DURABLE_TAIL` is false, so DIH never
+**State (2026-11-25): X5.1-X5.3 committed ("RONDB-1150: X5.1-X5.3,
+phase-2 parameters and step A on the durable tail"); X5.4-X5.7 and the
+tests of X5.10 written, to be built and tested; phase 2 is on
+(`Dbdih::SR_DURABLE_TAIL` true). X5.8 and X5.9 are not done.** Until
+X5.7, `Dbdih::SR_DURABLE_TAIL` was false, so DIH never
 sets `DF_TAIL` and every restart restores to R as before; the code of
 X5.2 and X5.3 runs only once X5.4-X5.7 are in and the switch goes. What
 there is:
@@ -990,6 +993,91 @@ there is:
 - The LQH proxy now imports the sections of START_RECREQ once, not once
   per worker; `sendSignalNoRelease()` copies them, so each worker's import
   but the last was never released.
+- X5.4: GSN 987-989, `SrTail.hpp`, printers in `StartRec.cpp`, Remote
+  scope. A part that reaches E waits there (`m_tail_phase` `TAIL_AT_END`);
+  once all parts of a worker have, it sends their in-doubt entries to the
+  proxy (B1, `redoTailSendIndoubt()`, 1000 per signal, the counts of a
+  transaction in two parts summed by the proxy, `TailUnion::merge()`).
+  The proxy sends the node's set to the SR nodes' proxies once all its
+  workers have (B2), and passes what it gets to its workers (B3). A
+  worker with every node's set rescans its parts from the mapping
+  (`redoTailRescan()`, `PmemRedo::readRecord()`, B4) and sends hits and
+  DONE the same way (B5, B6); the proxy sends the final DONE to its
+  workers once every SR node is done. A worker with no log part sends an
+  empty set and takes part as the others.
+- Decided while coding: no batch numbers; signals between two block
+  instances keep their order, and every last batch and DONE carries a
+  total that the receiver checks. A worker keeps the hits apart and puts
+  them into U at the final DONE, as a hit can arrive before the in-doubt
+  set of its transaction's other nodes.
+- X5.5: at the final DONE each worker computes G' (at least R) and sets
+  its parts to `TAIL_VERDICTS`; each part, still at E, takes its in-doubt
+  transactions one by one (`redoTailNextVerdict()`): a commit executes its
+  COMMITs as step A does, an abort sets `RF_INVALIDATED` on each, fenced
+  when the part ends round 0. G' is kept (`c_srTail.m_gciPrime`) for X5.6
+  and X5.7.
+- X5.6: at E the part's head is E, not the COMPLETED_GCI of R
+  (`redoTailHeadAtEnd()`); phase 4 zeroes nothing after it, closes E's
+  write unit, then writes SR_HEAD (R, G', g) and `COMPLETED_GCI(G')` and
+  makes them persistent (`redoTailWriteSrHead()`). LQH's newest GCIs,
+  Backup's restorable GCI and NDBCNTR's (`sendRESTORABLE_GCI_REP()`) are
+  G'. START_RECCONF carries G' (length 3); the LQH proxy checks that its
+  workers agree.
+- X5.7: the DIH master checks that every SR node reports the same G'; if
+  it is above R, `srRaiseRestorableGci()` sets the newest restorable GCI
+  and the last completed GCI of each SR node to G' and sends COPY_GCIREQ
+  with the new reason `RESTART_DURABLE` (6); each node writes the sysfile
+  and sets `crestartGci`, `c_newest_restorable_gci` and the micro-GCP
+  GCIs from G'; the restart goes on at COPY_GCICONF
+  (`startRecConfAllLab()`, split out of `execSTART_RECCONF()`).
+- Decided while coding: sysfile v3 with `durableGci` waits for X7.3; g is
+  the configured one (`__DurableCommits` gives g = 1), and a change of the
+  setting across a restart loses durable commits but keeps a consistent
+  cut. SR_HEAD holds g in place of a restart sequence. Phase 2 also needs
+  every SR node restorable to R (`lastCompletedGCI` = R), else a node would
+  take GCIs up to R for its tail; such a node is stale (X6.3).
+- Not handled: E at the first record of a file (a NEXT_MBYTE ended the
+  previous file and the crash came before page 0 of the next one was
+  persistent, W3) stops the restart with a message
+  (`redoTailHeadAtEnd()`); it needs the file switch completed at phase 4.
+- X5.10: error inserts 5185-5190 (DBLQH) and 7262 (DBDIH),
+  `ERROR_codes.txt`. `testRestartGci` cases `GciLedgerDurableSR` (each
+  restart with abort, then one without writes from G'),
+  `GciLedgerDurablePowerLoss` and `GciLedgerDurableCrashPoints` (5186-5189
+  and 7262 must stop a node, then the next restart; 5185 and 5190 change
+  phase 2 without a stop); with durable commits the ledger allows no
+  acknowledged loss. MTR `ndb_redo_pmem_durable_ledger`, `_crash` (big
+  test, StopOnError=0) and `_power_loss`; atrt `GciLedgerDurableSR` in
+  `pmem-durable-tests.txt`.
+- First runs (2026-11-25, macOS ARM64): `ndb_redo_pmem_durable_ledger`
+  passes. `_power_loss` lost acknowledged transactions of the last GCI.
+  The verdict lines of step C showed why: the crashes were not at once.
+  With error insert 5171 each node loses the power at its own random
+  drain; node 1 stopped 300 ms before node 2, which took over as master
+  and TC and went on committing GCI 103 on its own replicas, and
+  acknowledged it. At the restart node 1, still restorable at R in every
+  sysfile, took part as a normal node: count 0 against node 2's, so the
+  fallback aborted what node 2 alone had committed. That is D3 (plan
+  §5.4), which X6.1-X6.4 fix: node 2 records node 1's failure, node 1 is
+  stale and stays out, the fallback runs over node 2 alone. Until then a
+  test of X5 must crash every node at once: DUMP 2371
+  (`QmgrStopOnNodeFailure`, error-insert builds) makes a data node stop
+  at the first report of a node failure, before it can commit without
+  the failed node, a power loss with the emulation; the durable ledger
+  sends it before each power loss (`ledgerStopTogether()`). The system
+  restart with abort of `GciLedgerDurableSR` has the same window, small;
+  X6.8's D3 test is the one that must cover it. To look at in X6: one
+  aborted transaction had 6 COMMITs on node 2 for opCount 7 after a TC
+  takeover.
+- Found while writing the tests (finding API-1): when every data node
+  fails after the API sent the commit, `Ndb::abortTransactionsAfterNodeFailure()`
+  reports error 4010, "Node failure caused abort of transaction", a
+  temporary error. With durable commits that transaction may have passed
+  the commit point, and phase 2 commits it; an application that retries
+  on the temporary error writes twice. The ledger counts such a 4010 as
+  an unknown result. Proposed: an unknown-result error for a node failure
+  after the commit was sent (sendTC_COMMIT), at least with durable
+  commits; to decide.
 
 ### X5.1 Phase-2 parameters (S, 2 pd)
 
@@ -1450,6 +1538,38 @@ X5 ; X8.5 last.
 
 ## 9. Dependency graph and critical path
 
+**Order after X5 (decided 2026-11-25).** The system restart is where the
+risk is, so X5 ends at a gate before anything else builds on it:
+
+1. **X5**, with phase 2 switched on in X5.7.
+2. **Gate G-X5: a complete test run and a review.**
+   - Tests, on Linux x86_64, Linux ARM64 and macOS ARM64: the ledger with
+     kill -9 and with power loss, 100+ iterations, all nodes starting;
+     the crash points of the restart (5186-5189, 7262), each followed by
+     another restart that must reach the same verdicts; the forced
+     fallback (5185); the next restart at R = G' with and without
+     traffic; schema changes in the tail (X5.9); the regression suites
+     in file and PMEM mode, as `execSr()` changed for every restart.
+   - Review: of the X5 code, by someone not anchored on its reasoning,
+     and of the code against plan §5.2 and §6 and against phase 2 of the
+     TLA+ model (which also checks a rerun after a crash in step C). To
+     examine: the state machine at E and the queue of step A; no logging
+     in round 0; the order of hits before DONE through the proxies; the
+     same G' in every worker; the choices made while coding (phase 2
+     only when every replica is restored from its own REDO, hits applied
+     at the final DONE, the record's gci_lo in tail replays).
+   - `redoLogReader --simulate-sr` (X8.4) is pulled forward to here, to
+     show per part what step A executes and leaves in doubt when a run
+     fails.
+3. **X6.1-X6.4** next: they are correctness, not flexibility. Without the
+   node-failure file, a node that failed after the last GCP save joins
+   the restart as a normal node, and phase 2 replays on its peer what it
+   never saw (D3): the replicas differ. Until then durable commits are
+   safe only without a node failure since the last GCP save.
+4. **X6.5-X6.8** (partial restart, rejoin, unsafe shutdown, tests), then
+   **X7** (online activation; `__DurableCommits` gives g = 1 until then)
+   and **X8** (performance and documentation).
+
 ```
 X1 ─────────────────────────────────────────────── (independent)
 
@@ -1474,7 +1594,7 @@ X2 ──► X3.1-3.3 ──► X4 ──────────► X5 ──�
 | M1 | X1 | READ_BACKUP read-your-writes after TC takeover |
 | M2 | X2 + X3 | REDO on PMEM; crash of all nodes and power loss lose nothing ≤ R_gcp; loss above R_gcp measured |
 | M3 | X4 | Durable protocol on: rows visible only after COMPLETE is persistent, ack after last COMPLETED, F aborts on node failure; commit latency measured |
-| M4 | X5 | **Zero ledger losses after a full crash or power loss with all nodes starting**; repeatable SR |
+| M4 | X5 + gate G-X5 | **Zero ledger losses after a full crash or power loss with all nodes starting**; repeatable SR; the X5 code reviewed |
 | M5 | X6 | Zero losses with node failures in the tail GCI and partial SR; clear refusal for D4 |
 | M6 | X7 | `SET DurableCommits=1` on a running cluster, armed state in ndbinfo |
 | M7 | X8 | Adaptive fencing, benchmark report, docs |
@@ -1492,9 +1612,9 @@ proxy and worker.
 
 | GSN | Sender → receiver | Content | Scope | Receiver checks |
 |---|---|---|---|---|
-| `SR_TAIL_INDOUBT_REP` | DBLQH worker → DBLQH proxy (local); proxy → proxies of SR nodes; proxy → workers | node, batch no, flags (last), total; section `(transid1, transid2, count, gci_hi)`×n | Remote | sender block DBLQH; sender node ∈ `m_sr_nodes`; state = phase-2 exchange; section length multiple of 4 and ≤ batch max; batch numbers in sequence |
-| `SR_TAIL_HIT_REP` | same route | node, batch no; section `(transid1, transid2)`×n, each T complete | Remote | as above |
-| `SR_TAIL_DONE_REP` | same route | node, maxGciExecuted, entries sent, hits sent | Remote | as above; totals match what arrived |
+| `SR_TAIL_INDOUBT_REP` (987) | DBLQH worker → DBLQH proxy (local); proxy → proxies of SR nodes; proxy → workers | node, flags (`F_LAST`), count, total; section `(transid1, transid2, count, gci_hi, opCount)`×n, n ≤ 1000 | Remote | sender block DBLQH; a worker of the own node, or the proxy of a node ∈ the SR nodes; state = phase-2 exchange; section length = 5n; total at `F_LAST` |
+| `SR_TAIL_HIT_REP` (988) | same route | node, count; section `(transid1, transid2)`×n, each T complete | Remote | as above |
+| `SR_TAIL_DONE_REP` (989) | same route | node (0 from the proxy to its workers), maxGciExecuted, hits sent, entries sent | Remote | as above; the hits that arrived match the totals |
 | `DURABLE_ACTIVATE_REQ` | CMVMI → DIH (local); DIH → master DIH | node, senderRef, redoMode, version, request (activate) | Remote | sender block CMVMI (local) or DBDIH; master only; sender an alive data node |
 | `DURABLE_ACTIVATE_CONF` | master DIH → DIH → CMVMI | g, state | Remote | sender is the master DIH |
 | `DURABLE_ACTIVATE_REF` | same | error (not all PMEM, version, restart running, already active) | Remote | same |

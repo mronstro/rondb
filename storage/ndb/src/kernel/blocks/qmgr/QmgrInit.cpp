@@ -166,6 +166,7 @@ void Qmgr::initData() {
   c_allow_api_connect = 0;
   ctoStatus = Q_NOT_ACTIVE;
   c_keep_alive_send_in_progress = false;
+  c_stop_on_node_failure = false;
 
   for (nodePtr.i = 1; nodePtr.i < MAX_NODES; nodePtr.i++) {
     ptrAss(nodePtr, nodeRec);

@@ -160,6 +160,10 @@ constexpr Uint32 ABORT_TRANSID1 = 2;  // also COMPLETE
 constexpr Uint32 ABORT_TRANSID2 = 3;
 
 constexpr Uint32 COMPLETED_GCI_GCI = 2;  // word 3 is a pad
+/* SR_HEAD: the restart's GCI R, G' it raised the log to, and g (X5.6) */
+constexpr Uint32 SR_HEAD_R = 2;
+constexpr Uint32 SR_HEAD_G_PRIME = 3;
+constexpr Uint32 SR_HEAD_DURABLE_GCI = 4;  // word 5 is a pad
 
 constexpr Uint32 FD_NO_FD = 2;
 constexpr Uint32 FD_FILE_NO = 3;
@@ -365,6 +369,21 @@ inline void completeRecord(Uint32 *rec, Uint32 transid1, Uint32 transid2) {
   rec[1] = 0;
   rec[ABORT_TRANSID1] = transid1;
   rec[ABORT_TRANSID2] = transid2;
+}
+
+/**
+ * After phase 2 of a restart, at the end of the durable tail of each log
+ * part, before COMPLETED_GCI(G'): the head is there, not back at R.
+ * Nothing reads it but the tools; a later restart skips it.
+ */
+inline void srHeadRecord(Uint32 *rec, Uint32 restartGci, Uint32 gciPrime,
+                         Uint32 durableGci) {
+  rec[0] = makeW0(TYPE_SR_HEAD, 0, SR_HEAD_LEN);
+  rec[1] = 0;
+  rec[SR_HEAD_R] = restartGci;
+  rec[SR_HEAD_G_PRIME] = gciPrime;
+  rec[SR_HEAD_DURABLE_GCI] = durableGci;
+  rec[5] = 0;
 }
 
 inline void completedGciRecord(Uint32 *rec, Uint32 gci) {

@@ -1579,6 +1579,14 @@ void Dblqh::execCONTINUEB(Signal *signal) {
       jam();
       redoPmemSrZero(signal, data0);
       return;
+    case ZSR_TAIL_SEND:
+      jam();
+      redoTailSendIndoubt(signal);
+      return;
+    case ZSR_TAIL_RESCAN:
+      jam();
+      redoTailRescan(signal);
+      return;
     case ZINIT_FOURTH:
       jam();
       signal->theData[0] = data0;
@@ -38827,6 +38835,7 @@ void Dblqh::execSTART_RECREQ(Signal *signal) {
       /* X5.3: those restored with no REDO to execute logged since */
       jam();
       redoTailSetLogFlags(false);
+      redoTailInitWorker();
     }
   }
 
@@ -39145,8 +39154,11 @@ void Dblqh::rebuildOrderedIndexes(Signal *signal, Uint32 tableId) {
       StartRecConf *conf = (StartRecConf *)signal->getDataPtrSend();
       conf->startingNodeId = getOwnNodeId();
       conf->senderData = cstartRecReqData;
+      /* RONDB-1150, X5.7: G' after phase 2, for DIH to raise R to */
+      conf->restorableGci =
+          c_sr_durable_tail ? c_srTail.m_gciPrime : crestartNewestGci;
       sendSignal(cmasterDihBlockref, GSN_START_RECCONF, signal,
-                 StartRecConf::SignalLength, JBB);
+                 StartRecConf::SignalLength_durable, JBB);
 
       g_eventLogger->info(
           "LDM(%u): We have completed restoring our"
@@ -39461,17 +39473,12 @@ void Dblqh::execSrCompletedLab(Signal *signal) {
   if (c_sr_durable_tail && csrPhasesCompleted == 1) {
     /**
      * RONDB-1150, X5.3: round 0 is done on every node, and with it phase
-     * 2 on the durable tail. The fragments log again, and the step-A
-     * tables go; step C (X5.5) decides their in-doubt sets before.
+     * 2 on the durable tail. The fragments log again, and the tables of
+     * phase 2 go.
      */
     jam();
     redoTailSetLogFlags(true);
-    LogPartRecordPtr logPartPtr;
-    for (logPartPtr.i = 0; logPartPtr.i < clogPartFileSize; logPartPtr.i++) {
-      ptrAss(logPartPtr, logPartRecord);
-      delete logPartPtr.p->m_tail;
-      logPartPtr.p->m_tail = nullptr;
-    }
+    redoTailFreeWorker();
   }
   restart_synch_state(signal, COMPLETED_REDO_LOG_EXEC_SYNCH,
                       ZCONTINUE_REDO_LOG_EXEC_COMPLETED);
@@ -39784,6 +39791,11 @@ void Dblqh::continue_srGciLimits(Signal *signal) {
 
   if (clogPartFileSize == 0) {
     jam();
+    if (redoTailRound0()) {
+      /* RONDB-1150, X5.4: no part, so an empty in-doubt set at once */
+      jam();
+      redoTailSendIndoubt(signal);
+    }
     execLogComp_extra_files_closed(signal);
     return;
   }
@@ -40322,8 +40334,27 @@ void Dblqh::execSr(Signal *signal) {
       if (pos.fileNo == end.fileNo && pos.pageNo == end.pageNo &&
           pos.pageIndex == end.pageIndex && pos.lap == end.lap) {
         if (redoTailRound0() && logPartPtr.p->m_tail_found_last) {
-          /* X5.2: the end of the durable tail, and of round 0 */
+          /**
+           * X5.2-X5.5: the end of the durable tail. The part waits here
+           * for step B, then executes or invalidates its in-doubt set
+           * (step C); then round 0 ends for it.
+           */
           jam();
+          if (logPartPtr.p->m_tail_phase == TAIL_SCAN) {
+            jam();
+            logPartPtr.p->m_tail_phase = TAIL_AT_END;
+            redoTailHeadAtEnd(logPartPtr.p);
+            redoTailPartAtEnd(signal);
+            return;
+          }
+          if (logPartPtr.p->m_tail_phase == TAIL_AT_END) {
+            jam();
+            return;
+          }
+          if (redoTailNextVerdict(logPartPtr.p)) {
+            jam();
+            continue;
+          }
           logPartPtr.p->logExecState = LogPartRecord::LES_EXEC_LOG_COMPLETED;
           send_runredo_event(signal, logPartPtr.p, logPartPtr.p->logLastGci);
           continue;
@@ -40364,7 +40395,8 @@ void Dblqh::execSr(Signal *signal) {
           logPartPtr.p->m_redoWorkStats.m_opsSkipped++;
           continue;
         case PmemRedo::TYPE_COMPLETE:
-          if (redoTailRound0()) {
+          /* Error insert 5185: phase 2 ignores COMPLETEs (the fallback) */
+          if (redoTailRound0() && !ERROR_INSERTED(5185)) {
             /* X5.3: step A executes the COMMITs queued for it */
             jam();
             readLogword(logPagePtr, logFilePtr.p, logPartPtr.p);
@@ -41886,6 +41918,19 @@ void Dblqh::readSrFourthPhaseLab(Signal *signal, LogPageRecordPtr logPagePtr,
    *  WE HAVE TO CALCULATE THE NUMBER OF REMAINING WORDS IN THIS MBYTE.
    * ----------------------------------------------------------------------- */
   Uint32 gci = crestartNewestGci;
+  if (c_sr_durable_tail) {
+    /**
+     * RONDB-1150, X5.6: the log holds the durable tail up to G'; the
+     * head is at E, and COMPLETED_GCI(G') goes there (redoPmemSrZero()).
+     * Backup, and NDBCNTR for the local sysfile, restore to G' too; DIH
+     * raises the restorable GCI to G' once every node is here (X5.7).
+     */
+    jam();
+    ndbrequire(c_srTail.m_gciPrime >= crestartNewestGci);
+    gci = c_srTail.m_gciPrime;
+    c_backup->setRestorableGci(gci);
+    sendRESTORABLE_GCI_REP(signal, gci + 1);
+  }
   if (crestartOldestGci > gci) {
     jam();
     /**
@@ -43449,6 +43494,8 @@ void Dblqh::initialiseRecordsLab(Signal* signal, Uint32 data,
     c_sr_durable_gci = 0;
     c_sr_durable_tail = false;
     std::memset(c_sr_node_group, 0xFF, sizeof(c_sr_node_group));
+    c_srTail.m_union = nullptr;
+    c_srTail.m_hits = nullptr;
     ccurrentGcprec = RNIL;
     caddNodeState = ZFALSE;
     cstartRecReq = SRR_INITIAL; // Initial
@@ -43823,6 +43870,8 @@ void Dblqh::initLogpart(Signal *signal, LogPartRecordPtr logPartPtr) {
   logPartPtr.p->m_tail_found_last = false;
   logPartPtr.p->m_tail_start = PmemRedo::Pos{0, 0, 0, 0};
   logPartPtr.p->m_tail_max_gci = 0;
+  logPartPtr.p->m_tail_phase = TAIL_SCAN;
+  logPartPtr.p->m_tail_verdict = 0;
   NdbLogPartInfo lpinfo(instance());
   ndbrequire(lpinfo.partCount == clogPartFileSize);
   logPartPtr.p->logPartNo = lpinfo.partNo[logPartPtr.i];

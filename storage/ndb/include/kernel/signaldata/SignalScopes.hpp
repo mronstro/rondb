@@ -144,6 +144,10 @@
   /* Only DBDICT sends these, as replies; a data node never receives one */   \
   X(GSN_GET_COLLATION_INFO_CONF, Remote)                                       \
   X(GSN_GET_COLLATION_INFO_REF, Remote)                                        \
+  /* RONDB-1150: phase 2 of a system restart, between DBLQH proxies */         \
+  X(GSN_SR_TAIL_INDOUBT_REP, Remote)                                           \
+  X(GSN_SR_TAIL_HIT_REP, Remote)                                               \
+  X(GSN_SR_TAIL_DONE_REP, Remote)                                              \
   /* ============= Management (DB or MGM, never API) ================= */     \
   X(GSN_START_ORD, Management)                                                 \
   X(GSN_STOP_REQ, Management)                                                  \

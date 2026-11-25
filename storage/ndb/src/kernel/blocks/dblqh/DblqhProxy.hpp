@@ -41,7 +41,9 @@
 #include <signaldata/LqhTransConf.hpp>
 #include <signaldata/LqhTransReq.hpp>
 #include <signaldata/PrepDropTab.hpp>
+#include <signaldata/SrTail.hpp>
 #include <signaldata/StartRec.hpp>
+#include "PmemRedoTail.hpp"
 #include <signaldata/JoinAgg.hpp>
 #include <signaldata/TabCommit.hpp>
 
@@ -322,6 +324,8 @@ class DblqhProxy : public LocalProxy {
     // RONDB-1150, X5.1: section 1 of the request, 0 words when not sent
     Uint32 m_durable[StartRecReq::DURABLE_MAX_WORDS];
     Uint32 m_durableLen;
+    // RONDB-1150, X5.7: the restorable GCI of the workers, the same in all
+    Uint32 m_restorableGci;
     Uint32 phaseToSend;
     Uint32 restoreFragCompletedCount;
     Uint32 undoDDCompletedCount;
@@ -676,6 +680,44 @@ class DblqhProxy : public LocalProxy {
   void execCONTINUEB(Signal*);
   void continueFreeRedistPages(Signal*, Uint32 aggStateKey);
   void continueJoinAggTeardown(Signal*, Uint32 aggStateKey);
+
+  /**
+   * RONDB-1150, X5.4: step B of phase 2 of a system restart, the node's
+   * share of the exchange between the DBLQH workers of the SR nodes
+   * (SrTail.hpp):
+   *   m_merged       the in-doubt sets of the workers, counts summed
+   *   m_srNodes      the SR nodes, from START_RECREQ
+   *   m_workersLast  workers whose in-doubt set is complete, and the
+   *                  entries received from each, against their total
+   *   m_workersDone, m_maxGci, m_hits, m_hitsDone  the workers done, the
+   *                  highest GCI their step A executed, the hits that
+   *                  arrived from them and that their DONE counted
+   *   m_nodesDone, m_maxGciAll, m_hitsAll  the same over the SR nodes
+   */
+  struct SrTail {
+    PmemRedo::TailUnion *m_merged;
+    NdbNodeBitmask m_srNodes;
+    Uint32 m_workersLast;
+    Uint32 m_workerEntries[MaxWorkers];
+    Uint32 m_workersDone;
+    Uint32 m_maxGci;
+    Uint32 m_hits;
+    Uint32 m_hitsDone;
+    Uint32 m_entries;
+    NdbNodeBitmask m_nodesDone;
+    Uint32 m_maxGciAll;
+    Uint32 m_hitsAll;
+    Uint32 m_buf[SrTailRep::MAX_ENTRIES * SrTailRep::INDOUBT_WORDS];
+  } c_srTail;
+  void srTailInit(const StartRecReq *req, const Uint32 *durable,
+                  Uint32 durableLen);
+  void execSR_TAIL_INDOUBT_REP(Signal *);
+  void execSR_TAIL_HIT_REP(Signal *);
+  void execSR_TAIL_DONE_REP(Signal *);
+  bool srTailFromWorker(Signal *, Uint32 nodeId);
+  void srTailToWorkers(Signal *, GlobalSignalNumber gsn,
+                       SectionHandle *handle);
+  void srTailSendNodeSet(Signal *);
 };
 
 #undef JAM_FILE_ID

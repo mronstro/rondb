@@ -7219,6 +7219,20 @@ void Qmgr::failReportLab(Signal *signal, Uint16 aFailedNode,
     return;
   }
 
+#ifdef ERROR_INSERT
+  if (c_stop_on_node_failure && aFailedNode != getOwnNodeId()) {
+    /**
+     * RONDB-1150, DUMP 2371: stop before any commit can go on without the
+     * failed node, as if this node had lost the power together with it
+     */
+    char buf[100];
+    BaseString::snprintf(buf, sizeof(buf),
+                         "DUMP 2371: node %u failed; this node stops with it",
+                         aFailedNode);
+    progError(__LINE__, NDBD_EXIT_ERROR_INSERT, buf);
+  }
+#endif
+
   if (isNodeConnectivitySuspect(sourceNode) &&
       // (! isNodeConnectivitySuspect(aFailedNode)) &&  // TODO : Required?
       ((aFailCause == FailRep::ZCONNECT_CHECK_FAILURE) ||
@@ -9782,6 +9796,13 @@ void Qmgr::reportArbitEvent(Signal *signal, Ndb_logevent_type type,
 // end of arbitration module
 
 void Qmgr::execDUMP_STATE_ORD(Signal *signal) {
+#ifdef ERROR_INSERT
+  if (signal->theData[0] == DumpStateOrd::QmgrStopOnNodeFailure) {
+    c_stop_on_node_failure = true;
+    infoEvent("QMGR: this node stops at the first report of a node failure");
+    return;
+  }
+#endif
   if (signal->theData[0] == 1) {
     unsigned max_nodes = MAX_NDB_NODES;
     if (signal->getLength() == 2) {

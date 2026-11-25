@@ -260,11 +260,25 @@ const TailUnion::Entry *TailUnion::find(Uint32 transid1,
 
 TailResult TailUnion::add(Uint32 nodeId, Uint32 transid1, Uint32 transid2,
                           Uint32 count, Uint32 gciHi, Uint32 opCount) {
+  return add(nodeId, transid1, transid2, count, gciHi, opCount, false);
+}
+
+TailResult TailUnion::merge(Uint32 nodeId, Uint32 transid1, Uint32 transid2,
+                            Uint32 count, Uint32 gciHi, Uint32 opCount) {
+  return add(nodeId, transid1, transid2, count, gciHi, opCount, true);
+}
+
+TailResult TailUnion::add(Uint32 nodeId, Uint32 transid1, Uint32 transid2,
+                          Uint32 count, Uint32 gciHi, Uint32 opCount,
+                          bool sum) {
   Entry *n = find(transid1, transid2);
   if (n != nullptr) {
     if (n->gciHi != gciHi || n->opCount != opCount) return TAIL_MISMATCH;
     for (Uint32 c = n->counts; c != TAIL_NIL; c = m_counts[c].next) {
-      if (m_counts[c].nodeId == nodeId) return TAIL_DUPLICATE;
+      if (m_counts[c].nodeId != nodeId) continue;
+      if (!sum) return TAIL_DUPLICATE;
+      m_counts[c].count += count;
+      return TAIL_OK;
     }
   }
   if (m_countUsed == m_countCap && !growCounts()) return TAIL_NO_MEMORY;

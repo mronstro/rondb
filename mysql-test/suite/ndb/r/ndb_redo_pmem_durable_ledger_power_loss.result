@@ -1,0 +1,10 @@
+# Shutting down mysqld 1
+# Shutting down mysqld 2
+== 1 == every data node loses the power, four times
+Running command
+Result of command: 0
+Test program success!
+# Starting mysqld 1
+# restart
+# Starting mysqld 2
+# restart

@@ -55,7 +55,9 @@ class CopyGCIReq {
     RESTART = 2,
     GLOBAL_CHECKPOINT = 3,
     INITIAL_START_COMPLETED = 4,
-    RESTART_NR = 5
+    RESTART_NR = 5,
+    /* RONDB-1150, X5.7: phase 2 of a system restart raised R to G' */
+    RESTART_DURABLE = 6
   };
 
  private:

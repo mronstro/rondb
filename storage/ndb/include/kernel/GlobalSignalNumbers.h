@@ -37,7 +37,7 @@
  * version there signal may be sent. The signal number must remain reserved and
  * handled by receiver until that version is no longer supported.
  */
-const GlobalSignalNumber MAX_GSN = 986;
+const GlobalSignalNumber MAX_GSN = 989;
 
 struct GsnName {
   GlobalSignalNumber gsn;
@@ -1339,4 +1339,9 @@ extern const GlobalSignalNumber NO_OF_SIGNAL_NAMES;
 #define GSN_GET_COLLATION_INFO_REQ      984
 #define GSN_GET_COLLATION_INFO_CONF     985
 #define GSN_GET_COLLATION_INFO_REF      986
+
+/* RONDB-1150, X5.4: phase 2 of a system restart, DBLQH worker/proxy */
+#define GSN_SR_TAIL_INDOUBT_REP         987
+#define GSN_SR_TAIL_HIT_REP             988
+#define GSN_SR_TAIL_DONE_REP            989
 #endif

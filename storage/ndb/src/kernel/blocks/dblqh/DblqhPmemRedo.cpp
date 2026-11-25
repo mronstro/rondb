@@ -1545,6 +1545,8 @@ void Dblqh::redoTailStart(LogPartRecord *logPartPtrP,
   logPartPtrP->m_tail_found_last = false;
   logPartPtrP->m_tail_start = start;
   logPartPtrP->m_tail_max_gci = 0;
+  logPartPtrP->m_tail_phase = TAIL_SCAN;
+  logPartPtrP->m_tail_verdict = 0;
 }
 
 /**
@@ -1646,6 +1648,520 @@ void Dblqh::redoTailSetLogFlags(bool on) {
       fragPtr.p->logFlag = Fragrecord::STATE_TRUE;
     }
   } while (c_lcp_complete_fragments.next(fragPtr));
+}
+
+/**
+ * X5.4: the state of steps B and C in this worker, set up at START_RECREQ
+ * when phase 2 runs, before any part reaches E or any in-doubt set comes
+ * from the proxy; freed with the step-A tables when round 0 is done on
+ * every node.
+ */
+void Dblqh::redoTailInitWorker() {
+  redoTailFreeWorker();
+  c_srTail.m_union = new (std::nothrow) PmemRedo::TailUnion();
+  c_srTail.m_hits = new (std::nothrow) PmemRedo::TailUnion();
+  if (c_srTail.m_union == nullptr || c_srTail.m_hits == nullptr) {
+    progError(__LINE__, NDBD_EXIT_MEMALLOC,
+              "Phase 2 of the restart: no memory for the in-doubt sets");
+  }
+  c_srTail.m_partsAtEnd = 0;
+  c_srTail.m_sendPart = 0;
+  c_srTail.m_sendEntry = 0;
+  c_srTail.m_sent = 0;
+  c_srTail.m_nodesLast.clear();
+  std::memset(c_srTail.m_nodeEntries, 0, sizeof(c_srTail.m_nodeEntries));
+  c_srTail.m_rescanPart = 0;
+  c_srTail.m_rescanPos = PmemRedo::Pos{0, 0, 0, 0};
+  c_srTail.m_hitCount = 0;
+  c_srTail.m_hitsSent = 0;
+  c_srTail.m_hitsReceived = 0;
+  c_srTail.m_gciPrime = 0;
+  c_srTail.m_noSrNodes = 0;
+  for (Uint32 nodeId = m_sr_nodes.find_first();
+       nodeId != NdbNodeBitmask::NotFound;
+       nodeId = m_sr_nodes.find_next(nodeId + 1)) {
+    c_srTail.m_srNodeList[c_srTail.m_noSrNodes++] = nodeId;
+  }
+  c_srTail.m_committedByComplete = 0;
+  c_srTail.m_committedByFallback = 0;
+  c_srTail.m_aborted = 0;
+}
+
+void Dblqh::redoTailFreeWorker() {
+  delete c_srTail.m_union;
+  c_srTail.m_union = nullptr;
+  delete c_srTail.m_hits;
+  c_srTail.m_hits = nullptr;
+  LogPartRecordPtr logPartPtr;
+  for (logPartPtr.i = 0; logPartPtr.i < clogPartFileSize; logPartPtr.i++) {
+    ptrAss(logPartPtr, logPartRecord);
+    delete logPartPtr.p->m_tail;
+    logPartPtr.p->m_tail = nullptr;
+  }
+}
+
+/**
+ * X5.6: phase 4 does not move the head back to the COMPLETED_GCI of R,
+ * as the durable tail after it stays; the head is E. E is a record
+ * position, after a FILLER or NEXT_MBYTE at a page or mbyte start.
+ */
+void Dblqh::redoTailHeadAtEnd(LogPartRecord *logPartPtrP) {
+  const PmemRedo::Pos &end = logPartPtrP->m_pmem_end;
+  if (end.pageNo == 0) {
+    /**
+     * E at the FD of a file: the previous file ended with a NEXT_MBYTE
+     * and the crash came before page 0 of this one was persistent (W3).
+     * The head cannot be placed there; not handled yet.
+     */
+    redoPmemSrError(logPartPtrP, end, logPartPtrP->m_pmem_end_reason,
+                    "phase 2 of the restart: the end of the durable tail is "
+                    "at the first record of a file, which is not handled");
+  }
+  logPartPtrP->headFileNo = end.fileNo;
+  logPartPtrP->headPageNo = end.pageNo;
+  logPartPtrP->headPageIndex = end.pageIndex;
+  logPartPtrP->logLap = end.lap;
+}
+
+/**
+ * X5.6: at the head, after the write unit of E is closed: SR_HEAD (R, G',
+ * g) and COMPLETED_GCI(G'), made persistent. The invalidations of step C
+ * were fenced when the part ended round 0. A later restart with R >= G'
+ * stops at this COMPLETED_GCI, after every COMMIT up to G' of the tail;
+ * a restart from R again, after a crash before DIH raised R, reads past
+ * both records and reaches the same verdicts.
+ */
+void Dblqh::redoTailWriteSrHead(Signal *signal, LogPartRecord *logPartPtrP) {
+  ndbrequire(cnewestCompletedGci >= c_srTail.m_gciPrime);
+  LogFileRecordPtr logFilePtr;
+  logFilePtr.i = logPartPtrP->currentLogfile;
+  ptrCheckGuard(logFilePtr, clogFileFileSize, logFileRecord);
+  LogPageRecordPtr logPagePtr;
+  logPagePtr.i = logFilePtr.p->currentLogpage;
+  ptrCheckGuard(logPagePtr, logPartPtrP->logPageFileSize,
+                logPartPtrP->logPageRecord);
+  Uint32 rec[PmemRedo::SR_HEAD_LEN];
+  PmemRedo::srHeadRecord(rec, crestartNewestGci, c_srTail.m_gciPrime,
+                         c_sr_durable_gci);
+  redoAppendFixed(signal, logPartPtrP, logPagePtr, logFilePtr, rec,
+                  PmemRedo::SR_HEAD_LEN);
+  writeCompletedGciLogPmem(signal, logPagePtr, logFilePtr, logPartPtrP);
+  redoPersist(signal, logPartPtrP);
+  g_eventLogger->info(
+      "LDM(%u): log part %u: SR_HEAD (R %u, G' %u) and COMPLETED_GCI(%u) "
+      "written at the head",
+      instance(), logPartPtrP->logPartNo, crestartNewestGci,
+      c_srTail.m_gciPrime, c_srTail.m_gciPrime);
+}
+
+/* X5.4: a part's scan is at E; once all are, step B starts here */
+void Dblqh::redoTailPartAtEnd(Signal *signal) {
+  ndbrequire(c_srTail.m_partsAtEnd < clogPartFileSize);
+  c_srTail.m_partsAtEnd++;
+  if (c_srTail.m_partsAtEnd == clogPartFileSize) {
+    jam();
+    if (ERROR_INSERTED(5186)) {
+      redoPmemCrashPoint(5186, &logPartRecord[0],
+                         "phase 2: step A done in every part, before step B");
+    }
+    redoTailSendIndoubt(signal);
+  }
+}
+
+/**
+ * X5.4, step B1: the in-doubt sets of the worker's parts to the proxy,
+ * one batch per signal execution, the last with F_LAST and the total. A
+ * transaction in doubt in two parts goes twice; the proxy sums the
+ * counts over the parts and the workers.
+ */
+void Dblqh::redoTailSendIndoubt(Signal *signal) {
+  /* Error insert 5190: one entry per batch */
+  const Uint32 maxEntries = ERROR_INSERTED(5190) ? 1 : SrTailRep::MAX_ENTRIES;
+  Uint32 n = 0;
+  while (n < maxEntries && c_srTail.m_sendPart < clogPartFileSize) {
+    LogPartRecordPtr logPartPtr;
+    logPartPtr.i = c_srTail.m_sendPart;
+    ptrAss(logPartPtr, logPartRecord);
+    ndbrequire(logPartPtr.p->m_tail != nullptr);
+    const PmemRedo::TailTable &tail = *logPartPtr.p->m_tail;
+    if (c_srTail.m_sendEntry == tail.capacity()) {
+      c_srTail.m_sendPart++;
+      c_srTail.m_sendEntry = 0;
+      continue;
+    }
+    const PmemRedo::TailTable::Entry *t = tail.entry(c_srTail.m_sendEntry++);
+    if (t == nullptr) continue;
+    Uint32 *const w = &c_srTail.m_buf[n++ * SrTailRep::INDOUBT_WORDS];
+    w[0] = t->transid1;
+    w[1] = t->transid2;
+    w[2] = t->count;
+    w[3] = t->gciHi;
+    w[4] = t->opCount;
+  }
+  const bool last = c_srTail.m_sendPart == clogPartFileSize;
+  c_srTail.m_sent += n;
+  SrTailRep *rep = (SrTailRep *)signal->getDataPtrSend();
+  rep->nodeId = cownNodeid;
+  rep->flags = last ? SrTailRep::F_LAST : 0;
+  rep->count = n;
+  rep->total = c_srTail.m_sent;
+  LinearSectionPtr lsptr[3];
+  lsptr[0].p = c_srTail.m_buf;
+  lsptr[0].sz = n * SrTailRep::INDOUBT_WORDS;
+  sendSignal(DBLQH_REF, GSN_SR_TAIL_INDOUBT_REP, signal,
+             SrTailRep::SignalLength, JBB, lsptr, n > 0 ? 1 : 0);
+  if (!last) {
+    jam();
+    signal->theData[0] = ZSR_TAIL_SEND;
+    sendSignal(cownref, GSN_CONTINUEB, signal, 1, JBB);
+  }
+}
+
+/* X5.4: the in-doubt set of an SR node, from the proxy, into U */
+void Dblqh::execSR_TAIL_INDOUBT_REP(Signal *signal) {
+  jamEntry();
+  ndbrequire(c_srTail.m_union != nullptr &&
+             signal->getLength() == SrTailRep::SignalLength &&
+             redoTailFromProxy(signal));
+  const SrTailRep rep = *(const SrTailRep *)signal->getDataPtr();
+  ndbrequire(rep.count <= SrTailRep::MAX_ENTRIES &&
+             m_sr_nodes.get(rep.nodeId) &&
+             !c_srTail.m_nodesLast.get(rep.nodeId));
+  SectionHandle handle(this, signal);
+  ndbrequire(handle.m_cnt == (rep.count > 0 ? 1u : 0u));
+  if (rep.count > 0) {
+    jam();
+    SegmentedSectionPtr ptr;
+    ndbrequire(handle.getSection(ptr, 0));
+    ndbrequire(ptr.sz == rep.count * SrTailRep::INDOUBT_WORDS);
+    copy(c_srTail.m_buf, ptr);
+  }
+  releaseSections(handle);
+  for (Uint32 i = 0; i < rep.count; i++) {
+    const Uint32 *const w = &c_srTail.m_buf[i * SrTailRep::INDOUBT_WORDS];
+    const PmemRedo::TailResult res =
+        c_srTail.m_union->add(rep.nodeId, w[0], w[1], w[2], w[3], w[4]);
+    if (res == PmemRedo::TAIL_NO_MEMORY) {
+      progError(__LINE__, NDBD_EXIT_MEMALLOC,
+                "Phase 2 of the restart: out of memory for the in-doubt "
+                "sets of the SR nodes");
+    }
+    if (res != PmemRedo::TAIL_OK) {
+      char buf[200];
+      BaseString::snprintf(buf, sizeof(buf),
+                           "Phase 2 of the restart: node %u reports "
+                           "transaction 0x%x 0x%x %s",
+                           rep.nodeId, w[0], w[1],
+                           res == PmemRedo::TAIL_MISMATCH
+                               ? "with another GCI or opCount than a node "
+                                 "before it"
+                               : "twice");
+      progError(__LINE__, NDBD_EXIT_SR_REDOLOG, buf);
+    }
+  }
+  c_srTail.m_nodeEntries[rep.nodeId] += rep.count;
+  if ((rep.flags & SrTailRep::F_LAST) == 0) return;
+  ndbrequire(c_srTail.m_nodeEntries[rep.nodeId] == rep.total);
+  c_srTail.m_nodesLast.set(rep.nodeId);
+  if (c_srTail.m_nodesLast.equal(m_sr_nodes)) {
+    jam();
+    redoTailRescanStart(signal);
+  }
+}
+
+/**
+ * X5.4, step B4: U is complete, as are the parts of this worker, whose
+ * in-doubt sets are in it. The parts are rescanned one at a time.
+ */
+void Dblqh::redoTailRescanStart(Signal *signal) {
+  g_eventLogger->info(
+      "LDM(%u): phase 2 of the restart: %u transactions of the durable "
+      "tail in doubt in the SR nodes; rescanning %u log parts for their "
+      "COMPLETE records",
+      instance(), c_srTail.m_union->size(), clogPartFileSize);
+  c_srTail.m_rescanPart = 0;
+  if (clogPartFileSize > 0) {
+    jam();
+    LogPartRecordPtr logPartPtr;
+    logPartPtr.i = 0;
+    ptrAss(logPartPtr, logPartRecord);
+    c_srTail.m_rescanPos = logPartPtr.p->m_tail_start;
+    c_srTail.m_union->startPart();
+  }
+  redoTailRescan(signal);
+}
+
+/**
+ * X5.4, step B4: the records of the part from where round 0 started to E,
+ * read from the mapping, 1000 per signal execution. A COMPLETE of a
+ * transaction of U counts only after a durable COMMIT of the tail of it in
+ * the same part (DI-2); if the part holds that transaction in doubt, its
+ * log is corrupt, as step A would have executed it. Then the last hits
+ * and DONE go to the proxy (B5, B6).
+ */
+void Dblqh::redoTailRescan(Signal *signal) {
+  PmemRedo::TailUnion &u = *c_srTail.m_union;
+  PmemRedo::Pos &pos = c_srTail.m_rescanPos;
+  for (Uint32 loops = 0;
+       c_srTail.m_rescanPart < clogPartFileSize && loops < 1000; loops++) {
+    LogPartRecordPtr logPartPtr;
+    logPartPtr.i = c_srTail.m_rescanPart;
+    ptrAss(logPartPtr, logPartRecord);
+    LogPartRecord *const partP = logPartPtr.p;
+    const PmemRedo::Pos &end = partP->m_pmem_end;
+    if (pos.fileNo == end.fileNo && pos.pageNo == end.pageNo &&
+        pos.pageIndex == end.pageIndex && pos.lap == end.lap) {
+      jam();
+      c_srTail.m_rescanPart++;
+      if (c_srTail.m_rescanPart < clogPartFileSize) {
+        jam();
+        logPartPtr.i = c_srTail.m_rescanPart;
+        ptrAss(logPartPtr, logPartRecord);
+        pos = logPartPtr.p->m_tail_start;
+        u.startPart();
+      }
+      continue;
+    }
+    const PmemRedo::PartView v = redoPmemView(partP);
+    PmemRedo::RecInfo info;
+    const Uint32 reason = PmemRedo::checkRecord(v, pos, &info);
+    if (reason != PmemRedo::R_VALID) {
+      redoPmemSrError(partP, pos, reason,
+                      "a record before the end of the log is not valid in "
+                      "the rescan of phase 2");
+    }
+    const Uint32 type = PmemRedo::w0Type(info.w0);
+    if (type == PmemRedo::TYPE_COMMIT &&
+        (info.w0 & (PmemRedo::RF_INVALIDATED | PmemRedo::CF_DURABLE)) ==
+            PmemRedo::CF_DURABLE) {
+      Uint32 rec[PmemRedo::COMMIT_LEN];
+      PmemRedo::readRecord(v, pos, rec, PmemRedo::COMMIT_LEN);
+      if (rec[PmemRedo::COMMIT_GCI_HI] > crestartNewestGci) {
+        u.sawCommit(rec[PmemRedo::COMMIT_TRANSID1],
+                    rec[PmemRedo::COMMIT_TRANSID2]);
+      }
+    } else if (type == PmemRedo::TYPE_COMPLETE && !ERROR_INSERTED(5185)) {
+      Uint32 rec[PmemRedo::COMPLETE_LEN];
+      PmemRedo::readRecord(v, pos, rec, PmemRedo::COMPLETE_LEN);
+      const Uint32 transid1 = rec[PmemRedo::ABORT_TRANSID1];
+      const Uint32 transid2 = rec[PmemRedo::ABORT_TRANSID1 + 1];
+      PmemRedo::TailUnion::Entry *t = u.sawComplete(transid1, transid2);
+      if (t != nullptr) {
+        if (partP->m_tail->find(transid1, transid2) != nullptr) {
+          redoPmemSrError(partP, pos, PmemRedo::R_VALID,
+                          "a COMPLETE follows a COMMIT of the durable tail "
+                          "of a transaction that the log part holds in "
+                          "doubt");
+        }
+        if (!t->hit) {
+          t->hit = true;
+          Uint32 *const w =
+              &c_srTail.m_hitBuf[c_srTail.m_hitCount++ *
+                                 SrTailRep::HIT_WORDS];
+          w[0] = transid1;
+          w[1] = transid2;
+          if (c_srTail.m_hitCount == SrTailRep::MAX_ENTRIES ||
+              ERROR_INSERTED(5190)) {
+            redoTailSendHits(signal);
+          }
+        }
+      }
+    }
+    pos = info.next;
+  }
+  if (c_srTail.m_rescanPart < clogPartFileSize) {
+    jam();
+    signal->theData[0] = ZSR_TAIL_RESCAN;
+    sendSignal(cownref, GSN_CONTINUEB, signal, 1, JBB);
+    return;
+  }
+  if (c_srTail.m_hitCount > 0) redoTailSendHits(signal);
+  if (ERROR_INSERTED(5187) && clogPartFileSize > 0) {
+    redoPmemCrashPoint(5187, &logPartRecord[0],
+                       "phase 2: the rescan of step B done and its hits "
+                       "sent, before DONE");
+  }
+  Uint32 maxGci = 0;
+  LogPartRecordPtr logPartPtr;
+  for (logPartPtr.i = 0; logPartPtr.i < clogPartFileSize; logPartPtr.i++) {
+    ptrAss(logPartPtr, logPartRecord);
+    maxGci = std::max(maxGci, logPartPtr.p->m_tail_max_gci);
+  }
+  SrTailDoneRep *rep = (SrTailDoneRep *)signal->getDataPtrSend();
+  rep->nodeId = cownNodeid;
+  rep->maxGciExecuted = maxGci;
+  rep->hits = c_srTail.m_hitsSent;
+  rep->entries = c_srTail.m_sent;
+  sendSignal(DBLQH_REF, GSN_SR_TAIL_DONE_REP, signal,
+             SrTailDoneRep::SignalLength, JBB);
+}
+
+/* X5.4, step B5: the hits found so far, to the proxy */
+void Dblqh::redoTailSendHits(Signal *signal) {
+  SrTailRep *rep = (SrTailRep *)signal->getDataPtrSend();
+  rep->nodeId = cownNodeid;
+  rep->flags = 0;
+  rep->count = c_srTail.m_hitCount;
+  rep->total = 0;
+  LinearSectionPtr lsptr[3];
+  lsptr[0].p = c_srTail.m_hitBuf;
+  lsptr[0].sz = c_srTail.m_hitCount * SrTailRep::HIT_WORDS;
+  sendSignal(DBLQH_REF, GSN_SR_TAIL_HIT_REP, signal, SrTailRep::SignalLength,
+             JBB, lsptr, 1);
+  c_srTail.m_hitsSent += c_srTail.m_hitCount;
+  c_srTail.m_hitCount = 0;
+}
+
+/* X5.4: hits of an SR node, kept until every node is done */
+void Dblqh::execSR_TAIL_HIT_REP(Signal *signal) {
+  jamEntry();
+  ndbrequire(c_srTail.m_hits != nullptr &&
+             signal->getLength() == SrTailRep::SignalLength &&
+             redoTailFromProxy(signal));
+  const SrTailRep rep = *(const SrTailRep *)signal->getDataPtr();
+  ndbrequire(rep.count > 0 && rep.count <= SrTailRep::MAX_ENTRIES &&
+             m_sr_nodes.get(rep.nodeId));
+  SectionHandle handle(this, signal);
+  SegmentedSectionPtr ptr;
+  ndbrequire(handle.m_cnt == 1 && handle.getSection(ptr, 0) &&
+             ptr.sz == rep.count * SrTailRep::HIT_WORDS);
+  copy(c_srTail.m_buf, ptr);
+  releaseSections(handle);
+  for (Uint32 i = 0; i < rep.count; i++) {
+    const Uint32 *const w = &c_srTail.m_buf[i * SrTailRep::HIT_WORDS];
+    if (c_srTail.m_hits->add(0, w[0], w[1], 0, 0, 0) ==
+        PmemRedo::TAIL_NO_MEMORY) {
+      progError(__LINE__, NDBD_EXIT_MEMALLOC,
+                "Phase 2 of the restart: out of memory for the COMPLETE "
+                "records found");
+    }
+  }
+  c_srTail.m_hitsReceived += rep.count;
+}
+
+/**
+ * X5.4, step B6: every SR node is done, and all hits are here, as they
+ * came before each node's DONE on the same route. The hits go into U,
+ * every worker of every node computes the same G' from the same data
+ * (DI-4), and step C starts in each part, at E.
+ */
+void Dblqh::execSR_TAIL_DONE_REP(Signal *signal) {
+  jamEntry();
+  ndbrequire(c_srTail.m_union != nullptr &&
+             signal->getLength() == SrTailDoneRep::SignalLength &&
+             redoTailFromProxy(signal));
+  const SrTailDoneRep rep = *(const SrTailDoneRep *)signal->getDataPtr();
+  ndbrequire(rep.nodeId == 0 && c_srTail.m_nodesLast.equal(m_sr_nodes) &&
+             c_srTail.m_rescanPart == clogPartFileSize &&
+             c_srTail.m_hitsReceived == rep.hits);
+  PmemRedo::TailUnion &u = *c_srTail.m_union;
+  const PmemRedo::TailUnion &hits = *c_srTail.m_hits;
+  for (Uint32 e = 0; e < hits.size(); e++) {
+    const PmemRedo::TailUnion::Entry *h = hits.entry(e);
+    PmemRedo::TailUnion::Entry *t = u.find(h->transid1, h->transid2);
+    ndbrequire(t != nullptr);
+    t->hit = true;
+  }
+  c_srTail.m_gciPrime = std::max(
+      crestartNewestGci,
+      u.gciPrime(rep.maxGciExecuted, c_srTail.m_srNodeList,
+                 c_srTail.m_noSrNodes, c_sr_node_group));
+  g_eventLogger->info(
+      "LDM(%u): phase 2 of the restart: every SR node is done; %u of the "
+      "%u transactions in doubt have a COMPLETE; G' is %u",
+      instance(), hits.size(), u.size(), c_srTail.m_gciPrime);
+  LogPartRecordPtr logPartPtr;
+  for (logPartPtr.i = 0; logPartPtr.i < clogPartFileSize; logPartPtr.i++) {
+    ptrAss(logPartPtr, logPartRecord);
+    ndbrequire(logPartPtr.p->m_tail_phase == TAIL_AT_END);
+    logPartPtr.p->m_tail_phase = TAIL_VERDICTS;
+    logPartPtr.p->m_tail_verdict = 0;
+    signal->theData[0] = ZEXEC_SR;
+    signal->theData[1] = logPartPtr.i;
+    sendSignal(cownref, GSN_CONTINUEB, signal, 2, JBB);
+  }
+}
+
+/**
+ * X5.5, step C, at E: the next transaction of the part's in-doubt set
+ * that commits, by a COMPLETE found or by the fallback, its COMMITs in
+ * m_tail_exec to execute; those that abort on the way have their COMMITs
+ * invalidated in place (E9), fenced when the part ends round 0. In-doubt
+ * transactions of one part share no row (plan §6), so their order does
+ * not matter. false when the set is done.
+ */
+bool Dblqh::redoTailNextVerdict(LogPartRecord *logPartPtrP) {
+  PmemRedo::TailTable &tail = *logPartPtrP->m_tail;
+  const PmemRedo::TailUnion &u = *c_srTail.m_union;
+  while (logPartPtrP->m_tail_verdict < tail.capacity()) {
+    const Uint32 e = logPartPtrP->m_tail_verdict++;
+    const PmemRedo::TailTable::Entry *t = tail.entry(e);
+    if (t == nullptr) continue;
+    const PmemRedo::TailUnion::Entry *ut = u.find(t->transid1, t->transid2);
+    ndbrequire(ut != nullptr);
+    const Uint32 first = tail.take(e);
+    const bool commits = u.commits(*ut, c_srTail.m_srNodeList,
+                                   c_srTail.m_noSrNodes, c_sr_node_group);
+    if (c_srTail.m_committedByComplete + c_srTail.m_committedByFallback +
+            c_srTail.m_aborted <
+        100) {
+      /* The evidence of each verdict, the first 100 of the LDM */
+      char nodes[160] = "";
+      size_t len = 0;
+      for (Uint32 i = 0; i < c_srTail.m_noSrNodes && len < sizeof(nodes);
+           i++) {
+        const Uint32 nodeId = c_srTail.m_srNodeList[i];
+        len += BaseString::snprintf(nodes + len, sizeof(nodes) - len,
+                                    " node %u (ng %u): %u", nodeId,
+                                    c_sr_node_group[nodeId],
+                                    u.count(*ut, nodeId));
+      }
+      g_eventLogger->info(
+          "LDM(%u): phase 2, log part %u: transaction 0x%x 0x%x GCI %u "
+          "opCount %u, %u COMMITs here; %s; counts:%s; %s",
+          instance(), logPartPtrP->logPartNo, t->transid1, t->transid2,
+          t->gciHi, t->opCount, t->count,
+          ut->hit ? "a COMPLETE found" : "no COMPLETE found", nodes,
+          commits ? "commit" : "abort");
+    }
+    if (commits) {
+      jam();
+      if (ut->hit) {
+        c_srTail.m_committedByComplete++;
+      } else {
+        c_srTail.m_committedByFallback++;
+      }
+      logPartPtrP->m_tail_exec = first;
+      logPartPtrP->m_tail_exec_first = first;
+      if (ERROR_INSERTED(5188) && redoPmemCountTo(5188)) {
+        redoPmemCrashPoint(5188, logPartPtrP,
+                           "phase 2: step C commits a transaction, before "
+                           "its COMMITs execute");
+      }
+      return true;
+    }
+    jam();
+    c_srTail.m_aborted++;
+    for (Uint32 c = first; c != PmemRedo::TAIL_NIL; c = tail.nextCommit(c)) {
+      const PmemRedo::TailCommit &commit = tail.commit(c);
+      redoPmemInvalidateCommit(logPartPtrP, commit.pos.fileNo,
+                               commit.pos.pageNo, commit.pos.pageIndex,
+                               commit.rec[0]);
+      if (ERROR_INSERTED(5188) && redoPmemCountTo(5188)) {
+        redoPmemCrashPoint(5188, logPartPtrP,
+                           "phase 2: step C invalidated a COMMIT, before the "
+                           "rest of its transaction");
+      }
+    }
+    tail.releaseCommits(first);
+  }
+  g_eventLogger->info(
+      "LDM(%u): phase 2 of the restart done in log part %u; in this LDM "
+      "so far %u in-doubt entries committed by a COMPLETE, %u by the "
+      "fallback, %u aborted",
+      instance(), logPartPtrP->logPartNo, c_srTail.m_committedByComplete,
+      c_srTail.m_committedByFallback, c_srTail.m_aborted);
+  return false;
 }
 
 /**
@@ -1781,7 +2297,16 @@ void Dblqh::redoPmemSrZero(Signal *signal, Uint32 logPartPtrI) {
                                          : index - index % PmemRedo::W_WORDS);
   redoPersist(signal, partP);
   redoInitWritePosition(partP);
+  if (c_sr_durable_tail) {
+    jam();
+    redoTailWriteSrHead(signal, partP);
+  }
   unlock_log_part(partP);
+  if (c_sr_durable_tail && ERROR_INSERTED(5189)) {
+    redoPmemCrashPoint(5189, partP,
+                       "phase 4 wrote SR_HEAD and COMPLETED_GCI(G'), before "
+                       "START_RECCONF");
+  }
 
   LogFileRecordPtr logFilePtr;
   logFilePtr.i = partP->currentLogfile;
@@ -1899,7 +2424,8 @@ bool Dblqh::redoPmemCountTo(Uint32 code) {
     redoPmemSeed(code);
     Uint32 count = ERROR_INSERT_EXTRA;
     if (count == 0) {
-      count = code == 5169 ? 1 : 1 + Uint32(redoPmemRand() % 1000);
+      count = (code == 5169 || code == 5188) ? 1
+                                             : 1 + Uint32(redoPmemRand() % 1000);
     }
     c_redo_pmem_count_code = code;
     c_redo_pmem_count = 0;

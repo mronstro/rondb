@@ -1,0 +1,13 @@
+!include ../my.cnf
+
+# RONDB-1150 X5.10: as ndb_redo_pmem_durable_ledger.cnf, with the
+# power-loss emulation.
+[cluster_config.1]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+__RedoLogPmemPowerLossEmulation=1
+__DurableCommits=1
+NoOfFragmentLogFiles=5
+FragmentLogFileSize=4M
+TimeBetweenLocalCheckpoints=6
+TimeBetweenGlobalCheckpoints=500

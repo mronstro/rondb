@@ -161,6 +161,9 @@ Uint32 checkPage(const PartView &v, Uint32 fileNo, Uint32 pageNo, Uint32 lap);
 /* V1-V5 for the record at p, p.lap the expected lap; R_VALID fills *out */
 Uint32 checkRecord(const PartView &v, const Pos &p, RecInfo *out);
 
+/* The first n words of the valid record at p, page headers skipped */
+void readRecord(const PartView &v, const Pos &p, Uint32 *out, Uint32 n);
+
 /**
  * E: follows the records from the first record position of (fileNo,
  * mbyte), with the lap, to the first position that is not valid. After a

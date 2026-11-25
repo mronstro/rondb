@@ -401,6 +401,36 @@ Delay COMPLETE at the primary replica of a durable write or locking read
 by 3 s, once per operation, while the backups have committed it
 (testNodeRestart -n DurableDelayedComplete).
 
+RONDB-1150, X5: phase 2 of a system restart on the durable tail, set
+while the data nodes wait in NOSTART (testRestartGci -n
+GciLedgerDurable*). The crashes stop the node with
+NDBD_EXIT_ERROR_INSERT; the next restart must reach the same verdicts.
+
+5185:
+Phase 2 ignores COMPLETE records, in step A and in the rescan of step B,
+so that every verdict comes from the node-group counts (the fallback).
+
+5186:
+Crash when step A is done in every log part of the LDM, before its
+in-doubt set goes out (step B).
+
+5187:
+Crash when the rescan of step B is done and its hits are sent, before
+DONE.
+
+5188:
+Crash in step C at the N-th verdict, N the extra value or 1: a commit
+before its COMMITs execute, an abort after one of its COMMITs is
+invalidated.
+
+5189:
+Crash after phase 4 wrote SR_HEAD and COMPLETED_GCI(G') at the head of a
+log part, before START_RECCONF.
+
+5190:
+Step B sends the in-doubt set and the hits of an LDM one entry per
+signal.
+
 7165: Delay INCL_NODE_REQ in starting node yeilding error in GCP_PREPARE
 
 7030: Delay in GCP_PREPARE until node has completed a node failure
@@ -435,6 +465,9 @@ GCP Stop so that isolation is required to remove a node.
 7247: Delay WAIT_GCP_REQ processing indefinitely
 7248: Skip most recent LCP during a restart
 7250: Boost GCI to provoke a warning
+
+7262: RONDB-1150, X5.7: crash in COPY_GCIREQ(RESTART_DURABLE), before the
+      sysfile with the restorable GCI raised to G' is written
 
 Related (LQH):
   5085 : Ignore request to kill via DUMP 2305
