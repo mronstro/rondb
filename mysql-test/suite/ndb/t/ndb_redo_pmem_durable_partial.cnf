@@ -1,0 +1,32 @@
+!include ../my.cnf
+
+# RONDB-1150 X6.8: durable commits on 4 data nodes in 2 node groups, as
+# ndb_redo_pmem_durable_ledger.cnf; a partial system restart after 5 s.
+[cluster_config.1]
+NoOfReplicas=                  2
+ndbd=,,,
+ndb_mgmd=
+mysqld=,
+ndbapi=,,,,,,,,,,,
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+__DurableCommits=1
+NoOfFragmentLogFiles=5
+FragmentLogFileSize=4M
+TimeBetweenLocalCheckpoints=6
+TimeBetweenGlobalCheckpoints=500
+StartPartialTimeout=5000
+
+[mysqld]
+# Make all mysqlds use cluster
+ndbcluster
+ndb-wait-connected=20
+ndb-wait-setup=60
+ndb-extra-logging=99
+skip-log-bin
+skip-log-replica-updates
+
+[ENV]
+NDB_CONNECTSTRING=             @mysql_cluster.1.ndb_connectstring
+MASTER_MYPORT=                 @mysqld.1.1.port
+MASTER_MYPORT1=                @mysqld.2.1.port

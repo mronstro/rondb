@@ -1310,6 +1310,8 @@ void Dblqh::redoPmemSrPhase1(Signal *signal, LogPartRecordPtr logPartPtr) {
       PmemRedo::findEnd(v, lastFileNo, last.mbyte, lap);
   partP->m_pmem_end = scan.end;
   partP->m_pmem_end_reason = scan.reason;
+  partP->m_pmem_end_next_mbyte = scan.nextMbyte;
+  partP->m_pmem_end_after_next_mbyte = scan.mbytes > 0;
   /* ndb_redo_log_reader --find-end prints the same line */
   PmemRedo::formatEnd(buf, sizeof(buf), partNo, lastFileNo, lap, slot.seq,
                       last.mbyte, scan);
@@ -1706,21 +1708,38 @@ void Dblqh::redoTailFreeWorker() {
  * position, after a FILLER or NEXT_MBYTE at a page or mbyte start.
  */
 void Dblqh::redoTailHeadAtEnd(LogPartRecord *logPartPtrP) {
-  const PmemRedo::Pos &end = logPartPtrP->m_pmem_end;
-  if (end.pageNo == 0) {
+  PmemRedo::Pos head = logPartPtrP->m_pmem_end;
+  if (head.pageNo % PmemRedo::PAGES_IN_MBYTE == 0 &&
+      head.pageIndex == PmemRedo::HEADER_WORDS &&
+      logPartPtrP->m_pmem_end_after_next_mbyte) {
     /**
-     * E at the FD of a file: the previous file ended with a NEXT_MBYTE
-     * and the crash came before page 0 of this one was persistent (W3).
-     * The head cannot be placed there; not handled yet.
+     * E at the first record of an mbyte, after the NEXT_MBYTE that ended
+     * the one before: the crash came before the first unit of the new
+     * mbyte was persistent, in a new file before its page 0 (W3). The
+     * head goes to that NEXT_MBYTE, as after a GCP save whose
+     * COMPLETED_GCI ended an mbyte: phase 4 zeroes after it, and the
+     * first record written there changes the mbyte, and the file, as at
+     * run time (redoPmemStartMbyte()).
      */
-    redoPmemSrError(logPartPtrP, end, logPartPtrP->m_pmem_end_reason,
+    jam();
+    head = logPartPtrP->m_pmem_end_next_mbyte;
+    g_eventLogger->info(
+        "LDM(%u): PMEM REDO log part %u: the durable tail ends at the first "
+        "record of file %u mbyte %u; the head is at the NEXT_MBYTE before "
+        "it, file %u page %u word %u",
+        instance(), logPartPtrP->logPartNo, logPartPtrP->m_pmem_end.fileNo,
+        logPartPtrP->m_pmem_end.pageNo / PmemRedo::PAGES_IN_MBYTE,
+        head.fileNo, head.pageNo, head.pageIndex);
+  } else if (head.pageNo == 0) {
+    /* Page 0 is valid before its file holds a record (W3) */
+    redoPmemSrError(logPartPtrP, head, logPartPtrP->m_pmem_end_reason,
                     "phase 2 of the restart: the end of the durable tail is "
-                    "at the first record of a file, which is not handled");
+                    "at the first record of a file, after no NEXT_MBYTE");
   }
-  logPartPtrP->headFileNo = end.fileNo;
-  logPartPtrP->headPageNo = end.pageNo;
-  logPartPtrP->headPageIndex = end.pageIndex;
-  logPartPtrP->logLap = end.lap;
+  logPartPtrP->headFileNo = head.fileNo;
+  logPartPtrP->headPageNo = head.pageNo;
+  logPartPtrP->headPageIndex = head.pageIndex;
+  logPartPtrP->logLap = head.lap;
 }
 
 /**

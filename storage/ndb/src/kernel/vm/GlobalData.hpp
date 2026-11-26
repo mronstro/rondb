@@ -160,6 +160,20 @@ struct GlobalData {
   };
   RedoPmemPathInfo theRedoPmemPath[REDO_PMEM_PATHS];
   /**
+   * RONDB-1150, X6.7: the dirty-shutdown counts of the REDO paths summed
+   * into *sum; false if no path reports one
+   */
+  bool redoPmemDirtyShutdown(Uint64 *sum) const {
+    bool known = false;
+    *sum = 0;
+    for (const RedoPmemPathInfo &path : theRedoPmemPath) {
+      if (path.dirty_shutdown == ~Uint64(0)) continue;
+      *sum += path.dirty_shutdown;
+      known = true;
+    }
+    return known;
+  }
+  /**
    * RONDB-1150, X6.1, RedoLogMode=pmem: the directory of REDO path 0 and
    * how NDBFS maps files there, for the node-failure file of QMGR and
    * NDBCNTR (NodeFailFile.hpp). Set in NDBFS's READ_CONFIG_REQ; nullptr
@@ -167,6 +181,13 @@ struct GlobalData {
    */
   const char *theNodeFailFileDir;
   unsigned theNodeFailMapFlags;
+  /**
+   * RONDB-1150, X6.7: this start follows an unsafe shutdown of the
+   * persistent memory of the REDO log. QMGR sets it before the election
+   * and keeps it in the node-failure file until the start completes;
+   * NDBCNTR sends it with CNTR_START_REQ.
+   */
+  bool theNodeFailUnsafeShutdown;
 
   /**
    * NodeStartLogReportFrequency, seconds between [NODE-START] progress
@@ -274,6 +295,7 @@ struct GlobalData {
     }
     theNodeFailFileDir = nullptr;
     theNodeFailMapFlags = 0;
+    theNodeFailUnsafeShutdown = false;
     theNodeStartLogReportFrequency = 15;
     NdbTick_Invalidate(&theNodeStartTicks);
     theNodeStartLogState = NSL_STARTING;

@@ -1120,6 +1120,47 @@ bool fileSwitch(TestLog &log, bool fdTorn) {
 }
 
 /**
+ * RONDB-1150, X5.6: the file switch with page 0 of the new file torn, E
+ * at its FD. The scan keeps the NEXT_MBYTE that ended the file; a
+ * restart of the durable tail puts the head there (redoTailHeadAtEnd()),
+ * and the writes after it redo the file switch.
+ */
+bool fileSwitchHeadAtNextMbyte(TestLog &log) {
+  Rng rng(8);
+  log.reset();
+  log.setStream(108);
+  log.beginAt(1, 3, 2);
+  log.randomWindow(2000, 0);
+  log.barrier();
+  log.stopAfter(3);  // NEXT_MBYTE, fence, FD
+  log.nextMbyte();
+  CHECK(log.dead());
+  log.crash(CRASH_FULL, rng);
+  const Pos fdPos = {2, 0, HEADER_WORDS, 2};
+  log.at(fdPos)[10] ^= 0xFF;
+  ScanResult scan;
+  CHECK(findLogEnd(log, &scan));
+  CHECK(samePos(scan.end, fdPos));
+  CHECK(scan.mbytes == 1);
+  RecInfo info;
+  CHECK(checkRecord(log.view(), scan.nextMbyte, &info) == R_VALID);
+  CHECK(w0Type(info.w0) == TYPE_NEXT_MBYTE);
+  CHECK(samePos(info.next, scan.end));
+  CHECK(scan.nextMbyte.fileNo == 1 && scan.nextMbyte.lap == 2 &&
+        scan.nextMbyte.pageNo / PAGES_IN_MBYTE == 3);
+
+  CHECK(log.restart(scan.end, scan.nextMbyte));
+  CHECK(log.slotFile() == 1 && log.slotLap() == 2);
+  log.randomWindow(500, 0);
+  log.barrier();
+  CHECK(log.slotFile() == 2 && log.slotLap() == 2);
+  log.crash(CRASH_CLEAN, rng);
+  CHECK(findLogEnd(log, &scan));
+  CHECK(walkFrom(log, mbyteStart(1, 3, 2), scan));
+  return true;
+}
+
+/**
  * Orphans after a hole: records after the last fence persist while one
  * before them does not. V1-V5 accept the orphans. The restart zeroes
  * them; a new record ending where an orphan started then ends the log
@@ -1180,6 +1221,7 @@ bool cases(TestLog &log) {
   CHECK(zeroedRegion(log));
   CHECK(fileSwitch(log, true));
   CHECK(fileSwitch(log, false));
+  CHECK(fileSwitchHeadAtNextMbyte(log));
   CHECK(orphans(log, true));
   CHECK(orphans(log, false));
   return true;

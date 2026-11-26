@@ -101,6 +101,7 @@ struct ScanResult {
   Uint32 records;   // valid records from the start to E
   Uint32 mbytes;    // NEXT_MBYTE records followed
   bool nextFile;    // E lies in a later file than the start
+  Pos nextMbyte;    // the last NEXT_MBYTE followed, when mbytes > 0
 };
 
 /* The result of the walk over the mbyte headers of the last file */

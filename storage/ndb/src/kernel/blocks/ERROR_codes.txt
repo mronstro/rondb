@@ -470,6 +470,8 @@ GCP Stop so that isolation is required to remove a node.
      failure, before PREP_FAILCONF
 991: RONDB-1150, X6.1: do not record node failures in the node-failure
      file (a negative test: the divergence of D3 must show)
+992: RONDB-1150, X6.7: report an unsafe shutdown of the persistent memory
+     of the REDO log at the start (set in NOSTART)
 
 7262: RONDB-1150, X5.7: crash in COPY_GCIREQ(RESTART_DURABLE), before the
       sysfile with the restorable GCI raised to G' is written

@@ -57,15 +57,21 @@ CONSTANTS
     SkipDirty,        \* phase 2 skips a dirty write in the tail and step C
                       \* invalidates its COMMIT (best effort, DI-1); else
                       \* its CPF_SELF COMPLETE applies it (X4.13)
-    Fallback          \* step C commits by the count rule too, not only on
+    Fallback,         \* step C commits by the count rule too, not only on
                       \* "T complete" (D5; off only to show it is needed)
+    GroupLoss,        \* X6.3: the last live node of a node group may fail;
+                      \* the survivors record it and the cluster stops
+    RefinedStale      \* X6.3: a recorded failure makes its node stale only
+                      \* if a node of its node group outlived it; FALSE:
+                      \* any recorded failure does (the rule of X6.1-X6.4)
 
 NoTxn == "none"
 
 VARIABLES
     alive,      \* nodes running
     failCount,  \* node failures so far
-    nfRec,      \* nfRec[n]: failed nodes in n's node-failure file
+    nfRec,      \* nfRec[n]: <<x, k>> in n's node-failure file: node x
+                \* failed in the k-th failure
     tcState,    \* tcState[t]: TC's state of t, or the takeover's
     path,       \* path[t]: "linear" or "parallel"
     seenFail,   \* seenFail[t]: failed participants TC has reacted to
@@ -387,9 +393,11 @@ AbortFDone(t) ==
 -----------------------------------------------------------------------------
 (* A node failure. Every survivor records it in its node-failure file    *)
 (* before NODE_FAILREP (plan s.5.4), so before any TC or DIH leaves the   *)
-(* node out. A node group keeps a live node: else the cluster stops,      *)
-(* which is the crash of every node. A transaction whose TC was on the    *)
-(* node goes to a takeover.                                               *)
+(* node out, with the number of the failure. A node group keeps a live   *)
+(* node: else the cluster stops, which is the crash of every node; with   *)
+(* GroupLoss the survivors record the failure of the last node first     *)
+(* (NodeFailLast). A transaction whose TC was on the node goes to a       *)
+(* takeover.                                                              *)
 
 NodeFail(x) ==
     /\ failCount < MaxFailures
@@ -398,7 +406,8 @@ NodeFail(x) ==
     /\ alive' = alive \ {x}
     /\ failCount' = failCount + 1
     /\ nfRec' = [n \in Nodes |->
-                    IF n \in alive' THEN nfRec[n] \cup {x} ELSE nfRec[n]]
+                    IF n \in alive' THEN nfRec[n] \cup {<<x, failCount'>>}
+                    ELSE nfRec[n]]
     /\ tcState' = [t \in Txns |->
                      IF TC[t] = x /\ tcState[t] \in Active
                      THEN (IF t \in Dirty THEN "lost" ELSE "takeover")
@@ -409,6 +418,24 @@ NodeFail(x) ==
     /\ msgs' = {m \in msgs : m.to # x}
     /\ UNCHANGED <<path, seenFail, rep, lock, hist, abortRel, learnedBy, vis,
                    logVars, toVars, lqhCrash>>
+
+\* X6.3: the last live node of a node group fails; the survivors record
+\* it before PREP_FAILCONF, and then the cluster stops: every node crashes
+\* before anything commits without it
+NodeFailLast(x) ==
+    /\ GroupLoss
+    /\ failCount < MaxFailures
+    /\ x \in alive
+    /\ ~\E y \in alive \ {x} : NG[y] = NG[x]
+    /\ alive' = {}
+    /\ failCount' = failCount + 1
+    /\ nfRec' = [n \in Nodes |->
+                    IF n \in alive \ {x}
+                    THEN nfRec[n] \cup {<<x, failCount'>>}
+                    ELSE nfRec[n]]
+    /\ msgs' = {}
+    /\ UNCHANGED <<tcState, path, seenFail, rep, lock, hist, abortRel,
+                   learnedBy, vis, api, logVars, toVars, lqhCrash>>
 
 \* A signal that a failed node had not sent yet is lost with it
 LoseMsg(m) ==
@@ -616,7 +643,7 @@ Next ==
           \/ DirtyDone(t)
           \/ \E n \in Nodes : TakeoverScan(t, n)
     \/ \E m \in msgs : DeliverCommit(m) \/ DeliverComplete(m) \/ LoseMsg(m)
-    \/ \E x \in Nodes : NodeFail(x)
+    \/ \E x \in Nodes : NodeFail(x) \/ NodeFailLast(x)
 
 Spec == Init /\ [][Next]_vars
 
@@ -724,9 +751,25 @@ RowSeq(res, n, r) ==
     TxnSeq(Keep(res.final[n], {c \in Range(res.final[n]) : c.row = r}))
 
 \* A node that some starting node recorded as failed is stale: it takes no
-\* part (plan s.5.4). The restart needs a node that is not stale in every
-\* node group (D4, X6.4).
-Stale(S) == UNION {nfRec[n] : n \in S}
+\* part (plan s.5.4). With RefinedStale only if that node's file shows a
+\* node of its node group that outlived the failure: the recording node
+\* itself, one with no failure recorded, or one that failed later (X6.3,
+\* NodeFailFile::outlived()). Every node is restorable to R in the model,
+\* and a failed node does not come back. The restart needs a node that is
+\* not stale in every node group (D4, X6.4).
+Max(K) == CHOOSE m \in K : \A k \in K : k <= m
+LatestFail(n, x) ==
+    LET K == {p[2] : p \in {q \in nfRec[n] : q[1] = x}}
+    IN IF K = {} THEN 0 ELSE Max(K)
+Outlived(n, x) ==
+    \E y \in Nodes \ {x} :
+        /\ NG[y] = NG[x]
+        /\ \/ y = n
+           \/ LatestFail(n, y) = 0
+           \/ LatestFail(n, y) > LatestFail(n, x)
+Stale(S) ==
+    {x \in Nodes : \E n \in S :
+        LatestFail(n, x) > 0 /\ (RefinedStale => Outlived(n, x))}
 SRNodes(S) == S \ Stale(S)
 SRAllowed(S) == \A g \in NodeGroups : \E n \in SRNodes(S) : NG[n] = g
 SRStarts ==
@@ -757,6 +800,11 @@ TypeOK ==
 
 \* DBLQH never fails an ndbrequire
 NoLqhCrash == ~lqhCrash
+
+\* X6.3: with every node starting, each node group has a node that is not
+\* stale, also after a node group was lost (GroupLoss): its last node to
+\* fail restores it
+FullRestartAllowed == SRAllowed(Nodes)
 
 \* In a log part no COMMIT of T follows a COMPLETE of T (plan s.5.2 step A)
 CommitBeforeComplete ==

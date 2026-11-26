@@ -26,9 +26,8 @@
 
 #define NDBCNTR_C
 #include "Ndbcntr.hpp"
+#include "../dbdih/Dbdih.hpp"
 #include "../qmgr/NodeFailFile.hpp"
-#include <fcntl.h>
-#include <unistd.h>
 #include <memory>
 
 #include <ndb_limits.h>
@@ -2175,12 +2174,14 @@ void Ndbcntr::sendCntrStartReq(Signal *signal) {
 
   /**
    * RONDB-1150, X6.2: in a system restart, the failures of nodes that
-   * this node recorded, for the master to find stale nodes (X6.3)
+   * this node recorded, for the master to find stale nodes (X6.3), and
+   * whether this start follows an unsafe shutdown, as QMGR found (X6.7)
    */
   Uint32 nf[CntrStartReq::NF_MAX_WORDS];
   const Uint32 nfLen =
-      ctypeOfStart == NodeState::ST_SYSTEM_RESTART ? readNodeFailRecords(nf)
-                                                   : 0;
+      ctypeOfStart == NodeState::ST_SYSTEM_RESTART
+          ? readNodeFailRecords(nf, globalData.theNodeFailUnsafeShutdown)
+          : 0;
   CntrStartReq *req = (CntrStartReq *)signal->getDataPtrSend();
   req->startType = ctypeOfStart;
   req->lastGci = c_start.m_lastGci;
@@ -2196,50 +2197,62 @@ void Ndbcntr::sendCntrStartReq(Signal *signal) {
 /**
  * RONDB-1150, X6.2: the latest recorded failure of each node in this
  * node's node-failure file (NodeFailFile.hpp), read before QMGR maps it,
- * as section 0 of CNTR_START_REQ; 0 words without a valid file.
+ * as section 0 of CNTR_START_REQ, each with NFR_OUTLIVED when a node of
+ * its node group outlived it as this node's file and sysfile show (X6.3);
+ * unsafe (X6.7) in the flags word. 0 words without a valid file, unless
+ * unsafe.
  */
-Uint32 Ndbcntr::readNodeFailRecords(Uint32 *words) {
-  const char *dir = globalData.theNodeFailFileDir;
-  if (dir == nullptr) return 0;
-  BaseString path;
-  path.assfmt("%s%s", dir, NodeFailFile::FILE_NAME);
-  const int fd = ::open(path.c_str(), O_RDONLY);
-  if (fd < 0) return 0;
-  std::unique_ptr<Uint8[]> file(new Uint8[NodeFailFile::FILE_BYTES]);
-  const ssize_t n = ::pread(fd, file.get(), NodeFailFile::FILE_BYTES, 0);
-  ::close(fd);
-  if (n != ssize_t(NodeFailFile::FILE_BYTES) ||
-      !NodeFailFile::headerValid(reinterpret_cast<const Uint32 *>(file.get()),
-                                 getOwnNodeId())) {
-    return 0;
-  }
+Uint32 Ndbcntr::readNodeFailRecords(Uint32 *words, bool unsafe) {
+  words[CntrStartReq::NF_FLAGS] =
+      unsafe ? CntrStartReq::NF_F_UNSAFE_SHUTDOWN : 0;
   Uint32 len = CntrStartReq::NF_RECORDS;
-  words[CntrStartReq::NF_FLAGS] = 0;
+  std::unique_ptr<Uint8[]> file;
+  if (!NodeFailFile::readFile(globalData.theNodeFailFileDir, getOwnNodeId(),
+                              &file)) {
+    return unsafe ? len : 0;
+  }
+  const Dbdih *dih = (const Dbdih *)globalData.getBlock(DBDIH, instance());
+  NodeFailFile::SysView view;
+  NodeFailFile::fillView(dih, &view);
   for (Uint32 nodeId = 1; nodeId < ABS_MAX_NDB_NODES; nodeId++) {
     NodeFailFile::Record r;
     Uint32 slot;
     if (!NodeFailFile::latest(file.get(), nodeId, &r, &slot)) continue;
+    const bool outlived =
+        NodeFailFile::outlived(file.get(), r, getOwnNodeId(), view);
     words[len++] = r.nodeId;
     words[len++] = r.gciHi;
     words[len++] = r.failNo;
+    words[len++] = outlived ? CntrStartReq::NFR_OUTLIVED : 0;
     g_eventLogger->info(
-        "NDBCNTR: node-failure file: node %u failed in GCI %u (failure %u)",
-        r.nodeId, r.gciHi, r.failNo);
+        "NDBCNTR: node-failure file: node %u failed in GCI %u (failure %u)%s",
+        r.nodeId, r.gciHi, r.failNo,
+        outlived ? "" : "; no node of its node group outlived it");
   }
   return len;
 }
 
-/* RONDB-1150, X6.2: the master keeps the highest GCI of each failure */
+/**
+ * RONDB-1150, X6.2: the master keeps, for each node, the highest GCI of
+ * a failure that a node of its node group outlived, and the nodes that
+ * report an unsafe shutdown
+ */
 void Ndbcntr::noteNodeFailRecords(Uint32 witness, const Uint32 *words,
                                   Uint32 len) {
   ndbrequire(len >= CntrStartReq::NF_RECORDS &&
              (len - CntrStartReq::NF_RECORDS) % CntrStartReq::NF_WORDS == 0);
+  if (words[CntrStartReq::NF_FLAGS] & CntrStartReq::NF_F_UNSAFE_SHUTDOWN) {
+    jam();
+    c_start.m_unsafe.set(witness);
+  }
   for (Uint32 i = CntrStartReq::NF_RECORDS; i < len;
        i += CntrStartReq::NF_WORDS) {
     const Uint32 nodeId = words[i];
     const Uint32 gciHi = words[i + 1];
+    const Uint32 flags = words[i + 3];
     ndbrequire(nodeId > 0 && nodeId < ABS_MAX_NDB_NODES);
-    if (gciHi > c_start.m_nodeFailGci[nodeId]) {
+    if ((flags & CntrStartReq::NFR_OUTLIVED) != 0 &&
+        gciHi > c_start.m_nodeFailGci[nodeId]) {
       c_start.m_nodeFailGci[nodeId] = gciHi;
       c_start.m_nodeFailWitness[nodeId] = witness;
     }
@@ -2280,6 +2293,7 @@ void Ndbcntr::StartRecord::reset() {
   std::memset(m_wait_sp, 0, sizeof(m_wait_sp));
   std::memset(m_nodeFailGci, 0, sizeof(m_nodeFailGci));
   std::memset(m_nodeFailWitness, 0, sizeof(m_nodeFailWitness));
+  m_unsafe.clear();
   m_stale.clear();
 }
 
@@ -2834,23 +2848,36 @@ void Ndbcntr::update_withLog(void) {
   }
   /**
    * RONDB-1150, X6.3 (plan §5.4): a node whose failure a starting node
-   * recorded in a GCI after the restart's is stale. The cluster committed
-   * without it after the last GCP save, which no sysfile shows, and phase
-   * 2 would execute on its peers what it never saw. It takes no part in
-   * the system restart and joins by a node restart after it.
+   * recorded in a GCI after the restart's, and that a node of its node
+   * group outlived, is stale. The cluster may have committed without it
+   * after the last GCP save, which no sysfile shows, and phase 2 would
+   * execute on its peers what it never saw. X6.7: so is a node whose
+   * persistent memory reported an unsafe shutdown, as writes of its REDO
+   * acknowledged as persistent may be missing. It takes no part in the
+   * system restart and joins by a node restart after it.
    */
   for (Uint32 nodeId = c_start.m_withLog.find_first();
        nodeId != NdbNodeBitmask::NotFound;
        nodeId = c_start.m_withLog.find_next(nodeId + 1)) {
-    if (c_start.m_nodeFailGci[nodeId] <= latest_gci) continue;
+    const bool unsafe = c_start.m_unsafe.get(nodeId);
+    if (!unsafe && c_start.m_nodeFailGci[nodeId] <= latest_gci) continue;
     jam();
     c_start.m_withLog.clear(nodeId);
     c_start.m_withLogNotRestorable.set(nodeId);
     c_start.m_stale.set(nodeId);
+    if (unsafe) {
+      jam();
+      g_eventLogger->info(
+          "NDBCNTR: node %u is stale: its persistent memory reported an "
+          "unsafe shutdown; it joins by a node restart after the system "
+          "restart",
+          nodeId);
+      continue;
+    }
     g_eventLogger->info(
         "NDBCNTR: node %u is stale: node %u recorded its failure in GCI %u, "
-        "after the restart's GCI %u; it joins by a node restart after the "
-        "system restart",
+        "after the restart's GCI %u, and a node of its node group outlived "
+        "it; it joins by a node restart after the system restart",
         nodeId, c_start.m_nodeFailWitness[nodeId],
         c_start.m_nodeFailGci[nodeId], latest_gci);
   }

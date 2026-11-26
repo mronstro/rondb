@@ -3051,6 +3051,19 @@ public:
     const Uint64 pending = m_micro_gcp.m_new_gci;
     return Uint32((pending > current ? pending : current) >> 32);
   }
+  /**
+   * RONDB-1150 (X6.3): the sysfile as this node read it, for
+   * NodeFailFile::fillView() in QMGR and NDBCNTR: R, and the node group
+   * (~0 for none) and the last completed GCI of a node id
+   */
+  Uint32 sysfileRestorableGci() const { return sysfile.newestRestorableGCI; }
+  Uint32 sysfileNodeGroup(Uint32 nodeId) const {
+    const Uint32 ng = sysfile.getNodeGroup(nodeId);
+    return ng == NO_NODE_GROUP_ID ? ~Uint32(0) : ng;
+  }
+  Uint32 sysfileLastCompletedGci(Uint32 nodeId) const {
+    return sysfile.lastCompletedGCI[nodeId];
+  }
 
   NdbNodeBitmask c_shutdownReqNodes;
   void print_lcp_state();

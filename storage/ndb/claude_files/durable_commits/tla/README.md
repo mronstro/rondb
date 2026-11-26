@@ -59,6 +59,7 @@ committed.
 | `CompletePhaseDone` | the ack after the last COMPLETED (A) | `sendApiLateCommitSignal` |
 | `FailReaction`, `AbortFAt`, `AbortFDone` | a participant fails: rule F aborts in the commit phase, with an ABORT `AF_AFTER_COMMIT` where a COMMIT record exists; else COMMITREQ/COMPLETEREQ to the replicas left | X4.8, X4.10 |
 | `NodeFail` | survivors record the failure in the node-failure file before NODE_FAILREP | plan §5.4, X6.1 |
+| `NodeFailLast`, `Stale` | with `GroupLoss` the last node of a node group fails, is recorded, and the cluster stops; with `RefinedStale` a recorded failure makes its node stale only if a node of its node group outlived it, by failure number | X6.3, `NodeFailFile::outlived()` |
 | `LoseMsg` | a signal a failed node had not sent yet is lost | |
 | `TakeoverScan`, `TakeoverDecide`, `TO*` | LQH_TRANSREQ reports (operation records, commit-ack markers); CS_FAIL_PREPARED/COMMITTING/COMMITTED/COMPLETED; `takeOverCompleteSent()`; COMMITREQ, COMPLETEREQ, ABORTREQ | X4.9 |
 | `DirtyWrite` | PREPARE, COMMIT (opCount 0) and COMPLETE `CPF_SELF` behind one barrier, local commit, then the next replica | X4.13 |
@@ -135,6 +136,8 @@ finding, and so is a run that finds none where one is expected.
 | `MC_lazy_nofallback` | as `MC_lazy` without the count rule: a control that the crash cuts lose COMPLETEs and that the count rule then decides | `VisibleStays` violated |
 | `MC_late_tc` | late signals from a failed node | `NoLqhCrash` violated: finding 4 |
 | `MC_no_di2` | without the DI-2 rule | `G2Whole` violated: the DI-2 rule is needed |
+| `MC_lazy_group_loss` | as `MC_lazy_twofail_partial`, the last node of a node group may fail (`GroupLoss`): the survivors record it and the cluster stops; stale only if a node of the group outlived the failure (`RefinedStale`, X6.3); also `FullRestartAllowed` | no error |
+| `MC_lazy_group_loss_old` | as `MC_lazy_group_loss`, full restart, any recorded failure stale (X6.1-X6.4 as first committed): the control | `FullRestartAllowed` violated |
 
 ### First run (2026-11-24)
 

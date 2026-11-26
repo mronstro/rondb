@@ -548,6 +548,16 @@ that **start after** it.
 - **Stale node.** X is stale if some starting node recorded X's failure
   with GCI > R_gcp: X failed after the last GCP save, the cluster ran on
   without it, and no sysfile shows it.
+- **Refined (X6, 2026-11-26): only if a node of X's node group outlived
+  the failure**, as the recording node's file and sysfile show: the
+  recording node itself, a node restorable to R_gcp with no failure
+  recorded after it, or one whose latest failure came later. Otherwise
+  nothing ran on X's fragments without X. Without the refinement a
+  cluster that loses a whole node group, one node after the other, could
+  not restart: every node of that group would be stale, although the last
+  one to fail holds all of its data. Nodes that fail in one failure round
+  do not outlive each other. A node that loses an arbitration takes back
+  the records of the failure it lost.
 - **X is also stale if its PMEM device reports an unsafe shutdown** since
   the last start (review 7). Its REDO is still readable up to its valid end,
   because the checksums cut off lost or torn last writes, but writes

@@ -175,7 +175,8 @@ Uint32 checkRecord(const PartView &v, const Pos &p, RecInfo *out) {
 
 ScanResult findEnd(const PartView &v, Uint32 fileNo, Uint32 mbyte,
                    Uint32 lap) {
-  ScanResult res = {mbyteStart(fileNo, mbyte, lap), R_VALID, 0, 0, false};
+  const Pos start = mbyteStart(fileNo, mbyte, lap);
+  ScanResult res = {start, R_VALID, 0, 0, false, start};
   /**
    * The loop ends: a lap more in file 0 at every wrap, and a page header
    * holds one lap.
@@ -189,7 +190,10 @@ ScanResult findEnd(const PartView &v, Uint32 fileNo, Uint32 mbyte,
       return res;
     }
     res.records++;
-    if (w0Type(info.w0) == TYPE_NEXT_MBYTE) res.mbytes++;
+    if (w0Type(info.w0) == TYPE_NEXT_MBYTE) {
+      res.mbytes++;
+      res.nextMbyte = res.end;
+    }
     res.end = info.next;
   }
 }

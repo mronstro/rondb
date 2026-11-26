@@ -49,13 +49,18 @@ class CntrStartReq {
    * RONDB-1150, X6.2: section 0 in a system restart, when the node keeps
    * a node-failure file: a flags word, then the latest recorded failure
    * of each node, NF_WORDS words each: the failed node, the GCI current
-   * at its failure, the failure number.
+   * at its failure, the failure number and flags. NFR_OUTLIVED: a node
+   * of its node group outlived the failure (NodeFailFile::outlived()).
+   * NF_F_UNSAFE_SHUTDOWN (X6.7): the persistent memory of this node's
+   * REDO log reported an unsafe shutdown.
    */
   static constexpr Uint32 NF_FLAGS = 0;
   static constexpr Uint32 NF_RECORDS = 1;
-  static constexpr Uint32 NF_WORDS = 3;
+  static constexpr Uint32 NF_WORDS = 4;
   static constexpr Uint32 NF_MAX_WORDS =
       NF_RECORDS + NF_WORDS * ABS_MAX_NDB_NODES;
+  static constexpr Uint32 NF_F_UNSAFE_SHUTDOWN = 1;
+  static constexpr Uint32 NFR_OUTLIVED = 1;
 
  private:
   Uint32 nodeId;

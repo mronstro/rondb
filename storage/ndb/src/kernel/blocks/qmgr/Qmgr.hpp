@@ -966,16 +966,24 @@ class Qmgr : public SimulatedBlock {
   /**
    * RONDB-1150, X6.1: the node-failure file (NodeFailFile.hpp), mapped
    * in start phase 3 when durable commits are on; nullptr otherwise. The
-   * failures of nodes are stored there before PREP_FAILCONF. c_nodeFailSeq
-   * is the highest seq of a record in it.
+   * failures of nodes are stored there before PREP_FAILCONF, and the start
+   * state of this node (X6.7, writeStartState()). c_nodeFailSeq is the
+   * highest seq of a slot in it.
    */
   Uint8 *c_nodeFailBase;
   Uint64 c_nodeFailSeq;
+  /* The failure recorded last, until COMMIT_FAILREQ commits it */
+  Uint64 c_nodeFailLastSeq;
+  NdbNodeBitmask c_nodeFailLastNodes;
+  void readNodeFailFile();
   void openNodeFailFile();
   void recordNodeFailures(const NdbNodeBitmask &nodes, Uint32 failNo);
+  void retractNodeFailures();
+  void writeStartState(bool unsafe);
   /**
    * RONDB-1150, X6.3: the GCI of the latest failure of each node that
-   * this node's file recorded, read before the election of a president,
+   * this node's file recorded and a node of its node group outlived
+   * (NodeFailFile::outlived()), read before the election of a president,
    * which no stale node may win: one whose failure was recorded after the
    * GCI it runs with
    */

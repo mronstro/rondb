@@ -2362,6 +2362,8 @@ class Dblqh : public SimulatedBlock {
      *   m_pmem_end         E, the end of the valid log that phase 1
      *                      found, and m_pmem_end_reason why the record
      *                      there is not valid
+     *   m_pmem_end_next_mbyte  the last NEXT_MBYTE before E, if
+     *                      m_pmem_end_after_next_mbyte
      *   m_pmem_exec_lap    the lap of the log where phase 3 reads
      *   m_pmem_inval_pending  COMMITs invalidated in phase 3, not fenced
      *   m_pmem_zero_from, m_pmem_zero_to  the LSNs that phase 4 still
@@ -2372,6 +2374,8 @@ class Dblqh : public SimulatedBlock {
     Uint8 **m_pmem_file_base;
     PmemRedo::Pos m_pmem_end;
     Uint32 m_pmem_end_reason;
+    PmemRedo::Pos m_pmem_end_next_mbyte;
+    bool m_pmem_end_after_next_mbyte;
     Uint32 m_pmem_exec_lap;
     Uint32 m_pmem_inval_pending;
     Uint64 m_pmem_zero_from;

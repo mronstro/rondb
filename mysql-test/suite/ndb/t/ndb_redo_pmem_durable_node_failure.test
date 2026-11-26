@@ -1,0 +1,57 @@
+--source include/have_ndb.inc
+--source have_ndb_error_insert.inc
+
+# RONDB-1150 X6.8: the ledger of testRestartGci with durable commits and
+# node failures in the durable tail. GCP saves are held back (error
+# insert 7243), a node restarts with abort into NOSTART, the writers
+# commit on its peer alone, and then every node stops: the failed node is
+# stale (its failure is in the node-failure file of its peer), stays out
+# of the system restart and joins by a node restart after it (D3). The
+# same with the peer stopping as it records the failure (990), and with
+# an unsafe shutdown of a node's persistent memory (992, X6.7). Every
+# acknowledged transaction stays, with identical replicas. Last the
+# negative test: with the failure not recorded (991) the check must find
+# lost transactions or replicas that differ.
+
+# NDBT creates TEST_DB.T1 directly through the NDB API. Keep both
+# mysqlds stopped so metadata discovery cannot import the API table;
+# on a case-insensitive file system it retries CREATE DATABASE TEST_DB
+# after each system restart and fails.
+--connect(s2,127.0.0.1,root,,test,$MASTER_MYPORT1,)
+--connection default
+--echo # Shutting down mysqld 1
+--let $mysqld_name=mysqld.1.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld1_file_name= $_expect_file_name
+
+--connection s2
+--echo # Shutting down mysqld 2
+--let $mysqld_name=mysqld.2.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld2_file_name= $_expect_file_name
+
+let NDBAPITEST_CLEANUP_QUERY=;
+let NDBAPITEST_NAME=testRestartGci;
+
+--echo == 1 == a node failure in the durable tail, the stop at its record, an unsafe shutdown
+let NDBAPITEST_ARGS=-n GciLedgerDurableNodeFailure -l 1 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+--echo == 2 == the node failure not recorded: the check finds the divergence
+let NDBAPITEST_ARGS=-n GciLedgerDurableNoNodeFailRecord T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+--connection default
+--echo # Starting mysqld 1
+--let $_expect_file_name= $expect_mysqld1_file_name
+--let $mysqld_name=mysqld.1.1
+--source include/start_mysqld.inc
+
+--connection s2
+--echo # Starting mysqld 2
+--let $_expect_file_name= $expect_mysqld2_file_name
+--let $mysqld_name=mysqld.2.1
+--source include/start_mysqld.inc
+
+--connection default
+--disconnect s2

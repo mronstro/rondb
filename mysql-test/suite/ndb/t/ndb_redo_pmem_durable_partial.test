@@ -1,0 +1,52 @@
+--source include/big_test.inc
+--source include/have_ndb.inc
+--source have_ndb_error_insert.inc
+
+# RONDB-1150 X6.8: the ledger of testRestartGci with durable commits on
+# two node groups. Every node stops together and the system restart runs
+# without one node after StartPartialTimeout (X6.5, D5): the fallback
+# commits what the absent node alone may have a COMPLETE of, and the node
+# joins by a node restart. Then a node fails in the durable tail (GCP
+# saves held back by error insert 7243), every node stops, and its peer
+# does not start: the failed node is stale, its node group has no node to
+# restore it, and the system restart waits past StartPartialTimeout until
+# the peer starts (X6.4, D4). Every acknowledged transaction stays.
+
+# NDBT creates TEST_DB.T1 directly through the NDB API. Keep both
+# mysqlds stopped so metadata discovery cannot import the API table;
+# on a case-insensitive file system it retries CREATE DATABASE TEST_DB
+# after each system restart and fails.
+--connect(s2,127.0.0.1,root,,test,$MASTER_MYPORT1,)
+--connection default
+--echo # Shutting down mysqld 1
+--let $mysqld_name=mysqld.1.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld1_file_name= $_expect_file_name
+
+--connection s2
+--echo # Shutting down mysqld 2
+--let $mysqld_name=mysqld.2.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld2_file_name= $_expect_file_name
+
+let NDBAPITEST_CLEANUP_QUERY=;
+let NDBAPITEST_NAME=testRestartGci;
+
+--echo == 1 == a system restart without a node, and one that waits for the peer of a stale node
+let NDBAPITEST_ARGS=-n GciLedgerDurablePartialSR -l 1 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+--connection default
+--echo # Starting mysqld 1
+--let $_expect_file_name= $expect_mysqld1_file_name
+--let $mysqld_name=mysqld.1.1
+--source include/start_mysqld.inc
+
+--connection s2
+--echo # Starting mysqld 2
+--let $_expect_file_name= $expect_mysqld2_file_name
+--let $mysqld_name=mysqld.2.1
+--source include/start_mysqld.inc
+
+--connection default
+--disconnect s2

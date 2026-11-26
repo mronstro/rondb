@@ -41869,6 +41869,7 @@ void Dblqh::initFourth(Signal *signal) {
     logPartPtr.p->logLap = 1;
     logPartPtr.p->m_pmem_end =
         PmemRedo::Pos{0, 1, logPartPtr.p->headPageIndex, 1};
+    logPartPtr.p->m_pmem_end_after_next_mbyte = false;
   }
   logPartPtr.p->logPartState = LogPartRecord::SR_FOURTH_PHASE_STARTED;
   logPartPtr.p->logTailFileNo = 0;
@@ -43857,6 +43858,8 @@ void Dblqh::initLogpart(Signal *signal, LogPartRecordPtr logPartPtr) {
   logPartPtr.p->m_pmem_file_base = nullptr;
   logPartPtr.p->m_pmem_end = PmemRedo::Pos{0, 0, 0, 0};
   logPartPtr.p->m_pmem_end_reason = PmemRedo::R_VALID;
+  logPartPtr.p->m_pmem_end_next_mbyte = PmemRedo::Pos{0, 0, 0, 0};
+  logPartPtr.p->m_pmem_end_after_next_mbyte = false;
   logPartPtr.p->m_pmem_exec_lap = 0;
   logPartPtr.p->m_pmem_inval_pending = 0;
   logPartPtr.p->m_pmem_zero_from = 0;

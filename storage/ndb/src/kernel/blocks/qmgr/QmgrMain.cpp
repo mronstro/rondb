@@ -799,7 +799,23 @@ void Qmgr::execSTTOR(Signal *signal) {
           nodePtr.p->failState = NORMAL;
         }
       }
+      break;
     }
+    case 101:
+      jam();
+      /**
+       * RONDB-1150, X6.7: the start completed, so an unsafe shutdown
+       * before it no longer makes this node stale
+       */
+      if (globalData.theNodeFailUnsafeShutdown) {
+        jam();
+        globalData.theNodeFailUnsafeShutdown = false;
+        writeStartState(false);
+        g_eventLogger->info(
+            "QMGR: the start after the unsafe shutdown of the persistent "
+            "memory completed");
+      }
+      break;
   }
 
   sendSttorryLab(signal, false);
@@ -827,8 +843,9 @@ void Qmgr::sendSttorryLab(Signal *signal, bool first_phase) {
   signal->theData[3] = 3;
   signal->theData[4] = 7;
   signal->theData[5] = 9;
-  signal->theData[6] = 255;
-  sendSignal(NDBCNTR_REF, GSN_STTORRY, signal, 7, JBB);
+  signal->theData[6] = 101;
+  signal->theData[7] = 255;
+  sendSignal(NDBCNTR_REF, GSN_STTORRY, signal, 8, JBB);
   return;
 }  // Qmgr::sendSttorryLab()
 
@@ -889,10 +906,42 @@ void Qmgr::execDIH_RESTARTCONF(Signal *signal) {
   const DihRestartConf *conf =
       CAST_CONSTPTR(DihRestartConf, signal->getDataPtr());
   c_start.m_latest_gci = conf->latest_gci;
-  /* RONDB-1150, X6.3: the failures this node recorded, for the election */
-  NodeFailFile::readFailGcis(globalData.theNodeFailFileDir, getOwnNodeId(),
-                             c_nodeFailRecGci);
+  readNodeFailFile();
   sendReadLocalSysfile(signal);
+}
+
+/**
+ * RONDB-1150, before the election, DIH having read the sysfile:
+ *   X6.3  the failures this node recorded that make a node stale
+ *         (c_nodeFailRecGci), which no candidate may be
+ *   X6.7  whether this start follows an unsafe shutdown of the persistent
+ *         memory of the REDO log (E17), or error insert 992 says so; such
+ *         a node is stale, runs for president as one not restorable on
+ *         its own, and NDBCNTR tells the master with CNTR_START_REQ
+ */
+void Qmgr::readNodeFailFile() {
+  const Dbdih *dih = (const Dbdih *)globalData.getBlock(DBDIH, instance());
+  NodeFailFile::SysView view;
+  NodeFailFile::fillView(dih, &view);
+  NodeFailFile::readStaleGcis(globalData.theNodeFailFileDir, getOwnNodeId(),
+                              view, c_nodeFailRecGci);
+  globalData.theNodeFailUnsafeShutdown = false;
+  if (!dih->durableCommitsOn()) return;
+  std::unique_ptr<Uint8[]> file;
+  Uint64 dsc = 0;
+  const bool known = globalData.redoPmemDirtyShutdown(&dsc);
+  globalData.theNodeFailUnsafeShutdown =
+      ERROR_INSERTED(992) ||
+      (NodeFailFile::readFile(globalData.theNodeFailFileDir, getOwnNodeId(),
+                              &file) &&
+       NodeFailFile::unsafeShutdown(file.get(), known, dsc));
+  if (globalData.theNodeFailUnsafeShutdown) {
+    g_eventLogger->warning(
+        "QMGR: the persistent memory of the REDO log reported an unsafe "
+        "shutdown%s; with durable commits this node is stale in a system "
+        "restart and joins by a node restart",
+        ERROR_INSERTED(992) ? " (error insert 992)" : "");
+  }
 }
 
 void Qmgr::sendReadLocalSysfile(Signal *signal) {
@@ -906,7 +955,16 @@ void Qmgr::sendReadLocalSysfile(Signal *signal) {
 void Qmgr::execREAD_LOCAL_SYSFILE_CONF(Signal *signal) {
   ReadLocalSysfileConf *conf = (ReadLocalSysfileConf *)signal->getDataPtr();
   if (conf->nodeRestorableOnItsOwn ==
-      ReadLocalSysfileReq::NODE_RESTORABLE_ON_ITS_OWN) {
+          ReadLocalSysfileReq::NODE_RESTORABLE_ON_ITS_OWN &&
+      globalData.theNodeFailUnsafeShutdown) {
+    /* RONDB-1150, X6.7: stale, so no president (readNodeFailFile()) */
+    g_eventLogger->info(
+        "DIH reported normal start; after the unsafe shutdown this node "
+        "runs as one not restorable on its own; now starting the Node "
+        "Inclusion Protocol");
+    c_start.m_latest_gci = ZUNDEFINED_GCI_LIMIT;
+  } else if (conf->nodeRestorableOnItsOwn ==
+             ReadLocalSysfileReq::NODE_RESTORABLE_ON_ITS_OWN) {
     g_eventLogger->info(
         "DIH reported normal start, now starting the"
         " Node Inclusion Protocol");
@@ -7823,22 +7881,62 @@ void Qmgr::openNodeFailFile() {
         c_nodeFailSeq = std::max(c_nodeFailSeq, r.seq);
       }
     }
+    NodeFailFile::StartState s;
+    Uint32 slot;
+    if (NodeFailFile::latestState(c_nodeFailBase, &s, &slot)) {
+      c_nodeFailSeq = std::max(c_nodeFailSeq, s.seq);
+    }
   } else {
     ndb_pmem_zero(c_nodeFailBase, NodeFailFile::FILE_BYTES);
     NodeFailFile::buildHeader(line, getOwnNodeId());
     ndb_pmem_copy_nt(c_nodeFailBase, line, NodeFailFile::LINE_BYTES);
     ndb_pmem_drain();
   }
+  /* X6.7: readNodeFailFile() found whether this start follows one */
+  writeStartState(globalData.theNodeFailUnsafeShutdown);
   g_eventLogger->info(
-      "QMGR: node-failure file %s mapped%s, %u records of failed nodes",
-      path.c_str(), map.map_sync ? " with MAP_SYNC" : "", records);
+      "QMGR: node-failure file %s mapped%s, %u records of failed nodes%s",
+      path.c_str(), map.map_sync ? " with MAP_SYNC" : "", records,
+      globalData.theNodeFailUnsafeShutdown
+          ? "; this start follows an unsafe shutdown of the persistent "
+            "memory, kept until the start completes"
+          : "");
+}
+
+/**
+ * RONDB-1150, X6.7: the start state in the next slot of node id 0: the
+ * dirty-shutdown count of the REDO paths now, and whether an unsafe
+ * shutdown is not yet followed by a completed start (TF_UNSAFE), set from
+ * start phase 3 and cleared when the start completes (STTOR 101). A crash
+ * in between keeps it, so that the node stays stale for the durable tail.
+ */
+void Qmgr::writeStartState(bool unsafe) {
+  if (c_nodeFailBase == nullptr) return;
+  NodeFailFile::StartState s;
+  Uint32 slot;
+  NodeFailFile::latestState(c_nodeFailBase, &s, &slot);
+  Uint64 dsc = 0;
+  const bool known = globalData.redoPmemDirtyShutdown(&dsc);
+  s.dsc = dsc;
+  s.flags = (known ? NodeFailFile::TF_DSC_VALID : 0) |
+            (unsafe ? NodeFailFile::TF_UNSAFE : 0);
+  s.seq = ++c_nodeFailSeq;
+  Uint32 line[NodeFailFile::LINE_WORDS];
+  NodeFailFile::buildState(line, slot, s);
+  ndb_pmem_copy_nt(
+      c_nodeFailBase +
+          NodeFailFile::slotOffset(NodeFailFile::STATE_NODE_ID, slot),
+      line, NodeFailFile::LINE_BYTES);
+  ndb_pmem_drain();
 }
 
 /**
  * RONDB-1150, X6.1: "node X failed while GCI g was current" for each node
  * of the failure, in the slot after its latest record, one fence for all.
- * Error insert 991 skips it (a test that must see the divergence of D3),
- * 990 stops the node after it, before PREP_FAILCONF.
+ * The nodes of one failure share one seq, so that none of them outlived
+ * another (NodeFailFile::outlived()). Error insert 991 skips it (a test
+ * that must see the divergence of D3), 990 stops the node after it,
+ * before PREP_FAILCONF.
  */
 void Qmgr::recordNodeFailures(const NdbNodeBitmask &nodes, Uint32 failNo) {
   if (c_nodeFailBase == nullptr) return;
@@ -7848,6 +7946,7 @@ void Qmgr::recordNodeFailures(const NdbNodeBitmask &nodes, Uint32 failNo) {
   }
   const Dbdih *dih = (const Dbdih *)globalData.getBlock(DBDIH, instance());
   const Uint32 gciHi = dih->nodeFailGciHi();
+  const Uint64 seq = ++c_nodeFailSeq;
   Uint32 line[NodeFailFile::LINE_WORDS];
   for (Uint32 nodeId = nodes.find_first(); nodeId != NdbNodeBitmask::NotFound;
        nodeId = nodes.find_next(nodeId + 1)) {
@@ -7857,7 +7956,7 @@ void Qmgr::recordNodeFailures(const NdbNodeBitmask &nodes, Uint32 failNo) {
     r.nodeId = nodeId;
     r.gciHi = gciHi;
     r.failNo = failNo;
-    r.seq = ++c_nodeFailSeq;
+    r.seq = seq;
     NodeFailFile::buildSlot(line, slot, r);
     ndb_pmem_copy_nt(c_nodeFailBase + NodeFailFile::slotOffset(nodeId, slot),
                      line, NodeFailFile::LINE_BYTES);
@@ -7866,6 +7965,8 @@ void Qmgr::recordNodeFailures(const NdbNodeBitmask &nodes, Uint32 failNo) {
         nodeId, gciHi, failNo);
   }
   ndb_pmem_drain();
+  c_nodeFailLastSeq = seq;
+  c_nodeFailLastNodes = nodes;
   CRASH_INSERTION(990);
 }
 
@@ -8065,6 +8166,9 @@ void Qmgr::execCOMMIT_FAILREQ(Signal *signal) {
      * SIGNAL. WE CAN HEAR IT SEVERAL TIMES IF THE PRESIDENTS KEEP FAILING.
      *-----------------------------------------------------------------------*/
     ccommitFailureNr = TfailureNr;
+    /* RONDB-1150, X6.3: committed, no longer taken back */
+    c_nodeFailLastSeq = 0;
+    c_nodeFailLastNodes.clear();
 
     Uint32 nodeFailIndex = TfailureNr % MAX_DATA_NODE_FAILURES;
     NodeFailRec *TnodeFailRec = &nodeFailRec[nodeFailIndex];
@@ -9840,8 +9944,43 @@ void Qmgr::stateArbitCrash(Signal *signal) {
   CRASH_INSERTION(938);
   CRASH_INSERTION(943);
   CRASH_INSERTION(944);
+  retractNodeFailures();
   progError(__LINE__, NDBD_EXIT_ARBIT_SHUTDOWN,
             "Arbitrator decided to shutdown this node");
+}
+
+/**
+ * RONDB-1150, X6.3: this node lost the arbitration of the failure it
+ * recorded last, before its COMMIT_FAILREQ, and stops: it committed
+ * nothing without those nodes, so its records of them are no evidence.
+ * In a split of two nodes each would else make the other stale. The
+ * slot of each holding that record is zeroed, and the one before it is
+ * the latest again. A crash before the zeroing leaves it; the other side
+ * then may find no node to restore the node group with (X6.4).
+ */
+void Qmgr::retractNodeFailures() {
+  if (c_nodeFailBase == nullptr || c_nodeFailLastSeq == 0) return;
+  for (Uint32 nodeId = c_nodeFailLastNodes.find_first();
+       nodeId != NdbNodeBitmask::NotFound;
+       nodeId = c_nodeFailLastNodes.find_next(nodeId + 1)) {
+    for (Uint32 index = 0; index < 2; index++) {
+      Uint8 *const line =
+          c_nodeFailBase + NodeFailFile::slotOffset(nodeId, index);
+      NodeFailFile::Record r;
+      if (NodeFailFile::slotValid(reinterpret_cast<const Uint32 *>(line),
+                                  nodeId, index, &r) &&
+          r.seq == c_nodeFailLastSeq) {
+        ndb_pmem_zero(line, NodeFailFile::LINE_BYTES);
+      }
+    }
+    g_eventLogger->info(
+        "QMGR: node-failure file: the failure of node %u is taken back, as "
+        "this node lost the arbitration",
+        nodeId);
+  }
+  ndb_pmem_drain();
+  c_nodeFailLastSeq = 0;
+  c_nodeFailLastNodes.clear();
 }
 
 /**

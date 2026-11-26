@@ -82,3 +82,26 @@ max-time: 1800
 cmd: testRestartGci
 args: -n GciLedgerDurableSR -l 5 T1
 max-time: 3600
+
+# X6.8: a node failure in the durable tail (D3), the stop of the others
+# at its record (990) and an unsafe shutdown (992): the stale node joins
+# by a node restart; without the record (991) the check must fail. On
+# .4node_durable also the system restart without a node (D5) and the one
+# that waits for the peer of a stale node (D4).
+cmd: testRestartGci
+args: -n GciLedgerDurableNodeFailure -l 2 T1
+max-time: 3600
+
+cmd: testRestartGci
+args: -n GciLedgerDurableNoNodeFailRecord T1
+max-time: 900
+
+cmd: testRestartGci
+args: -n GciLedgerDurablePartialSR -l 2 T1
+max-time: 3600
+
+# X5.9: create table, add column, add partitions and drop table in the
+# durable tail
+cmd: testRestartGci
+args: -n GciLedgerDurableSchema -l 2 T1
+max-time: 1800

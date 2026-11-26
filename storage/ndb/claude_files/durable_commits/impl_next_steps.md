@@ -948,10 +948,39 @@ replicas, and raises the restorable GCI to G'.
   step A ignores ABORTs, step B reports only COMPLETE hits and step C has
   no veto.
 
-**State (2026-11-25): X5.1-X5.3 committed ("RONDB-1150: X5.1-X5.3,
-phase-2 parameters and step A on the durable tail"); X5.4-X5.7 and the
-tests of X5.10 written, to be built and tested; phase 2 is on
-(`Dbdih::SR_DURABLE_TAIL` true). X5.8 and X5.9 are not done.** Until
+**State (2026-11-26): X5.1-X5.7 and X5.10 committed, the
+`rondb_pmem_durable` run on Linux passes. X5.8 is not needed (below,
+X6.5); the fix for E at the first record of an mbyte and the X5.9 test
+are written, to be built and tested.**
+- X5.8 is not done and not needed: X6 is in, and X6.5 allows the partial
+  system restart that X5.8 was to refuse. The fallback already takes the
+  SR node set and the node groups from START_RECREQ.
+- E at the first record of an mbyte (the "not handled" case below): the
+  end-of-log scan keeps the last NEXT_MBYTE it followed
+  (`ScanResult::nextMbyte`, `m_pmem_end_next_mbyte`), and
+  `redoTailHeadAtEnd()` puts the head there when E is the first record
+  of an mbyte, as after a GCP save whose COMPLETED_GCI ended an mbyte:
+  phase 4 zeroes after it, and SR_HEAD or COMPLETED_GCI(G') changes the
+  mbyte, and the file, as at run time (`redoPmemStartMbyte()` writes page
+  0 and the slot). Error insert 5159 (page 0 of a new file torn) reaches
+  it, so `ndb_redo_pmem_ledger_crash` with `pmem_redo_durable.cnf` would
+  have stopped on it. `pmem_redo_scan-t`: `fileSwitchHeadAtNextMbyte`.
+- X5.9: `testRestartGci -n GciLedgerDurableSchema`, MTR
+  `ndb_redo_pmem_durable_schema`: with GCP saves held back (error insert
+  7243) a table is created and filled, gets a column online and every
+  row updated, gets more partitions online and every row updated again,
+  and a table filled before is dropped; then every node stops together.
+  The table must have its column, partitions and every row of the last
+  update, with identical replicas, and the dropped table must be gone.
+  Read while writing it: DICT keeps no GCI filter at a restart, so a table
+  created in the tail comes back from the schema file, and its tail
+  COMMITs execute (`checkIfExecLog()` compares the major schema version);
+  the COMMITs of a dropped table find no table and are skipped. DICT's
+  commit waits only for the next epoch (`trans_commit_wait_gci()`), TRIX
+  for the current GCI, so 7243 holds no schema change back.
+
+Earlier state (2026-11-25): X5.1-X5.3 committed; X5.4-X5.7 and the tests
+of X5.10 written; phase 2 is on (`Dbdih::SR_DURABLE_TAIL` true). Until
 X5.7, `Dbdih::SR_DURABLE_TAIL` was false, so DIH never
 sets `DF_TAIL` and every restart restores to R as before; the code of
 X5.2 and X5.3 runs only once X5.4-X5.7 are in and the switch goes. What
@@ -1036,10 +1065,10 @@ there is:
   cut. SR_HEAD holds g in place of a restart sequence. Phase 2 also needs
   every SR node restorable to R (`lastCompletedGCI` = R), else a node would
   take GCIs up to R for its tail; such a node is stale (X6.3).
-- Not handled: E at the first record of a file (a NEXT_MBYTE ended the
-  previous file and the crash came before page 0 of the next one was
-  persistent, W3) stops the restart with a message
-  (`redoTailHeadAtEnd()`); it needs the file switch completed at phase 4.
+- Not handled then, fixed 2026-11-26 (above): E at the first record of a
+  file (a NEXT_MBYTE ended the previous file and the crash came before
+  page 0 of the next one was persistent, W3) stopped the restart with a
+  message (`redoTailHeadAtEnd()`).
 - X5.10: error inserts 5185-5190 (DBLQH) and 7262 (DBDIH),
   `ERROR_codes.txt`. `testRestartGci` cases `GciLedgerDurableSR` (each
   restart with abort, then one without writes from G'),
@@ -1066,9 +1095,11 @@ there is:
   the failed node, a power loss with the emulation; the durable ledger
   sends it before each power loss (`ledgerStopTogether()`). The system
   restart with abort of `GciLedgerDurableSR` has the same window, small;
-  X6.8's D3 test is the one that must cover it. To look at in X6: one
+  X6.8's D3 test is the one that must cover it. Looked at in X6: one
   aborted transaction had 6 COMMITs on node 2 for opCount 7 after a TC
-  takeover.
+  takeover. Node 2 lost the power 300 ms after node 1, while it
+  committed node 1's transactions as takeover TC, so one COMMIT never got
+  written; the transaction was not acknowledged, and the abort is right.
 - Found while writing the tests (finding API-1): when every data node
   fails after the API sent the commit, `Ndb::abortTransactionsAfterNodeFailure()`
   reports error 4010, "Node failure caused abort of transaction", a
@@ -1274,7 +1305,72 @@ reason.
 SR allowed again in durable mode; stale nodes rejoin by node restart with
 identical replicas.
 
-**State (2026-11-25): X6.1-X6.4 written, to be built and tested.**
+**State (2026-11-26): X6.1-X6.4 committed, the `rondb_pmem_durable` run
+on Linux passes; X6.3 refined, X6.5-X6.8 written, to be built and
+tested.**
+- X6.3 refined (found while writing X6.8): with the rule "a record after
+  R makes the node stale", a cluster that loses a whole node group could
+  not restart. Node group 0 of X and Y: X fails, Y fails later, the
+  cluster stops; the others recorded both failures after R, so both were
+  stale and X6.4 stopped every restart, although Y had all of the node
+  group's data. Decided: a recorded failure makes its node stale only if
+  a node of its node group outlived it, as the file and the sysfile of
+  the recording node show (`NodeFailFile::outlived()`): the recording
+  node itself; a node restorable to R with no failure recorded after R;
+  or one whose latest failure came later. `recordNodeFailures()` gives
+  the nodes of one failure one seq, so nodes that fail together do not
+  outlive each other. The recording node decides it, as it alone knows
+  the order of its records: each record in CNTR_START_REQ carries
+  `NFR_OUTLIVED` (`NF_WORDS` 4), and the master counts only those. QMGR's
+  election uses the same rule (`readStaleGcis()`). Dbdih gives the
+  sysfile to QMGR and NDBCNTR (`sysfileRestorableGci()`,
+  `sysfileNodeGroup()`, `sysfileLastCompletedGci()`), in the same thread.
+- Also decided: a node that loses an arbitration stops before the
+  COMMIT_FAILREQ of the failure it recorded last, and committed nothing
+  without those nodes; `retractNodeFailures()` zeroes the slots of that
+  record before `stateArbitCrash()` stops it, so that in a split of two
+  nodes the loser does not make the winner stale. A crash before the
+  zeroing, or a losing partition of several nodes whose non-president
+  nodes keep their records, can still leave a node group with no node to
+  restore it (X6.4 stops the restart with its message); that needs the
+  whole cluster to stop before the next GCP save after the split.
+- X6.5: nothing to change; X5.8 was never written, and the fallback uses
+  the SR nodes and node groups of START_RECREQ.
+- X6.6: nothing to change. A stale node restarts with its own
+  `lastCompletedGCI` (R) as `crestartNewestGci`, so its COMMITs after R
+  are invalidated as in any node restart, phase 4 zeroes the log after
+  its head, and it copies the rows of the tail. The replica check of the
+  ledger runs after its node restart.
+- X6.7: the start state in the slots of node id 0 of the node-failure
+  file (`NodeFailFile::StartState`): the dirty-shutdown count of the REDO
+  paths (`GlobalData::redoPmemDirtyShutdown()`, from NDBFS's probe at
+  every start) and `TF_UNSAFE`. QMGR finds before the election whether
+  this start follows an unsafe shutdown (`readNodeFailFile()`: a higher
+  count than recorded, `TF_UNSAFE` still set, or error insert 992), sets
+  `GlobalData::theNodeFailUnsafeShutdown`, and runs for president as a
+  node not restorable on its own; it writes the state with `TF_UNSAFE` in
+  start phase 3 and clears it at STTOR 101, so a crash before the start
+  completes keeps the node stale. NDBCNTR sends `NF_F_UNSAFE_SHUTDOWN`
+  with CNTR_START_REQ, and the master makes the node stale. The header is
+  written only when the file is made, so a torn write of the state cannot
+  lose the records. Not tested on a device that reports an unsafe
+  shutdown (P6).
+- X6.8: `testRestartGci` cases, and MTR tests that run them:
+  - `GciLedgerDurableNodeFailure` (`ndb_redo_pmem_durable_node_failure`):
+    each loop D3 (GCP saves held back by error insert 7243, node x
+    restarts with abort into NOSTART, the writers commit on its peers,
+    then the others stop together), the same with the others stopping as
+    they record the failure (990), and an unsafe shutdown (992). Every
+    acknowledged transaction stays, with identical replicas.
+  - `GciLedgerDurableNoNodeFailRecord` (same MTR test): D3 with 991; the
+    check must fail.
+  - `GciLedgerDurablePartialSR` (`ndb_redo_pmem_durable_partial`, 4 data
+    nodes, big test): a system restart without one node after
+    StartPartialTimeout (D5), and D4, where the restart must still wait 10
+    s past StartPartialTimeout for the peer of the stale node.
+  - atrt entries in `pmem-durable-tests.txt`.
+
+X6.1-X6.4 as written (2026-11-25):
 - X6.1: `qmgr/NodeFailFile.hpp`, a 20 KB file `nodefail.dat` beside REDO
   path 0 (`GlobalData::theNodeFailFileDir`, set by NDBFS), a header line
   and two 64-byte slots per node id with an XXH3 checksum, the slot after
@@ -1320,7 +1416,7 @@ identical replicas.
   node whose only witness does not start cannot be found (plan §5.5).
 - Tests: `GciLedgerDurablePowerLoss` now crashes with DUMP 2371 in its
   even loops and lets the nodes stop one by one at random drains in its
-  odd ones, D3. The rest of X6.8 is not written.
+  odd ones, D3.
 
 ### X6.1 The node-failure file (M, 5 pd)
 

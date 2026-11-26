@@ -770,8 +770,9 @@ int ledgerReadRow(NDBT_Context *ctx, NDBT_Step *step, HugoOperations &hugoOps,
  * as just after a node started, is read again for a while.
  */
 bool ledgerReplicasAgree(NDBT_Context *ctx, NDBT_Step *step,
-                         const char *what) {
-  const NdbDictionary::Table *tab = ctx->getTab();
+                         const char *what,
+                         const NdbDictionary::Table *tab = nullptr) {
+  if (tab == nullptr) tab = ctx->getTab();
   std::set<Uint32> tableIds = {Uint32(tab->getObjectId())};
   NdbDictionary::Dictionary::List indexes;
   if (GETNDB(step)->getDictionary()->listIndexes(indexes, *tab) != 0) {
@@ -890,7 +891,8 @@ void ledgerPrintRow(Uint32 r, const LedgerRow &row) {
  * as they are.
  */
 int ledgerVerify(NDBT_Context *ctx, NDBT_Step *step, Uint64 maxGci,
-                 const char *what, bool allKept = false) {
+                 const char *what, bool allKept = false,
+                 bool replicas = true) {
   HugoOperations hugoOps(*ctx->getTab());
   HugoCalculator hugoCalc(*ctx->getTab());
   std::map<Uint64, std::pair<Uint32, Uint32>> unknownTxns;  // with, without
@@ -986,7 +988,8 @@ int ledgerVerify(NDBT_Context *ctx, NDBT_Step *step, Uint64 maxGci,
           txn.second.second);
     }
   }
-  if (!ledgerReplicasAgree(ctx, step, what)) failures++;
+  /* Not after a partial system restart: a replica of some fragments is down */
+  if (replicas && !ledgerReplicasAgree(ctx, step, what)) failures++;
   ndbout_c(
       "Ledger after the %s: %u rows, %u row writes kept, %u row writes "
       "acknowledged and lost, %u rows of %u transactions with an unknown "
@@ -1415,6 +1418,355 @@ int ledgerRestartCrashNR(NDBT_Context *ctx, NDBT_Step *step, Uint32 code,
   if (res == NDBT_OK && *acted) res = ledgerCleanRestart(ctx, step);
   ledgerResume(ctx);
   return res;
+}
+
+/* RONDB-1150, X6.8: the data nodes but down */
+std::vector<int> ledgerOtherNodes(const std::vector<int> &nodes, int down) {
+  std::vector<int> rest;
+  for (int node : nodes) {
+    if (node != down) rest.push_back(node);
+  }
+  return rest;
+}
+
+/**
+ * RONDB-1150, X6.8: the data nodes but down (0 for none) stop together
+ * while the writers write: DUMP 2371 in each, then one restarts with
+ * abort into NOSTART and the others stop at its failure, as a power loss
+ * of them all. Then every data node is in NOSTART.
+ */
+bool ledgerStopRestTogether(NdbRestarter &restarter,
+                            const std::vector<int> &nodes, int down) {
+  const std::vector<int> rest = ledgerOtherNodes(nodes, down);
+  if (rest.empty()) return true;
+  const int together = DumpStateOrd::QmgrStopOnNodeFailure;
+  if (!ledgerNoStartOnCrash(restarter, rest)) return false;
+  for (int node : rest) {
+    if (restarter.dumpStateOneNode(node, &together, 1) != 0) {
+      ndbout_c("ERR: ledger: could not send DUMP 2371 to node %d", node);
+      return false;
+    }
+  }
+  if (restarter.restartOneDbNode(rest[0], false, true, true) != 0) {
+    return false;
+  }
+  return ledgerAllNoStart(restarter, nodes);
+}
+
+/**
+ * RONDB-1150, X6.8 (plan §5.4): a node failure in the durable tail. GCP
+ * saves stop (error insert 7243 in every data node, as any may become
+ * master), survivorCode is set in the other nodes, and node x restarts
+ * with abort into NOSTART; the writers commit on its peers alone for a
+ * while, then the others stop together, so every sysfile still shows x
+ * restorable to R. With survivorCode 990 the others stop instead as they
+ * record the failure. Then the system restart: x is stale and joins by a
+ * node restart, and every acknowledged transaction stays with identical
+ * replicas (D3); with 991 the failure is not recorded and the check must
+ * fail. *started is false if the cluster did not start.
+ */
+int ledgerNodeFailureInTail(NDBT_Context *ctx, NDBT_Step *step,
+                            Uint32 survivorCode, const char *what,
+                            bool *started) {
+  const Uint32 seconds = ctx->getProperty("LedgerSeconds", Uint32(5));
+  NdbRestarter restarter;
+  const std::vector<int> nodes = ledgerDataNodes(restarter);
+  const int x = restarter.getNode(NdbRestarter::NS_RANDOM);
+  const std::vector<int> rest = ledgerOtherNodes(nodes, x);
+  *started = false;
+  ndbout_c("Ledger: %s: GCP saves stopped (error insert 7243), node %d "
+           "restarts with abort into NOSTART%s",
+           what, x,
+           survivorCode == 990   ? ", the others stop as they record it"
+           : survivorCode == 991 ? ", the others do not record it"
+                                 : "");
+  if (restarter.insertErrorInAllNodes(7243) != 0 ||
+      (survivorCode != 0 && !ledgerArm(restarter, rest, survivorCode, 0))) {
+    ndbout_c("ERR: ledger: could not set the error inserts");
+    return NDBT_FAILED;
+  }
+  /* A GCP save under way ends; R is the last one */
+  NdbSleep_MilliSleep(1000);
+  if (restarter.restartOneDbNode(x, false, true, true) != 0 ||
+      restarter.waitNodesNoStart(&x, 1, 300) != 0) {
+    return NDBT_FAILED;
+  }
+  if (survivorCode == 990) {
+    if (!ledgerAllNoStart(restarter, nodes)) return NDBT_FAILED;
+  } else if (!ledgerSleep(ctx, seconds) ||
+             !ledgerStopRestTogether(restarter, nodes, x)) {
+    return NDBT_FAILED;
+  }
+  if (!ledgerPause(ctx)) return NDBT_FAILED;
+  int res = NDBT_FAILED;
+  if (restarter.startAll() == 0 && restarter.waitClusterStarted(300) == 0) {
+    *started = true;
+    res = ledgerCheckRestart(ctx, step, what, true);
+  }
+  ledgerResume(ctx);
+  return res;
+}
+
+/**
+ * RONDB-1150, X6.8 (X6.7): every data node stops together, and node x
+ * reports an unsafe shutdown of its persistent memory at its start (error
+ * insert 992, set in NOSTART). x is stale: it runs for president as one
+ * not restorable on its own, and joins by a node restart after the
+ * system restart; every acknowledged transaction stays.
+ */
+int ledgerUnsafeShutdown(NDBT_Context *ctx, NDBT_Step *step) {
+  NdbRestarter restarter;
+  const std::vector<int> nodes = ledgerDataNodes(restarter);
+  const int x = restarter.getNode(NdbRestarter::NS_RANDOM);
+  ndbout_c("Ledger: every data node stops together; node %d reports an "
+           "unsafe shutdown (error insert 992)",
+           x);
+  if (!ledgerStopRestTogether(restarter, nodes, 0) || !ledgerPause(ctx) ||
+      !ledgerArm(restarter, std::vector<int>(1, x), 992, 0) ||
+      restarter.startAll() != 0) {
+    return NDBT_FAILED;
+  }
+  const int res =
+      ledgerCheckRestart(ctx, step, "system restart after an unsafe shutdown",
+                         true);
+  ledgerDisarm(restarter);
+  ledgerResume(ctx);
+  return res;
+}
+
+/**
+ * RONDB-1150, X6.8 (X6.5, plan §5.5, D5): every data node stops together
+ * while the writers write; the system restart runs without node y, one of
+ * a node group, after StartPartialTimeout. Every acknowledged transaction
+ * stays, also one whose only COMPLETE was in y's log, by the counts of
+ * the fallback. Then y joins by a node restart and the replicas agree.
+ */
+int ledgerPartialSR(NDBT_Context *ctx, NDBT_Step *step) {
+  NdbRestarter restarter;
+  Ndb *pNdb = GETNDB(step);
+  const std::vector<int> nodes = ledgerDataNodes(restarter);
+  const int y = restarter.getNode(NdbRestarter::NS_RANDOM);
+  const std::vector<int> rest = ledgerOtherNodes(nodes, y);
+  ndbout_c("Ledger: every data node stops together; the system restart "
+           "runs without node %d",
+           y);
+  if (!ledgerStopRestTogether(restarter, nodes, 0) || !ledgerPause(ctx) ||
+      restarter.startNodes(rest.data(), int(rest.size())) != 0 ||
+      restarter.waitNodesStarted(rest.data(), int(rest.size()), 300) != 0 ||
+      pNdb->waitUntilReady() != 0) {
+    return NDBT_FAILED;
+  }
+  Uint32 restartGci = 0;
+  if (!ledgerRestartGci(pNdb, restarter, &restartGci)) return NDBT_FAILED;
+  ndbout_c("Ledger: restart GCI %u without node %d", restartGci, y);
+  int res = ledgerVerify(ctx, step, (Uint64(restartGci) << 32) | 0xffffffff,
+                         "partial system restart", true, false);
+  if (res == NDBT_OK) {
+    if (restarter.startNodes(&y, 1) != 0 ||
+        restarter.waitClusterStarted(300) != 0) {
+      res = NDBT_FAILED;
+    } else {
+      res = ledgerVerify(ctx, step, ~Uint64(0),
+                         "node restart after the partial system restart");
+    }
+  }
+  ledgerResume(ctx);
+  return res;
+}
+
+/**
+ * RONDB-1150, X6.8 (X6.4, plan §5.5, D4): node x fails in the durable
+ * tail and the writers commit on both node groups; every node stops
+ * together, and x's peer y does not start. x is stale, so its node group
+ * has no node that can restore it: the system restart waits, 10 s past
+ * StartPartialTimeout, until y starts. Then x joins by a node restart and
+ * every acknowledged transaction stays.
+ */
+int ledgerStaleGroupWaits(NDBT_Context *ctx, NDBT_Step *step) {
+  const Uint32 seconds = ctx->getProperty("LedgerSeconds", Uint32(5));
+  NdbRestarter restarter;
+  Uint32 partialMs = 30000;
+  {
+    NdbConfig conf;
+    conf.getProperty(restarter.getDbNodeId(0), NODE_TYPE_DB,
+                     CFG_DB_START_PARTIAL_TIMEOUT, &partialMs);
+  }
+  const Uint32 wait = partialMs / 1000 + 10;
+  const std::vector<int> nodes = ledgerDataNodes(restarter);
+  const int x = restarter.getNode(NdbRestarter::NS_RANDOM);
+  const int y = restarter.getRandomNodeSameNodeGroup(x, ndb_rand());
+  const std::vector<int> rest = ledgerOtherNodes(nodes, y);
+  ndbout_c("Ledger: GCP saves stopped (error insert 7243), node %d restarts "
+           "with abort into NOSTART, the others stop later; the system "
+           "restart waits for node %d",
+           x, y);
+  if (y < 0 || restarter.insertErrorInAllNodes(7243) != 0) {
+    return NDBT_FAILED;
+  }
+  NdbSleep_MilliSleep(1000);
+  if (restarter.restartOneDbNode(x, false, true, true) != 0 ||
+      restarter.waitNodesNoStart(&x, 1, 300) != 0 || !ledgerSleep(ctx, seconds) ||
+      !ledgerStopRestTogether(restarter, nodes, x) || !ledgerPause(ctx) ||
+      restarter.startNodes(rest.data(), int(rest.size())) != 0) {
+    return NDBT_FAILED;
+  }
+  for (Uint32 i = 0; i < 10 * wait; i++) {
+    for (int node : rest) {
+      if (restarter.getNodeStatus(node) == NDB_MGM_NODE_STATUS_STARTED) {
+        ndbout_c("ERR: ledger: node %d started without node %d, the only "
+                 "node that can restore the node group of stale node %d",
+                 node, y, x);
+        ledgerResume(ctx);
+        return NDBT_FAILED;
+      }
+    }
+    NdbSleep_MilliSleep(100);
+  }
+  ndbout_c("Ledger: the system restart waited %u s for node %d; it starts",
+           wait, y);
+  int res = NDBT_FAILED;
+  if (restarter.startNodes(&y, 1) == 0) {
+    res = ledgerCheckRestart(ctx, step,
+                             "system restart once the stale node's group "
+                             "can be restored",
+                             true);
+  }
+  ledgerResume(ctx);
+  return res;
+}
+
+/* RONDB-1150, X5.9: the column added online in the durable tail */
+constexpr const char *LEDGER_SCHEMA_COLUMN = "LEDGER_X59";
+/* Rows per transaction of the schema test */
+constexpr Uint32 LEDGER_SCHEMA_BATCH = 8;
+
+/* RONDB-1150, X5.9: a copy of the ledger table named name */
+const NdbDictionary::Table *ledgerCopyTable(NDBT_Context *ctx, Ndb *pNdb,
+                                            const char *name) {
+  NdbDictionary::Dictionary *dict = pNdb->getDictionary();
+  NdbDictionary::Table copy(*ctx->getTab());
+  copy.setName(name);
+  (void)dict->dropTable(name);
+  if (dict->createTable(copy) != 0) {
+    ndbout << "ERR: ledger: create table " << name << ": "
+           << dict->getNdbError() << endl;
+    return nullptr;
+  }
+  return dict->getTable(name);
+}
+
+/**
+ * RONDB-1150, X5.9: rows [0, rows) of tab inserted, or updated, to the
+ * updates value, LEDGER_SCHEMA_BATCH rows in each transaction; a
+ * temporary error is retried
+ */
+bool ledgerSchemaWrite(Ndb *pNdb, const NdbDictionary::Table *tab,
+                       Uint32 rows, bool insert, Uint32 updates) {
+  HugoOperations ops(*tab);
+  for (Uint32 r = 0; r < rows; r += LEDGER_SCHEMA_BATCH) {
+    const Uint32 n = std::min(LEDGER_SCHEMA_BATCH, rows - r);
+    for (int attempt = 0;; attempt++) {
+      int res = ops.startTransaction(pNdb);
+      if (res == 0) {
+        res = insert ? ops.pkInsertRecord(pNdb, r, n, updates)
+                     : ops.pkUpdateRecord(pNdb, r, n, updates);
+      }
+      if (res == 0) res = ops.execute_Commit(pNdb);
+      const NdbError err = ops.getNdbError();
+      ops.closeTransaction(pNdb);
+      if (res == 0) break;
+      if (err.status == NdbError::TemporaryError && attempt < 100) {
+        NdbSleep_MilliSleep(100);
+        continue;
+      }
+      ndbout << "ERR: ledger: " << (insert ? "insert" : "update")
+             << " of rows " << r << "-" << r + n - 1 << " of "
+             << tab->getName() << ": " << err << endl;
+      return false;
+    }
+  }
+  return true;
+}
+
+/* RONDB-1150, X5.9: tab holds rows [0, rows), each at the updates value */
+bool ledgerSchemaCheck(Ndb *pNdb, const NdbDictionary::Table *tab,
+                       Uint32 rows, Uint32 updates) {
+  int count = -1;
+  UtilTransactions util(*tab);
+  if (util.selectCount(pNdb, 64, &count) != 0 || count != int(rows)) {
+    ndbout_c("ERR: ledger: table %s has %d rows, %u expected", tab->getName(),
+             count, rows);
+    return false;
+  }
+  HugoOperations ops(*tab);
+  HugoCalculator calc(*tab);
+  for (Uint32 r = 0; r < rows; r += LEDGER_SCHEMA_BATCH) {
+    const Uint32 n = std::min(LEDGER_SCHEMA_BATCH, rows - r);
+    int res = ops.startTransaction(pNdb);
+    if (res == 0) res = ops.pkReadRecord(pNdb, r, n);
+    if (res == 0) res = ops.execute_Commit(pNdb);
+    if (res != 0) {
+      ndbout << "ERR: ledger: read of rows " << r << "-" << r + n - 1
+             << " of " << tab->getName() << ": " << ops.getNdbError() << endl;
+      ops.closeTransaction(pNdb);
+      return false;
+    }
+    for (Uint32 i = 0; i < n; i++) {
+      NDBT_ResultRow &row = ops.get_row(i);
+      if (calc.verifyRowValues(&row) != 0 ||
+          Uint32(calc.getUpdatesValue(&row)) != updates) {
+        ndbout_c("ERR: ledger: row %u of %s is not at update %u", r + i,
+                 tab->getName(), updates);
+        ops.closeTransaction(pNdb);
+        return false;
+      }
+    }
+    ops.closeTransaction(pNdb);
+  }
+  return true;
+}
+
+/**
+ * RONDB-1150, X5.9: tab with a nullable dynamic column added online. It
+ * is the last unsigned column, so HugoCalculator counts the updates in
+ * it: every row must be updated after this.
+ */
+const NdbDictionary::Table *ledgerAddColumn(Ndb *pNdb,
+                                            const NdbDictionary::Table *tab) {
+  NdbDictionary::Dictionary *dict = pNdb->getDictionary();
+  NdbDictionary::Table altered(*tab);
+  NdbDictionary::Column col(LEDGER_SCHEMA_COLUMN);
+  col.setType(NdbDictionary::Column::Unsigned);
+  col.setNullable(true);
+  col.setDynamic(true);
+  altered.addColumn(col);
+  const BaseString name(tab->getName());
+  if (dict->alterTable(*tab, altered) != 0) {
+    ndbout << "ERR: ledger: add column to " << name.c_str() << ": "
+           << dict->getNdbError() << endl;
+    return nullptr;
+  }
+  dict->invalidateTable(name.c_str());
+  return dict->getTable(name.c_str());
+}
+
+/* RONDB-1150, X5.9: tab with a fragment more per data node, online */
+const NdbDictionary::Table *ledgerAddPartitions(
+    Ndb *pNdb, NdbRestarter &restarter, const NdbDictionary::Table *tab) {
+  NdbDictionary::Dictionary *dict = pNdb->getDictionary();
+  NdbDictionary::Table altered(*tab);
+  altered.setFragmentCount(tab->getFragmentCount() + restarter.getNumDbNodes());
+  altered.setPartitionBalance(NdbDictionary::Object::PartitionBalance_Specific);
+  const BaseString name(tab->getName());
+  if (dict->beginSchemaTrans() != 0 ||
+      dict->prepareHashMap(*tab, altered) == -1 ||
+      dict->endSchemaTrans() != 0 || dict->alterTable(*tab, altered) != 0) {
+    ndbout << "ERR: ledger: add partitions to " << name.c_str() << ": "
+           << dict->getNdbError() << endl;
+    return nullptr;
+  }
+  dict->invalidateTable(name.c_str());
+  return dict->getTable(name.c_str());
 }
 
 }  // namespace
@@ -1868,6 +2220,200 @@ int runLedgerPowerLoss(NDBT_Context *ctx, NDBT_Step *step) {
   return result;
 }
 
+/**
+ * RONDB-1150, X6.8: each loop a node failure in the durable tail (D3),
+ * the same with the other nodes stopping as they record it (error insert
+ * 990), and an unsafe shutdown of a node's persistent memory (X6.7, error
+ * insert 992). The stale node joins by a node restart; every acknowledged
+ * transaction stays, with identical replicas.
+ */
+int runLedgerDurableNodeFailure(NDBT_Context *ctx, NDBT_Step *step) {
+  const Uint32 seconds = ctx->getProperty("LedgerSeconds", Uint32(5));
+  int result = NDBT_OK;
+  for (int l = 0; l < ctx->getNumLoops() && result == NDBT_OK; l++) {
+    bool started = false;
+    ndbout_c("Ledger loop %d: a node failure in the durable tail (D3)", l);
+    result = ledgerSleep(ctx, seconds)
+                 ? ledgerNodeFailureInTail(
+                       ctx, step, 0,
+                       "system restart after a node failure in the tail",
+                       &started)
+                 : NDBT_FAILED;
+    if (result != NDBT_OK) break;
+    ndbout_c("Ledger loop %d: the others stop at the record (990)", l);
+    result = ledgerSleep(ctx, seconds)
+                 ? ledgerNodeFailureInTail(
+                       ctx, step, 990,
+                       "system restart after the stop at the record of a "
+                       "node failure",
+                       &started)
+                 : NDBT_FAILED;
+    if (result != NDBT_OK) break;
+    ndbout_c("Ledger loop %d: an unsafe shutdown (992)", l);
+    result = ledgerSleep(ctx, seconds) ? ledgerUnsafeShutdown(ctx, step)
+                                       : NDBT_FAILED;
+  }
+  if (result != NDBT_OK) {
+    NdbRestarter restarter;
+    ledgerDisarm(restarter);
+  }
+  ctx->stopTest();
+  return result;
+}
+
+/**
+ * RONDB-1150, X6.8: the negative test of D3. With error insert 991 the
+ * node failure is not recorded, so the failed node takes part in the
+ * system restart as if it had seen the tail, and the check must find the
+ * divergence: acknowledged transactions lost, or replicas that differ.
+ * It shows that the check of D3 sees what the node-failure file
+ * prevents. The table is left diverged and is dropped.
+ */
+int runLedgerDurableNoNodeFailRecord(NDBT_Context *ctx, NDBT_Step *step) {
+  const Uint32 seconds = ctx->getProperty("LedgerSeconds", Uint32(5));
+  int result = NDBT_FAILED;
+  bool started = false;
+  if (ledgerSleep(ctx, seconds)) {
+    const int res = ledgerNodeFailureInTail(
+        ctx, step, 991, "system restart without the record of a node failure",
+        &started);
+    if (!started) {
+      ndbout_c("ERR: ledger: the cluster did not start after error insert "
+               "991");
+    } else if (res == NDBT_OK) {
+      ndbout_c("ERR: ledger: without the node-failure records the check did "
+               "not find the divergence of D3");
+    } else {
+      ndbout_c("Ledger: without the node-failure records the check found the "
+               "divergence of D3, as it must");
+      result = NDBT_OK;
+    }
+  }
+  ctx->stopTest();
+  return result;
+}
+
+/**
+ * RONDB-1150, X6.8, at least two node groups: each loop a partial system
+ * restart without a node (X6.5, D5), and one that waits for the peer of a
+ * stale node (X6.4, D4)
+ */
+int runLedgerDurablePartialSR(NDBT_Context *ctx, NDBT_Step *step) {
+  const Uint32 seconds = ctx->getProperty("LedgerSeconds", Uint32(5));
+  NdbRestarter restarter;
+  if (restarter.getNumNodeGroups() < 2) {
+    ndbout_c("Ledger: this test needs two node groups");
+    ctx->stopTest();
+    return NDBT_SKIPPED;
+  }
+  int result = NDBT_OK;
+  for (int l = 0; l < ctx->getNumLoops() && result == NDBT_OK; l++) {
+    ndbout_c("Ledger loop %d: a partial system restart (D5)", l);
+    result = ledgerSleep(ctx, seconds) ? ledgerPartialSR(ctx, step)
+                                       : NDBT_FAILED;
+    if (result != NDBT_OK) break;
+    ndbout_c("Ledger loop %d: a stale node and its absent peer (D4)", l);
+    result = ledgerSleep(ctx, seconds) ? ledgerStaleGroupWaits(ctx, step)
+                                       : NDBT_FAILED;
+  }
+  if (result != NDBT_OK) ledgerDisarm(restarter);
+  ctx->stopTest();
+  return result;
+}
+
+/**
+ * RONDB-1150, X5.9: schema changes in the durable tail. GCP saves stop
+ * (error insert 7243); then a table S is created and filled, gets a
+ * column online and every row updated, gets more partitions online and
+ * every row updated again, and a table D, filled before the stop, is
+ * dropped; then every data node stops together. After the system restart
+ * S has the column, the partitions and every row at its last update,
+ * with identical replicas, and D is gone: the replay's schema-version
+ * check keeps the records of the changed and the dropped tables apart,
+ * and no transaction of S is half applied.
+ */
+int runLedgerDurableSchema(NDBT_Context *ctx, NDBT_Step *step) {
+  const Uint32 rows = ctx->getProperty("LedgerSchemaRows", Uint32(512));
+  Ndb *pNdb = GETNDB(step);
+  NdbDictionary::Dictionary *dict = pNdb->getDictionary();
+  NdbRestarter restarter;
+  const std::vector<int> nodes = ledgerDataNodes(restarter);
+  int result = NDBT_OK;
+  for (int l = 0; l < ctx->getNumLoops() && result == NDBT_OK; l++) {
+    char sName[64];
+    char dName[64];
+    BaseString::snprintf(sName, sizeof(sName), "%s_S%d",
+                         ctx->getTab()->getName(), l);
+    BaseString::snprintf(dName, sizeof(dName), "%s_D%d",
+                         ctx->getTab()->getName(), l);
+    result = NDBT_FAILED;
+    const NdbDictionary::Table *d = ledgerCopyTable(ctx, pNdb, dName);
+    if (d == nullptr || !ledgerSchemaWrite(pNdb, d, rows, true, 0)) break;
+    /* GCP saves take D and its rows before R */
+    NdbSleep_MilliSleep(3000);
+    if (restarter.insertErrorInAllNodes(7243) != 0) break;
+    NdbSleep_MilliSleep(1000);
+    ndbout_c("Ledger loop %d: GCP saves stopped (error insert 7243); in the "
+             "tail %s is created, gets a column and partitions, %s is "
+             "dropped",
+             l, sName, dName);
+    const NdbDictionary::Table *s = ledgerCopyTable(ctx, pNdb, sName);
+    if (s == nullptr || !ledgerSchemaWrite(pNdb, s, rows, true, 0)) break;
+    s = ledgerAddColumn(pNdb, s);
+    if (s == nullptr || !ledgerSchemaWrite(pNdb, s, rows, false, 1)) break;
+    s = ledgerAddPartitions(pNdb, restarter, s);
+    if (s == nullptr || !ledgerSchemaWrite(pNdb, s, rows, false, 2)) break;
+    const Uint32 frags = s->getFragmentCount();
+    if (dict->dropTable(dName) != 0) {
+      ndbout << "ERR: ledger: drop table " << dName << ": "
+             << dict->getNdbError() << endl;
+      break;
+    }
+    if (!ledgerStopRestTogether(restarter, nodes, 0) ||
+        restarter.startAll() != 0) {
+      break;
+    }
+    result = ledgerCheckRestart(ctx, step,
+                                "system restart after schema changes in the "
+                                "tail",
+                                true);
+    dict->invalidateTable(sName);
+    dict->invalidateTable(dName);
+    s = dict->getTable(sName);
+    if (s == nullptr) {
+      ndbout_c("ERR: ledger: table %s is gone after the system restart",
+               sName);
+      result = NDBT_FAILED;
+    } else if (s->getColumn(LEDGER_SCHEMA_COLUMN) == nullptr ||
+               s->getFragmentCount() != frags) {
+      ndbout_c("ERR: ledger: table %s has %s column %s and %u fragments, "
+               "%u expected",
+               sName,
+               s->getColumn(LEDGER_SCHEMA_COLUMN) == nullptr ? "no" : "the",
+               LEDGER_SCHEMA_COLUMN, s->getFragmentCount(), frags);
+      result = NDBT_FAILED;
+    } else if (!ledgerSchemaCheck(pNdb, s, rows, 2) ||
+               !ledgerReplicasAgree(ctx, step, "schema changes in the tail",
+                                    s)) {
+      result = NDBT_FAILED;
+    } else {
+      ndbout_c("Ledger: %s has its column, %u fragments and every row of its "
+               "last update",
+               sName, frags);
+    }
+    if (dict->getTable(dName) != nullptr) {
+      ndbout_c("ERR: ledger: table %s, dropped in the tail, exists after the "
+               "system restart",
+               dName);
+      result = NDBT_FAILED;
+    }
+    (void)dict->dropTable(sName);
+  }
+  if (result != NDBT_OK) ledgerDisarm(restarter);
+  ctx->stopTest();
+  return result;
+}
+
 NDBT_TESTSUITE(testRestartGci);
 TESTCASE("InsertRestartGci",
          "Verify that only expected records are still in NDB\n"
@@ -2041,6 +2587,60 @@ TESTCASE("GciLedgerDurableCrashPoints",
   INITIALIZER(runLedgerInit);
   STEPS(runLedgerWriter, LEDGER_WRITERS);
   STEP(runLedgerDurableCrashPoints);
+  FINALIZER(runDropTable);
+}
+TESTCASE("GciLedgerDurableNodeFailure",
+         "RONDB-1150 (X6.8), PMEM mode with __DurableCommits: a node failure "
+         "in the durable tail (D3), the stop of the others as they record it "
+         "(error insert 990), an unsafe shutdown (992); the stale node "
+         "joins by a node restart and every acknowledged transaction "
+         "stays") {
+  TC_PROPERTY("LedgerSeconds", Uint32(3));
+  TC_PROPERTY("LedgerDurable", Uint32(1));
+  INITIALIZER(runLedgerNeedsPmem);
+  INITIALIZER(runCreateTable);
+  INITIALIZER(runLedgerInit);
+  STEPS(runLedgerWriter, LEDGER_WRITERS);
+  STEP(runLedgerDurableNodeFailure);
+  FINALIZER(runDropTable);
+}
+TESTCASE("GciLedgerDurableNoNodeFailRecord",
+         "RONDB-1150 (X6.8), PMEM mode with __DurableCommits: as D3 of "
+         "GciLedgerDurableNodeFailure with the failure not recorded (error "
+         "insert 991); the check must find the divergence") {
+  TC_PROPERTY("LedgerSeconds", Uint32(3));
+  TC_PROPERTY("LedgerDurable", Uint32(1));
+  INITIALIZER(runLedgerNeedsPmem);
+  INITIALIZER(runCreateTable);
+  INITIALIZER(runLedgerInit);
+  STEPS(runLedgerWriter, LEDGER_WRITERS);
+  STEP(runLedgerDurableNoNodeFailRecord);
+  FINALIZER(runDropTable);
+}
+TESTCASE("GciLedgerDurablePartialSR",
+         "RONDB-1150 (X6.8), PMEM mode with __DurableCommits, two node "
+         "groups: a system restart without a node (D5) and one that waits "
+         "for the peer of a stale node (D4); every acknowledged transaction "
+         "stays") {
+  TC_PROPERTY("LedgerSeconds", Uint32(3));
+  TC_PROPERTY("LedgerDurable", Uint32(1));
+  INITIALIZER(runLedgerNeedsPmem);
+  INITIALIZER(runCreateTable);
+  INITIALIZER(runLedgerInit);
+  STEPS(runLedgerWriter, LEDGER_WRITERS);
+  STEP(runLedgerDurablePartialSR);
+  FINALIZER(runDropTable);
+}
+TESTCASE("GciLedgerDurableSchema",
+         "RONDB-1150 (X5.9), PMEM mode with __DurableCommits: create table, "
+         "add column, add partitions and drop table in the durable tail, "
+         "then every node stops; the changed tables and their rows are as "
+         "acknowledged") {
+  TC_PROPERTY("LedgerDurable", Uint32(1));
+  INITIALIZER(runLedgerNeedsPmem);
+  INITIALIZER(runCreateTable);
+  INITIALIZER(runLedgerInit);
+  STEP(runLedgerDurableSchema);
   FINALIZER(runDropTable);
 }
 NDBT_TESTSUITE_END(testRestartGci)
