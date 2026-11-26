@@ -2481,6 +2481,21 @@ Uint32 Qmgr::check_startup(Signal *signal) {
           ? Uint32(~0)
           : (c_restartPartialTimeout + c_restartPartitionedTimeout);
 
+  /**
+   * RONDB-1150, X6.9: with durable commits a system restart starts only
+   * when the starting nodes hold every node of some node group and a node
+   * of every node group (CheckNodeGroups::Win), whatever
+   * StartPartitionedTimeout and the no-wait nodes say. The nodes not
+   * starting must not be able to have been the last to run, as after a
+   * node failure. A node of that node group ran at every node failure
+   * after which the cluster committed, and recorded it before
+   * PREP_FAILCONF, so its file shows the stale nodes (X6.3). Without the
+   * rule, nodes that failed together, and recorded nothing of each other,
+   * could restart without what their peers committed after them.
+   */
+  const Dbdih *dih = (const Dbdih *)globalData.getBlock(DBDIH, instance());
+  const bool durable = dih->durableCommitsOn();
+
   const bool no_nodegroup_active =
       (c_restartNoNodegroupTimeout != ~Uint32(0)) &&
       (!c_start.m_no_nodegroup_nodes.isclear());
@@ -2617,6 +2632,10 @@ Uint32 Qmgr::check_startup(Signal *signal) {
         case CheckNodeGroups::Partitioning: {
           jam();
           ndbrequire(result != CheckNodeGroups::Lose);
+          if (durable && result != CheckNodeGroups::Win) {
+            jam();
+            goto durable_wait;
+          }
           signal->theData[1] =
               all ? 0x8001 : (result == CheckNodeGroups::Win ? 0x8002 : 0x8003);
           report_mask.assign(c_definedNodes);
@@ -2664,6 +2683,10 @@ Uint32 Qmgr::check_startup(Signal *signal) {
       }
       case CheckNodeGroups::Partitioning: {
         jam();
+        if (durable && result != CheckNodeGroups::Win) {
+          jam();
+          goto durable_wait;
+        }
         if (elapsed != Uint32(~0) && elapsed < partitionedTimeout &&
             result != CheckNodeGroups::Win) {
           jam();
@@ -2728,6 +2751,23 @@ missinglog:
           : Uint32((partitionedTimeout - elapsed + 500) / 1000);
   infoEvent("partitionedTimeout = %llu, elapsed = %llu", partitionedTimeout,
             elapsed);
+  report_mask.assign(c_definedNodes);
+  report_mask.bitANDC(c_start.m_starting_nodes);
+  retVal = 0;
+  goto start_report;
+
+durable_wait:
+  /* RONDB-1150, X6.9: no node group has all its nodes here, see above */
+  jam();
+  if (!c_durableWaitLogged) {
+    c_durableWaitLogged = true;
+    g_eventLogger->info(
+        "QMGR: durable commits: the system restart waits for every node of "
+        "a node group; a node that is not here could have been the last to "
+        "run (StartPartitionedTimeout and the no-wait nodes do not apply)");
+  }
+  signal->theData[1] = 4;
+  signal->theData[2] = Uint32(~0);
   report_mask.assign(c_definedNodes);
   report_mask.bitANDC(c_start.m_starting_nodes);
   retVal = 0;

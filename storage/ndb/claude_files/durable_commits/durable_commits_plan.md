@@ -122,6 +122,12 @@ All paths are relative to `storage/ndb/`.
   FILLER after a COMPLETE (32 words reserved per operation at W = 64, not
   46). The TLA+ model checks it with every crash cut of the log parts
   (`tla/`, `MC_lazy*`).
+- **Revision 16** (X6). A recorded failure makes its node stale only if
+  a node of its node group outlived it, so that a cluster that lost a
+  node group, one node after the other, can restart (§5.4). A system
+  restart needs every node of some node group as well as a node of every
+  node group: the nodes that do not start must not be able to have been
+  the last to run (§5.5, X6.9).
 
 ---
 
@@ -572,8 +578,8 @@ that **start after** it.
 - So the node-failure records must reach the master before it fixes the
   node sets: each starting node sends them with its start request
   (CNTR_START_REQ, or a new signal in the same phase).
-- **Recovery needs at least one non-stale node in each node group**
-  (§5.5).
+- **Recovery needs at least one non-stale node in each node group, and
+  every node of some node group** (§5.5).
 
 ### 5.5 Partial SR
 
@@ -617,8 +623,36 @@ cluster to R_gcp (a consistent cut) and lose the acknowledged commits after
 it, is not decided.
 
 With a single node group (X and Y only), nothing can reveal that X is
-stale: the only witness, Y, is gone. X recovers alone; only the commits on
-Y are lost, and nothing is half applied.
+stale: the only witness, Y, is gone. Until X6.9, X recovered alone and the
+commits on Y were lost (stock NDB starts it so only with
+`StartPartitionedTimeout` set or Y a no-wait node). Now X waits for Y: its
+node group does not have all its nodes (below).
+
+**The nodes that do not start (X6.9, decided 2026-11-26).** In a cluster
+restart the same rule applies as after a node failure: the restart may
+not start if the nodes that do not start could have been the last to run,
+as only their node-failure files could then show that the starting nodes
+are stale.
+
+Example: nodes X (node group 0) and Z (node group 1) fail together, in
+one failure round, so neither records the other. Their peers Y and W
+commit alone, then crash. X and Z alone find no record and would restart
+without those commits.
+
+**Rule:** with durable commits, a system restart needs every node of some
+node group and a node of every node group (`CheckNodeGroups::Win`),
+whatever `StartPartitionedTimeout` and the no-wait nodes say. QMGR's
+election and the master's NDBCNTR wait for more nodes until then.
+- A node of that node group ran at every node failure after which the
+  cluster committed: a failure round needs the PREP_FAILCONF of every
+  live node, each records the failure before it (§5.4), and the cluster
+  stops when the last node of a node group fails. So its file shows the
+  stale nodes.
+- A node group lost before the crash still needs a node in the restart,
+  and if it was lost one node after the other, its last node: the others
+  are stale (D4).
+- Every starting node counts, also one started with `--initial` or one
+  that reports an unsafe shutdown: waiting cannot bring back what it lost.
 
 ### 5.6 All or nothing after R_gcp
 

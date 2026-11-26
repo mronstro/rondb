@@ -36,7 +36,7 @@ If a step-1 plan names these differently, the names here follow it.
 | X3 | Ledger, crash of all nodes, power-loss runs, TLA+ model | M (15 pd) | X2 (S7) | Losses only above R_gcp, measured |
 | X4 | Commit path: flag, opCount, barriers, local commit at COMPLETE, late ack, API hold-back (rule F dropped) | L (50 pd) | X2, X3 | Durable protocol running; node failures tested |
 | X5 | SR phases 1–3: one scan, exchange, verdicts, raise to G' | L (50 pd) | X4 | **Zero ledger losses after a full crash, all nodes starting** |
-| X6 | Node-failure file, stale nodes, D4 check, partial SR fallback | M (17 pd) | X5 (X6.1 only X2) | Zero losses with a node failure in the tail GCI and with partial SR |
+| X6 | Node-failure file, stale nodes, D4 check, partial SR fallback, a node group with all its nodes | M (17 pd) | X5 (X6.1 only X2) | Zero losses with a node failure in the tail GCI and with partial SR |
 | X7 | Online activation at g, arming, deactivation by SR, ndbinfo, version gate | M (17 pd) | X4 (X7.1–7.2), X5 | Activation on a running cluster |
 | X8 | Adaptive fencing, benchmarks, `redoLogReader`, documentation | L (32 pd) | X4 (X8.1–8.2), X5–X7 | Published numbers, rondb-docs chapters |
 
@@ -1306,8 +1306,56 @@ SR allowed again in durable mode; stale nodes rejoin by node restart with
 identical replicas.
 
 **State (2026-11-26): X6.1-X6.4 committed, the `rondb_pmem_durable` run
-on Linux passes; X6.3 refined, X6.5-X6.8 written, to be built and
+on Linux passes; X6.3 refined, X6.5-X6.9 written, to be built and
 tested.**
+- X6.9 (decided 2026-11-26): a system restart with
+  durable commits starts only when the starting nodes hold every node of
+  some node group and a node of every node group
+  (`CheckNodeGroups::Win`). The nodes not starting must not be able to
+  have been the last to run, the same rule as after a node failure. Found
+  by it: two nodes of different node groups that fail together, in one
+  failure round, record nothing of each other; their peers commit alone,
+  then crash; the two alone started (with `StartPartitionedTimeout` set,
+  or the others as no-wait nodes), found no record, and lost those
+  commits. With a whole node group starting, a node of it ran at every
+  node failure after which the cluster committed: a failure round needs
+  the PREP_FAILCONF of every live node, each records the failure before
+  it, and the cluster stops when the last node of a node group fails. So
+  the stale nodes are known. A node group lost before the crash, one
+  node after the other, needs its last node in the restart: the others
+  are stale and the restart waits (D4).
+  - QMGR `check_startup()`: with durable commits a partitioned set of
+    starting nodes waits, with start report 4 ("Waiting for non
+    partitioned start") and one log line, also when the others are
+    no-wait nodes or `StartPartitionedTimeout` has passed.
+  - NDBCNTR `trySystemRestart()`, the master: when no node group of the
+    starting nodes has all its nodes, it waits for more nodes to join,
+    and logs it once for each set of nodes. QMGR stops this before, so it
+    is the second check.
+  - Decided: every starting node counts, also one started with `--initial`
+    and one that reports an unsafe shutdown (X6.7), as stock NDB counts
+    them. Waiting cannot bring back what such a node lost, and the
+    operator who wiped a node chose that loss.
+  - With one node group, a node alone no longer starts: plan §5.5
+    accepted that it lost its peer's commits after its failure, and with
+    stock NDB that happened only with `StartPartitionedTimeout` set or
+    the peer a no-wait node.
+  - TLA+: `NodeFailJoint(X)` (constant `JointFail`), the nodes of X failing
+    in one round with one number, and `WholeGroup` in `SRAllowed`.
+    `MC_lazy_joint_fail` (expected: no error) and its control
+    `MC_lazy_joint_fail_old` (without `WholeGroup`; expected: G1
+    violated). The other configurations keep `WholeGroup = FALSE`: they
+    check more restarts than the code allows, and pass without the rule
+    as their failures are one node at a time.
+  - Test: `ledgerPartitionedSRWaits()` in `GciLedgerDurablePartialSR`:
+    nodes x and z of two node groups fail in the tail (error insert 991
+    in z, so that it does not record x), their peers y and w commit and
+    then stop together, x and z start alone and must still wait 10 s past
+    StartPartialTimeout and StartPartitionedTimeout; then y and w start,
+    x and z are stale and join by node restarts, and every acknowledged
+    transaction stays. `ndb_redo_pmem_durable_partial.cnf` sets
+    `StartPartitionedTimeout=2000`, so that without the rule QMGR would
+    have started them.
 - X6.3 refined (found while writing X6.8): with the rule "a record after
   R makes the node stale", a cluster that loses a whole node group could
   not restart. Node group 0 of X and Y: X fails, Y fails later, the
@@ -1413,7 +1461,8 @@ X6.1-X6.4 as written (2026-11-25):
 - X6.4: a node group with no node that can restore it, with every node
   present, stops the restart with a message naming the stale nodes, in
   place of `ndbrequire(!allNodes)` (DI-8). With one node group a stale
-  node whose only witness does not start cannot be found (plan §5.5).
+  node whose only witness does not start cannot be found (plan §5.5);
+  X6.9 closes this: such a restart waits for the witness.
 - Tests: `GciLedgerDurablePowerLoss` now crashes with DUMP 2371 in its
   even loops and lets the nodes stop one by one at random drains in its
   odd ones, D3.
@@ -1462,7 +1511,8 @@ evidence.
   replace by `progError` naming the node group and the stale nodes (DI-8).
   Forced start to R is not decided (Q3).
 - A single node group cannot detect a stale node whose only witness is
-  absent (plan §5.5); document it.
+  absent (plan §5.5); document it. Closed by X6.9: a restart needs every
+  node of some node group, so the witness takes part.
 
 ### X6.5 Partial SR and the fallback (S, 2 pd)
 
@@ -1493,8 +1543,19 @@ is verified in P6 (E17).
   divergence (shows the test can see the bug).
 - Crash between the record and PREP_FAILCONF (990).
 
+### X6.9 A node group with all its nodes (S, 1 pd)
+
+Decided 2026-11-26: in a cluster restart the same rule applies as after
+a node failure. The restart may not start if
+the nodes that are not starting could have been the last to run. So it
+needs every node of some node group and a node of every node group
+(`CheckNodeGroups::Win`); a node group lost before the crash still needs
+a node in the restart, and the outlived rule (X6.3) says which. In QMGR's
+`check_startup()` and NDBCNTR's `trySystemRestart()`, with durable
+commits, whatever `StartPartitionedTimeout` and the no-wait nodes say.
+
 **Order inside X6:** X6.1 (can start after step 1, in parallel with X4) →
-X6.2 → X6.3 → X6.4 → X6.7 → X6.5 → X6.6 → X6.8.
+X6.2 → X6.3 → X6.4 → X6.7 → X6.5 → X6.6 → X6.8 → X6.9.
 
 ---
 

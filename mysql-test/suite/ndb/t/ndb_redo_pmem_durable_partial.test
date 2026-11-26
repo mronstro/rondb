@@ -10,7 +10,12 @@
 # saves held back by error insert 7243), every node stops, and its peer
 # does not start: the failed node is stale, its node group has no node to
 # restore it, and the system restart waits past StartPartialTimeout until
-# the peer starts (X6.4, D4). Every acknowledged transaction stays.
+# the peer starts (X6.4, D4). Then two nodes of different node groups
+# fail together in the durable tail and record nothing of each other,
+# their peers commit alone and stop, and only the two start: no node
+# group has all its nodes, so the system restart waits, also past
+# StartPartitionedTimeout, until the peers start (X6.9). Every
+# acknowledged transaction stays.
 
 # NDBT creates TEST_DB.T1 directly through the NDB API. Keep both
 # mysqlds stopped so metadata discovery cannot import the API table;
@@ -32,7 +37,7 @@
 let NDBAPITEST_CLEANUP_QUERY=;
 let NDBAPITEST_NAME=testRestartGci;
 
---echo == 1 == a system restart without a node, and one that waits for the peer of a stale node
+--echo == 1 == a system restart without a node, one that waits for the peer of a stale node, and one that waits for a node group with all its nodes
 let NDBAPITEST_ARGS=-n GciLedgerDurablePartialSR -l 1 T1;
 --source suite/ndb/include/run_ndbapitest.inc
 

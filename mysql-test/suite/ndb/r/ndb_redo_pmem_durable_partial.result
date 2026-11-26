@@ -1,6 +1,6 @@
 # Shutting down mysqld 1
 # Shutting down mysqld 2
-== 1 == a system restart without a node, and one that waits for the peer of a stale node
+== 1 == a system restart without a node, one that waits for the peer of a stale node, and one that waits for a node group with all its nodes
 Running command
 Result of command: 0
 Test program success!

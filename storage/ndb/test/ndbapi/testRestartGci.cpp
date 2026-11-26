@@ -1430,27 +1430,33 @@ std::vector<int> ledgerOtherNodes(const std::vector<int> &nodes, int down) {
 }
 
 /**
- * RONDB-1150, X6.8: the data nodes but down (0 for none) stop together
- * while the writers write: DUMP 2371 in each, then one restarts with
- * abort into NOSTART and the others stop at its failure, as a power loss
- * of them all. Then every data node is in NOSTART.
+ * RONDB-1150, X6.8: the data nodes stop, the others of nodes being down
+ * already, stop together while the writers write: DUMP 2371 in each, then
+ * one restarts with abort into NOSTART and the others stop at its
+ * failure, as a power loss of them all. Then every data node is in
+ * NOSTART.
  */
-bool ledgerStopRestTogether(NdbRestarter &restarter,
-                            const std::vector<int> &nodes, int down) {
-  const std::vector<int> rest = ledgerOtherNodes(nodes, down);
-  if (rest.empty()) return true;
+bool ledgerStopTogether(NdbRestarter &restarter, const std::vector<int> &nodes,
+                        const std::vector<int> &stop) {
+  if (stop.empty()) return true;
   const int together = DumpStateOrd::QmgrStopOnNodeFailure;
-  if (!ledgerNoStartOnCrash(restarter, rest)) return false;
-  for (int node : rest) {
+  if (!ledgerNoStartOnCrash(restarter, stop)) return false;
+  for (int node : stop) {
     if (restarter.dumpStateOneNode(node, &together, 1) != 0) {
       ndbout_c("ERR: ledger: could not send DUMP 2371 to node %d", node);
       return false;
     }
   }
-  if (restarter.restartOneDbNode(rest[0], false, true, true) != 0) {
+  if (restarter.restartOneDbNode(stop[0], false, true, true) != 0) {
     return false;
   }
   return ledgerAllNoStart(restarter, nodes);
+}
+
+/* RONDB-1150, X6.8: the data nodes but down (0 for none) stop together */
+bool ledgerStopRestTogether(NdbRestarter &restarter,
+                            const std::vector<int> &nodes, int down) {
+  return ledgerStopTogether(restarter, nodes, ledgerOtherNodes(nodes, down));
 }
 
 /**
@@ -1629,6 +1635,90 @@ int ledgerStaleGroupWaits(NDBT_Context *ctx, NDBT_Step *step) {
     res = ledgerCheckRestart(ctx, step,
                              "system restart once the stale node's group "
                              "can be restored",
+                             true);
+  }
+  ledgerResume(ctx);
+  return res;
+}
+
+/**
+ * RONDB-1150, X6.9: nodes x and z, of two node groups, fail in the durable
+ * tail and record nothing of each other, as nodes that fail together (z
+ * has error insert 991 when x fails); the writers commit on their peers y
+ * and w alone, which then stop together. Only x and z start: no node
+ * group has all its nodes, and nothing here shows that x and z are
+ * stale, so the system restart waits, 10 s past StartPartialTimeout and
+ * StartPartitionedTimeout, until y and w start. Then x and z are stale
+ * and join by node restarts, and every acknowledged transaction stays.
+ */
+int ledgerPartitionedSRWaits(NDBT_Context *ctx, NDBT_Step *step) {
+  const Uint32 seconds = ctx->getProperty("LedgerSeconds", Uint32(5));
+  NdbRestarter restarter;
+  Uint32 partialMs = 30000;
+  Uint32 partitionedMs = 0;
+  {
+    NdbConfig conf;
+    conf.getProperty(restarter.getDbNodeId(0), NODE_TYPE_DB,
+                     CFG_DB_START_PARTIAL_TIMEOUT, &partialMs);
+    conf.getProperty(restarter.getDbNodeId(0), NODE_TYPE_DB,
+                     CFG_DB_START_PARTITION_TIMEOUT, &partitionedMs);
+  }
+  const Uint32 wait = (partialMs + partitionedMs) / 1000 + 10;
+  const std::vector<int> nodes = ledgerDataNodes(restarter);
+  const int x = restarter.getNode(NdbRestarter::NS_RANDOM);
+  const int z = restarter.getRandomNodeOtherNodeGroup(x, ndb_rand());
+  const int y = restarter.getRandomNodeSameNodeGroup(x, ndb_rand());
+  const int w =
+      z < 0 ? -1 : restarter.getRandomNodeSameNodeGroup(z, ndb_rand());
+  if (z < 0 || y < 0 || w < 0) {
+    ndbout_c("ERR: ledger: no two node groups of two nodes");
+    return NDBT_FAILED;
+  }
+  const int failed[] = {x, z};
+  const std::vector<int> peers = {y, w};
+  ndbout_c("Ledger: GCP saves stopped (error insert 7243), nodes %d and %d "
+           "fail together, the writers commit on nodes %d and %d, which "
+           "stop later; the system restart of nodes %d and %d waits%s",
+           x, z, y, w, x, z,
+           partitionedMs == 0 ? " (StartPartitionedTimeout=0 waits anyway)"
+                              : "");
+  if (restarter.insertErrorInAllNodes(7243) != 0 ||
+      restarter.insertErrorInNode(z, 991) != 0) {
+    ndbout_c("ERR: ledger: could not set the error inserts");
+    return NDBT_FAILED;
+  }
+  /* A GCP save under way ends; R is the last one */
+  NdbSleep_MilliSleep(1000);
+  if (restarter.restartOneDbNode(x, false, true, true) != 0 ||
+      restarter.waitNodesNoStart(&x, 1, 300) != 0 ||
+      restarter.restartOneDbNode(z, false, true, true) != 0 ||
+      restarter.waitNodesNoStart(failed, 2, 300) != 0 ||
+      !ledgerSleep(ctx, seconds) ||
+      !ledgerStopTogether(restarter, nodes, peers) || !ledgerPause(ctx) ||
+      restarter.startNodes(failed, 2) != 0) {
+    return NDBT_FAILED;
+  }
+  for (Uint32 i = 0; i < 10 * wait; i++) {
+    for (int node : failed) {
+      if (restarter.getNodeStatus(node) == NDB_MGM_NODE_STATUS_STARTED) {
+        ndbout_c("ERR: ledger: node %d started, with no node group having "
+                 "all its nodes; nodes %d and %d committed without nodes %d "
+                 "and %d",
+                 node, y, w, x, z);
+        ledgerResume(ctx);
+        return NDBT_FAILED;
+      }
+    }
+    NdbSleep_MilliSleep(100);
+  }
+  ndbout_c("Ledger: the system restart of nodes %d and %d waited %u s; "
+           "nodes %d and %d start",
+           x, z, wait, y, w);
+  int res = NDBT_FAILED;
+  if (restarter.startNodes(peers.data(), int(peers.size())) == 0) {
+    res = ledgerCheckRestart(ctx, step,
+                             "system restart once a node group has all its "
+                             "nodes",
                              true);
   }
   ledgerResume(ctx);
@@ -2295,8 +2385,9 @@ int runLedgerDurableNoNodeFailRecord(NDBT_Context *ctx, NDBT_Step *step) {
 
 /**
  * RONDB-1150, X6.8, at least two node groups: each loop a partial system
- * restart without a node (X6.5, D5), and one that waits for the peer of a
- * stale node (X6.4, D4)
+ * restart without a node (X6.5, D5), one that waits for the peer of a
+ * stale node (X6.4, D4), and one that waits for a node group with all
+ * its nodes (X6.9)
  */
 int runLedgerDurablePartialSR(NDBT_Context *ctx, NDBT_Step *step) {
   const Uint32 seconds = ctx->getProperty("LedgerSeconds", Uint32(5));
@@ -2314,6 +2405,12 @@ int runLedgerDurablePartialSR(NDBT_Context *ctx, NDBT_Step *step) {
     if (result != NDBT_OK) break;
     ndbout_c("Ledger loop %d: a stale node and its absent peer (D4)", l);
     result = ledgerSleep(ctx, seconds) ? ledgerStaleGroupWaits(ctx, step)
+                                       : NDBT_FAILED;
+    if (result != NDBT_OK) break;
+    ndbout_c("Ledger loop %d: two nodes that failed together start alone "
+             "(X6.9)",
+             l);
+    result = ledgerSleep(ctx, seconds) ? ledgerPartitionedSRWaits(ctx, step)
                                        : NDBT_FAILED;
   }
   if (result != NDBT_OK) ledgerDisarm(restarter);
@@ -2619,8 +2716,9 @@ TESTCASE("GciLedgerDurableNoNodeFailRecord",
 }
 TESTCASE("GciLedgerDurablePartialSR",
          "RONDB-1150 (X6.8), PMEM mode with __DurableCommits, two node "
-         "groups: a system restart without a node (D5) and one that waits "
-         "for the peer of a stale node (D4); every acknowledged transaction "
+         "groups: a system restart without a node (D5), one that waits "
+         "for the peer of a stale node (D4), and one that waits for a node "
+         "group with all its nodes (X6.9); every acknowledged transaction "
          "stays") {
   TC_PROPERTY("LedgerSeconds", Uint32(3));
   TC_PROPERTY("LedgerDurable", Uint32(1));

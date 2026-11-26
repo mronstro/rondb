@@ -1,7 +1,9 @@
 !include ../my.cnf
 
 # RONDB-1150 X6.8: durable commits on 4 data nodes in 2 node groups, as
-# ndb_redo_pmem_durable_ledger.cnf; a partial system restart after 5 s.
+# ndb_redo_pmem_durable_ledger.cnf; a partial system restart after 5 s,
+# and a partitioned one after 2 s more, which durable commits refuse
+# (X6.9).
 [cluster_config.1]
 NoOfReplicas=                  2
 ndbd=,,,
@@ -16,6 +18,7 @@ FragmentLogFileSize=4M
 TimeBetweenLocalCheckpoints=6
 TimeBetweenGlobalCheckpoints=500
 StartPartialTimeout=5000
+StartPartitionedTimeout=2000
 
 [mysqld]
 # Make all mysqlds use cluster

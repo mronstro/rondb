@@ -2295,6 +2295,7 @@ void Ndbcntr::StartRecord::reset() {
   std::memset(m_nodeFailWitness, 0, sizeof(m_nodeFailWitness));
   m_unsafe.clear();
   m_stale.clear();
+  m_partitionedLogged.clear();
 }
 
 void Ndbcntr::execCNTR_START_CONF(Signal *signal) {
@@ -2959,6 +2960,29 @@ bool Ndbcntr::trySystemRestart(Signal *signal) {
           }
           case CheckNodeGroups::Partitioning: {
             jam();
+            const Dbdih *dih =
+                (const Dbdih *)globalData.getBlock(DBDIH, instance());
+            if (dih->durableCommitsOn()) {
+              /**
+               * RONDB-1150, X6.9: no node group has all its nodes here, so
+               * a node that is not here could have been the last to run,
+               * and only its node-failure file could show that nodes here
+               * are stale. QMGR's election waits for this already
+               * (check_startup()); the master waits too, until more nodes
+               * join.
+               */
+              jam();
+              if (!tmp.equal(c_start.m_partitionedLogged)) {
+                c_start.m_partitionedLogged = tmp;
+                char buf[NdbNodeBitmask::TextLength + 1];
+                g_eventLogger->info(
+                    "NDBCNTR: durable commits: no node group has all its "
+                    "nodes among the starting nodes %s; the system restart "
+                    "waits for more nodes",
+                    tmp.getText(buf));
+              }
+              return false;
+            }
             /**
              * Even with all nodes accounted for we are still in a partitioned
              * state. Only continue if we are ever allowed to start in a

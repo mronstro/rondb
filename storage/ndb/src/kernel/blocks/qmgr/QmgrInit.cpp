@@ -172,6 +172,7 @@ void Qmgr::initData() {
   c_nodeFailLastSeq = 0;
   c_nodeFailLastNodes.clear();
   std::memset(c_nodeFailRecGci, 0, sizeof(c_nodeFailRecGci));
+  c_durableWaitLogged = false;
 
   for (nodePtr.i = 1; nodePtr.i < MAX_NODES; nodePtr.i++) {
     ptrAss(nodePtr, nodeRec);

@@ -61,9 +61,14 @@ CONSTANTS
                       \* "T complete" (D5; off only to show it is needed)
     GroupLoss,        \* X6.3: the last live node of a node group may fail;
                       \* the survivors record it and the cluster stops
-    RefinedStale      \* X6.3: a recorded failure makes its node stale only
+    RefinedStale,     \* X6.3: a recorded failure makes its node stale only
                       \* if a node of its node group outlived it; FALSE:
                       \* any recorded failure does (the rule of X6.1-X6.4)
+    JointFail,        \* X6.9: nodes may fail together, in one failure
+                      \* round, and record nothing of each other
+    WholeGroup        \* X6.9: a restart needs every node of some node
+                      \* group (CheckNodeGroups::Win); FALSE: a node of each
+                      \* node group that is not stale suffices
 
 NoTxn == "none"
 
@@ -437,6 +442,34 @@ NodeFailLast(x) ==
     /\ UNCHANGED <<tcState, path, seenFail, rep, lock, hist, abortRel,
                    learnedBy, vis, api, logVars, toVars, lqhCrash>>
 
+\* X6.9: nodes fail together, in one failure round, as when they lose the
+\* power at once: the survivors record each with the same number, and the
+\* failed nodes record nothing of each other. Each node group keeps a live
+\* node. As NodeFail for each of them, one after the other, but for the
+\* records.
+NodeFailJoint(X) ==
+    /\ JointFail
+    /\ Cardinality(X) >= 2
+    /\ failCount + Cardinality(X) <= MaxFailures
+    /\ X \subseteq alive
+    /\ \A g \in NodeGroups : \E y \in alive \ X : NG[y] = g
+    /\ alive' = alive \ X
+    /\ failCount' = failCount + Cardinality(X)
+    /\ nfRec' = [n \in Nodes |->
+                    IF n \in alive'
+                    THEN nfRec[n] \cup {<<x, failCount + 1>> : x \in X}
+                    ELSE nfRec[n]]
+    /\ tcState' = [t \in Txns |->
+                     IF TC[t] \in X /\ tcState[t] \in Active
+                     THEN (IF t \in Dirty THEN "lost" ELSE "takeover")
+                     ELSE tcState[t]]
+    /\ api' = [t \in Txns |->
+                 IF TC[t] \in X /\ tcState[t] \in Active /\ t \in Dirty
+                 THEN "unknown" ELSE api[t]]
+    /\ msgs' = {m \in msgs : m.to \notin X}
+    /\ UNCHANGED <<path, seenFail, rep, lock, hist, abortRel, learnedBy, vis,
+                   logVars, toVars, lqhCrash>>
+
 \* A signal that a failed node had not sent yet is lost with it
 LoseMsg(m) ==
     /\ m \in msgs
@@ -644,6 +677,7 @@ Next ==
           \/ \E n \in Nodes : TakeoverScan(t, n)
     \/ \E m \in msgs : DeliverCommit(m) \/ DeliverComplete(m) \/ LoseMsg(m)
     \/ \E x \in Nodes : NodeFail(x) \/ NodeFailLast(x)
+    \/ \E X \in SUBSET Nodes : NodeFailJoint(X)
 
 Spec == Init /\ [][Next]_vars
 
@@ -756,7 +790,9 @@ RowSeq(res, n, r) ==
 \* itself, one with no failure recorded, or one that failed later (X6.3,
 \* NodeFailFile::outlived()). Every node is restorable to R in the model,
 \* and a failed node does not come back. The restart needs a node that is
-\* not stale in every node group (D4, X6.4).
+\* not stale in every node group (D4, X6.4), and with WholeGroup every node
+\* of some node group (X6.9), so that the nodes not starting cannot have
+\* been the last to run.
 Max(K) == CHOOSE m \in K : \A k \in K : k <= m
 LatestFail(n, x) ==
     LET K == {p[2] : p \in {q \in nfRec[n] : q[1] = x}}
@@ -771,7 +807,11 @@ Stale(S) ==
     {x \in Nodes : \E n \in S :
         LatestFail(n, x) > 0 /\ (RefinedStale => Outlived(n, x))}
 SRNodes(S) == S \ Stale(S)
-SRAllowed(S) == \A g \in NodeGroups : \E n \in SRNodes(S) : NG[n] = g
+WholeGroupIn(S) ==
+    \E g \in NodeGroups : \A n \in Nodes : NG[n] = g => n \in S
+SRAllowed(S) ==
+    /\ WholeGroup => WholeGroupIn(S)
+    /\ \A g \in NodeGroups : \E n \in SRNodes(S) : NG[n] = g
 SRStarts ==
     {S \in (IF PartialSR THEN SUBSET Nodes ELSE {Nodes}) : SRAllowed(S)}
 NoFlags == [n \in Nodes |-> {}]

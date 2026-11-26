@@ -124,6 +124,11 @@ class Ndbcntr : public SimulatedBlock {
     Uint32 m_nodeFailWitness[ABS_MAX_NDB_NODES];
     NdbNodeBitmask m_unsafe;
     NdbNodeBitmask m_stale;
+    /**
+     * RONDB-1150, X6.9: the starting nodes for which the master logged
+     * that no node group has all its nodes, in trySystemRestart()
+     */
+    NdbNodeBitmask m_partitionedLogged;
   } c_start;
 
   struct LocalSysfile {

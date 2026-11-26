@@ -991,6 +991,8 @@ class Qmgr : public SimulatedBlock {
   bool nodeFailStale(Uint32 nodeId, Uint32 gci) const {
     return gci != ZUNDEFINED_GCI_LIMIT && c_nodeFailRecGci[nodeId] > gci;
   }
+  /* RONDB-1150, X6.9: check_startup() logged its wait for a node group */
+  bool c_durableWaitLogged;
   Uint32 c_keepalive_seqnum;
 
   Timer interface_check_timer;
