@@ -248,6 +248,22 @@ inline bool readFile(const char *dir, Uint32 ownNodeId,
 }
 
 /**
+ * The file in dir removed, as an initial start does with the rest of the
+ * file system. NDBCNTR clears directories below FileSystemPath, and the
+ * whole of a FileSystemPathRedoLog directory; without one, REDO path 0
+ * is FileSystemPath itself, where the file is not in any of the cleared
+ * directories. Left behind, its records carry GCIs of the cluster before
+ * the initial start, far above those of the new one, and the first
+ * system restart finds every node stale.
+ */
+inline void removeFile(const char *dir) {
+  if (dir == nullptr) return;
+  char path[1024];
+  snprintf(path, sizeof(path), "%s%s", dir, FILE_NAME);
+  (void)::unlink(path);
+}
+
+/**
  * The sysfile as this node read it: the restart's GCI R, and the node
  * group (NO_GROUP for none) and the last completed GCI of each node id
  */

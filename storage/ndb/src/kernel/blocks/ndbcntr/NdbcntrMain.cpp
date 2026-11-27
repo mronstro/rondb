@@ -6151,6 +6151,12 @@ void Ndbcntr::clearFilesystem(Signal *signal) {
   const Uint32 DD = CLEAR_DX + CLEAR_LCP + CLEAR_DD;
   const Uint32 REDO = CLEAR_ALL;
 
+  if (c_fsRemoveCount == 0) {
+    jam();
+    /* RONDB-1150, X6.1: not in a directory cleared below, unless REDO
+     * path 0 is a FileSystemPathRedoLog */
+    NodeFailFile::removeFile(globalData.theNodeFailFileDir);
+  }
   if (c_fsRemoveCount < DX) {
     FsOpenReq::setVersion(req->fileNumber, FsOpenReq::V_DISK);
     FsOpenReq::setSuffix(req->fileNumber, FsOpenReq::S_CTL);  // Can by any...

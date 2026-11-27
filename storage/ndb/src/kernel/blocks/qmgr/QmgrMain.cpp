@@ -7908,7 +7908,8 @@ void Qmgr::execCLOSE_COMCONF(Signal *signal) {
  * RONDB-1150, X6.1 (plan §5.4): the node-failure file beside REDO path 0,
  * mapped as the REDO log is, only with durable commits. A file that is
  * missing, of another size, or with a header of another node starts empty;
- * an initial start has removed it with the rest of the file system. The
+ * an initial start has removed it with the rest of the file system
+ * (Ndbcntr::clearFilesystem(), NodeFailFile::removeFile()). The
  * node cannot run durable commits without it (D8).
  */
 void Qmgr::openNodeFailFile() {
