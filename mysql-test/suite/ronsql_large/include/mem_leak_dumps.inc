@@ -18,9 +18,33 @@
 # and otherwise sends 2560 and 2650 only.  Run it only on an idle cluster:
 # 2560 would also flag an unrelated scan that happens to be closing.
 #
+# A request can return before the data nodes have cleaned up after it.
+# After a SCAN_TABREF the API does not wait for the scan's close
+# (NdbQueryImpl::closeTcCursor, detachFailedScan), and DBTC sends the
+# join-aggregation RELEASE_REQs, fire-and-forget, only once every fragment
+# of the scan has closed (releaseScanResources).  When SETUP was refused on
+# some node, the consumers parked on its identity close their fragments
+# only when the park sweep fails them, 200 ms later
+# (JOIN_AGG_PARK_SWEEP_DELAY_MS), so a state that a SETUP on another node
+# created waits that long for its RELEASE_REQ.  If it holds no group it
+# moves no QUERY_MEMORY page, so the level checks pass and DUMP 2361 found
+# it (mle-e5149b).  So first wait until no DBTC scan record is in use: the
+# record is released where the RELEASE_REQs are sent.  Then give them and
+# the CONTINUEB-sliced teardown a second.
+#
 # A missing acknowledgement means the node aborted (or is hung): its
 # ndb_<id>_out.log / error log names the leaked record ("DUMP 2361: leaked
 # agg state ...", "DUMP 2650: leaked DBSPJ request ...").
+# wait_condition.inc evaluates the condition twice (its let, then the
+# query in backquotes), so the '$' of ndb$pools needs two escapes.
+--let $wait_condition = SELECT COALESCE(SUM(used), 0) = 0 FROM ndbinfo.ndb\\\$pools WHERE pool_name = 'TC Scan Record'
+--let $wait_timeout = 60
+--source include/wait_condition.inc
+if (!$success)
+{
+  --die mem_leak_dumps: a DBTC scan record was still in use after 60 s
+}
+--sleep 1
 --let $mlk_dump_cookie = `SELECT FLOOR(RAND() * 536870910) + 1`
 --let $mlk_dump_nodes = `SELECT GROUP_CONCAT(node_id ORDER BY node_id) FROM ndbinfo.nodes`
 --let MLKE_DUMP_COOKIE = $mlk_dump_cookie
