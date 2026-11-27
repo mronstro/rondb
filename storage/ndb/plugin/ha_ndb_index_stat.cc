@@ -577,7 +577,7 @@ move_to_glob(Ndb_index_stat *st)
   objects.  Sync the value with global status ("allow" field).
 */
 
-static bool ndb_index_stat_allow_flag = false;
+static std::atomic<bool> ndb_index_stat_allow_flag{false};
 
 static bool ndb_index_stat_get_allow() { return ndb_index_stat_allow_flag; }
 
@@ -2162,7 +2162,9 @@ void Ndb_index_stat_thread::stop_listener(const Ndb_index_stat_proc &pr) const {
 
 /* Restart things after system restart */
 
-static bool ndb_index_stat_restart_flag = false;
+/* Set by the binlog thread (ndb_index_stat_restart), cleared by the
+ * stats thread when it starts over. */
+static std::atomic<bool> ndb_index_stat_restart_flag{false};
 
 void ndb_index_stat_restart() {
   DBUG_TRACE;
@@ -2172,7 +2174,9 @@ void ndb_index_stat_restart() {
 
 bool Ndb_index_stat_thread::is_setup_complete() {
   if (ndb_index_stat_get_enable(nullptr)) {
-    return ndb_index_stat_get_allow();
+    /* A restart the stats thread has not acted on yet means it will close
+     * for requests again (error 4721) before it is set up. */
+    return ndb_index_stat_get_allow() && !ndb_index_stat_restart_flag;
   }
   return true;
 }
@@ -2319,6 +2323,14 @@ void Ndb_index_stat_thread::do_run() {
       // normal processing
       check_sys = false;
       ndb_index_stat_set_allow(true);
+      if (ndb_index_stat_restart_flag) {
+        /* ndb_index_stat_restart() ran after this round's check of the
+         * flag, and its set_allow(false) may have come before the
+         * set_allow(true) above.  Stay closed for requests; the next
+         * round starts over. */
+        ndb_index_stat_set_allow(false);
+        break;
+      }
       pr.busy = false;
       ndb_index_stat_proc(pr);
     } while (0);
