@@ -49,6 +49,13 @@ INSERT INTO t1
 --exec $NDB_MGM -e "all start" >> $NDB_TOOLS_OUTPUT
 --exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
 --source include/ndb_not_readonly.inc
+# The second mysqld sets up its binlog after the system restart too and
+# holds the global schema lock while it does: the node restart of step 3
+# would abort that transaction (error 286) and mysqld.2 would warn.
+--connect(s2,127.0.0.1,root,,test,$MASTER_MYPORT1,)
+--source include/ndb_not_readonly.inc
+--disconnect s2
+--connection default
 SELECT COUNT(*), SUM(LENGTH(b)) FROM t1;
 INSERT INTO t1 VALUES (1001, 'after system restart');
 
@@ -65,7 +72,9 @@ SELECT COUNT(*), SUM(LENGTH(b)) FROM t1;
 --exec mv $cluster/ndb_2_fs/D9 $cluster/ndbd.2/ndb_2_fs/D9
 --exec $NDB_MGM -e "2 start" >> $NDB_TOOLS_OUTPUT
 --exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
---exec grep -c "log part 1 were found under FileSystemPath, not under REDO path 0" $cluster/ndbd.2/ndbd.log
+# Counted in the last start of node 2 only: a retry of the test after it
+# passed runs on the same cluster, and ndbd.log keeps the earlier starts.
+--exec awk '/Start initiated/ { n = 0 } /log part 1 were found under FileSystemPath, not under REDO path 0/ { n++ } END { print n + 0 }' $cluster/ndbd.2/ndbd.log
 SELECT COUNT(*), SUM(LENGTH(b)) FROM t1;
 SELECT node_id, log_part, redo_path FROM ndbinfo.redo_log_pmem
   WHERE node_id = 2 ORDER BY log_part;
