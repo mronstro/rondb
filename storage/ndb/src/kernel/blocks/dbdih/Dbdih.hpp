@@ -2342,6 +2342,18 @@ class Dbdih : public SimulatedBlock {
   void durableArmed(Signal *);
   void durableActivateNodeFailure(Signal *, const NdbNodeBitmask &failed,
                                   Uint32 oldMasterId);
+  /**
+   * RONDB-1150, X7.5: the state of durable commits in this node for
+   * ndbinfo durable_commits, with DurableCommits of its config now
+   */
+  enum DurableState {
+    DS_OFF = 0,
+    DS_ACTIVATING = 1,  // a SET waits, or an activation runs, before g
+    DS_ON = 2,          // committing durably, g not yet in the sysfile
+    DS_ARMED = 3,       // g in the sysfile of this node
+    DS_ENDING = 4       // on with DurableCommits=0: off at the next SR
+  };
+  Uint32 durableState(bool config) const;
 
   struct GcpMonitor {
     struct {
@@ -3108,9 +3120,8 @@ public:
   bool durableCommitsOn() const { return m_micro_gcp.m_durable_gci != 0; }
   /**
    * RONDB-1150, X6.1: whether QMGR maps the node-failure file at its start
-   * phase 3, as durable commits are on or configured. A node restart that
-   * learns later that they are on stops if this was false then
-   * (execSTART_MECONF()), as its failures would not be recorded.
+   * phase 3, as durable commits are on or configured. A node that learns
+   * later that they are on maps it then (durableGciLearned()).
    */
   bool nodeFailFileNeeded() const {
     return durableCommitsOn() || c_durable_commits_config;

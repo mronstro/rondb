@@ -39479,6 +39479,11 @@ void Dblqh::execSrCompletedLab(Signal *signal) {
     jam();
     redoTailSetLogFlags(true);
     redoTailFreeWorker();
+    if (NdbTick_IsValid(c_srTail.m_start)) {
+      c_srTail.m_ms = Uint32(
+          NdbTick_Elapsed(c_srTail.m_start, NdbTick_getCurrentTicks())
+              .milliSec());
+    }
   }
   restart_synch_state(signal, COMPLETED_REDO_LOG_EXEC_SYNCH,
                       ZCONTINUE_REDO_LOG_EXEC_COMPLETED);
@@ -39671,6 +39676,11 @@ void Dblqh::srPhase3Start(Signal *signal) {
 
   csrPhaseStarted = ZSR_BOTH_PHASES_STARTED;
   c_nsl_redo_round_done = false; /* [NODE-START] step 10: next round */
+  if (c_sr_durable_tail && csrPhasesCompleted == 0) {
+    /* RONDB-1150, X7.5: round 0, which runs phase 2, starts */
+    jam();
+    c_srTail.m_start = NdbTick_getCurrentTicks();
+  }
 
   LogPartRecordPtr logPartPtr;
   for (logPartPtr.i = 0; logPartPtr.i < clogPartFileSize; logPartPtr.i++) {
@@ -43497,6 +43507,14 @@ void Dblqh::initialiseRecordsLab(Signal* signal, Uint32 data,
     std::memset(c_sr_node_group, 0xFF, sizeof(c_sr_node_group));
     c_srTail.m_union = nullptr;
     c_srTail.m_hits = nullptr;
+    c_srTail.m_gciPrime = 0;
+    c_srTail.m_inDoubt = 0;
+    c_srTail.m_withComplete = 0;
+    c_srTail.m_committedByComplete = 0;
+    c_srTail.m_committedByFallback = 0;
+    c_srTail.m_aborted = 0;
+    NdbTick_Invalidate(&c_srTail.m_start);
+    c_srTail.m_ms = 0;
     ccurrentGcprec = RNIL;
     caddNodeState = ZFALSE;
     cstartRecReq = SRR_INITIAL; // Initial
@@ -47523,6 +47541,34 @@ void Dblqh::execDBINFO_SCANREQ(Signal *signal) {
           return;
         }
       }
+      break;
+    }
+
+    case Ndbinfo::DURABLE_RESTART_TABLEID: {
+      /**
+       * RONDB-1150, X7.5: one row per LDM when the last start of the node
+       * was a system restart under durable commits (START_RECREQ with g)
+       */
+      if (c_sr_durable_gci == 0) {
+        jam();
+        break;
+      }
+      jam();
+      const bool tail = c_sr_durable_tail;
+      Ndbinfo::Row row(signal, req);
+      row.write_uint32(getOwnNodeId());
+      row.write_uint32(instance());
+      row.write_uint32(c_sr_durable_gci);
+      row.write_uint32(crestartNewestGci);
+      row.write_uint32(tail ? 1 : 0);
+      row.write_uint32(tail ? c_srTail.m_gciPrime : crestartNewestGci);
+      row.write_uint32(tail ? c_srTail.m_inDoubt : 0);
+      row.write_uint32(tail ? c_srTail.m_withComplete : 0);
+      row.write_uint32(tail ? c_srTail.m_committedByComplete : 0);
+      row.write_uint32(tail ? c_srTail.m_committedByFallback : 0);
+      row.write_uint32(tail ? c_srTail.m_aborted : 0);
+      row.write_uint32(tail ? c_srTail.m_ms : 0);
+      ndbinfo_send_row(signal, req, row, rl);
       break;
     }
 

@@ -1425,6 +1425,59 @@ DECLARE_NDBINFO_TABLE(REDO_LOG_PMEM, 24) = {
      {"dirty_shutdown_count", Ndbinfo::Number64,
       "Dirty shutdowns of the devices, 18446744073709551615 = unknown"}}};
 
+/* RONDB-1150, X7: durable commits, one row per data node (DBDIH) */
+DECLARE_NDBINFO_TABLE(DURABLE_COMMITS, 5) = {
+    {"durable_commits", 5, 0,
+     [](const Ndbinfo::Counts &c) { return c.data_nodes; },
+     "Durable commits of the data node (DurableCommits)"},
+    {{"node_id", Ndbinfo::Number, ""},
+     {"config", Ndbinfo::Number, "DurableCommits in the config of the node now"},
+     {"state", Ndbinfo::Number,
+      "0 = off, 1 = activating, 2 = on, 3 = armed, 4 = ending: on until "
+      "the next system restart"},
+     {"durable_gci", Ndbinfo::Number,
+      "g, the first GCI that commits durably, 0 = off"},
+     {"restorable_gci", Ndbinfo::Number,
+      "Newest restorable GCI in the sysfile of the node"}}};
+
+/* RONDB-1150, X5: phase 2 of the last system restart, one row per LDM */
+DECLARE_NDBINFO_TABLE(DURABLE_RESTART, 12) = {
+    {"durable_restart", 12, 0,
+     [](const Ndbinfo::Counts &c) { return c.data_nodes * c.instances.lqh; },
+     "System restart under durable commits (rows only after one)"},
+    {{"node_id", Ndbinfo::Number, ""},
+     {"ldm_instance", Ndbinfo::Number, ""},
+     {"durable_gci", Ndbinfo::Number, "g of the restart"},
+     {"restart_gci", Ndbinfo::Number, "R, the GCI that the restart restored"},
+     {"phase2", Ndbinfo::Number, "1 = phase 2 ran on the durable tail"},
+     {"gci_prime", Ndbinfo::Number, "G', the GCI that phase 2 raised R to"},
+     {"in_doubt", Ndbinfo::Number,
+      "Transactions in doubt in the log parts of the LDM on the SR nodes"},
+     {"with_complete", Ndbinfo::Number,
+      "Of them, those with a COMPLETE in a log part"},
+     {"committed_by_complete", Ndbinfo::Number,
+      "Its own in-doubt entries committed as a COMPLETE was found"},
+     {"committed_by_fallback", Ndbinfo::Number,
+      "Its own in-doubt entries committed by the counts of node groups"},
+     {"aborted", Ndbinfo::Number,
+      "Its own in-doubt entries aborted, their COMMITs invalidated"},
+     {"phase2_ms", Ndbinfo::Number,
+      "Milliseconds of round 0 of the REDO execution, which ran phase 2"}}};
+
+/* RONDB-1150, X6: the node-failure file, one row per failed node in it */
+DECLARE_NDBINFO_TABLE(NODE_FAILURE_RECORDS, 6) = {
+    {"node_failure_records", 6, 0,
+     [](const Ndbinfo::Counts &c) { return c.data_nodes * c.data_nodes; },
+     "Latest failure of each node in the node-failure file"},
+    {{"node_id", Ndbinfo::Number, ""},
+     {"failed_node_id", Ndbinfo::Number, ""},
+     {"gci_hi", Ndbinfo::Number, "GCI that was current when it failed"},
+     {"failure_no", Ndbinfo::Number, "Number of the failure in QMGR"},
+     {"seq", Ndbinfo::Number64,
+      "Order of the records, the same for the nodes of one failure"},
+     {"pending", Ndbinfo::Number,
+      "1 = recorded, the failure not yet committed (COMMIT_FAILREQ)"}}};
+
 #define DBINFOTBL(x) \
   { Ndbinfo::x##_TABLEID, (const Ndbinfo::Table *)&ndbinfo_##x }
 
@@ -1498,7 +1551,10 @@ static struct ndbinfo_table_list_entry {
     DBINFOTBL(SECURITY_VIOLATION_COUNTS),
     DBINFOTBL(JIT),
     DBINFOTBL(TRUSTED_CERTS),
-    DBINFOTBL(REDO_LOG_PMEM)};
+    DBINFOTBL(REDO_LOG_PMEM),
+    DBINFOTBL(DURABLE_COMMITS),
+    DBINFOTBL(DURABLE_RESTART),
+    DBINFOTBL(NODE_FAILURE_RECORDS)};
 
 static int no_ndbinfo_tables =
     sizeof(ndbinfo_tables) / sizeof(ndbinfo_tables[0]);

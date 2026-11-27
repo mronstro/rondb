@@ -390,6 +390,22 @@ static struct view {
     {"ndbinfo", "diskstats_1sec",
      "SELECT * "
      "FROM `ndbinfo`.`ndb$diskstats_1sec`"},
+    /* RONDB-1150: durable commits, one row per data node */
+    {"ndbinfo", "durable_commits",
+     "SELECT node_id, config, "
+     "CASE state"
+     "  WHEN 0 THEN \"off\""
+     "  WHEN 1 THEN \"activating\""
+     "  WHEN 2 THEN \"on\""
+     "  WHEN 3 THEN \"armed\""
+     "  WHEN 4 THEN \"ending\""
+     "  ELSE NULL "
+     " END AS state, "
+     "NULLIF(durable_gci, 0) AS durable_gci, restorable_gci "
+     "FROM `ndbinfo`.`ndb$durable_commits`"},
+    /* RONDB-1150: phase 2 of the last system restart, one row per LDM */
+    {"ndbinfo", "durable_restart",
+     "SELECT * FROM `ndbinfo`.`ndb$durable_restart`"},
     {"ndbinfo", "error_messages",
      "SELECT error_code, error_description, error_status, error_classification "
      "FROM `ndbinfo`.`ndb$error_messages`"},
@@ -507,6 +523,9 @@ static struct view {
      "FROM `ndbinfo`.`ndb$pools` "
      "WHERE block_number = 254 "
      "GROUP BY node_id, memory_type"},
+    /* RONDB-1150: the node-failure file of each data node */
+    {"ndbinfo", "node_failure_records",
+     "SELECT * FROM `ndbinfo`.`ndb$node_failure_records`"},
     {"ndbinfo", "nodes",
      "SELECT node_id, "
      "uptime, "

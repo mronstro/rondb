@@ -1642,8 +1642,7 @@ transactions before arming, none after; master failure during activation
 handled; a node restart after activation works; activation refused with a
 file-mode node or an old version.
 
-**State (2026-11-27): parts 1 and 2 committed, part 3 written, all three
-to be built and tested; part 4 next.** Re-scoped against the code first: only the start-time
+**State (2026-11-27): parts 1-4 committed; part 5 next.** Re-scoped against the code first: only the start-time
 path existed. `__DurableCommits` (CFG 716) set
 `m_micro_gcp.m_durable_gci = 1` in `Dbdih::initCommonData()`, and g lived
 nowhere else: not in the sysfile, not in a signal. A system restart took
@@ -1806,14 +1805,50 @@ Parts, each a commit to be built and tested:
      The results that list the SET parameters gain `DurableCommits`.
      `redo_pmem_durable_log.inc` takes `LOG_WAIT`, as a node writes
      ndbd.log through two log threads, a little after the SET returns.
-4. ndbinfo (X7.5): `durable_commits` (DIH, a row per node) and
-   `node_failure_records` (QMGR). `durable_commit_stats` per LDM moves
-   to X8, beside the persist counters it would report with.
+4. ndbinfo (X7.5): `durable_commits` (DIH, a row per node),
+   `durable_restart` (DBLQH, a row per LDM) and `node_failure_records`
+   (QMGR), table ids 62-64. `durable_commit_stats` per LDM moves to X8,
+   beside the persist counters it would report with.
+   **Committed (2026-11-27).** The first run on macOS ARM64 had every
+   ndbinfo value as expected; two results were fixed after it (the
+   indentation of a statement, which a result keeps only with
+   `--result_format 2`, and the list of exact row estimates in
+   `ndbinfo_plans`, which leaves `durable_restart` out as it depends on
+   the tests before it).
+   - `durable_commits`: `config` (DurableCommits in the node's config
+     now, which ALL SET changes; CMVMI and DIH run in the main thread),
+     `state` (`Dbdih::durableState()`: off; activating from a SET that
+     waits, the master's activation or a GCP_PREPARE with g until its
+     GCP_COMMIT; on; armed when g is in the node's sysfile; ending when
+     the config is 0 and g is not), `durable_gci` (g, NULL in the view
+     when 0) and `restorable_gci` of the sysfile.
+   - The plan's "armed at GCI" is left out: a node that started after
+     arming cannot know the GCI of the save that armed g. The columns of
+     the last system restart are in `durable_restart` instead, as phase
+     2 runs in each LDM and DIH has only the master's G': g, R
+     (`crestartNewestGci`), whether phase 2 ran, G', the sizes of U and
+     of its hits (`in_doubt`, `with_complete`), the verdicts of step C on
+     the LDM's own entries, and the milliseconds of round 0 (from
+     `srPhase3Start()`). Rows only when the node's last start was a
+     system restart with g (`c_sr_durable_gci`), so none after a node
+     restart. Stale nodes are not a column: they are in the log, and in
+     `node_failure_records` as records after R.
+   - `node_failure_records`: the latest record of each failed node in
+     the file (`NodeFailFile::latest()`), `gci_hi`, `failure_no`, `seq`
+     and `pending` for the failure recorded last until its
+     COMMIT_FAILREQ; no rows while the file is not mapped. The start
+     state of X6.7 is not shown.
+   - Test: `ndb_redo_pmem_durable_online` reads the three tables at
+     every step, and gains a node restart after activation (step 4):
+     node 1 records the failure of node 2, node 2 takes g from the
+     master and has no `durable_restart` rows. `ndbinfo` and
+     `ndbinfo_plans` count the new tables.
 5. Tests (X7.7): activation under ledger load, with no loss after arming;
    refusal with a file-mode node; master crash after
-   GCP_PREPARE(activate) (7260) and before arming (7261); a node restart
-   after activation; deactivation through a system restart; the ndbinfo
-   values.
+   GCP_PREPARE(activate) (7260) and before arming (7261); deactivation
+   through a system restart; the ndbinfo values under those. A node
+   restart after activation is in `ndb_redo_pmem_durable_online` (part
+   4).
 
 ### X7.1 Config `DurableCommits` (S, 3 pd)
 
@@ -2129,9 +2164,10 @@ LQH codes below 5180.
 
 | Table | Rows | Columns |
 |---|---|---|
-| `durable_commits` | one per data node (DIH) | config value, state (off, requested, activating, armed, off-pending), activation GCI g, armed at GCI, last SR: R, G', in-doubt, committed by COMPLETE, by fallback, aborted, phase-2 ms, stale nodes |
+| `durable_commits` | one per data node (DIH) | config value, state (off, activating, on, armed, ending), g, restorable GCI (X7 part 4: armed at GCI dropped, the last SR moved to `durable_restart`) |
+| `durable_restart` | one per LDM (DBLQH), after a system restart with g | g, R, phase 2 ran, G', in doubt, with a COMPLETE, committed by COMPLETE, by fallback, aborted, phase-2 ms |
 | `durable_commit_stats` | one per LDM (DBLQH) | durable ops, COMPLETE records, aborts after commit, persist waits (X8.2), parked ops |
-| `node_failure_records` | one per record (QMGR) | failed node, gci_hi, failure no, valid |
+| `node_failure_records` | one per record (QMGR) | failed node, gci_hi, failure no, seq, pending |
 
 Step 1 adds the persist counters per part (E19).
 

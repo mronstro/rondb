@@ -1684,9 +1684,13 @@ void Dblqh::redoTailInitWorker() {
        nodeId = m_sr_nodes.find_next(nodeId + 1)) {
     c_srTail.m_srNodeList[c_srTail.m_noSrNodes++] = nodeId;
   }
+  c_srTail.m_inDoubt = 0;
+  c_srTail.m_withComplete = 0;
   c_srTail.m_committedByComplete = 0;
   c_srTail.m_committedByFallback = 0;
   c_srTail.m_aborted = 0;
+  NdbTick_Invalidate(&c_srTail.m_start);
+  c_srTail.m_ms = 0;
 }
 
 void Dblqh::redoTailFreeWorker() {
@@ -2085,6 +2089,8 @@ void Dblqh::execSR_TAIL_DONE_REP(Signal *signal) {
       crestartNewestGci,
       u.gciPrime(rep.maxGciExecuted, c_srTail.m_srNodeList,
                  c_srTail.m_noSrNodes, c_sr_node_group));
+  c_srTail.m_inDoubt = u.size();
+  c_srTail.m_withComplete = hits.size();
   g_eventLogger->info(
       "LDM(%u): phase 2 of the restart: every SR node is done; %u of the "
       "%u transactions in doubt have a COMPLETE; G' is %u",

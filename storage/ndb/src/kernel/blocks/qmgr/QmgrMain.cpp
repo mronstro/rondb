@@ -11664,6 +11664,31 @@ void Qmgr::execDBINFO_SCANREQ(Signal *signal) {
       }
       break;
     }
+    case Ndbinfo::NODE_FAILURE_RECORDS_TABLEID: {
+      /**
+       * RONDB-1150, X7.5: the latest record of each node in the
+       * node-failure file, none while it is not mapped. Pending: the
+       * failure recorded last, before its COMMIT_FAILREQ.
+       */
+      jam();
+      if (c_nodeFailBase == nullptr) break;
+      for (Uint32 nodeId = 1; nodeId < MAX_NDB_NODES; nodeId++) {
+        NodeFailFile::Record r;
+        Uint32 slot;
+        if (!NodeFailFile::latest(c_nodeFailBase, nodeId, &r, &slot)) continue;
+        const bool pending =
+            r.seq == c_nodeFailLastSeq && c_nodeFailLastNodes.get(nodeId);
+        Ndbinfo::Row row(signal, req);
+        row.write_uint32(getOwnNodeId());
+        row.write_uint32(nodeId);
+        row.write_uint32(r.gciHi);
+        row.write_uint32(r.failNo);
+        row.write_uint64(r.seq);
+        row.write_uint32(pending ? 1 : 0);
+        ndbinfo_send_row(signal, req, row, rl);
+      }
+      break;
+    }
     default:
       break;
   }

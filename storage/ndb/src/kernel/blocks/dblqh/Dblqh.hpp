@@ -4564,6 +4564,10 @@ private:
    *   m_hitsReceived the hit entries that arrived
    *   m_gciPrime     G', once every node is done
    *   m_srNodeList   the SR nodes, for the fallback of step C
+   *   m_inDoubt, m_withComplete, m_committedBy*, m_aborted, m_ms
+   *                  for ndbinfo durable_restart (X7.5): the sizes of U
+   *                  and of the hits, the verdicts of step C, and the
+   *                  milliseconds of round 0 from m_start
    */
   struct SrTailWorker {
     PmemRedo::TailUnion *m_union;
@@ -4583,9 +4587,13 @@ private:
     Uint32 m_gciPrime;
     Uint32 m_srNodeList[ABS_MAX_NDB_NODES];
     Uint32 m_noSrNodes;
+    Uint32 m_inDoubt;
+    Uint32 m_withComplete;
     Uint32 m_committedByComplete;
     Uint32 m_committedByFallback;
     Uint32 m_aborted;
+    NDB_TICKS m_start;
+    Uint32 m_ms;
     Uint32 m_buf[SrTailRep::MAX_ENTRIES * SrTailRep::INDOUBT_WORDS];
   } c_srTail;
   void redoTailInitWorker();

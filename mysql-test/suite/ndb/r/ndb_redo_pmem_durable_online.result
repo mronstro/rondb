@@ -1,5 +1,17 @@
 CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=NDB;
 INSERT INTO t1 VALUES (1, 1);
+== 0 == off: no node-failure file and no system restart yet
+SELECT node_id, config, state, durable_gci
+FROM ndbinfo.durable_commits ORDER BY node_id;
+node_id	config	state	durable_gci
+1	0	off	NULL
+2	0	off	NULL
+SELECT COUNT(*) FROM ndbinfo.node_failure_records;
+COUNT(*)
+0
+SELECT COUNT(*) FROM ndbinfo.durable_restart;
+COUNT(*)
+0
 == 1 == ALL SET DurableCommits 1 turns them on and returns once armed
 Configuration updated for all data nodes
 DurableCommits set to 1: durable commits are on in all data nodes
@@ -9,6 +21,14 @@ node 1: 1
 node 2: 1
 node 1: 1
 node 2: 1
+SELECT node_id, config, state, restorable_gci + 1 >= durable_gci AS saved
+FROM ndbinfo.durable_commits ORDER BY node_id;
+node_id	config	state	saved
+1	1	armed	1
+2	1	armed	1
+SELECT COUNT(DISTINCT durable_gci) AS g_values FROM ndbinfo.durable_commits;
+g_values
+1
 == 2 == once on, the SET returns at once
 Configuration updated for all data nodes
 DurableCommits set to 1: durable commits are on in all data nodes
@@ -23,10 +43,47 @@ SELECT * FROM t1 ORDER BY a;
 a	b
 1	1
 2	2
-== 4 == ALL SET DurableCommits 0 ends them at the next system restart
+SELECT node_id, state FROM ndbinfo.durable_commits ORDER BY node_id;
+node_id	state
+1	armed
+2	armed
+SELECT r.node_id, MIN(r.phase2) AS phase2,
+MIN(r.durable_gci = d.durable_gci) AS same_g,
+MIN(r.restart_gci + 1 >= r.durable_gci) AS restart_gci_ok,
+MIN(r.gci_prime >= r.restart_gci) AS gci_prime_ok
+FROM ndbinfo.durable_restart r
+JOIN ndbinfo.durable_commits d ON d.node_id = r.node_id
+GROUP BY r.node_id ORDER BY r.node_id;
+node_id	phase2	same_g	restart_gci_ok	gci_prime_ok
+1	1	1	1	1
+2	1	1	1	1
+== 4 == a node restart: node 1 records the failure of node 2, which takes g from the master
+SELECT f.node_id, f.failed_node_id, f.gci_hi >= d.durable_gci AS after_g,
+f.pending
+FROM ndbinfo.node_failure_records f
+JOIN ndbinfo.durable_commits d ON d.node_id = f.node_id
+WHERE f.node_id = 1 ORDER BY f.failed_node_id;
+node_id	failed_node_id	after_g	pending
+1	2	1	0
+SELECT node_id, config, state FROM ndbinfo.durable_commits ORDER BY node_id;
+node_id	config	state
+1	1	armed
+2	1	armed
+SELECT COUNT(DISTINCT durable_gci) AS g_values FROM ndbinfo.durable_commits;
+g_values
+1
+SELECT node_id, COUNT(*) > 0 AS has_rows
+FROM ndbinfo.durable_restart GROUP BY node_id ORDER BY node_id;
+node_id	has_rows
+1	1
+== 5 == ALL SET DurableCommits 0 ends them at the next system restart
 Configuration updated for all data nodes
 DurableCommits set to 0: durable commits, if on, end at the next system restart
 
+SELECT node_id, config, state FROM ndbinfo.durable_commits ORDER BY node_id;
+node_id	config	state
+1	0	ending
+2	0	ending
 g: on
 node 1: 1
 node 2: 1
@@ -34,4 +91,14 @@ SELECT * FROM t1 ORDER BY a;
 a	b
 1	1
 2	2
+SELECT node_id, config, state, durable_gci
+FROM ndbinfo.durable_commits ORDER BY node_id;
+node_id	config	state	durable_gci
+1	0	off	NULL
+2	0	off	NULL
+SELECT node_id, COUNT(*) > 0 AS has_rows
+FROM ndbinfo.durable_restart GROUP BY node_id ORDER BY node_id;
+node_id	has_rows
+1	1
+2	1
 DROP TABLE t1;

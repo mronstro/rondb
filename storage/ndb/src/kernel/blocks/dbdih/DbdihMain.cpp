@@ -8069,6 +8069,25 @@ void Dbdih::execDBINFO_SCANREQ(Signal *signal) {
       }
       break;
     }
+    case Ndbinfo::DURABLE_COMMITS_TABLEID: {
+      /**
+       * RONDB-1150, X7.5: one row, of this node. DurableCommits is read
+       * from the config now, which ALL SET DurableCommits changes (CMVMI,
+       * in this thread).
+       */
+      jam();
+      Uint32 config = 0;
+      ndb_mgm_get_int_parameter(m_ctx.m_config.getOwnConfigIterator(),
+                                CFG_DB_DURABLE_COMMITS, &config);
+      Ndbinfo::Row row(signal, req);
+      row.write_uint32(getOwnNodeId());
+      row.write_uint32(config);
+      row.write_uint32(durableState(config != 0));
+      row.write_uint32(m_micro_gcp.m_durable_gci);
+      row.write_uint32(SYSFILE->newestRestorableGCI);
+      ndbinfo_send_row(signal, req, row, rl);
+      break;
+    }
     case Ndbinfo::TABLE_DIST_STATUS_TABLEID:
     case Ndbinfo::TABLE_DIST_STATUS_ALL_TABLEID: {
       jam();
@@ -19224,6 +19243,27 @@ void Dbdih::durableActivateClient(Signal *signal, Uint32 error, Uint32 g) {
   ref->errorCode = error;
   sendSignal(clientRef, GSN_SET_CONFIG_PARAM_REF, signal,
              SetConfigParamRef::SignalLength, JBB);
+}
+
+/**
+ * X7.5: the state of ndbinfo durable_commits. Activating from a SET that
+ * waits, an activation that the master runs, or a GCP_PREPARE with g,
+ * until the GCP_COMMIT of g. Armed when g is in the sysfile of this node:
+ * the master's copy that arms it reached the node, and a system restart
+ * runs phase 2 with it. Ending when DurableCommits is 0 now; the system
+ * restart turns them off (srDurableGciAtEnd()).
+ */
+Uint32 Dbdih::durableState(bool config) const {
+  const Uint32 g = m_micro_gcp.m_durable_gci;
+  if (g == 0) {
+    return (c_durable_activate.m_client_ref != 0 ||
+            c_durable_activate.m_state != DurableActivate::DA_IDLE ||
+            m_micro_gcp.m_new_durable_gci != 0)
+               ? DS_ACTIVATING
+               : DS_OFF;
+  }
+  if (!config) return DS_ENDING;
+  return SYSFILE->durableGci == g ? DS_ARMED : DS_ON;
 }
 
 /**

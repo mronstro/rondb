@@ -6,14 +6,23 @@
 # node commits durably from the GCP_COMMIT of g, and the SET returns once
 # the GCP save of g - 1 has written g into every sysfile (armed). A row
 # committed just before every node stops then survives through phase 2
-# with that g. ALL SET DurableCommits 0 takes effect at the next system
-# restart.
+# with that g. A node restart records the failure of the node in the
+# node-failure file of the other, and the node takes g from the master.
+# ALL SET DurableCommits 0 takes effect at the next system restart.
+# X7 part 4: ndbinfo durable_commits, durable_restart and
+# node_failure_records at each step.
 
 --error 0,1
 --remove_file $MYSQLTEST_VARDIR/tmp/redo_pmem_durable_logged_gci.txt
 
 CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=NDB;
 INSERT INTO t1 VALUES (1, 1);
+
+--echo == 0 == off: no node-failure file and no system restart yet
+SELECT node_id, config, state, durable_gci
+  FROM ndbinfo.durable_commits ORDER BY node_id;
+SELECT COUNT(*) FROM ndbinfo.node_failure_records;
+SELECT COUNT(*) FROM ndbinfo.durable_restart;
 
 --echo == 1 == ALL SET DurableCommits 1 turns them on and returns once armed
 --exec $NDB_MGM -e "ALL SET DurableCommits 1"
@@ -29,6 +38,10 @@ INSERT INTO t1 VALUES (1, 1);
 --source suite/ndb/include/redo_pmem_durable_log.inc
 --let LOG_LINE = DIH: SET DurableCommits 1: durable commits are on from GCI <n>
 --source suite/ndb/include/redo_pmem_durable_log.inc
+# Armed: g in the sysfile of every node, saved from g - 1 on
+SELECT node_id, config, state, restorable_gci + 1 >= durable_gci AS saved
+  FROM ndbinfo.durable_commits ORDER BY node_id;
+SELECT COUNT(DISTINCT durable_gci) AS g_values FROM ndbinfo.durable_commits;
 
 --echo == 2 == once on, the SET returns at once
 --exec $NDB_MGM -e "ALL SET DurableCommits 1"
@@ -49,9 +62,36 @@ INSERT INTO t1 VALUES (2, 2);
 --source suite/ndb/include/redo_pmem_durable_log.inc
 --let LOG_SUM = 0
 SELECT * FROM t1 ORDER BY a;
+# Every LDM ran phase 2 with g, from R to G'
+SELECT node_id, state FROM ndbinfo.durable_commits ORDER BY node_id;
+SELECT r.node_id, MIN(r.phase2) AS phase2,
+       MIN(r.durable_gci = d.durable_gci) AS same_g,
+       MIN(r.restart_gci + 1 >= r.durable_gci) AS restart_gci_ok,
+       MIN(r.gci_prime >= r.restart_gci) AS gci_prime_ok
+  FROM ndbinfo.durable_restart r
+  JOIN ndbinfo.durable_commits d ON d.node_id = r.node_id
+  GROUP BY r.node_id ORDER BY r.node_id;
 
---echo == 4 == ALL SET DurableCommits 0 ends them at the next system restart
+--echo == 4 == a node restart: node 1 records the failure of node 2, which takes g from the master
+--exec $NDB_MGM -e "2 restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --nowait-nodes=1 --not-started >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "2 start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+# Node 2 may have a record of node 1 from the stop of every node above
+SELECT f.node_id, f.failed_node_id, f.gci_hi >= d.durable_gci AS after_g,
+       f.pending
+  FROM ndbinfo.node_failure_records f
+  JOIN ndbinfo.durable_commits d ON d.node_id = f.node_id
+  WHERE f.node_id = 1 ORDER BY f.failed_node_id;
+SELECT node_id, config, state FROM ndbinfo.durable_commits ORDER BY node_id;
+SELECT COUNT(DISTINCT durable_gci) AS g_values FROM ndbinfo.durable_commits;
+# The last start of node 2 is a node restart
+SELECT node_id, COUNT(*) > 0 AS has_rows
+  FROM ndbinfo.durable_restart GROUP BY node_id ORDER BY node_id;
+
+--echo == 5 == ALL SET DurableCommits 0 ends them at the next system restart
 --exec $NDB_MGM -e "ALL SET DurableCommits 0"
+SELECT node_id, config, state FROM ndbinfo.durable_commits ORDER BY node_id;
 --exec $NDB_MGM -e "all restart -n" >> $NDB_TOOLS_OUTPUT
 --exec $NDB_WAITER --not-started >> $NDB_TOOLS_OUTPUT
 --source suite/ndb/include/redo_pmem_durable_gci.inc
@@ -61,6 +101,11 @@ SELECT * FROM t1 ORDER BY a;
 --let LOG_LINE = DIH: durable commits end with the system restart; they were on from GCI <g>
 --source suite/ndb/include/redo_pmem_durable_log.inc
 SELECT * FROM t1 ORDER BY a;
+SELECT node_id, config, state, durable_gci
+  FROM ndbinfo.durable_commits ORDER BY node_id;
+# The restart ran under the old g
+SELECT node_id, COUNT(*) > 0 AS has_rows
+  FROM ndbinfo.durable_restart GROUP BY node_id ORDER BY node_id;
 
 DROP TABLE t1;
 --remove_file $MYSQLTEST_VARDIR/tmp/redo_pmem_durable_gci.txt
