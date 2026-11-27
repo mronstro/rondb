@@ -1,0 +1,17 @@
+CREATE TABLE p61_agg (
+ID INT UNSIGNED NOT NULL PRIMARY KEY,
+G INT UNSIGNED NOT NULL,
+TNP TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci,
+TPS TEXT CHARACTER SET latin1 COLLATE latin1_swedish_ci,
+B BLOB
+) ENGINE=NDB;
+INSERT INTO p61_agg VALUES (1, 10, 'x', 'x', 'x'), (2, 10, 'x', 'x', 'x'), (3, 20, 'y', 'y', 'y'), (4, 20, 'y', 'y', 'y');
+# Positive control: well-formed raw SPJ scan, expect SCAN_TABCONF
+Running command
+Result of command: 0
+Test program success!
+# P-61: single-table aggregation program with a column past the table, a pseudo column, a TEXT or BLOB GROUP BY column
+Running command
+Result of command: 0
+Test program success!
+DROP TABLE p61_agg;

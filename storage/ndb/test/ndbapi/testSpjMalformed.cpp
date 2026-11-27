@@ -107,6 +107,13 @@
  * BRANCH_ATTR_OP_PARAM reads whose parameter section is missing or
  * shorter than its length word, which must fail the same way
  * (RONDB-1124).
+ * P-61 is an NDB API single-table aggregation scan, not through DBSPJ,
+ * whose NdbAggregator program has one column id changed: a GROUP BY or
+ * kOpLoadCol column past the table or a kOpLoadCol of a pseudo column,
+ * which DBTUP must fail with 879, and a GROUP BY TEXT or BLOB column,
+ * which it must fail with 1869 (RONDB-1124,
+ * AggInterpreterBase::initGBTypes and publishGBTypes,
+ * Dbtup::readSingleAttribute).
  * Q-1 .. Q-5 send DBTC requests that carry the mark of a rate queue
  * re-send (passQueue), which only DBTC itself may set (RONDB-1124).
  * S-1 and S-2 send join aggregation signals that only data nodes send
@@ -159,6 +166,7 @@
 #include <ndbapi/NdbAggregationCommon.hpp>
 #include <algorithm>
 #include <cstring>
+#include <utility>
 #include <vector>
 #include "../../src/ndbapi/SignalSender.hpp"
 
@@ -3339,6 +3347,231 @@ class SpjMalformedChecker {
     return result;
   }
 
+  /* ---- P-61: a single-table aggregation program, one word changed ---- *
+   * NDB API scans, not through DBSPJ, of the table test.p61_agg, which
+   * the MTR test creates through MySQL with four rows: ID INT UNSIGNED
+   * (the key, 1 to 4), G INT UNSIGNED (10, 10, 20, 20), TNP TEXT
+   * utf8mb4_0900_ai_ci (a NO PAD collation), TPS TEXT latin1_swedish_ci
+   * (a PAD SPACE one) and B BLOB, attribute ids 0 to 4, with every TEXT
+   * and BLOB value set.  The aggregation program, SELECT G, COUNT(ID)
+   * GROUP BY G built with NdbAggregator, runs in DBTUP's AggInterpreter,
+   * which takes the type and collation of a GROUP BY column from the
+   * table (AggInterpreterBase::initGBTypes), where a join aggregation
+   * takes them from its request (P-54 (d), P-59):
+   *   0..7  the header
+   *   8     GROUP BY column G
+   *   9     kOpLoadCol of ID into register 0
+   *   10    kOpCount of register 0 into slot 0
+   * NdbAggregator refuses a column its table does not have and a GROUP
+   * BY column of type BLOB or TEXT, and setAggregationCode refuses a
+   * program built for another table (error 241).  So a case builds the
+   * program for p61_agg and changes the column id in word 8 or 9 of the
+   * finalized program, which the scan then sends as it is. */
+  static constexpr Uint32 kP61Unchanged = 0;  /* no word changed */
+  static constexpr Uint32 kP61GroupByWord = 8;
+  static constexpr Uint32 kP61LoadWord = 9;
+  static constexpr Uint32 kP61ProgramWords = 11;
+  static constexpr Uint32 kP61IdAttr = 0;
+  static constexpr Uint32 kP61GAttr = 1;
+  static constexpr Uint32 kP61NoPadTextAttr = 2;
+  static constexpr Uint32 kP61PadSpaceTextAttr = 3;
+  static constexpr Uint32 kP61BlobAttr = 4;
+  static constexpr Uint32 kP61Columns = 5;
+  static constexpr Uint32 kP61NoPadCharset = 255;   /* utf8mb4_0900_ai_ci */
+  static constexpr Uint32 kP61PadSpaceCharset = 8;  /* latin1_swedish_ci */
+  static constexpr Uint32 kAttributeIdError = 879;  /* ZATTRIBUTE_ID_ERROR */
+  static constexpr Uint32 kAggOtherError = 1869;    /* ZAGG_OTHER_ERROR */
+
+  /* One P-61 scan: the error code it failed with, 0 if it succeeded,
+   * and the groups it returned, as (G, COUNT(ID)) pairs. */
+  struct P61Outcome {
+    int errorCode{0};
+    std::vector<std::pair<Uint32, Uint64>> groups;
+  };
+
+  /* Scans tab with the P-61 program, in which word `word`
+   * (kP61GroupByWord or kP61LoadWord) gets the column id attrId, or
+   * which is sent as built (kP61Unchanged).  Returns false, after logging
+   * why, if the program could not be built or the scan defined. */
+  bool scanP61(Ndb *pNdb, const NdbDictionary::Table *tab, Uint32 word,
+               Uint32 attrId, P61Outcome &out) {
+    out = P61Outcome();
+    NdbAggregator agg(tab);
+    if (!agg.GroupBy(Int32(kP61GAttr)) ||
+        !agg.LoadColumn(Int32(kP61IdAttr), 0) || !agg.Count(0, 0) ||
+        !agg.Finalize()) {
+      g_err << "P-61: building the program failed: "
+            << agg.GetError().err_msg_ << endl;
+      return false;
+    }
+    /* buffer() holds the program that the scan sends.  The aggregator
+     * itself is not const, so its words may be written. */
+    Uint32 *const prog = const_cast<Uint32 *>(agg.buffer());
+    if (agg.instructions_length() != kP61ProgramWords ||
+        (prog[kP61GroupByWord] >> 16) != kP61GAttr ||
+        aggProgramOp(prog[kP61LoadWord]) != Uint32(kOpLoadCol) ||
+        (prog[kP61LoadWord] & 0xFFFF) != kP61IdAttr ||
+        aggProgramOp(prog[kP61LoadWord + 1]) != Uint32(kOpCount)) {
+      g_err << "P-61: NdbAggregator laid out the program otherwise than "
+               "this case expects (kP61GroupByWord, kP61LoadWord)"
+            << endl;
+      return false;
+    }
+    if (word == kP61GroupByWord) {
+      prog[word] = (attrId << 16) | (prog[word] & 0xFFFF);
+    } else if (word == kP61LoadWord) {
+      prog[word] = (prog[word] & 0xFFFF0000u) | attrId;
+    }
+
+    NdbTransaction *trans = pNdb->startTransaction();
+    if (trans == nullptr) {
+      g_err << "P-61: startTransaction failed: " << pNdb->getNdbError()
+            << endl;
+      return false;
+    }
+    NdbScanOperation *op = trans->getNdbScanOperation(tab);
+    if (op == nullptr ||
+        op->readTuples(NdbOperation::LM_CommittedRead) != 0 ||
+        op->setAggregationCode(&agg) != 0) {
+      g_err << "P-61: defining the scan failed: " << trans->getNdbError()
+            << endl;
+      trans->close();
+      return false;
+    }
+    if (op->DoAggregation() != 0) {
+      NdbError err = op->getNdbError();
+      if (err.code == 0) {
+        err = trans->getNdbError();
+      }
+      out.errorCode = (err.code != 0) ? err.code : -1;
+    } else {
+      NdbAggregator::ResultRecord record = agg.FetchResultRecord();
+      while (!record.end()) {
+        NdbAggregator::Column gCol = record.FetchGroupbyColumn();
+        NdbAggregator::Result countRes = record.FetchAggregationResult();
+        /* A key that is not one 4-byte value, which a changed GROUP BY
+         * column that was not refused returns, reads as ~0. */
+        const Uint32 g =
+            (!gCol.end() && !gCol.is_null() && gCol.byte_size() == 4)
+                ? gCol.data_uint32()
+                : ~Uint32(0);
+        const Uint64 count = (!countRes.end() && !countRes.is_null())
+                                 ? countRes.data_uint64()
+                                 : ~Uint64(0);
+        out.groups.push_back(std::make_pair(g, count));
+        record = agg.FetchResultRecord();
+      }
+    }
+    trans->close();
+    return true;
+  }
+
+  int runP61(Ndb *pNdb, const NdbDictionary::Table *tab) {
+    /* AggInterpreter::ProcessRec sets the GROUP BY types on the first
+     * row (initGBTypes, publishGBTypes) and then reads each GROUP BY
+     * column and each kOpLoadCol column with readSingleAttribute:
+     * - initGBTypes described a GROUP BY column from tabDescriptor at the
+     *   program's column id: an id past the table read the descriptor
+     *   array out of bounds, up to 256 KB past it for 0x7FFF, and where
+     *   the words read there had the charset flag set, a charset
+     *   position from them indexed charsetArray, and publishGBTypes
+     *   took what it read there for the collation (strnxfrm_hash_len).
+     *   readSingleAttribute then refused the id with 879, but first its
+     *   ndbassert stopped a debug data node, as it did for a kOpLoadCol
+     *   column past the table or a pseudo column.  Each now fails the
+     *   row with 879 (b306c658e03).
+     * - BLOB and TEXT have no compare function, which the group hash
+     *   table calls for a column with a collation.  A TEXT column has
+     *   one: no key matched a group, so each row became a group of its
+     *   own, and hashing a key of a NO PAD collation asserted a string
+     *   type in strnxfrm_hash, which stopped a debug data node.  A BLOB
+     *   key was grouped by its bytes.  publishGBTypes now refuses such a
+     *   column, which fails the first row with 1869 (9d013e4d714).
+     * The control, the program as built, must return G 10 and G 20 with
+     * a COUNT of 2 each: without it a harness whose program never
+     * reaches the rows would pass every case. */
+    const char *const findingId =
+        "P-61 single-table aggregation program with a changed column id";
+
+    P61Outcome control;
+    if (!scanP61(pNdb, tab, kP61Unchanged, 0, control)) {
+      return clusterHealthy() ? NDBT_FAILED : failNodeDown(findingId);
+    }
+    std::sort(control.groups.begin(), control.groups.end());
+    const std::vector<std::pair<Uint32, Uint64>> expected = {{10, 2},
+                                                            {20, 2}};
+    if (control.errorCode != 0 || control.groups != expected) {
+      g_err << "P-61 CONTROL (GROUP BY G, COUNT(ID)) did not return G 10 "
+               "and G 20 with a COUNT of 2 each (error "
+            << control.errorCode << ", "
+            << Uint32(control.groups.size())
+            << " groups).  The program does not reach the rows; fix this "
+               "before trusting the result of P-61." << endl;
+      return clusterHealthy() ? NDBT_FAILED : failNodeDown(findingId);
+    }
+    g_info << "CONTROL (GROUP BY G, COUNT(ID)): G 10 and G 20, COUNT 2 "
+              "each" << endl;
+
+    struct Case {
+      const char *id;
+      Uint32 word;
+      Uint32 attrId;
+      Uint32 error;
+    };
+    const Case cases[] = {
+        {"P-61a GROUP BY column 5, past the table", kP61GroupByWord,
+         kP61Columns, kAttributeIdError},
+        {"P-61b GROUP BY column 0x7FFF, the largest local column id",
+         kP61GroupByWord, 0x7FFFu, kAttributeIdError},
+        {"P-61c kOpLoadCol of column 5, past the table", kP61LoadWord,
+         kP61Columns, kAttributeIdError},
+        {"P-61d kOpLoadCol of the pseudo column FRAGMENT", kP61LoadWord,
+         AttributeHeader::FRAGMENT, kAttributeIdError},
+        {"P-61e GROUP BY a TEXT column of utf8mb4_0900_ai_ci (NO PAD)",
+         kP61GroupByWord, kP61NoPadTextAttr, kAggOtherError},
+        {"P-61f GROUP BY a TEXT column of latin1_swedish_ci (PAD SPACE)",
+         kP61GroupByWord, kP61PadSpaceTextAttr, kAggOtherError},
+        {"P-61g GROUP BY a BLOB column", kP61GroupByWord, kP61BlobAttr,
+         kAggOtherError},
+    };
+    std::vector<P61Outcome> outcomes;
+    for (const Case &c : cases) {
+      P61Outcome o;
+      if (!scanP61(pNdb, tab, c.word, c.attrId, o)) {
+        return clusterHealthy() ? NDBT_FAILED : failNodeDown(findingId);
+      }
+      g_info << c.id << ": error " << o.errorCode << ", "
+             << Uint32(o.groups.size()) << " groups" << endl;
+      outcomes.push_back(o);
+    }
+
+    /* Give a crash time to surface, then check status. */
+    NdbSleep_MilliSleep(SettleMillis);
+
+    if (!clusterHealthy()) {
+      return failNodeDown(findingId);
+    }
+    int result = NDBT_OK;
+    Uint32 i = 0;
+    for (const Case &c : cases) {
+      const P61Outcome &o = outcomes[i++];
+      if (o.errorCode != int(c.error)) {
+        g_err << c.id << ": FAIL -- expected error " << c.error
+              << ", got " << o.errorCode;
+        if (o.errorCode == 0) {
+          g_err << " (the scan returned " << Uint32(o.groups.size())
+                << " groups): the column was not refused";
+        }
+        g_err << endl;
+        result = NDBT_FAILED;
+      } else {
+        g_info << c.id << ": PASS (all data nodes started; error "
+               << o.errorCode << ")" << endl;
+      }
+    }
+    return result;
+  }
+
   /* ---- Q cases: DBTC's rate queue re-send mark sent by the API -------- *
    * DBTC's rate queue handler re-sends a queued request to its own DBTC
    * instance with a mark: the passQueue flag of TCKEYREQ, TCINDXREQ and
@@ -4224,6 +4457,79 @@ int runP53(NDBT_Context *ctx, NDBT_Step *step) {
   return res;
 }
 
+/* P-61's table test.p61_agg, with the columns and rows that
+ * SpjMalformedChecker::runP61 describes, which the MTR test
+ * test_spj_malformed_p61 creates and loads before the case and drops
+ * after. */
+int lookupP61Table(Ndb *pNdb, const NdbDictionary::Table *&tab) {
+  const char *const tabName = "p61_agg";
+  const NdbDictionary::Table *found = nullptr;
+  const NdbDictionary::Index *noIndex = nullptr;
+  tab = nullptr;
+  if (lookupMysqlTable(pNdb, tabName, nullptr,
+                       "The MTR test test_spj_malformed_p61", found,
+                       noIndex) != 0) {
+    return -1;
+  }
+  bool columnsOk =
+      (found->getNoOfColumns() == int(SpjMalformedChecker::kP61Columns));
+  if (columnsOk) {
+    const NdbDictionary::Column *const id =
+        found->getColumn(int(SpjMalformedChecker::kP61IdAttr));
+    const NdbDictionary::Column *const g =
+        found->getColumn(int(SpjMalformedChecker::kP61GAttr));
+    const NdbDictionary::Column *const noPad =
+        found->getColumn(int(SpjMalformedChecker::kP61NoPadTextAttr));
+    const NdbDictionary::Column *const padSpace =
+        found->getColumn(int(SpjMalformedChecker::kP61PadSpaceTextAttr));
+    const NdbDictionary::Column *const blob =
+        found->getColumn(int(SpjMalformedChecker::kP61BlobAttr));
+    columnsOk =
+        id->getType() == NdbDictionary::Column::Unsigned &&
+        id->getPrimaryKey() &&
+        g->getType() == NdbDictionary::Column::Unsigned &&
+        !g->getPrimaryKey() &&
+        noPad->getType() == NdbDictionary::Column::Text &&
+        noPad->getCharset() != nullptr &&
+        noPad->getCharsetNumber() ==
+            int(SpjMalformedChecker::kP61NoPadCharset) &&
+        padSpace->getType() == NdbDictionary::Column::Text &&
+        padSpace->getCharset() != nullptr &&
+        padSpace->getCharsetNumber() ==
+            int(SpjMalformedChecker::kP61PadSpaceCharset) &&
+        blob->getType() == NdbDictionary::Column::Blob;
+  }
+  if (!columnsOk) {
+    g_err << "P-61: table " << MysqlDbName << "." << tabName
+          << " does not have the columns that test_spj_malformed_p61 "
+             "creates: ID INT UNSIGNED PRIMARY KEY, G INT UNSIGNED, TNP "
+             "TEXT utf8mb4_0900_ai_ci, TPS TEXT latin1_swedish_ci, B BLOB."
+          << endl;
+    return -1;
+  }
+  tab = found;
+  return 0;
+}
+
+/* P-61 scans a table with TEXT and BLOB columns, which T1 does not have:
+ * test.p61_agg, which the MTR test creates through MySQL. */
+int runP61(NDBT_Context *ctx, NDBT_Step *step) {
+  Ndb *pNdb = nullptr;
+  SignalSender *ss = nullptr;
+  NdbRestarter *restarter = nullptr;
+  SpjMalformedChecker *c = makeChecker(step, pNdb, ss, restarter);
+  if (c == nullptr) return NDBT_FAILED;
+  const NdbDictionary::Table *tab = nullptr;
+  int res = NDBT_FAILED;
+  if (lookupP61Table(pNdb, tab) == 0) {
+    res = c->runP61(pNdb, tab);
+  }
+  delete c;
+  delete ss;
+  delete restarter;
+  return res;
+}
+
 }  // namespace
 
 NDBT_TESTSUITE(testSpjMalformed);
@@ -4418,6 +4724,13 @@ TESTCASE("P60",
          "interpreted read: an instruction cut off at the end of its "
          "program, a parameter section shorter than its length word") {
   STEP(runP60);
+}
+TESTCASE("P61",
+         "single-table aggregation: a GROUP BY or kOpLoadCol column past "
+         "the table, a kOpLoadCol pseudo column, a GROUP BY TEXT or BLOB "
+         "column (reads test.p61_agg, which the MTR test "
+         "test_spj_malformed_p61 creates through MySQL)") {
+  STEP(runP61);
 }
 TESTCASE("Q1", "TCKEYREQ with the rate queue flag from the API") {
   STEP(runQ1);

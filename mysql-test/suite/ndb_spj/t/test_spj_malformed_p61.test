@@ -1,0 +1,43 @@
+--source include/have_ndb.inc
+
+# P-61: NDB API single-table aggregation scans, not through DBSPJ, of the
+# table p61_agg, whose program (NdbAggregator: SELECT G, COUNT(ID) GROUP
+# BY G) has one column id changed (RONDB-1124). DBTUP's AggInterpreter
+# takes the type and collation of a GROUP BY column from the table
+# (AggInterpreterBase::initGBTypes), where a join aggregation (P-54,
+# P-59) takes them from its request.
+# (a) (b) GROUP BY column 5 or 0x7FFF, past the table: initGBTypes read
+# the table descriptor out of bounds, and readSingleAttribute's
+# ndbassert stopped a debug data node. Now 879.
+# (c) (d) kOpLoadCol of column 5 or of the pseudo column FRAGMENT:
+# readSingleAttribute's ndbasserts stopped a debug data node. Now 879.
+# (e) (f) (g) GROUP BY a TEXT column of a NO PAD or a PAD SPACE collation,
+# or a BLOB column, types without a compare function: each row of a TEXT
+# key became a group of its own, and hashing a NO PAD one asserted a
+# string type, which stopped a debug data node; a BLOB key was grouped
+# by its bytes. AggInterpreterBase::publishGBTypes now refuses the
+# column on the first row: 1869.
+# Every data node must still be started. The control, the program as
+# built, must return G 10 and G 20 with a COUNT of 2 each.
+# Tables are created through MySQL, never through the NDB API: this test
+# creates p61_agg and its rows, and testSpjMalformed only looks it up in
+# the NDB database test. The name is lowercase, so that it is the same
+# in NDB with any lower_case_table_names. The attribute ids are 0 to 4
+# in the order of the columns; every TEXT and BLOB value is set.
+# One testSpjMalformed case per MTR test, see
+# suite/ndb_spj/include/spj_malformed_case.inc.
+
+CREATE TABLE p61_agg (
+  ID INT UNSIGNED NOT NULL PRIMARY KEY,
+  G INT UNSIGNED NOT NULL,
+  TNP TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci,
+  TPS TEXT CHARACTER SET latin1 COLLATE latin1_swedish_ci,
+  B BLOB
+) ENGINE=NDB;
+INSERT INTO p61_agg VALUES (1, 10, 'x', 'x', 'x'), (2, 10, 'x', 'x', 'x'), (3, 20, 'y', 'y', 'y'), (4, 20, 'y', 'y', 'y');
+
+--let $spj_case = P61
+--let $spj_case_title = P-61: single-table aggregation program with a column past the table, a pseudo column, a TEXT or BLOB GROUP BY column
+--source suite/ndb_spj/include/spj_malformed_case.inc
+
+DROP TABLE p61_agg;

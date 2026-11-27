@@ -64,7 +64,7 @@ continues both lists. Their status is in `../ronsql_executor/README.md`.
     that sources the original and pins the JIT fallback delta; see
     `mysql-test/suite/ronsql_jit/t/ronsql_cte_minmax_string_redist.test`.
   - Raw-signal hardening tests go in
-    `storage/ndb/test/ndbapi/testSpjMalformed.cpp` (cases P1..P60, Q1..Q5,
+    `storage/ndb/test/ndbapi/testSpjMalformed.cpp` (cases P1..P61, Q1..Q5,
     S1..S2), each with an MTR wrapper in `mysql-test/suite/ndb_spj/t/`
     (`test_spj_malformed_pNN.test`, `test_tc_queue_flag_qN.test`,
     `test_signal_scope_sN.test`). The program creates no table: T1 is
@@ -602,11 +602,13 @@ Optional, performance only:
   does for sibling CTE_LOOKUPs, then clear Q9's skip in
   `ronsqltpch/handler_test.go`.
 - **Untested paths of the 2026-11-26 fixes:**
-  - the CTE_LOOKUP probe and CTE ORDER BY paths of `e226cead16a`, and
-    the single-table paths of `b306c658e03` (a GROUP BY column id past
-    the table) and `9d013e4d714` (a TEXT GROUP BY column):
-    testSpjMalformed cannot build a CTE and its table has no TEXT
-    column;
+  - the CTE_LOOKUP probe and CTE ORDER BY paths of `e226cead16a`:
+    testSpjMalformed cannot build a CTE;
+  - the single-table paths of `b306c658e03` (a GROUP BY or kOpLoadCol
+    column id past the table, a pseudo column) and `9d013e4d714` (a TEXT
+    or BLOB GROUP BY column) are tested now: P61 changes one column id
+    of a finished NdbAggregator program for `test.p61_agg` and expects
+    879 or 1869. The JIT arm of P61 (c) and (d) is not tested;
   - `2ce87f392be` and the reused-connection case of `81e0f764713`
     (timing that no test can force).
 - **NdbAggregator follows no CASE arms:** a program in which a string
