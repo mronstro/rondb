@@ -1095,8 +1095,9 @@ const ConfigInfo::ParamInfo ConfigInfo::m_ParamInfo[] = {
     "Durable commits: every write transaction commits durably, its "
     "acknowledgement waits until its COMMIT and COMPLETE records are "
     "persistent in the REDO log, so it survives a crash of every data "
-    "node. Needs RedoLogMode=pmem; set it for all data nodes and change "
-    "it only by a system restart",
+    "node. Needs RedoLogMode=pmem; the same for all data nodes. ALL SET "
+    "DurableCommits 1 turns them on online, 0 ends them at the next "
+    "system restart",
     ConfigInfo::CI_USED,
     false,
     ConfigInfo::CI_BOOL,

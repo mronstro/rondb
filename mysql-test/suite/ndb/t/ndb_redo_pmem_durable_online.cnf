@@ -1,0 +1,10 @@
+!include ../my.cnf
+
+# RONDB-1150 X7: the REDO log in PMEM mode without durable commits, which
+# the test turns on online; GCP saves twice a second.
+[cluster_config.1]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+NoOfFragmentLogFiles=4
+FragmentLogFileSize=4M
+TimeBetweenGlobalCheckpoints=500

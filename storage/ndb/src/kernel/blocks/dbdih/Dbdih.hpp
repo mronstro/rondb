@@ -1055,6 +1055,9 @@ class Dbdih : public SimulatedBlock {
   void execMASTER_GCPREF(Signal *);
   void execMASTER_GCPREQ(Signal *);
   void execMASTER_GCPCONF(Signal *);
+  void execDURABLE_ACTIVATE_REQ(Signal *);
+  void execDURABLE_ACTIVATE_CONF(Signal *);
+  void execDURABLE_ACTIVATE_REF(Signal *);
   void execMASTER_LCPREF(Signal *);
   void execMASTER_LCPREQ(Signal *);
   void execMASTER_LCPCONF(Signal *);
@@ -1398,6 +1401,7 @@ class Dbdih : public SimulatedBlock {
   void sendEND_TOREQ(Signal *, Uint32 nodeId, Uint32);
   void sendGCP_COMMIT(Signal *, Uint32 nodeId, Uint32);
   void sendGCP_PREPARE(Signal *, Uint32 nodeId, Uint32);
+  void sendDURABLE_ACTIVATE_REQ(Signal *, Uint32 nodeId, Uint32);
   void sendGCP_SAVEREQ(Signal *, Uint32 nodeId, Uint32);
   void sendSUB_GCP_COMPLETE_REP(Signal *, Uint32 nodeId, Uint32);
   void sendINCL_NODEREQ(Signal *, Uint32 nodeId, Uint32);
@@ -2230,9 +2234,12 @@ class Dbdih : public SimulatedBlock {
      * m_lock. 1 with DurableCommits until DIH has read a sysfile, then the
      * g of that sysfile (Sysfile::durableGci): this node's own before the
      * election, the restart's in a system restart, the master's in a node
-     * restart. A system restart ends with g from the config (X7).
+     * restart. A system restart ends with g from the config (X7). An
+     * online activation sets it with the GCI, at GCP_COMMIT of g.
      */
     Uint32 m_durable_gci;
+    /* RONDB-1150, X7: the highest g of a GCP_PREPARE, 0 without */
+    Uint32 m_new_durable_gci;
     enum State {
       M_GCP_IDLE = 0,
       M_GCP_PREPARE = 1,
@@ -2246,6 +2253,12 @@ class Dbdih : public SimulatedBlock {
       Uint32 m_time_between_gcp;
       Uint64 m_new_gci;
       NDB_TICKS m_start_time;
+      /**
+       * RONDB-1150, X7: g that this master took at the gci_hi switch of an
+       * online activation, or learned from MASTER_GCPCONF in a takeover;
+       * 0 before (masterDurableGci())
+       */
+      Uint32 m_durable_gci;
     } m_master;
   } m_micro_gcp;
 
@@ -2285,6 +2298,50 @@ class Dbdih : public SimulatedBlock {
    */
   bool c_durable_commits_config;
   bool c_redo_log_pmem;
+
+  /**
+   * RONDB-1150, X7: online activation of durable commits, ALL SET
+   * DurableCommits 1 (DurableActivate.hpp). On the master: the state and
+   * the nodes whose DIH waits for the answer. On every node: the SET of
+   * the management server that this DIH answers, and the master it asked.
+   */
+  struct DurableActivate {
+    enum State {
+      DA_IDLE = 0,         // none, or g chosen (masterDurableGci())
+      DA_PREPARE = 1,      // Prepare sent to every alive node
+      DA_WAIT_SWITCH = 2,  // every node ready; g at the next gci_hi switch
+      DA_WAIT_ARM = 3      // g chosen; armed by the save of g - 1
+    };
+    State m_state;
+    NdbNodeBitmask m_requesters;
+    Uint32 m_error;         // the first REF of the Prepare round
+    Uint32 m_round;         // senderData of the Prepare round
+    bool m_arming;          // the copy of this GCP save writes g
+    Uint32 m_client_ref;    // the management server, 0 when none
+    Uint32 m_asked_master;  // the master this node asked
+    Uint32 m_client_was_on; // g of this node when the SET came, 0 if off
+  } c_durable_activate;
+  /**
+   * g that the master sends in GCP_PREPARE and GCP_COMMIT: the one it
+   * runs with, or the one of an online activation not yet committed
+   */
+  Uint32 masterDurableGci() const {
+    const Uint32 g = m_micro_gcp.m_durable_gci;
+    const Uint32 activated = m_micro_gcp.m_master.m_durable_gci;
+    return activated > g ? activated : g;
+  }
+  void durableGciLearned(Signal *, Uint32 g);
+  Uint32 durableMapNodeFailFile(Signal *);
+  Uint32 durableActivateCheck();
+  void durableActivatePrepared(Signal *);
+  void durableActivateDone(Signal *, Uint32 error);
+  void durableActivateAnswer(Signal *, Uint32 ref, Uint32 senderData,
+                             Uint32 requestType, Uint32 error);
+  void durableActivateClient(Signal *, Uint32 error, Uint32 g);
+  void durableArmCheck();
+  void durableArmed(Signal *);
+  void durableActivateNodeFailure(Signal *, const NdbNodeBitmask &failed,
+                                  Uint32 oldMasterId);
 
   struct GcpMonitor {
     struct {
@@ -2695,6 +2752,7 @@ class Dbdih : public SimulatedBlock {
   SignalCounter c_SUB_GCP_COMPLETE_REP_Counter;
   SignalCounter c_INCL_NODEREQ_Counter;
   SignalCounter c_MASTER_GCPREQ_Counter;
+  SignalCounter c_DURABLE_ACTIVATE_REQ_Counter;
   SignalCounter c_MASTER_LCPREQ_Counter;
   SignalCounter c_START_INFOREQ_Counter;
   SignalCounter c_START_RECREQ_Counter;
@@ -3056,6 +3114,14 @@ public:
    */
   bool nodeFailFileNeeded() const {
     return durableCommitsOn() || c_durable_commits_config;
+  }
+  /**
+   * RONDB-1150, X7: for QMGR's CM_REGREQ, whether a joining node must
+   * support durable commits: they are on, or this master activates them
+   */
+  bool durableCommitsOnOrActivating() const {
+    return durableCommitsOn() || masterDurableGci() != 0 ||
+           c_durable_activate.m_state != DurableActivate::DA_IDLE;
   }
   Uint32 currentGciHi() const {
     return Uint32(m_micro_gcp.m_current_gci >> 32);

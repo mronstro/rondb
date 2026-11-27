@@ -37,7 +37,7 @@
  * version there signal may be sent. The signal number must remain reserved and
  * handled by receiver until that version is no longer supported.
  */
-const GlobalSignalNumber MAX_GSN = 989;
+const GlobalSignalNumber MAX_GSN = 992;
 
 struct GsnName {
   GlobalSignalNumber gsn;
@@ -1344,4 +1344,9 @@ extern const GlobalSignalNumber NO_OF_SIGNAL_NAMES;
 #define GSN_SR_TAIL_INDOUBT_REP         987
 #define GSN_SR_TAIL_HIT_REP             988
 #define GSN_SR_TAIL_DONE_REP            989
+
+/* RONDB-1150, X7: online activation of durable commits, DIH */
+#define GSN_DURABLE_ACTIVATE_REQ        990
+#define GSN_DURABLE_ACTIVATE_CONF       991
+#define GSN_DURABLE_ACTIVATE_REF        992
 #endif

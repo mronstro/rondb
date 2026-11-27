@@ -148,6 +148,10 @@
   X(GSN_SR_TAIL_INDOUBT_REP, Remote)                                           \
   X(GSN_SR_TAIL_HIT_REP, Remote)                                               \
   X(GSN_SR_TAIL_DONE_REP, Remote)                                              \
+  /* RONDB-1150, X7: CMVMI -> DIH, DIH <-> DIH master, DIH -> QMGR direct */  \
+  X(GSN_DURABLE_ACTIVATE_REQ, Remote)                                          \
+  X(GSN_DURABLE_ACTIVATE_CONF, Remote)                                         \
+  X(GSN_DURABLE_ACTIVATE_REF, Remote)                                          \
   /* ============= Management (DB or MGM, never API) ================= */     \
   X(GSN_START_ORD, Management)                                                 \
   X(GSN_STOP_REQ, Management)                                                  \

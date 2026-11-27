@@ -41,6 +41,11 @@ class MasterGCPConf {
 
  public:
   static constexpr Uint32 SignalLength = 10 + 2;
+  /**
+   * RONDB-1150, X7: and the highest g of durable commits the node knows,
+   * from a GCP_PREPARE or GCP_COMMIT, to a master of a version with them
+   */
+  static constexpr Uint32 SignalLengthDurable = SignalLength + 1;
 
   enum State {
     GCP_READY = 0,
@@ -106,6 +111,7 @@ class MasterGCPConf {
   Uint32 newGCP_lo;
   Uint32 saveState;
   Uint32 saveGCI;
+  Uint32 durableGci;
 };
 
 /**

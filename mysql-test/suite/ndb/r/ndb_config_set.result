@@ -25,10 +25,10 @@ MaxDiskWriteSpeed must be between 1M and 1024G
 Invalid value: '100X'. Use a number with optional K, M, or G suffix (e.g., 100M)
 
 Usage: <id> SET <parameter> <value>
-Supported parameters: MaxDiskWriteSpeed, EnableProactiveDeadlockDetection, RdmaLogLevel, CompiledInterpreter, AdaptiveSendThreshold
+Supported parameters: MaxDiskWriteSpeed, EnableProactiveDeadlockDetection, RdmaLogLevel, CompiledInterpreter, AdaptiveSendThreshold, DurableCommits
 
 Unknown SET parameter: 'FooBar'
-Supported parameters: MaxDiskWriteSpeed, EnableProactiveDeadlockDetection, RdmaLogLevel, CompiledInterpreter, AdaptiveSendThreshold
+Supported parameters: MaxDiskWriteSpeed, EnableProactiveDeadlockDetection, RdmaLogLevel, CompiledInterpreter, AdaptiveSendThreshold, DurableCommits
 
 Node 3 found, but with wrong node type
 MaxDiskWriteSpeed is a data node parameter: node 3 is not a data node
@@ -62,5 +62,5 @@ RdmaLogLevel must be an integer between 0 and 3 (0=errors, 1=warnings, 2=info, 3
 RdmaLogLevel must be an integer between 0 and 3 (0=errors, 1=warnings, 2=info, 3=debug)
 
 Usage: <id> SET <parameter> <value>
-Supported parameters: MaxDiskWriteSpeed, EnableProactiveDeadlockDetection, RdmaLogLevel, CompiledInterpreter, AdaptiveSendThreshold
+Supported parameters: MaxDiskWriteSpeed, EnableProactiveDeadlockDetection, RdmaLogLevel, CompiledInterpreter, AdaptiveSendThreshold, DurableCommits
 

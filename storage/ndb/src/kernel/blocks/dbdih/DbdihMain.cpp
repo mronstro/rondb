@@ -54,6 +54,7 @@
 #include <signaldata/EventReport.hpp>
 #include <signaldata/FsConf.hpp>
 #include <signaldata/FsReadWriteReq.hpp>
+#include <signaldata/DurableActivate.hpp>
 #include <signaldata/GCP.hpp>
 #include <signaldata/LCP.hpp>
 #include <signaldata/MasterGCP.hpp>
@@ -99,6 +100,7 @@
 #include <signaldata/JoinAgg.hpp>
 #include <signaldata/LqhFrag.hpp>
 #include <signaldata/PrepDropTab.hpp>
+#include <signaldata/SetConfigParam.hpp>
 #include <signaldata/SumaImpl.hpp>
 #include <signaldata/Upgrade.hpp>
 #include "portlib/mt-asm.h"
@@ -390,9 +392,14 @@ void Dbdih::sendGCP_COMMIT(Signal *signal, Uint32 nodeId, Uint32 extra) {
   req->nodeId = cownNodeId;
   req->gci_hi = Uint32(m_micro_gcp.m_master.m_new_gci >> 32);
   req->gci_lo = Uint32(m_micro_gcp.m_master.m_new_gci);
+  /* RONDB-1150, X7: g, only when on or activated (every node has them) */
+  req->durableGci = masterDurableGci();
   DEB_NODE_STOP(
       ("Send GCP_COMMIT(%u,%u) to %u", req->gci_hi, req->gci_lo, nodeId));
-  sendSignal(ref, GSN_GCP_COMMIT, signal, GCPCommit::SignalLength, JBA);
+  sendSignal(ref, GSN_GCP_COMMIT, signal,
+             req->durableGci != 0 ? GCPCommit::SignalLengthDurable
+                                  : GCPCommit::SignalLength,
+             JBA);
 
   ndbassert(m_micro_gcp.m_enabled || Uint32(m_micro_gcp.m_new_gci) == 0);
 }  // Dbdih::sendGCP_COMMIT()
@@ -403,18 +410,21 @@ void Dbdih::sendGCP_PREPARE(Signal *signal, Uint32 nodeId, Uint32 extra) {
   req->nodeId = cownNodeId;
   req->gci_hi = Uint32(m_micro_gcp.m_master.m_new_gci >> 32);
   req->gci_lo = Uint32(m_micro_gcp.m_master.m_new_gci);
+  /* RONDB-1150, X7: g, only when on or activated (every node has them) */
+  req->durableGci = masterDurableGci();
+  const Uint32 length = req->durableGci != 0 ? GCPPrepare::SignalLengthDurable
+                                             : GCPPrepare::SignalLength;
 
   DEB_NODE_STOP(
       ("Send GCP_PREPARE(%u,%u) to %u", req->gci_hi, req->gci_lo, nodeId));
 
   if (!(ERROR_INSERTED(7201) || ERROR_INSERTED(7202))) {
-    sendSignal(ref, GSN_GCP_PREPARE, signal, GCPPrepare::SignalLength, JBA);
+    sendSignal(ref, GSN_GCP_PREPARE, signal, length, JBA);
   } else if (ERROR_INSERTED(7201)) {
-    sendSignal(ref, GSN_GCP_PREPARE, signal, GCPPrepare::SignalLength, JBB);
+    sendSignal(ref, GSN_GCP_PREPARE, signal, length, JBB);
   } else if (ERROR_INSERTED(7202)) {
     ndbrequire(nodeId == getOwnNodeId());
-    sendSignalWithDelay(ref, GSN_GCP_PREPARE, signal, 2000,
-                        GCPPrepare::SignalLength);
+    sendSignalWithDelay(ref, GSN_GCP_PREPARE, signal, 2000, length);
   } else {
     ndbabort();  // should be dead code #ifndef ERROR_INSERT
   }
@@ -1185,6 +1195,10 @@ void Dbdih::execCOPY_GCIREQ(Signal *signal) {
               m_micro_gcp.m_durable_gci);
         }
       }
+      if (SYSFILE->durableGci != 0) {
+        jam();
+        durableGciLearned(signal, SYSFILE->durableGci);
+      }
       m_micro_gcp.m_durable_gci = SYSFILE->durableGci;
       setNodeActiveStatus();
       setNodeGroups();
@@ -1280,6 +1294,10 @@ void Dbdih::execCOPY_GCIREQ(Signal *signal) {
               "were on from GCI %u",
               m_micro_gcp.m_durable_gci);
         }
+      }
+      if (SYSFILE->durableGci != 0) {
+        jam();
+        durableGciLearned(signal, SYSFILE->durableGci);
       }
       m_micro_gcp.m_durable_gci = SYSFILE->durableGci;
       break;
@@ -3484,29 +3502,14 @@ void Dbdih::execSTART_MECONF(Signal *signal) {
     /**
      * RONDB-1150, X7: g of the cluster, from the master's sysfile, whatever
      * this node's DurableCommits says, which takes effect at the end of a
-     * system restart. With durable commits on, the node needs its REDO log
-     * on persistent memory, and its node-failure file mapped since start
-     * phase 3 (nodeFailFileNeeded(), evaluated with the g it had then).
+     * system restart (durableGciLearned() checks the REDO log mode and
+     * maps the node-failure file). An activation not yet armed is not in
+     * the sysfile, but the master lets no node start then (Q-B7).
      */
     const Uint32 g = SYSFILE->durableGci;
-    if (g != 0 && !c_redo_log_pmem) {
-      char buf[160];
-      BaseString::snprintf(buf, sizeof(buf),
-                           "The cluster runs durable commits from GCI %u, "
-                           "which need RedoLogMode=pmem on this node",
-                           g);
-      progError(__LINE__, NDBD_EXIT_INVALID_CONFIG, buf);
-    }
-    if (g != 0 && !nodeFailFileNeeded()) {
-      char buf[200];
-      BaseString::snprintf(buf, sizeof(buf),
-                           "The cluster runs durable commits from GCI %u; "
-                           "this node started with DurableCommits=0 and "
-                           "without its node-failure file: start it with "
-                           "DurableCommits=1, or end them by a system "
-                           "restart first",
-                           g);
-      progError(__LINE__, NDBD_EXIT_INVALID_CONFIG, buf);
+    if (g != 0) {
+      jam();
+      durableGciLearned(signal, g);
     }
     if (g != m_micro_gcp.m_durable_gci) {
       jam();
@@ -3660,6 +3663,23 @@ void Dbdih::execSTART_PERMREQ(Signal *signal) {
     sendSignal(retRef, GSN_START_PERMREF, signal, 2, JBB);
     return;
   }  // if
+
+  if (c_durable_activate.m_state != DurableActivate::DA_IDLE ||
+      (masterDurableGci() != 0 && SYSFILE->durableGci != masterDurableGci())) {
+    /**
+     * RONDB-1150, X7 (Q-B7): no node starts while durable commits are
+     * activated, until they are armed; the node asks again in 3 s
+     */
+    jam();
+    g_eventLogger->info(
+        "DIH: node %u waits to start until the activation of durable "
+        "commits is armed",
+        nodeId);
+    signal->theData[0] = nodeId;
+    signal->theData[1] = StartPermRef::ZNODE_START_DISALLOWED_ERROR;
+    sendSignal(retRef, GSN_START_PERMREF, signal, 2, JBB);
+    return;
+  }
 
   if (!getAllowNodeStart(nodeId)) {
     jam();
@@ -10610,6 +10630,7 @@ void Dbdih::execNODE_FAILREP(Signal *signal) {
      */
     failedNodeSynchHandling(signal, failedNodePtr);
   }  // for
+  durableActivateNodeFailure(signal, allFailed, oldMasterId);
   if (masterTakeOver) {
     jam();
     NodeRecordPtr nodePtr;
@@ -11621,6 +11642,14 @@ void Dbdih::execMASTER_GCPREQ(Signal *signal) {
   masterGCPConf->newGCP_lo = Uint32(m_micro_gcp.m_new_gci);
   masterGCPConf->saveState = saveState;
   masterGCPConf->saveGCI = m_gcp_save.m_gci;
+  /* RONDB-1150, X7: g, also of an activation prepared but not committed */
+  masterGCPConf->durableGci =
+      std::max(m_micro_gcp.m_durable_gci, m_micro_gcp.m_new_durable_gci);
+  const Uint32 confLength =
+      ndbd_support_durable_commits(
+          getNodeInfo(refToNode(newMasterBlockref)).m_version)
+          ? MasterGCPConf::SignalLengthDurable
+          : MasterGCPConf::SignalLength;
   Uint32 packed_length =
       NdbNodeBitmask::getPackedLengthInWords(SYSFILE->lcpActive);
 
@@ -11634,7 +11663,7 @@ void Dbdih::execMASTER_GCPREQ(Signal *signal) {
     import(handle.m_ptr[0], lsptr[0].p, lsptr[0].sz);
 
     sendSignalWithDelay(newMasterBlockref, GSN_MASTER_GCPCONF, signal, 500,
-                        MasterGCPConf::SignalLength, &handle);
+                        confLength, &handle);
   } else {
     Uint32 node_version = getNodeInfo(refToNode(newMasterBlockref)).m_version;
     if (ndbd_send_node_bitmask_in_section(node_version)) {
@@ -11643,14 +11672,14 @@ void Dbdih::execMASTER_GCPREQ(Signal *signal) {
       LinearSectionPtr lsptr[3];
       lsptr[0].p = lcpActiveCopy;
       lsptr[0].sz = packed_length;
-      sendSignal(newMasterBlockref, GSN_MASTER_GCPCONF, signal,
-                 MasterGCPConf::SignalLength, JBB, lsptr, 1);
+      sendSignal(newMasterBlockref, GSN_MASTER_GCPCONF, signal, confLength,
+                 JBB, lsptr, 1);
     } else if (packed_length <= NdbNodeBitmask48::Size) {
       for (Uint32 i = 0; i < NdbNodeBitmask48::Size; i++)
         masterGCPConf->lcpActive_v1[i] = SYSFILE->lcpActive[i];
 
-      sendSignal(newMasterBlockref, GSN_MASTER_GCPCONF, signal,
-                 MasterGCPConf::SignalLength, JBB);
+      sendSignal(newMasterBlockref, GSN_MASTER_GCPCONF, signal, confLength,
+                 JBB);
     } else {
       ndbabort();
     }
@@ -11674,6 +11703,19 @@ void Dbdih::execMASTER_GCPCONF(Signal *signal) {
 
   Uint32 senderRef = signal->getSendersBlockRef();
   Uint32 senderVersion = getNodeInfo(refToNode(senderRef)).m_version;
+  /**
+   * RONDB-1150, X7: g that the node knows, read before temp_lcpActive
+   * overwrites the word: the new master sends the highest of all nodes in
+   * GCP_PREPARE and GCP_COMMIT, and arms durable commits with it
+   */
+  const Uint32 durableGci =
+      signal->getLength() >= MasterGCPConf::SignalLengthDurable
+          ? masterGCPConf->durableGci
+          : 0;
+  if (durableGci > m_micro_gcp.m_master.m_durable_gci) {
+    jam();
+    m_micro_gcp.m_master.m_durable_gci = durableGci;
+  }
   Uint32 *temp_lcpActive = &signal->theData[MasterGCPConf::SignalLength];
 
   if (signal->getNoOfSections() >= 1) {
@@ -11909,6 +11951,7 @@ void Dbdih::MASTER_GCPhandling(Signal *signal, Uint32 failedNodeId) {
       case GcpSave::GCP_SAVE_COPY_GCI:
         jam();
         ok = true;
+        durableArmCheck();
         copyGciLab(signal, CopyGCIReq::GLOBAL_CHECKPOINT);
         m_gcp_save.m_master.m_state = GcpSave::GCP_SAVE_COPY_GCI;
         break;
@@ -18375,6 +18418,33 @@ void Dbdih::startGcpLab(Signal *signal) {
       CLEAR_ERROR_INSERT_VALUE;
     }
 
+    if (c_durable_activate.m_state == DurableActivate::DA_WAIT_SWITCH &&
+        !ERROR_INSERTED(7263)) {
+      /**
+       * RONDB-1150, X7: g is this new gci_hi, so that every transaction of
+       * a gci_hi >= g commits durably and none below; every GCP_PREPARE
+       * and GCP_COMMIT from this one carries it. 7263 holds it back.
+       */
+      jam();
+      const Uint32 error = durableActivateCheck();
+      if (error != 0) {
+        jam();
+        durableActivateDone(signal, error);
+      } else {
+        jam();
+        const Uint32 g = Uint32(m_micro_gcp.m_master.m_new_gci >> 32);
+        m_micro_gcp.m_master.m_durable_gci = g;
+        c_durable_activate.m_state = DurableActivate::DA_WAIT_ARM;
+        g_eventLogger->info(
+            "DIH: durable commits activated from GCI %u, armed when GCI %u "
+            "is saved",
+            g, g - 1);
+        infoEvent("Durable commits activated from GCI %u, armed when GCI %u "
+                  "is saved",
+                  g, g - 1);
+      }
+    }
+
     signal->theData[0] = NDB_LE_GlobalCheckpointStarted;  // Event type
     signal->theData[1] = Uint32(currGCI >> 32);
     signal->theData[2] = Uint32(currGCI);
@@ -18447,6 +18517,13 @@ void Dbdih::startGcpLab(Signal *signal) {
 #endif
 
   sendLoopMacro(GCP_PREPARE, sendGCP_PREPARE, RNIL);
+
+  if (m_micro_gcp.m_master.m_durable_gci != 0 &&
+      (Uint64(m_micro_gcp.m_master.m_durable_gci) << 32) ==
+          m_micro_gcp.m_master.m_new_gci) {
+    /* RONDB-1150, X7: the master stops after GCP_PREPARE(g) */
+    CRASH_INSERTION(7260);
+  }
 }  // Dbdih::startGcpLab()
 
 void Dbdih::execGCP_PREPARECONF(Signal *signal) {
@@ -18797,11 +18874,479 @@ void Dbdih::GCP_SAVEhandling(Signal *signal, Uint32 nodeId) {
 #endif
     SYSFILE->clearInitialStartOngoing();
   }
+  durableArmCheck();
   copyGciLab(signal, CopyGCIReq::GLOBAL_CHECKPOINT);
 
   m_gcp_save.m_master.m_state = GcpSave::GCP_SAVE_COPY_GCI;
 
 }  // Dbdih::GCP_SAVEhandling()
+
+/*
+  RONDB-1150, X7: ONLINE ACTIVATION OF DURABLE COMMITS
+  ****************************************************
+  ALL SET DurableCommits 1 reaches CMVMI on every data node, which hands
+  it to its DIH (Set); each DIH asks the master (Request). The master
+  checks the cluster, has every alive node check its REDO log mode and
+  map its node-failure file (Prepare), takes g at the next gci_hi switch
+  and sends it in every GCP_PREPARE and GCP_COMMIT from then. Each node
+  commits durably from the GCP_COMMIT of g, switching with the GCI under
+  m_micro_gcp.m_lock. The guarantee holds once the GCP save of g - 1 has
+  written g into the sysfile of every node (armed); then the master
+  answers the requests, and each DIH the management server. A node that
+  failed before the Prepare round is in the sysfile that arms them, with
+  its last completed GCI; the node-failure files record those after it.
+*/
+static const char *durableActivateErrorText(Uint32 error) {
+  switch (error) {
+    case DurableActivateRef::NotMaster:
+      return "the node asked is no longer the master";
+    case DurableActivateRef::NotStarted:
+      return "the cluster has not completed its start";
+    case DurableActivateRef::NodeRestart:
+      return "a node restart runs";
+    case DurableActivateRef::NodeVersion:
+      return "a data node runs a version without durable commits";
+    case DurableActivateRef::NotPmem:
+      return "a data node has a RedoLogMode other than pmem";
+    case DurableActivateRef::NodeFailFile:
+      return "a data node cannot map its node-failure file";
+    case DurableActivateRef::NodeFailure:
+      return "a data node failed during the activation";
+    case DurableActivateRef::Busy:
+      return "this node already waits for an activation";
+    case DurableActivateRef::MasterFailure:
+      return "the master failed during the activation";
+    default:
+      return "unknown error";
+  }
+}
+
+void Dbdih::execDURABLE_ACTIVATE_REQ(Signal *signal) {
+  jamEntry();
+  const DurableActivateReq req =
+      *CAST_CONSTPTR(DurableActivateReq, signal->getDataPtr());
+  switch (req.requestType) {
+    case DurableActivateReq::Set: {
+      /* From CMVMI: SET DurableCommits 1 of the management server */
+      jam();
+      ndbrequire(refToNode(signal->getSendersBlockRef()) == getOwnNodeId());
+      Uint32 error = 0;
+      if (c_durable_activate.m_client_ref != 0) {
+        jam();
+        error = DurableActivateRef::Busy;
+      } else if (getNodeState().startLevel != NodeState::SL_STARTED) {
+        jam();  // no master to ask yet
+        error = DurableActivateRef::NotStarted;
+      }
+      if (error != 0) {
+        jam();
+        g_eventLogger->warning("DIH: SET DurableCommits 1 refused: %s",
+                               durableActivateErrorText(error));
+        SetConfigParamRef *ref = (SetConfigParamRef *)signal->getDataPtrSend();
+        ref->senderRef = reference();
+        ref->configParamKey = CFG_DB_DURABLE_COMMITS;
+        ref->errorCode = error;
+        sendSignal(req.senderRef, GSN_SET_CONFIG_PARAM_REF, signal,
+                   SetConfigParamRef::SignalLength, JBB);
+        return;
+      }
+      c_durable_activate.m_client_ref = req.senderRef;
+      c_durable_activate.m_asked_master = cmasterNodeId;
+      c_durable_activate.m_client_was_on = m_micro_gcp.m_durable_gci;
+      DurableActivateReq *fwd = (DurableActivateReq *)signal->getDataPtrSend();
+      fwd->senderRef = reference();
+      fwd->senderData = 0;
+      fwd->requestType = DurableActivateReq::Request;
+      fwd->value = 1;
+      sendSignal(cmasterdihref, GSN_DURABLE_ACTIVATE_REQ, signal,
+                 DurableActivateReq::SignalLength, JBB);
+      return;
+    }
+    case DurableActivateReq::Request: {
+      jam();
+      if (!isMaster()) {
+        jam();
+        durableActivateAnswer(signal, req.senderRef, req.senderData,
+                              DurableActivateReq::Request,
+                              DurableActivateRef::NotMaster);
+        return;
+      }
+      const Uint32 g = masterDurableGci();
+      if (g != 0 && SYSFILE->durableGci == g) {
+        jam();  // on and armed
+        durableActivateAnswer(signal, req.senderRef, req.senderData,
+                              DurableActivateReq::Request, 0);
+        return;
+      }
+      c_durable_activate.m_requesters.set(refToNode(req.senderRef));
+      if (g != 0 ||
+          c_durable_activate.m_state != DurableActivate::DA_IDLE) {
+        jam();  // answered when armed, or when the activation fails
+        return;
+      }
+      const Uint32 error = durableActivateCheck();
+      if (error != 0) {
+        jam();
+        durableActivateDone(signal, error);
+        return;
+      }
+      g_eventLogger->info(
+          "DIH: durable commits: activation requested by node %u; every "
+          "node checks its REDO log and maps its node-failure file",
+          refToNode(req.senderRef));
+      c_durable_activate.m_state = DurableActivate::DA_PREPARE;
+      c_durable_activate.m_error = 0;
+      c_durable_activate.m_round++;
+      sendLoopMacro(DURABLE_ACTIVATE_REQ, sendDURABLE_ACTIVATE_REQ, RNIL);
+      return;
+    }
+    case DurableActivateReq::Prepare: {
+      jam();
+      Uint32 error = 0;
+      if (!c_redo_log_pmem) {
+        jam();
+        error = DurableActivateRef::NotPmem;
+      } else if (durableMapNodeFailFile(signal) != 0) {
+        jam();
+        error = DurableActivateRef::NodeFailFile;
+      }
+      durableActivateAnswer(signal, req.senderRef, req.senderData,
+                            DurableActivateReq::Prepare, error);
+      return;
+    }
+    default:
+      ndbabort();
+  }
+}
+
+void Dbdih::sendDURABLE_ACTIVATE_REQ(Signal *signal, Uint32 nodeId, Uint32) {
+  DurableActivateReq *req = (DurableActivateReq *)signal->getDataPtrSend();
+  req->senderRef = reference();
+  req->senderData = c_durable_activate.m_round;
+  req->requestType = DurableActivateReq::Prepare;
+  req->value = 1;
+  sendSignal(calcDihBlockRef(nodeId), GSN_DURABLE_ACTIVATE_REQ, signal,
+             DurableActivateReq::SignalLength, JBB);
+}
+
+void Dbdih::execDURABLE_ACTIVATE_CONF(Signal *signal) {
+  jamEntry();
+  const DurableActivateConf conf =
+      *CAST_CONSTPTR(DurableActivateConf, signal->getDataPtr());
+  if (conf.requestType == DurableActivateReq::Prepare) {
+    jam();
+    if (c_durable_activate.m_state != DurableActivate::DA_PREPARE ||
+        conf.senderData != c_durable_activate.m_round) {
+      jam();  // of a round that a node failure ended
+      return;
+    }
+    receiveLoopMacro(DURABLE_ACTIVATE_REQ, refToNode(conf.senderRef));
+    durableActivatePrepared(signal);
+    return;
+  }
+  ndbrequire(conf.requestType == DurableActivateReq::Request);
+  durableActivateClient(signal, 0, conf.durableGci);
+}
+
+void Dbdih::execDURABLE_ACTIVATE_REF(Signal *signal) {
+  jamEntry();
+  const DurableActivateRef ref =
+      *CAST_CONSTPTR(DurableActivateRef, signal->getDataPtr());
+  if (ref.requestType == DurableActivateReq::Prepare) {
+    jam();
+    if (c_durable_activate.m_state != DurableActivate::DA_PREPARE ||
+        ref.senderData != c_durable_activate.m_round) {
+      jam();
+      return;
+    }
+    g_eventLogger->warning("DIH: durable commits: node %u is not ready: %s",
+                           refToNode(ref.senderRef),
+                           durableActivateErrorText(ref.errorCode));
+    if (c_durable_activate.m_error == 0) {
+      c_durable_activate.m_error = ref.errorCode;
+    }
+    receiveLoopMacro(DURABLE_ACTIVATE_REQ, refToNode(ref.senderRef));
+    durableActivatePrepared(signal);
+    return;
+  }
+  ndbrequire(ref.requestType == DurableActivateReq::Request);
+  durableActivateClient(signal, ref.errorCode, 0);
+}
+
+/**
+ * The master: whether durable commits can be activated now, 0 or a
+ * DurableActivateRef error. The cluster has started, no node restart
+ * runs (Q-B7), and every alive data node runs a version with them.
+ */
+Uint32 Dbdih::durableActivateCheck() {
+  if (cmasterState != MASTER_ACTIVE ||
+      getNodeState().startLevel != NodeState::SL_STARTED) {
+    jam();
+    return DurableActivateRef::NotStarted;
+  }
+  if (c_nodeStartMaster.activeState || c_nodeStartMaster.wait != ZFALSE ||
+      c_ndbcntr->is_any_node_below_restart_barrier()) {
+    jam();
+    return DurableActivateRef::NodeRestart;
+  }
+  for (Uint32 nodeId = 1; nodeId <= m_max_node_id; nodeId++) {
+    const NodeRecord::NodeStatus status = getNodeStatus(nodeId);
+    if (status == NodeRecord::STARTING) {
+      jam();
+      return DurableActivateRef::NodeRestart;
+    }
+    if (status == NodeRecord::ALIVE &&
+        !ndbd_support_durable_commits(getNodeInfo(nodeId).m_version)) {
+      jam();
+      return DurableActivateRef::NodeVersion;
+    }
+  }
+  return 0;
+}
+
+/**
+ * The master: every alive node answered the Prepare round. g at the next
+ * gci_hi switch, which an invalid start time of the GCP save brings at
+ * the next micro GCP, as when the interval between GCP saves has passed.
+ */
+void Dbdih::durableActivatePrepared(Signal *signal) {
+  if (c_durable_activate.m_error != 0) {
+    jam();
+    durableActivateDone(signal, c_durable_activate.m_error);
+    return;
+  }
+  jam();
+  c_durable_activate.m_state = DurableActivate::DA_WAIT_SWITCH;
+  NdbTick_Invalidate(&m_gcp_save.m_master.m_start_time);
+  g_eventLogger->info(
+      "DIH: durable commits: every node is ready, g is the next gci_hi");
+}
+
+/**
+ * The master: the activation fails before g is chosen; every node that
+ * asked gets the error. The saved config turns durable commits on at the
+ * next system restart.
+ */
+void Dbdih::durableActivateDone(Signal *signal, Uint32 error) {
+  jam();
+  g_eventLogger->warning(
+      "DIH: durable commits not activated: %s; run ALL SET DurableCommits 1 "
+      "again, or a system restart turns them on",
+      durableActivateErrorText(error));
+  warningEvent("Durable commits not activated: %s",
+               durableActivateErrorText(error));
+  c_durable_activate.m_state = DurableActivate::DA_IDLE;
+  c_durable_activate.m_error = 0;
+  NdbNodeBitmask requesters = c_durable_activate.m_requesters;
+  c_durable_activate.m_requesters.clear();
+  for (Uint32 nodeId = requesters.find_first();
+       nodeId != NdbNodeBitmask::NotFound;
+       nodeId = requesters.find_next(nodeId + 1)) {
+    durableActivateAnswer(signal, calcDihBlockRef(nodeId), 0,
+                          DurableActivateReq::Request, error);
+  }
+}
+
+/**
+ * CONF (error 0) or REF of a Request or a Prepare; a CONF of a Request
+ * carries g
+ */
+void Dbdih::durableActivateAnswer(Signal *signal, Uint32 ref,
+                                  Uint32 senderData, Uint32 requestType,
+                                  Uint32 error) {
+  if (error == 0) {
+    jam();
+    DurableActivateConf *conf =
+        (DurableActivateConf *)signal->getDataPtrSend();
+    conf->senderRef = reference();
+    conf->senderData = senderData;
+    conf->requestType = requestType;
+    conf->durableGci =
+        requestType == DurableActivateReq::Request ? masterDurableGci() : 0;
+    sendSignal(ref, GSN_DURABLE_ACTIVATE_CONF, signal,
+               DurableActivateConf::SignalLength, JBB);
+  } else {
+    jam();
+    DurableActivateRef *rf = (DurableActivateRef *)signal->getDataPtrSend();
+    rf->senderRef = reference();
+    rf->senderData = senderData;
+    rf->requestType = requestType;
+    rf->errorCode = error;
+    sendSignal(ref, GSN_DURABLE_ACTIVATE_REF, signal,
+               DurableActivateRef::SignalLength, JBB);
+  }
+}
+
+/**
+ * Every node: the answer to the SET of the management server, through
+ * which it waits until durable commits are armed. Any REF becomes error
+ * 5070 there.
+ */
+void Dbdih::durableActivateClient(Signal *signal, Uint32 error, Uint32 g) {
+  const Uint32 clientRef = c_durable_activate.m_client_ref;
+  if (clientRef == 0) {
+    jam();
+    return;
+  }
+  c_durable_activate.m_client_ref = 0;
+  if (error == 0) {
+    /**
+     * A repeated SET logs another line than the one that turned them on:
+     * the log handler holds back a line equal to the one before it until
+     * a different one comes, which may be much later.
+     */
+    if (c_durable_activate.m_client_was_on != 0) {
+      jam();
+      g_eventLogger->info(
+          "DIH: SET DurableCommits 1: durable commits were already on from "
+          "GCI %u",
+          g);
+    } else {
+      jam();
+      g_eventLogger->info(
+          "DIH: SET DurableCommits 1: durable commits are on from GCI %u", g);
+    }
+    SetConfigParamConf *conf = (SetConfigParamConf *)signal->getDataPtrSend();
+    conf->senderRef = reference();
+    conf->configParamKey = CFG_DB_DURABLE_COMMITS;
+    sendSignal(clientRef, GSN_SET_CONFIG_PARAM_CONF, signal,
+               SetConfigParamConf::SignalLength, JBB);
+    return;
+  }
+  jam();
+  g_eventLogger->warning(
+      "DIH: SET DurableCommits 1 failed: %s; the saved config turns durable "
+      "commits on at the next system restart",
+      durableActivateErrorText(error));
+  SetConfigParamRef *ref = (SetConfigParamRef *)signal->getDataPtrSend();
+  ref->senderRef = reference();
+  ref->configParamKey = CFG_DB_DURABLE_COMMITS;
+  ref->errorCode = error;
+  sendSignal(clientRef, GSN_SET_CONFIG_PARAM_REF, signal,
+             SetConfigParamRef::SignalLength, JBB);
+}
+
+/**
+ * The master: the copy of this GCP save writes g into the sysfile of
+ * every node when the save is of g - 1 or later (armed at its
+ * COPY_GCICONF). A system restart from such a sysfile runs phase 2 with
+ * g, which needs R >= g - 1 (X7.4); one from an earlier sysfile has
+ * durable commits off, and turns them on at its end with the config.
+ * Error insert 7261 stops the master before.
+ */
+void Dbdih::durableArmCheck() {
+  const Uint32 g = masterDurableGci();
+  if (g == 0 || SYSFILE->durableGci == g ||
+      SYSFILE->newestRestorableGCI + 1 < g) {
+    jam();
+    return;
+  }
+  jam();
+  CRASH_INSERTION(7261);
+  ndbrequire(SYSFILE->durableGci == 0);
+  SYSFILE->durableGci = g;
+  c_durable_activate.m_arming = true;
+}
+
+/**
+ * The master: every node has the sysfile with g on disk. Every node that
+ * asked gets g. After a takeover nobody waits: the nodes that asked the
+ * failed master have answered their SET with an error.
+ */
+void Dbdih::durableArmed(Signal *signal) {
+  const Uint32 g = SYSFILE->durableGci;
+  g_eventLogger->info(
+      "DIH: durable commits armed from GCI %u: GCI %u is restorable, and "
+      "the sysfile of every node has g",
+      g, SYSFILE->newestRestorableGCI);
+  infoEvent("Durable commits are on from GCI %u (armed)", g);
+  c_durable_activate.m_state = DurableActivate::DA_IDLE;
+  NdbNodeBitmask requesters = c_durable_activate.m_requesters;
+  c_durable_activate.m_requesters.clear();
+  for (Uint32 nodeId = requesters.find_first();
+       nodeId != NdbNodeBitmask::NotFound;
+       nodeId = requesters.find_next(nodeId + 1)) {
+    durableActivateAnswer(signal, calcDihBlockRef(nodeId), 0,
+                          DurableActivateReq::Request, 0);
+  }
+}
+
+/**
+ * Every node: a node failure. The SET that this node passed on fails
+ * with the master it asked. The master forgets the nodes that failed,
+ * and an activation before g is chosen fails, as a failed node could
+ * start again without the Prepare round; once g is chosen it goes on.
+ */
+void Dbdih::durableActivateNodeFailure(Signal *signal,
+                                       const NdbNodeBitmask &failed,
+                                       Uint32 oldMasterId) {
+  if (c_durable_activate.m_client_ref != 0 &&
+      failed.get(c_durable_activate.m_asked_master)) {
+    jam();
+    durableActivateClient(signal, DurableActivateRef::MasterFailure, 0);
+  }
+  if (oldMasterId != getOwnNodeId()) {
+    jam();
+    return;
+  }
+  c_durable_activate.m_requesters.bitANDC(failed);
+  if (c_durable_activate.m_state == DurableActivate::DA_PREPARE) {
+    jam();
+    for (Uint32 nodeId = failed.find_first();
+         nodeId != NdbNodeBitmask::NotFound;
+         nodeId = failed.find_next(nodeId + 1)) {
+      c_DURABLE_ACTIVATE_REQ_Counter.clearWaitingFor(nodeId);
+    }
+    c_durable_activate.m_error = DurableActivateRef::NodeFailure;
+    if (c_DURABLE_ACTIVATE_REQ_Counter.done()) {
+      jam();
+      durableActivatePrepared(signal);
+    }
+  } else if (c_durable_activate.m_state == DurableActivate::DA_WAIT_SWITCH) {
+    jam();
+    durableActivateDone(signal, DurableActivateRef::NodeFailure);
+  }
+}
+
+/**
+ * Every node: it runs with g != 0 from now, learned from a sysfile of the
+ * master or a GCP_COMMIT. Its REDO log must be on persistent memory, and
+ * its node-failure file mapped, also when DurableCommits=0 at its start.
+ */
+void Dbdih::durableGciLearned(Signal *signal, Uint32 g) {
+  char buf[200];
+  if (!c_redo_log_pmem) {
+    BaseString::snprintf(buf, sizeof(buf),
+                         "The cluster runs durable commits from GCI %u, "
+                         "which need RedoLogMode=pmem on this node",
+                         g);
+    progError(__LINE__, NDBD_EXIT_INVALID_CONFIG, buf);
+  }
+  const Uint32 err = durableMapNodeFailFile(signal);
+  if (err != 0) {
+    BaseString::snprintf(buf, sizeof(buf),
+                         "The cluster runs durable commits from GCI %u, and "
+                         "this node cannot map its node-failure file: %s",
+                         g, strerror(int(err)));
+    progError(__LINE__, NDBD_EXIT_INVALID_CONFIG, buf);
+  }
+}
+
+/**
+ * QMGR maps the node-failure file if it has not, directly in this thread;
+ * 0 or an errno
+ */
+Uint32 Dbdih::durableMapNodeFailFile(Signal *signal) {
+  DurableActivateReq *req = (DurableActivateReq *)signal->getDataPtrSend();
+  req->senderRef = reference();
+  req->senderData = 0;
+  req->requestType = DurableActivateReq::MapFile;
+  req->value = 0;
+  EXECUTE_DIRECT(QMGR, GSN_DURABLE_ACTIVATE_REQ, signal,
+                 DurableActivateReq::SignalLength);
+  jamEntry();
+  return signal->theData[0];
+}
 
 /*
   3.11   G L O B A L  C H E C K P O I N T (N O T - M A S T E R)
@@ -18828,6 +19373,17 @@ void Dbdih::execGCP_PREPARE(Signal *signal) {
   Uint32 gci_lo = req->gci_lo;
   ndbrequire(signal->getLength() >= GCPPrepare::SignalLength);
   Uint64 gci = gci_lo | (Uint64(gci_hi) << 32);
+  /**
+   * RONDB-1150, X7: g of an online activation reaches every node first
+   * here, for a new master to resume it (MASTER_GCPCONF)
+   */
+  const Uint32 durableGci =
+      signal->getLength() >= GCPPrepare::SignalLengthDurable ? req->durableGci
+                                                             : 0;
+  if (durableGci > m_micro_gcp.m_new_durable_gci) {
+    jam();
+    m_micro_gcp.m_new_durable_gci = durableGci;
+  }
 
   DEB_NODE_STOP(
       ("Recv GCP_PREPARE(%u,%u) from %u", gci_hi, gci_lo, masterNodeId));
@@ -18920,6 +19476,9 @@ void Dbdih::execGCP_COMMIT(Signal *signal) {
 
   ndbrequire(signal->getLength() >= GCPCommit::SignalLength);
   Uint64 gci = gci_lo | (Uint64(gci_hi) << 32);
+  const Uint32 durableGci =
+      signal->getLength() >= GCPCommit::SignalLengthDurable ? req->durableGci
+                                                            : 0;
 
 #ifdef ERROR_INSERT
   if (ERROR_INSERTED(7213)) {
@@ -18984,11 +19543,31 @@ void Dbdih::execGCP_COMMIT(Signal *signal) {
   m_micro_gcp.m_state = MicroGcp::M_GCP_COMMIT;
   m_micro_gcp.m_master_ref = calcDihBlockRef(masterNodeId);
 
+  /**
+   * RONDB-1150, X7: with g of an online activation, or the first g this
+   * node learns (a node that joined while it ran), every transaction of
+   * gci_hi >= g commits durably here, the switch made together with the
+   * GCI. g only grows online; a system restart turns it off.
+   */
+  const bool durableNew = durableGci > m_micro_gcp.m_durable_gci;
+  if (durableNew) {
+    jam();
+    ndbrequire(gci_hi >= durableGci);
+    durableGciLearned(signal, durableGci);
+  }
   m_micro_gcp.m_lock.write_lock();
   m_micro_gcp.m_old_gci = m_micro_gcp.m_current_gci;
   m_micro_gcp.m_current_gci = gci;
+  if (durableNew) m_micro_gcp.m_durable_gci = durableGci;
   cgckptflag = false;
   m_micro_gcp.m_lock.write_unlock();
+  if (durableNew) {
+    jam();
+    g_eventLogger->info(
+        "DIH: durable commits from GCI %u, activated online (GCP_COMMIT "
+        "of GCI %u/%u)",
+        durableGci, gci_hi, gci_lo);
+  }
 
   for (Uint32 i = 0; i < c_diverify_queue_cnt; i++) {
     jam();
@@ -19544,6 +20123,11 @@ void Dbdih::execCOPY_GCICONF(Signal *signal) {
         sendSignal(reference(), GSN_CONTINUEB, signal, 1, JBB);
       }
       m_gcp_save.m_master.m_state = GcpSave::GCP_SAVE_IDLE;
+      if (c_durable_activate.m_arming) {
+        jam();
+        c_durable_activate.m_arming = false;
+        durableArmed(signal);
+      }
 
       CRASH_INSERTION(7004);
       emptyWaitGCPMasterQueue(signal, Uint64(m_gcp_save.m_gci) << 32,
@@ -25963,6 +26547,14 @@ void Dbdih::initCommonData() {
     }
     c_durable_commits_config = durable != 0;
     c_redo_log_pmem = redoLogMode == NDB_REDO_LOG_MODE_PMEM;
+    c_durable_activate.m_state = DurableActivate::DA_IDLE;
+    c_durable_activate.m_requesters.clear();
+    c_durable_activate.m_error = 0;
+    c_durable_activate.m_round = 0;
+    c_durable_activate.m_arming = false;
+    c_durable_activate.m_client_ref = 0;
+    c_durable_activate.m_asked_master = 0;
+    c_durable_activate.m_client_was_on = 0;
     m_micro_gcp.m_durable_gci = durable != 0 ? 1 : 0;
     if (durable != 0) {
       g_eventLogger->info(

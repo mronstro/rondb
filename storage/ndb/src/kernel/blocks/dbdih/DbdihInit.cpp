@@ -234,6 +234,10 @@ Dbdih::Dbdih(Block_context &ctx)
   addRecSignal(GSN_MASTER_GCPREQ, &Dbdih::execMASTER_GCPREQ);
   addRecSignal(GSN_MASTER_GCPREF, &Dbdih::execMASTER_GCPREF);
   addRecSignal(GSN_MASTER_GCPCONF, &Dbdih::execMASTER_GCPCONF);
+  /* RONDB-1150, X7: online activation of durable commits */
+  addRecSignal(GSN_DURABLE_ACTIVATE_REQ, &Dbdih::execDURABLE_ACTIVATE_REQ);
+  addRecSignal(GSN_DURABLE_ACTIVATE_CONF, &Dbdih::execDURABLE_ACTIVATE_CONF);
+  addRecSignal(GSN_DURABLE_ACTIVATE_REF, &Dbdih::execDURABLE_ACTIVATE_REF);
 
   addRecSignal(GSN_MASTER_LCPREQ, &Dbdih::execMASTER_LCPREQ);
   addRecSignal(GSN_MASTER_LCPREF, &Dbdih::execMASTER_LCPREF);

@@ -1,0 +1,67 @@
+--source include/have_ndb.inc
+
+# RONDB-1150 X7 part 3 (impl_next_steps.md §7): durable commits turned on
+# in a running cluster. ALL SET DurableCommits 1 has every node map its
+# node-failure file, the master takes g at the next gci_hi switch, every
+# node commits durably from the GCP_COMMIT of g, and the SET returns once
+# the GCP save of g - 1 has written g into every sysfile (armed). A row
+# committed just before every node stops then survives through phase 2
+# with that g. ALL SET DurableCommits 0 takes effect at the next system
+# restart.
+
+--error 0,1
+--remove_file $MYSQLTEST_VARDIR/tmp/redo_pmem_durable_logged_gci.txt
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=NDB;
+INSERT INTO t1 VALUES (1, 1);
+
+--echo == 1 == ALL SET DurableCommits 1 turns them on and returns once armed
+--exec $NDB_MGM -e "ALL SET DurableCommits 1"
+# The nodes log the last lines as the SET returns, a little before they
+# are in ndbd.log
+--let LOG_WAIT = 1
+# Only the master logs it
+--let LOG_SUM = 1
+--let LOG_LINE = DIH: durable commits armed from GCI <n>:
+--source suite/ndb/include/redo_pmem_durable_log.inc
+--let LOG_SUM = 0
+--let LOG_LINE = DIH: durable commits from GCI <n>, activated online
+--source suite/ndb/include/redo_pmem_durable_log.inc
+--let LOG_LINE = DIH: SET DurableCommits 1: durable commits are on from GCI <n>
+--source suite/ndb/include/redo_pmem_durable_log.inc
+
+--echo == 2 == once on, the SET returns at once
+--exec $NDB_MGM -e "ALL SET DurableCommits 1"
+--let LOG_LINE = DIH: SET DurableCommits 1: durable commits were already on from GCI <n>
+--source suite/ndb/include/redo_pmem_durable_log.inc
+--let LOG_WAIT = 0
+
+--echo == 3 == a row committed just before every node stops survives
+INSERT INTO t1 VALUES (2, 2);
+--exec $NDB_MGM -e "all restart -n -a" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started >> $NDB_TOOLS_OUTPUT
+--source suite/ndb/include/redo_pmem_durable_gci.inc
+--exec $NDB_MGM -e "all start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+--source include/ndb_not_readonly.inc
+--let LOG_SUM = 1
+--let LOG_LINE = then phase 2 on the durable tail (g <g>)
+--source suite/ndb/include/redo_pmem_durable_log.inc
+--let LOG_SUM = 0
+SELECT * FROM t1 ORDER BY a;
+
+--echo == 4 == ALL SET DurableCommits 0 ends them at the next system restart
+--exec $NDB_MGM -e "ALL SET DurableCommits 0"
+--exec $NDB_MGM -e "all restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started >> $NDB_TOOLS_OUTPUT
+--source suite/ndb/include/redo_pmem_durable_gci.inc
+--exec $NDB_MGM -e "all start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+--source include/ndb_not_readonly.inc
+--let LOG_LINE = DIH: durable commits end with the system restart; they were on from GCI <g>
+--source suite/ndb/include/redo_pmem_durable_log.inc
+SELECT * FROM t1 ORDER BY a;
+
+DROP TABLE t1;
+--remove_file $MYSQLTEST_VARDIR/tmp/redo_pmem_durable_gci.txt
+--remove_file $NDB_TOOLS_OUTPUT

@@ -1642,8 +1642,8 @@ transactions before arming, none after; master failure during activation
 handled; a node restart after activation works; activation refused with a
 file-mode node or an old version.
 
-**State (2026-11-27): parts 1 and 2 written, to be built and tested;
-part 3 next.** Re-scoped against the code first: only the start-time
+**State (2026-11-27): parts 1 and 2 committed, part 3 written, all three
+to be built and tested; part 4 next.** Re-scoped against the code first: only the start-time
 path existed. `__DurableCommits` (CFG 716) set
 `m_micro_gcp.m_durable_gci = 1` in `Dbdih::initCommonData()`, and g lived
 nowhere else: not in the sysfile, not in a signal. A system restart took
@@ -1744,7 +1744,68 @@ Parts, each a commit to be built and tested:
    the next gci_hi switch; g in GCP_PREPARE, GCP_COMMIT and
    MASTER_GCPCONF; armed at the COPY_GCICONF of the save of g − 1, with
    an event; `SET DurableCommits=0` accepted as pending (Q-B6); error
-   inserts 7260, 7261, 7263.
+   inserts 7260, 7261, 7263. **Written (2026-11-27), to be built and
+   tested.**
+   - The flow (`DurableActivate.hpp`, request types): CMVMI hands
+     `ALL SET DurableCommits 1` to its DIH (Set), which asks the master
+     (Request). The master checks that the cluster has started, that no
+     node restart runs and that every alive node supports durable
+     commits, then sends Prepare to every alive node: it checks its REDO
+     log mode and has QMGR map its node-failure file (MapFile, by
+     EXECUTE_DIRECT, as QMGR runs in DIH's thread). Any one request starts
+     it, so it does not wait for one from every node; the others queue.
+   - g is the gci_hi of the next switch, forced by invalidating the start
+     time of the GCP save. GCP_PREPARE and GCP_COMMIT carry it as a
+     fourth word whenever it is not 0 (`masterDurableGci()`); a node
+     sets `m_durable_gci` at the GCP_COMMIT of a higher g, under the lock
+     together with the GCI, and only after it checked its REDO log mode
+     and mapped its file. GCP_PREPARE has it for a new master:
+     MASTER_GCPCONF carries the highest g of a node (a 13th word to a
+     master with durable commits), as an activation prepared but not
+     committed must be resumed with it.
+   - Armed: before the copy of a GCP save of g - 1 or later, also the one
+     a new master resumes, the master writes g into the sysfile
+     (`durableArmCheck()`); at its COPY_GCICONF every requester gets g
+     and each DIH answers the management server, which waits that long
+     (about two GCP save intervals). After a takeover nobody waits: the
+     nodes that asked the failed master answered their SET with an error.
+   - Q-B7 both ways: the activation is refused while a node restart runs,
+     and no node gets START_PERMCONF from the Prepare round until armed
+     (ZNODE_START_DISALLOWED_ERROR, the node asks again every 3 s). A
+     node of an older version is refused at CM_REGREQ while durable
+     commits are on or activated (ZINCOMPATIBLE_VERSION).
+   - A node failure before g is chosen fails the activation (the failed
+     node could start again without the Prepare round); after, it goes
+     on. The REF reasons go to the cluster log, as the management server
+     reports any REF as error 5070.
+   - A node failure before the Prepare round needs no record in the
+     node-failure files: the sysfile that arms durable commits has the
+     failed node with its last completed GCI. The files record the
+     failures from the Prepare round on.
+   - A node that learns g != 0 later (START_MECONF, the restart copies,
+     GCP_COMMIT) maps its node-failure file through QMGR if it has not
+     (`durableGciLearned()`), instead of part 2's refusal; RedoLogMode=file
+     stops it.
+   - `SET DurableCommits 0` is accepted at once and logged; the saved
+     config ends durable commits at the next system restart (part 2).
+   - The client accepts only `ALL`, as the value is the same in every
+     data node, and refuses 1 without saving anything when a data node
+     has RedoLogMode other than pmem: the management server runs the
+     config rules on a config file only, not on a configuration set by a
+     client, and the nodes would not start again.
+   - Error inserts: 7260 the master stops after GCP_PREPARE(g), 7261
+     before the copy that arms, 7263 holds the activation before g.
+   - A SET that finds durable commits on logs "were already on from GCI
+     g", not the line of the SET that turned them on: the log handler
+     holds back a line equal to the one before it until a different one
+     comes (its repeat filter), and the test waited 30 s for it.
+   - Test `ndb_redo_pmem_durable_online`: on with `ALL SET`, the log
+     lines of the activation and of arming, a second SET at once, a row
+     committed just before every node stops survives with phase 2 under
+     g, `ALL SET DurableCommits 0` ends them at the next system restart.
+     The results that list the SET parameters gain `DurableCommits`.
+     `redo_pmem_durable_log.inc` takes `LOG_WAIT`, as a node writes
+     ndbd.log through two log threads, a little after the SET returns.
 4. ndbinfo (X7.5): `durable_commits` (DIH, a row per node) and
    `node_failure_records` (QMGR). `durable_commit_stats` per LDM moves
    to X8, beside the persist counters it would report with.

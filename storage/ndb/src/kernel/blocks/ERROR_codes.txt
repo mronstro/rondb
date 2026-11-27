@@ -475,8 +475,15 @@ GCP Stop so that isolation is required to remove a node.
 993: RONDB-1150, X6.3: at the start take every other node's failure as
      recorded after any GCI, so that every node is stale (set in NOSTART)
 
+7260: RONDB-1150, X7: the master stops after it sent GCP_PREPARE of the
+      first GCI of an online activation of durable commits, g
+7261: RONDB-1150, X7: the master stops before the copy of the GCP save of
+      g - 1 writes g into the sysfile (an activation not yet armed)
 7262: RONDB-1150, X5.7: crash in COPY_GCIREQ(RESTART_DURABLE), before the
       sysfile with the restorable GCI raised to G' is written
+7263: RONDB-1150, X7: the master holds an online activation of durable
+      commits, every node ready, before it takes g; while set no node
+      starts, the SET waits
 7264: RONDB-1150, X7: the master of a system restart takes DurableCommits
       as 0 at the end of the restart, which turns durable commits off
       (set in NOSTART on every node)

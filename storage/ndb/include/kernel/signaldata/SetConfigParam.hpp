@@ -79,6 +79,7 @@ class SetConfigParamConf
   friend class Cmvmi;
   friend class Qmgr;
   friend class ClusterMgr;
+  friend class Dbdih;  // RONDB-1150, X7: DurableCommits, once armed
 
   /**
    * Receiver(s)
@@ -104,6 +105,7 @@ class SetConfigParamRef
   friend class Cmvmi;
   friend class Qmgr;
   friend class ClusterMgr;
+  friend class Dbdih;  // RONDB-1150, X7: DurableCommits, once armed
 
   /**
    * Receiver(s)

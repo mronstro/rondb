@@ -67,6 +67,7 @@
 #include <signaldata/Activate.hpp>
 #include <signaldata/SetHostname.hpp>
 #include <signaldata/SetDomainId.hpp>
+#include <signaldata/DurableActivate.hpp>
 #include <signaldata/SetConfigParam.hpp>
 #include <Configuration.hpp>
 #ifdef _WIN32
@@ -1636,6 +1637,26 @@ void Qmgr::execCM_REGREQ(Signal *signal) {
        * Every joining data node must run a version supporting it.
        */
       jam();
+      sendCmRegrefLab(signal, Tblockref, CmRegRef::ZINCOMPATIBLE_VERSION,
+                      startingVersion);
+      return;
+    }
+  }
+
+  {
+    /**
+     * RONDB-1150, X7: with durable commits on, or activated by this
+     * master, every data node must run them; an older one would commit
+     * without them, and read the sysfile as one with them off
+     */
+    const Dbdih *dih = (const Dbdih *)globalData.getBlock(DBDIH, instance());
+    if (dih->durableCommitsOnOrActivating() &&
+        !ndbd_support_durable_commits(startingVersion)) {
+      jam();
+      infoEvent(
+          "Connection from node %u refused: durable commits are on, and its "
+          "version has none",
+          addNodePtr.i);
       sendCmRegrefLab(signal, Tblockref, CmRegRef::ZINCOMPATIBLE_VERSION,
                       startingVersion);
       return;
@@ -7924,17 +7945,50 @@ void Qmgr::execCLOSE_COMCONF(Signal *signal) {
  * header of another node starts empty; an initial start has removed it
  * with the rest of the file system (Ndbcntr::clearFilesystem(),
  * NodeFailFile::removeFile()). The node cannot run durable commits
- * without it (D8); a node restart into a cluster that runs them stops
- * if it did not map it (Dbdih::execSTART_MECONF()).
+ * without it (D8). A node that learns later that they are on maps it
+ * then (execDURABLE_ACTIVATE_REQ(), from DIH): an online activation, or a
+ * restart into a cluster that runs them.
  */
 void Qmgr::openNodeFailFile() {
   const Dbdih *dih = (const Dbdih *)globalData.getBlock(DBDIH, instance());
-  if (!dih->nodeFailFileNeeded()) return;
+  if (!dih->nodeFailFileNeeded() || c_nodeFailBase != nullptr) return;
+  const int err = mapNodeFailFile();
+  if (err != 0) {
+    char msg[300];
+    BaseString::snprintf(msg, sizeof(msg),
+                         "Durable commits need the node-failure file %s%s, "
+                         "which cannot be mapped: %s",
+                         globalData.theNodeFailFileDir,
+                         NodeFailFile::FILE_NAME, strerror(err));
+    progError(__LINE__, NDBD_EXIT_INVALID_CONFIG, msg);
+  }
+}
+
+/**
+ * RONDB-1150, X7: DIH, directly in this thread (DurableActivate.hpp,
+ * MapFile): the node-failure file mapped if it is not; theData[0] is 0
+ * or an errno
+ */
+void Qmgr::execDURABLE_ACTIVATE_REQ(Signal *signal) {
+  jamEntry();
+  const DurableActivateReq *req =
+      CAST_CONSTPTR(DurableActivateReq, signal->getDataPtr());
+  ndbrequire(req->requestType == DurableActivateReq::MapFile);
+  ndbrequire(refToNode(req->senderRef) == getOwnNodeId());
+  int err = 0;
+  if (c_nodeFailBase == nullptr) {
+    jam();
+    err = mapNodeFailFile();
+  }
+  signal->theData[0] = Uint32(err);
+}
+
+/* The node-failure file mapped, its records counted; 0 or an errno */
+int Qmgr::mapNodeFailFile() {
   const char *dir = globalData.theNodeFailFileDir;
   ndbrequire(dir != nullptr && c_nodeFailBase == nullptr);
   BaseString path;
   path.assfmt("%s%s", dir, NodeFailFile::FILE_NAME);
-  char msg[300];
   NdbDir::create(dir, NdbDir::u_rwx() | NdbDir::g_r() | NdbDir::g_x(), true);
   const int fd = ::open(path.c_str(), O_RDWR | O_CREAT, 0600);
   struct stat st;
@@ -7953,11 +8007,9 @@ void Qmgr::openNodeFailFile() {
   }
   if (fd >= 0) ::close(fd);
   if (err != 0) {
-    BaseString::snprintf(msg, sizeof(msg),
-                         "Durable commits need the node-failure file %s, "
-                         "which cannot be mapped: %s",
+    g_eventLogger->error("QMGR: the node-failure file %s cannot be mapped: %s",
                          path.c_str(), strerror(err));
-    progError(__LINE__, NDBD_EXIT_INVALID_CONFIG, msg);
+    return err;
   }
   c_nodeFailBase = static_cast<Uint8 *>(map.addr);
   Uint32 line[NodeFailFile::LINE_WORDS];
@@ -7993,6 +8045,7 @@ void Qmgr::openNodeFailFile() {
           ? "; this start follows an unsafe shutdown of the persistent "
             "memory, kept until the start completes"
           : "");
+  return 0;
 }
 
 /**

@@ -312,6 +312,8 @@ Qmgr::Qmgr(Block_context &ctx) : SimulatedBlock(QMGR, ctx) {
   addRecSignal(GSN_SET_HOSTNAME_REF, &Qmgr::execSET_HOSTNAME_REF);
 
   addRecSignal(GSN_SET_CONFIG_PARAM_REQ, &Qmgr::execSET_CONFIG_PARAM_REQ);
+  /* RONDB-1150, X7: DIH asks for the node-failure file, EXECUTE_DIRECT */
+  addRecSignal(GSN_DURABLE_ACTIVATE_REQ, &Qmgr::execDURABLE_ACTIVATE_REQ);
   addRecSignal(GSN_SET_CONFIG_PARAM_CONF, &Qmgr::execSET_CONFIG_PARAM_CONF);
   addRecSignal(GSN_SET_CONFIG_PARAM_REF, &Qmgr::execSET_CONFIG_PARAM_REF);
 

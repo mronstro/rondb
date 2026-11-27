@@ -603,6 +603,7 @@ class Qmgr : public SimulatedBlock {
   void execSET_HOSTNAME_REQ(Signal*);
   // Online SET of an API node parameter (SetConfigParamReq::forApiNodes)
   void execSET_CONFIG_PARAM_REQ(Signal*);
+  void execDURABLE_ACTIVATE_REQ(Signal*);
   void execSET_CONFIG_PARAM_CONF(Signal*);
   void execSET_CONFIG_PARAM_REF(Signal*);
   void execSET_HOSTNAME_CONF(Signal*);
@@ -977,6 +978,7 @@ class Qmgr : public SimulatedBlock {
   NdbNodeBitmask c_nodeFailLastNodes;
   void readNodeFailFile();
   void openNodeFailFile();
+  int mapNodeFailFile();
   void recordNodeFailures(const NdbNodeBitmask &nodes, Uint32 failNo);
   void retractNodeFailures();
   void writeStartState(bool unsafe);

@@ -59,6 +59,7 @@
 #include <signaldata/TamperOrd.hpp>
 #include <signaldata/TestOrd.hpp>
 #include <signaldata/SetDomainId.hpp>
+#include <signaldata/DurableActivate.hpp>
 #include <signaldata/SetConfigParam.hpp>
 
 #ifdef ERROR_INSERT
@@ -3552,6 +3553,7 @@ void Cmvmi::execSET_CONFIG_PARAM_REQ(Signal *signal)
    * returns from here, before the ConfigValues update below, so that
    * ndbinfo never reports a value that was not applied.
    */
+  bool replyLater = false;
   switch (configKey)
   {
   case CFG_DB_MAX_DISK_WRITE_SPEED:
@@ -3621,6 +3623,50 @@ void Cmvmi::execSET_CONFIG_PARAM_REQ(Signal *signal)
                         Uint32(configValue));
     break;
   }
+  case CFG_DB_DURABLE_COMMITS:
+  {
+    jam();
+    /**
+     * RONDB-1150, X7: 1 activates durable commits online. DIH answers
+     * mgmd once they are armed, after the GCP save of the GCI before the
+     * first durable one, or with a REF (Dbdih::execDURABLE_ACTIVATE_REQ).
+     * 0 ends them at the next system restart, as the commits acknowledged
+     * as durable must survive until then; the saved config says so.
+     */
+    if (configValue > 1)
+    {
+      jam();
+      SetConfigParamRef* ref = (SetConfigParamRef *)signal->getDataPtrSend();
+      ref->senderRef = reference();
+      ref->configParamKey = configKey;
+      ref->errorCode = 1;
+      sendSignal(senderRef,
+                 GSN_SET_CONFIG_PARAM_REF,
+                 signal,
+                 SetConfigParamRef::SignalLength,
+                 JBB);
+      return;
+    }
+    if (configValue == 0)
+    {
+      jam();
+      g_eventLogger->info("DurableCommits set to 0: durable commits, if on, "
+                          "end at the next system restart");
+      break;
+    }
+    DurableActivateReq* req = (DurableActivateReq *)signal->getDataPtrSend();
+    req->senderRef = senderRef;
+    req->senderData = 0;
+    req->requestType = DurableActivateReq::Set;
+    req->value = 1;
+    sendSignal(DBDIH_REF,
+               GSN_DURABLE_ACTIVATE_REQ,
+               signal,
+               DurableActivateReq::SignalLength,
+               JBB);
+    replyLater = true;
+    break;
+  }
   default:
     jam();
     g_eventLogger->info("SET_CONFIG_PARAM_REQ: unsupported config key %u",
@@ -3653,6 +3699,12 @@ void Cmvmi::execSET_CONFIG_PARAM_REQ(Signal *signal)
       iter.set(configKey, configValue);
     }
     iter.closeSection();
+  }
+
+  if (replyLater)
+  {
+    jam();
+    return;
   }
 
   /**

@@ -171,6 +171,7 @@ class CommandInterpreter {
                                     bool all);
   int executeSetAdaptiveSendThreshold(int processId, const char *value_str,
                                       bool all);
+  int executeSetDurableCommits(int processId, const char *value_str, bool all);
   Uint64 parse_size_value(const char *str, bool &ok);
   int executeSetDomain(int processId, const char *parameters, bool all);
   int executeHostname(int processId, const char *parameters, bool all);
@@ -575,7 +576,13 @@ static const char* helpTextSet =
 "                             0 = errors, 1 = warnings, 2 = info (default),\n"
 "                             3 = debug. Updates the saved config of all RDMA\n"
 "                             connections (of node <id>) and the running data\n"
-"                             nodes.\n\n"
+"                             nodes.\n"
+"  DurableCommits             Durable commits (RedoLogMode=pmem): every write\n"
+"                             transaction survives a crash of every data node.\n"
+"                             Value: 0/1 (also on/off, true/false); ALL only.\n"
+"                             1 turns them on in the running cluster and\n"
+"                             returns once they are armed, after the next GCP\n"
+"                             save; 0 ends them at the next system restart.\n\n"
 "Examples:\n"
 "  ALL SET MaxDiskWriteSpeed 100M    Set on all data nodes to 100 MB/s\n"
 "  1 SET MaxDiskWriteSpeed 50M       Set on node 1 to 50 MB/s\n"
@@ -586,6 +593,7 @@ static const char* helpTextSet =
 "  1 SET CompiledInterpreter OFF     Back to the default (interpreter) on node 1\n"
 "  ALL SET AdaptiveSendThreshold 16  Favour throughput on all API nodes\n"
 "  51 SET AdaptiveSendThreshold 0    Back to the default (latency) on API node 51\n"
+"  ALL SET DurableCommits 1          Turn durable commits on, online\n"
 ;
 
 static const char* helpTextHostname =
@@ -2878,7 +2886,7 @@ CommandInterpreter::executeSet(int processId,
     ndbout_c("Usage: <id> SET <parameter> <value>");
     ndbout_c("Supported parameters: MaxDiskWriteSpeed, "
              "EnableProactiveDeadlockDetection, RdmaLogLevel, "
-             "CompiledInterpreter, AdaptiveSendThreshold");
+             "CompiledInterpreter, AdaptiveSendThreshold, DurableCommits");
     return -1;
   }
 
@@ -2891,7 +2899,7 @@ CommandInterpreter::executeSet(int processId,
     ndbout_c("Usage: <id> SET <parameter> <value>");
     ndbout_c("Supported parameters: MaxDiskWriteSpeed, "
              "EnableProactiveDeadlockDetection, RdmaLogLevel, "
-             "CompiledInterpreter, AdaptiveSendThreshold");
+             "CompiledInterpreter, AdaptiveSendThreshold, DurableCommits");
     return -1;
   }
 
@@ -2922,10 +2930,15 @@ CommandInterpreter::executeSet(int processId,
     return executeSetAdaptiveSendThreshold(processId, value_str, all);
   }
 
+  if (native_strcasecmp(param_name, "DurableCommits") == 0)
+  {
+    return executeSetDurableCommits(processId, value_str, all);
+  }
+
   ndbout_c("Unknown SET parameter: '%s'", param_name);
   ndbout_c("Supported parameters: MaxDiskWriteSpeed, "
            "EnableProactiveDeadlockDetection, RdmaLogLevel, "
-           "CompiledInterpreter, AdaptiveSendThreshold");
+           "CompiledInterpreter, AdaptiveSendThreshold, DurableCommits");
   return -1;
 }
 
@@ -3364,6 +3377,134 @@ CommandInterpreter::executeSetCompiledInterpreter(int processId,
   else
     ndbout_c("CompiledInterpreter set to %s on node %d", mode_name, processId);
 
+  return 0;
+}
+
+/*
+ * RONDB-1150, X7: DurableCommits online.  The value must be the same in
+ * every data node (the management server refuses a config where they
+ * differ), so only ALL is accepted.  Step 1 saves it in the permanent
+ * configuration, step 2 sends it to the running data nodes: 1 activates
+ * durable commits and returns once they are armed, which takes the next
+ * GCP save; 0 is accepted at once and ends them at the next system restart,
+ * since the commits acknowledged as durable must survive until then.  If
+ * the activation fails, the cluster log says why, and the saved
+ * configuration turns durable commits on at the next system restart.
+ */
+int
+CommandInterpreter::executeSetDurableCommits(int processId,
+                                             const char *value_str,
+                                             bool all)
+{
+  if (!all)
+  {
+    ndbout_c("DurableCommits is the same in every data node: use "
+             "ALL SET DurableCommits %s (node %d given)", value_str,
+             processId);
+    return -1;
+  }
+  Uint32 new_value;
+  if (native_strcasecmp(value_str, "1") == 0 ||
+      native_strcasecmp(value_str, "on") == 0 ||
+      native_strcasecmp(value_str, "true") == 0)
+  {
+    new_value = 1;
+  }
+  else if (native_strcasecmp(value_str, "0") == 0 ||
+           native_strcasecmp(value_str, "off") == 0 ||
+           native_strcasecmp(value_str, "false") == 0)
+  {
+    new_value = 0;
+  }
+  else
+  {
+    ndbout_c("Invalid value: '%s'. Use 0 or 1 (also on/off, true/false)",
+             value_str);
+    return -1;
+  }
+
+  ndb_mgm_configuration *conf = ndb_mgm_get_configuration(m_mgmsrv,
+                                                          NDB_VERSION);
+  if (conf == 0)
+  {
+    ndbout_c("Could not get configuration");
+    printError();
+    return -1;
+  }
+
+  ConfigValues::Iterator iter(conf->m_config_values);
+  bool found_any = false;
+  for (int i = 0; i < ABS_MAX_NODES; i++)
+  {
+    if (!iter.openSection(CFG_SECTION_NODE, i))
+      continue;
+    Uint32 node_type = 0;
+    iter.get(CFG_TYPE_OF_SECTION, &node_type);
+    if (node_type != (Uint32)NODE_TYPE_DB)
+    {
+      iter.closeSection();
+      continue;
+    }
+    /*
+     * The management server checks the config rules of a config file only,
+     * not of a configuration set here: with RedoLogMode=file a data node
+     * would refuse to start with DurableCommits=1.
+     */
+    Uint32 redo_log_mode = NDB_REDO_LOG_MODE_FILE;
+    iter.get(CFG_DB_REDO_LOG_MODE, &redo_log_mode);
+    if (new_value == 1 && redo_log_mode != NDB_REDO_LOG_MODE_PMEM)
+    {
+      Uint32 node_id = 0;
+      iter.get(CFG_NODE_ID, &node_id);
+      ndbout_c("DurableCommits=1 needs RedoLogMode=pmem, and data node %u "
+               "has another; the configuration is not changed", node_id);
+      iter.closeSection();
+      ndb_mgm_destroy_configuration(conf);
+      return -1;
+    }
+    iter.set(CFG_DB_DURABLE_COMMITS, new_value);
+    iter.closeSection();
+    found_any = true;
+  }
+  if (!found_any)
+  {
+    ndbout_c("No data nodes found in configuration");
+    ndb_mgm_destroy_configuration(conf);
+    return -1;
+  }
+
+  int ret_code = ndb_mgm_set_configuration(m_mgmsrv, conf);
+  ndb_mgm_destroy_configuration(conf);
+  if (ret_code != 0)
+  {
+    ndbout_c("Failed to update configuration");
+    printError();
+    return -1;
+  }
+  ndbout_c("Configuration updated for all data nodes");
+
+  ret_code = ndb_mgm_set_config_param(m_mgmsrv, 0, CFG_DB_DURABLE_COMMITS,
+                                      new_value);
+  if (ret_code < 0)
+  {
+    if (new_value == 1)
+      ndbout_c("Warning: Configuration saved, but durable commits are not on "
+               "in the running cluster: the cluster log says why. Run the "
+               "command again, or a system restart turns them on.");
+    else
+      ndbout_c("Warning: Configuration saved, but not every running data "
+               "node took the value; durable commits end at the next "
+               "system restart.");
+    printError();
+    return -1;
+  }
+
+  if (new_value == 1)
+    ndbout_c("DurableCommits set to 1: durable commits are on in all data "
+             "nodes");
+  else
+    ndbout_c("DurableCommits set to 0: durable commits, if on, end at the "
+             "next system restart");
   return 0;
 }
 

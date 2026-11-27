@@ -38,10 +38,16 @@
  */
 struct GCPPrepare {
   static constexpr Uint32 SignalLength = 3;
+  /**
+   * RONDB-1150, X7: with durable commits on or being activated, g; the
+   * master sends it only then, when every node supports durable commits
+   */
+  static constexpr Uint32 SignalLengthDurable = 4;
 
   Uint32 nodeId;
   Uint32 gci_hi;
   Uint32 gci_lo;
+  Uint32 durableGci;
 };
 
 struct GCPPrepareConf // Distr. DIH-DIH
@@ -56,10 +62,13 @@ struct GCPPrepareConf // Distr. DIH-DIH
 struct GCPCommit // Distr. DIH-DIH
 {
   static constexpr Uint32 SignalLength = 3;
+  /* RONDB-1150, X7: g, as in GCPPrepare */
+  static constexpr Uint32 SignalLengthDurable = 4;
 
   Uint32 nodeId;
   Uint32 gci_hi;
   Uint32 gci_lo;
+  Uint32 durableGci;
 };
 
 struct GCPNoMoreTrans // Local DIH/TC
