@@ -8,9 +8,9 @@
 # DBSPJ writes it (Dbtup::nextAttrInfoParam), so the scan failed with
 # ZTOTAL_LEN_ERROR (882). Now only a scan from DBSPJ moves on from block
 # to block, and every range of any other scan runs the whole program.
-# The case creates an ordered index on T1's KOL1 and scans KOL1 in
-# [1, 4] and KOL1 in [10, 13] with a program whose subroutine reads
-# KOL1, refusing KOL1 3 and 12: the scan must return 1, 2, 4, 10, 11
+# The case scans the ordered index PRIMARY that MySQL created on T1's
+# KOL1 (spj_malformed_case.inc), KOL1 in [1, 4] and KOL1 in [10, 13],
+# with a program whose subroutine reads KOL1, refusing KOL1 3 and 12: the scan must return 1, 2, 4, 10, 11
 # and 13, with every data node still started.
 # One testSpjMalformed case per MTR test, see
 # suite/ndb_spj/include/spj_malformed_case.inc.

@@ -16,9 +16,9 @@
 # used whole for every range (P-49). Error insert 4047 has DBTUP read
 # this scan's area as blocks all the same, so the block cases run under
 # it, on data nodes built with ERROR_INSERT only.
-# The case creates an ordered index on T1's KOL1 and scans KOL1 = 1 and
-# KOL1 = 2 with two well-formed blocks first, which must get
-# SCAN_TABCONF, then with header lengths that wrap in 32 bits, which
+# The case scans the ordered index PRIMARY that MySQL created on T1's
+# KOL1 (spj_malformed_case.inc), KOL1 = 1 and KOL1 = 2, with two
+# well-formed blocks first, which must get SCAN_TABCONF, then with header lengths that wrap in 32 bits, which
 # must get SCAN_TABREF 882. Under error insert 4047 the well-formed
 # blocks must get SCAN_TABCONF again, and a first block and a second
 # block that run past the area must each get SCAN_TABREF 882. Every

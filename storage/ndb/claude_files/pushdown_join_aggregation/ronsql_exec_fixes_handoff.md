@@ -67,10 +67,13 @@ continues both lists. Their status is in `../ronsql_executor/README.md`.
     `storage/ndb/test/ndbapi/testSpjMalformed.cpp` (cases P1..P60, Q1..Q5,
     S1..S2), each with an MTR wrapper in `mysql-test/suite/ndb_spj/t/`
     (`test_spj_malformed_pNN.test`, `test_tc_queue_flag_qN.test`,
-    `test_signal_scope_sN.test`). A table a case needs besides T1 is
-    created by its MTR wrapper through mysqld (`CREATE TABLE ...
-    ENGINE=NDB`, as `test_spj_malformed_p53` does) and looked up by the
-    program, never created through the NDB API.
+    `test_signal_scope_sN.test`). The program creates no table: T1 is
+    `test.t1`, which `suite/ndb_spj/include/spj_malformed_case.inc`
+    creates through mysqld before the control and drops after the case
+    (P46 / P49 scan its ordered index PRIMARY), and a table a case needs
+    besides T1 is created by its MTR wrapper the same way, as
+    `test_spj_malformed_p53` does. The program looks them up
+    (`lookupMysqlTable`).
   - A test that runs `ndb_mgm` writes its output to its own
     `$MYSQLTEST_VARDIR/tmp/<test>_mgm.log` and removes it, never to the
     shared `$NDB_TOOLS_OUTPUT` (`ndb_testrun.log`): check-testcase fails
@@ -609,10 +612,11 @@ Optional, performance only:
 - **NdbAggregator follows no CASE arms:** a program in which a string
   reaches arithmetic on one path only passes the builder; the data node
   refuses it (`checkAggSlotKinds`).
-- **Tables created through the NDB API in tests:** every testSpjMalformed
-  MTR wrapper has the program create `TEST_DB.T1` (`--stop-on-error T1`),
-  and P46 / P49 create an ordered index on it, through the NDB API,
-  against the rule in §1. Move them to the wrappers (mysqld) as P53 does.
+- **Tables created through the NDB API in tests: fixed.** testSpjMalformed
+  created `TEST_DB.T1`, and P46 / P49 an ordered index on it, through the
+  NDB API. `spj_malformed_case.inc` now creates `test.t1` through mysqld,
+  the program looks it up, and P46 / P49 scan its PRIMARY ordered index;
+  `suite/ndb_spj/my.cnf` no longer needs `ndb_metadata_check = false`.
 - **Watch items:**
   - a RonSQL CTE output column of undefined type used as an outer
     GROUP BY key could now get 1869 from `publishGBTypes`

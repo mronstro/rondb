@@ -139,6 +139,7 @@
 #include <NDBT_Test.hpp>
 #include <NdbRestarter.hpp>
 #include <HugoTransactions.hpp>
+#include <UtilTransactions.hpp>
 #include <AttributeHeader.hpp>
 #include <CteLinkedAttr.hpp>
 /* ndb_opts.h, included through NDBT.hpp, defines NONE as an empty
@@ -3955,11 +3956,110 @@ class SpjMalformedChecker {
 
 /* ----- one STEP per finding, so NDBT runs them one by one (-n <name>) --- */
 
-SpjMalformedChecker *makeChecker(NDBT_Context *ctx, NDBT_Step *step,
-                                 Ndb *&pNdb, SignalSender *&ss,
+/* Tables are created through MySQL, never through the NDB API: mysqld
+ * does not know a table that the NDB API creates.  The cases read tables
+ * that their MTR test creates, in MySQL's database test, which is the NDB
+ * database "test", schema "def".  The program creates no table
+ * (setCreateTable(false) in main). */
+const char *const MysqlDbName = "test";
+
+/* T1, the table every case reads: test.t1 with the columns of NDBT's T1,
+ * KOL1 to KOL5 INT UNSIGNED NOT NULL, KOL1 the primary key.
+ * suite/ndb_spj/include/spj_malformed_case.inc creates it before the
+ * control and drops it after the case.  mysqld gives the primary key the
+ * ordered index PRIMARY, which P-46 and P-49 scan. */
+const char *const T1Name = "t1";
+const char *const T1OrderedIndexName = "PRIMARY";
+const int T1NumColumns = 5;
+
+/* Looks up test.<tabName>, and its index indexName unless that is
+ * nullptr.  The step's Ndb object uses TEST_DB (NDBT), so the lookup
+ * sets the database "test" and TEST_DB back after it, as testNdbApi's
+ * RateQueueDirtyReadOtherDatabase does; the objects stay in the
+ * dictionary cache.  creator names the MTR test or include that creates
+ * the table.  Returns 0, or -1 after logging why. */
+int lookupMysqlTable(Ndb *pNdb, const char *tabName, const char *indexName,
+                     const char *creator, const NdbDictionary::Table *&tab,
+                     const NdbDictionary::Index *&index) {
+  tab = nullptr;
+  index = nullptr;
+  const BaseString savedDb(pNdb->getDatabaseName());
+  if (pNdb->setDatabaseName(MysqlDbName) != 0) {
+    g_err << "setDatabaseName(" << MysqlDbName
+          << ") failed: " << pNdb->getNdbError() << endl;
+    return -1;
+  }
+  NdbDictionary::Dictionary *dict = pNdb->getDictionary();
+  int res = -1;
+  const NdbDictionary::Table *found = dict->getTable(tabName);
+  if (found == nullptr) {
+    g_err << "Table " << MysqlDbName << "." << tabName
+          << " not found: " << dict->getNdbError() << ".  " << creator
+          << " creates it through MySQL; run the case from there." << endl;
+  } else if (indexName == nullptr) {
+    tab = found;
+    res = 0;
+  } else {
+    const NdbDictionary::Index *foundIndex =
+        dict->getIndex(indexName, tabName);
+    if (foundIndex == nullptr) {
+      g_err << "Index " << indexName << " of " << MysqlDbName << "."
+            << tabName << " not found: " << dict->getNdbError() << endl;
+    } else {
+      tab = found;
+      index = foundIndex;
+      res = 0;
+    }
+  }
+  (void)pNdb->setDatabaseName(savedDb.c_str());
+  return res;
+}
+
+/* Looks up T1, and its index indexName unless that is nullptr, and checks
+ * that it has the columns of NDBT's T1. */
+int lookupT1(Ndb *pNdb, const char *indexName,
+             const NdbDictionary::Table *&tab,
+             const NdbDictionary::Index *&index) {
+  if (lookupMysqlTable(pNdb, T1Name, indexName,
+                       "suite/ndb_spj/include/spj_malformed_case.inc", tab,
+                       index) != 0) {
+    return -1;
+  }
+  bool columnsOk = (tab->getNoOfColumns() == T1NumColumns);
+  for (int i = 0; columnsOk && i < T1NumColumns; i++) {
+    const NdbDictionary::Column *col = tab->getColumn(i);
+    columnsOk = (col->getType() == NdbDictionary::Column::Unsigned &&
+                 !col->getNullable() && col->getPrimaryKey() == (i == 0));
+  }
+  if (!columnsOk) {
+    g_err << "Table " << MysqlDbName << "." << T1Name
+          << " does not have the columns that spj_malformed_case.inc "
+             "creates: KOL1 INT UNSIGNED PRIMARY KEY, KOL2 to KOL5 INT "
+             "UNSIGNED NOT NULL." << endl;
+    tab = nullptr;
+    index = nullptr;
+    return -1;
+  }
+  return 0;
+}
+
+/* Looks up T1 and loads its NumRows rows.  The control and the case of an
+ * MTR test are two runs of the program on one table, so each run empties
+ * it first and every case starts from the same rows. */
+SpjMalformedChecker *makeChecker(NDBT_Step *step, Ndb *&pNdb,
+                                 SignalSender *&ss,
                                  NdbRestarter *&restarter) {
   pNdb = GETNDB(step);
-  const NdbDictionary::Table *tab = ctx->getTab();
+  const NdbDictionary::Table *tab = nullptr;
+  const NdbDictionary::Index *noIndex = nullptr;
+  if (lookupT1(pNdb, nullptr, tab, noIndex) != 0) {
+    return nullptr;
+  }
+  UtilTransactions util(*tab);
+  if (util.clearTable(pNdb) != 0) {
+    g_err << "Failed to empty " << MysqlDbName << "." << T1Name << endl;
+    return nullptr;
+  }
   HugoTransactions hugo(*tab);
   if (hugo.loadTable(pNdb, NumRows) != 0) {
     g_err << "Failed to load " << NumRows << " rows" << endl;
@@ -3975,7 +4075,7 @@ SpjMalformedChecker *makeChecker(NDBT_Context *ctx, NDBT_Step *step,
     Ndb *pNdb = nullptr;                                           \
     SignalSender *ss = nullptr;                                    \
     NdbRestarter *restarter = nullptr;                             \
-    SpjMalformedChecker *c = makeChecker(ctx, step, pNdb, ss, restarter); \
+    SpjMalformedChecker *c = makeChecker(step, pNdb, ss, restarter); \
     if (c == nullptr) return NDBT_FAILED;                          \
     const int res = c->method();                                   \
     delete c;                                                      \
@@ -4034,122 +4134,74 @@ CASE_STEP(runQ5, runQ5)
 CASE_STEP(runS1, runS1)
 CASE_STEP(runS2, runS2)
 
-/* Creates the ordered index indexName on column 0 of tab, after dropping
- * one that an earlier run left.  Returns it, or nullptr. */
-const NdbDictionary::Index *createOrderedIndexOnColumn0(
-    NdbDictionary::Dictionary *dict, const NdbDictionary::Table *tab,
-    const char *indexName, const char *caseId) {
-  (void)dict->dropIndex(indexName, tab->getName());  /* an earlier run's */
-  NdbDictionary::Index idx(indexName);
-  idx.setTable(tab->getName());
-  idx.setType(NdbDictionary::Index::OrderedIndex);
-  idx.setLogging(false);
-  idx.addColumnName(tab->getColumn(0)->getName());
-  if (dict->createIndex(idx) != 0) {
-    g_err << caseId << ": creating ordered index " << indexName
-          << " failed: " << dict->getNdbError() << endl;
-    return nullptr;
-  }
-  const NdbDictionary::Index *created =
-      dict->getIndex(indexName, tab->getName());
-  if (created == nullptr) {
-    g_err << caseId << ": ordered index " << indexName << " not found: "
-          << dict->getNdbError() << endl;
-  }
-  return created;
-}
-
-/* P-46 scans an ordered index on column 0 of the table, which the step
- * creates and drops after the case. */
+/* P-46 scans the ordered index PRIMARY that mysqld created on T1's KOL1. */
 int runP46(NDBT_Context *ctx, NDBT_Step *step) {
   Ndb *pNdb = nullptr;
   SignalSender *ss = nullptr;
   NdbRestarter *restarter = nullptr;
-  SpjMalformedChecker *c = makeChecker(ctx, step, pNdb, ss, restarter);
+  SpjMalformedChecker *c = makeChecker(step, pNdb, ss, restarter);
   if (c == nullptr) return NDBT_FAILED;
-  const NdbDictionary::Table *tab = ctx->getTab();
-  NdbDictionary::Dictionary *dict = pNdb->getDictionary();
-  const char *const indexName = "P46_ORDERED_COL0";
+  const NdbDictionary::Table *tab = nullptr;
+  const NdbDictionary::Index *index = nullptr;
   int res = NDBT_FAILED;
-  const NdbDictionary::Index *created =
-      createOrderedIndexOnColumn0(dict, tab, indexName, "P-46");
-  if (created != nullptr) {
-    res = c->runP46(Uint32(created->getObjectId()),
-                    Uint32(created->getObjectVersion()));
+  if (lookupT1(pNdb, T1OrderedIndexName, tab, index) == 0) {
+    res = c->runP46(Uint32(index->getObjectId()),
+                    Uint32(index->getObjectVersion()));
   }
-  (void)dict->dropIndex(indexName, tab->getName());
   delete c;
   delete ss;
   delete restarter;
   return res;
 }
 
-/* P-49 scans an ordered index on column 0 of the table through the NDB
- * API; the step creates the index and drops it after the case. */
+/* P-49 scans the ordered index PRIMARY that mysqld created on T1's KOL1,
+ * through the NDB API. */
 int runP49(NDBT_Context *ctx, NDBT_Step *step) {
   Ndb *pNdb = nullptr;
   SignalSender *ss = nullptr;
   NdbRestarter *restarter = nullptr;
-  SpjMalformedChecker *c = makeChecker(ctx, step, pNdb, ss, restarter);
+  SpjMalformedChecker *c = makeChecker(step, pNdb, ss, restarter);
   if (c == nullptr) return NDBT_FAILED;
-  const NdbDictionary::Table *tab = ctx->getTab();
-  NdbDictionary::Dictionary *dict = pNdb->getDictionary();
-  const char *const indexName = "P49_ORDERED_COL0";
+  const NdbDictionary::Table *tab = nullptr;
+  const NdbDictionary::Index *index = nullptr;
   int res = NDBT_FAILED;
-  const NdbDictionary::Index *created =
-      createOrderedIndexOnColumn0(dict, tab, indexName, "P-49");
-  if (created != nullptr) {
-    res = c->runP49(pNdb, tab, created);
+  if (lookupT1(pNdb, T1OrderedIndexName, tab, index) == 0) {
+    res = c->runP49(pNdb, tab, index);
   }
-  (void)dict->dropIndex(indexName, tab->getName());
   delete c;
   delete ss;
   delete restarter;
   return res;
 }
 
-/* P-53's table test.p53_cmp, with the row ID 1, VC 'abcd', F 1.5.
- * Tables are created through MySQL, never through the NDB API: the MTR
- * test test_spj_malformed_p53 creates and loads it before the case and
- * drops it after, and the step only looks it up.  MySQL's database test
- * is the NDB database "test", schema "def"; the step's Ndb object uses
- * TEST_DB (NDBT), so it uses "test" for the lookup and gets TEST_DB
- * back after it.  runP53 reads attribute ids 0, 1 and 2 as ID Unsigned
+/* P-53's table test.p53_cmp, with the row ID 1, VC 'abcd', F 1.5, which
+ * the MTR test test_spj_malformed_p53 creates and loads before the case
+ * and drops after.  runP53 reads attribute ids 0, 1 and 2 as ID Unsigned
  * (the key), VC Varchar(8) (a 1-byte length prefix) and F Float. */
 int lookupP53Table(Ndb *pNdb, Uint32 &tableId, Uint32 &tableVersion) {
-  const char *const dbName = "test";
   const char *const tabName = "p53_cmp";
-  const BaseString savedDb(pNdb->getDatabaseName());
-  if (pNdb->setDatabaseName(dbName) != 0) {
-    g_err << "P-53: setDatabaseName(" << dbName
-          << ") failed: " << pNdb->getNdbError() << endl;
+  const NdbDictionary::Table *tab = nullptr;
+  const NdbDictionary::Index *noIndex = nullptr;
+  if (lookupMysqlTable(pNdb, tabName, nullptr,
+                       "The MTR test test_spj_malformed_p53", tab,
+                       noIndex) != 0) {
     return -1;
   }
-  NdbDictionary::Dictionary *dict = pNdb->getDictionary();
-  const NdbDictionary::Table *tab = dict->getTable(tabName);
-  int res = -1;
-  if (tab == nullptr) {
-    g_err << "P-53: table " << dbName << "." << tabName
-          << " not found: " << dict->getNdbError()
-          << ".  The MTR test test_spj_malformed_p53 creates it through "
-             "MySQL; run P53 from there." << endl;
-  } else if (tab->getNoOfColumns() != 3 ||
-             tab->getColumn(0)->getType() != NdbDictionary::Column::Unsigned ||
-             !tab->getColumn(0)->getPrimaryKey() ||
-             tab->getColumn(1)->getType() != NdbDictionary::Column::Varchar ||
-             tab->getColumn(1)->getLength() != 8 ||
-             tab->getColumn(2)->getType() != NdbDictionary::Column::Float) {
-    g_err << "P-53: table " << dbName << "." << tabName
+  if (tab->getNoOfColumns() != 3 ||
+      tab->getColumn(0)->getType() != NdbDictionary::Column::Unsigned ||
+      !tab->getColumn(0)->getPrimaryKey() ||
+      tab->getColumn(1)->getType() != NdbDictionary::Column::Varchar ||
+      tab->getColumn(1)->getLength() != 8 ||
+      tab->getColumn(2)->getType() != NdbDictionary::Column::Float) {
+    g_err << "P-53: table " << MysqlDbName << "." << tabName
           << " does not have the columns that test_spj_malformed_p53 "
              "creates: ID INT UNSIGNED PRIMARY KEY, VC VARCHAR(8) "
              "CHARACTER SET latin1, F FLOAT." << endl;
-  } else {
-    tableId = Uint32(tab->getObjectId());
-    tableVersion = Uint32(tab->getObjectVersion());
-    res = 0;
+    return -1;
   }
-  (void)pNdb->setDatabaseName(savedDb.c_str());
-  return res;
+  tableId = Uint32(tab->getObjectId());
+  tableVersion = Uint32(tab->getObjectVersion());
+  return 0;
 }
 
 /* P-53 reads a table with a VARCHAR and a FLOAT column, which T1 does
@@ -4158,7 +4210,7 @@ int runP53(NDBT_Context *ctx, NDBT_Step *step) {
   Ndb *pNdb = nullptr;
   SignalSender *ss = nullptr;
   NdbRestarter *restarter = nullptr;
-  SpjMalformedChecker *c = makeChecker(ctx, step, pNdb, ss, restarter);
+  SpjMalformedChecker *c = makeChecker(step, pNdb, ss, restarter);
   if (c == nullptr) return NDBT_FAILED;
   Uint32 tableId = 0;
   Uint32 tableVersion = 0;
@@ -4401,5 +4453,9 @@ NDBT_TESTSUITE_END(testSpjMalformed)
 int main(int argc, const char **argv) {
   ndb_init();
   NDBT_TESTSUITE_INSTANCE(testSpjMalformed);
+  /* The cases read tables that MySQL creates (lookupT1): the program
+   * creates no table, takes no table argument and runs a case once. */
+  testSpjMalformed.setCreateTable(false);
+  testSpjMalformed.setRunAllTables(true);
   return testSpjMalformed.execute(argc, argv);
 }

@@ -539,6 +539,9 @@ Steps:
      change monitor, which found the NDBT database `TEST_DB` with
      `lower_case_table_names=2` (macOS) during the 10 s the test waits for
      a reply. `suite/ndb_spj/my.cnf` now sets `ndb_metadata_check = false`.
+     (2026-11-27: testSpjMalformed no longer creates `TEST_DB.T1`; T1 is
+     `test.t1`, created through mysqld by `spj_malformed_case.inc`, and
+     the setting is gone.)
    - `ndb_push_agg_jit` canaries: `rondb_jit_decimal_canary`,
      `double_canary` and `mixed_canary` asserted JIT compiles of SUM over
      scale-2 DECIMALs and of a DECIMAL expression that mysqld no longer
