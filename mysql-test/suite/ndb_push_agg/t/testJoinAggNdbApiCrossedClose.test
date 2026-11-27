@@ -1,0 +1,41 @@
+# RONDB-1124: an API close that crosses the end of a join aggregation
+# after a receive timeout, and the next scan with the same transaction
+# id (testJoinAggNdbApi Test 27).  DBTC error insert 8321 holds the end
+# of the query until the API's close of it arrives, then ends the scan
+# before it answers the close, and holds that answer (the second pure
+# EndOfData of "Confirming scan close") until the API's next request on
+# the same connection.  The DBUG keyword ndb_reduced_api_protocol_timeout
+# cuts the API's wait for the end to 3 x 2 s.  The query must fail with
+# 4008, the same query in a buddy transaction (Ndb::hupp(), same
+# transaction id) after the close must give the right result, and the
+# cluster must stay up.  Before the fix the buddy's scan reused the
+# closed scan's connection and took the held answer as its own
+# EndOfData: a debug NDB API aborted on assert(m_pendingWorkers > 0) in
+# NdbQueryImpl::handleBatchComplete().  Debug only: the DBUG keyword
+# needs a debug NDB API, and the error insert debug data nodes.
+#
+# A debug NDB API prints receive-timeout traces with timestamps while the
+# query waits, so the program's output goes to a file and only its result
+# lines are compared.  A crash fails the --exec; a failed check prints a
+# FAILED line and "Some tests FAILED", which differ from the result file.
+--source include/have_ndb.inc
+--source include/have_debug.inc
+--source include/have_ndb_debug.inc
+
+--let $crossed_close_out = $MYSQLTEST_VARDIR/tmp/testJoinAggNdbApiCrossedClose.out
+--echo Running testJoinAggNdbApi --only 27
+--error 0,1
+--exec $NDB_PUSH_AGG_DIR/testJoinAggNdbApi -c "$NDB_CONNECTSTRING" -m $MASTER_MYPORT --only 27 > $crossed_close_out 2>&1
+--exec grep -E "^(Test 27|FAILED|All tests|Some tests)" $crossed_close_out
+--remove_file $crossed_close_out
+
+# DBTC clears 8321 in the TC instance that holds the end, and the
+# program clears it everywhere, but not if it died: clear it here too.
+# The mgm output goes to a test-local file that is removed again, so
+# that check-testcase sees the same vardir before and after.
+--let $crossed_close_mgm = $MYSQLTEST_VARDIR/tmp/testJoinAggNdbApiCrossedClose_mgm.log
+--exec $NDB_MGM -e "all error 0" >> $crossed_close_mgm
+--remove_file $crossed_close_mgm
+
+# Clean up database created by test program
+DROP DATABASE IF EXISTS test_db;

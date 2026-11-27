@@ -6186,6 +6186,332 @@ testDuplicateEndOfData(Ndb *ndb, MYSQL *conn, NdbRestarter &restarter)
 }
 
 /* ------------------------------------------------------------------ */
+/* Helpers for Test 27, which runs only with a debug NDB API           */
+/* ------------------------------------------------------------------ */
+
+#ifndef NDEBUG
+/* SELECT p.grp, SUM(c.val), COUNT(c.val)
+ * FROM t14_parent p JOIN t14_child c ON c.parent_id = p.id
+ * GROUP BY p.grp.  On error prints a FAILED line that starts with head
+ * and returns nullptr. */
+static const NdbQueryDef *
+prepareT14SumCountDef(Ndb *ndb, const NdbDictionary::Table *parentTab,
+                      const NdbDictionary::Table *childTab, const char *head)
+{
+  const NdbDictionary::Column *grpCol = parentTab->getColumn("grp");
+  if (grpCol == nullptr) {
+    printf("%sFAILED (column lookup)\n", head);
+    return nullptr;
+  }
+
+  NdbAggregator agg(childTab);
+  if (!agg.GroupByLinked(0, grpCol) ||
+      !agg.LoadColumn("val", 0) ||
+      !agg.Sum(0, 0) ||
+      !agg.Count(1, 0) ||
+      !agg.Finalize()) {
+    printf("%sFAILED (agg program: %s)\n", head, agg.GetError().err_msg_);
+    return nullptr;
+  }
+
+  NdbQueryBuilder *qb = NdbQueryBuilder::create();
+  const NdbQueryTableScanOperationDef *parentOp = qb->scanTable(parentTab);
+  const NdbQueryOperand *joinKey[] = {
+    qb->linkedValue(parentOp, "id"), nullptr
+  };
+  NdbQueryOptions opts;
+  opts.setMatchType(NdbQueryOptions::MatchNonNull);
+  opts.setAggregation(agg);
+  const NdbLinkedOperand *grpLink = qb->linkedValue(parentOp, "grp");
+  opts.addLinkedProjection(grpLink);
+
+  const NdbQueryLookupOperationDef *childOp =
+      qb->readTuple(childTab, joinKey, &opts);
+  if (childOp == nullptr) {
+    printf("%sFAILED (readTuple: %s)\n", head, qb->getNdbError().message);
+    qb->destroy();
+    return nullptr;
+  }
+
+  const NdbQueryDef *queryDef = qb->prepare(ndb);
+  if (queryDef == nullptr) {
+    printf("%sFAILED (prepare: %s)\n", head, qb->getNdbError().message);
+  }
+  qb->destroy();
+  return queryDef;
+}
+
+/* Read an executed t14 SUM/COUNT query (prepareT14SumCountDef) to the
+ * end and check its 10 groups: group g has SUM(val) = 100*g + 4500 and
+ * COUNT = 10.  On failure prints a FAILED line and returns -1. */
+static int
+readAndCheckT14Groups(NdbQuery *query, const char *label)
+{
+  NdbQuery::NextResultOutcome outcome;
+  while ((outcome = query->nextResult(true)) == NdbQuery::NextResult_gotRow) {
+  }
+  if (outcome != NdbQuery::NextResult_scanComplete) {
+    printf("FAILED (%s: nextResult: outcome %d error %d %s)\n", label,
+           static_cast<int>(outcome), query->getNdbError().code,
+           query->getNdbError().message);
+    return -1;
+  }
+
+  NdbAggregator *resultAgg = query->getAggregator();
+  if (resultAgg == nullptr) {
+    printf("FAILED (%s: getAggregator returned nullptr)\n", label);
+    return -1;
+  }
+
+  std::map<Int32, std::pair<Int64, Int64>> actual;
+  for (;;) {
+    NdbAggregator::ResultRecord rec = resultAgg->FetchResultRecord();
+    if (rec.end()) break;
+    NdbAggregator::Column grp = rec.FetchGroupbyColumn();
+    const Int32 grpVal = grp.data_int32();
+    NdbAggregator::Result sumRes = rec.FetchAggregationResult();
+    const Int64 sumVal = sumRes.data_int64();
+    NdbAggregator::Result cntRes = rec.FetchAggregationResult();
+    const Int64 cntVal = cntRes.data_int64();
+    actual[grpVal] = std::make_pair(sumVal, cntVal);
+  }
+
+  if (actual.size() != 10) {
+    printf("FAILED (%s: expected 10 groups, got %zu)\n", label,
+           actual.size());
+    return -1;
+  }
+  for (Int32 g = 1; g <= 10; g++) {
+    const std::map<Int32, std::pair<Int64, Int64>>::const_iterator it =
+        actual.find(g);
+    if (it == actual.end()) {
+      printf("FAILED (%s: missing group %d)\n", label, g);
+      return -1;
+    }
+    const Int64 expectedSum = static_cast<Int64>(g) * static_cast<Int64>(100) +
+                              static_cast<Int64>(4500);
+    if (it->second.first != expectedSum || it->second.second != 10) {
+      printf("FAILED (%s: group %d: SUM=%lld COUNT=%lld, "
+             "expected SUM=%lld COUNT=10)\n",
+             label, g, static_cast<long long>(it->second.first),
+             static_cast<long long>(it->second.second),
+             static_cast<long long>(expectedSum));
+      return -1;
+    }
+  }
+  return 0;
+}
+#endif
+
+/* ------------------------------------------------------------------ */
+/* Test 27: an API close that crosses the end of a join aggregation    */
+/*          after a receive timeout, and the next scan with the same   */
+/*          transaction id (ERROR_INSERT 8321).  Not part of the       */
+/*          default run: --only 27, from the debug-only MTR wrapper    */
+/*          testJoinAggNdbApiCrossedClose.                             */
+/*                                                                     */
+/* 8321 makes DBTC hold the end of the t14 SUM/COUNT query, with every */
+/* COMPLETE_CONF in, until the API's close of the scan arrives.  The   */
+/* API waits for the end until its receive timeout, which              */
+/* ndb_reduced_api_protocol_timeout cuts to 3 x 2 s: nextResult()      */
+/* fails with 4008 while a worker is not final, and close() sends      */
+/* SCAN_NEXTREQ(close).  DBTC then ends the scan (aggregate            */
+/* SCAN_TABCONF, pure EndOfData, scan released), so that the close     */
+/* crosses the end, and answers the close with a second pure           */
+/* EndOfData, as it answers every close that comes after the end       */
+/* ("Confirming scan close").  It holds that answer until the API's    */
+/* next SCAN_TABREQ or TCRELEASEREQ on the same connection and sends   */
+/* it just before it handles that request, the latest it could have    */
+/* sent it.                                                            */
+/*                                                                     */
+/* The 4008 aborts the query's transaction, which then executes        */
+/* nothing more, so the only scan that can carry its transaction id    */
+/* afterwards is one of a buddy transaction from Ndb::hupp(), which    */
+/* takes the transaction id of its parent.  The test starts a buddy    */
+/* before the close and runs the same query in it after the close.  It */
+/* uses an Ndb object of its own, whose idle connections are only the  */
+/* ones this test returns.  Before the fix the closed scan's           */
+/* connection went back to them, and the buddy's scan, on the same     */
+/* data node and TC instance, took it again: its SCAN_TABREQ released  */
+/* the held answer, which passed checkState_TransId() and ended the    */
+/* new scan with every worker final before any of its results came;    */
+/* a debug API then aborted on assert(m_pendingWorkers > 0) in         */
+/* NdbQueryImpl::handleBatchComplete() at the new scan's first         */
+/* SCAN_TABCONF.  Now the close after a receive timeout releases the   */
+/* connection: the held answer goes out before DBTC handles the        */
+/* TCRELEASEREQ and finds the connection DisConnecting, which drops    */
+/* it, and the buddy's scan runs on another connection and gives the   */
+/* right result.                                                       */
+/* ------------------------------------------------------------------ */
+
+#ifndef NDEBUG
+/* Test 27 without its setup: the query that times out, its close, and
+ * the same query in a buddy transaction.  On failure prints a FAILED
+ * line and returns -1. */
+static int
+runCrossedCloseQueries(Ndb *testNdb, const NdbQueryDef *queryDef)
+{
+  NdbTransaction *trans = testNdb->startTransaction();
+  if (trans == nullptr) {
+    printf("FAILED (8321: startTransaction: %s)\n",
+           testNdb->getNdbError().message);
+    return -1;
+  }
+  NdbQuery *query = trans->createQuery(queryDef);
+  if (query == nullptr) {
+    printf("FAILED (8321: createQuery: %s)\n", trans->getNdbError().message);
+    trans->close();
+    return -1;
+  }
+  if (trans->execute(NdbTransaction::NoCommit) != 0) {
+    printf("FAILED (8321: execute: %s)\n", trans->getNdbError().message);
+    query->close();
+    trans->close();
+    return -1;
+  }
+
+  /* The end of the scan is held: this waits until the receive timeout. */
+  NdbQuery::NextResultOutcome outcome;
+  while ((outcome = query->nextResult(true)) == NdbQuery::NextResult_gotRow) {
+  }
+  const int queryError =
+      (outcome == NdbQuery::NextResult_error) ? query->getNdbError().code : 0;
+  V("  nextResult() outcome %d error %d\n", static_cast<int>(outcome),
+    queryError);
+
+  /* Started before the close, so that it does not take the connection
+   * of the query's scan itself. */
+  NdbTransaction *buddy = testNdb->hupp(trans);
+
+  /* The close crosses the held end of the scan. */
+  query->close();
+
+  if (outcome != NdbQuery::NextResult_error || queryError != 4008) {
+    printf("FAILED (8321: expected nextResult() to fail with 4008, got "
+           "outcome %d error %d)\n",
+           static_cast<int>(outcome), queryError);
+    if (buddy != nullptr) testNdb->closeTransaction(buddy);
+    trans->close();
+    return -1;
+  }
+  if (buddy == nullptr) {
+    printf("FAILED (8321: hupp: %s)\n", testNdb->getNdbError().message);
+    trans->close();
+    return -1;
+  }
+
+  /* A scan with the transaction id of the closed one. */
+  int result = 0;
+  NdbQuery *buddyQuery = buddy->createQuery(queryDef);
+  if (buddyQuery == nullptr) {
+    printf("FAILED (8321: buddy createQuery: %s)\n",
+           buddy->getNdbError().message);
+    result = -1;
+  } else {
+    if (buddy->execute(NdbTransaction::NoCommit) != 0) {
+      printf("FAILED (8321: buddy execute: %s)\n",
+             buddy->getNdbError().message);
+      result = -1;
+    } else if (readAndCheckT14Groups(buddyQuery, "8321 buddy query") != 0) {
+      result = -1;
+    }
+    buddyQuery->close();
+  }
+  testNdb->closeTransaction(buddy);
+  trans->close();
+  return result;
+}
+#endif
+
+static int
+testCrossedCloseAfterTimeout(Ndb *ndb, MYSQL *conn, NdbRestarter &restarter)
+{
+  /* The line is printed whole at the end: a debug NDB API prints its
+   * receive-timeout traces to stdout while the query waits. */
+  static const char *const head =
+      "Test 27: close crossing the end after a receive timeout "
+      "(ERROR_INSERT 8321) ... ";
+
+#ifdef NDEBUG
+  /* ndb_reduced_api_protocol_timeout is a DBUG keyword: without it the
+   * wait would last 3 x the full receive timeout. */
+  (void)ndb;
+  (void)conn;
+  (void)restarter;
+  printf("%sSKIPPED (needs a debug NDB API)\n", head);
+  return 0;
+#else
+  int result = 0;
+  {
+    /* Destroyed, with its connections, before the check below. */
+    Ndb testNdb(&ndb->get_ndb_cluster_connection(), TEST_DB);
+    if (testNdb.init() != 0) {
+      printf("%sFAILED (Ndb::init: %s)\n", head,
+             testNdb.getNdbError().message);
+      return -1;
+    }
+    NdbDictionary::Dictionary *dict = testNdb.getDictionary();
+    dict->invalidateTable(T14_PARENT);
+    dict->invalidateTable(T14_CHILD);
+    const NdbDictionary::Table *parentTab = dict->getTable(T14_PARENT);
+    const NdbDictionary::Table *childTab = dict->getTable(T14_CHILD);
+    if (parentTab == nullptr || childTab == nullptr) {
+      printf("%sFAILED (table lookup: %s)\n", head,
+             dict->getNdbError().message);
+      return -1;
+    }
+    const NdbQueryDef *queryDef =
+        prepareT14SumCountDef(&testNdb, parentTab, childTab, head);
+    if (queryDef == nullptr) {
+      return -1;
+    }
+
+    if (restarter.insertErrorInAllNodes(8321) != 0) {
+      printf("%sFAILED (insertErrorInAllNodes(8321))\n", head);
+      queryDef->destroy();
+      return -1;
+    }
+    V("\n  ERROR_INSERT 8321 set (join aggregation end held until the "
+      "close)\n");
+
+    /* The wait for the held end gives up after 3 x 2 s. */
+    DBUG_PUSH("d,ndb_reduced_api_protocol_timeout");
+    result = runCrossedCloseQueries(&testNdb, queryDef);
+    DBUG_POP();
+
+    /* DBTC cleared 8321 when it held the end; this clears it where no
+     * scan used it. */
+    restarter.insertErrorInAllNodes(0);
+    V("  ERROR_INSERT cleared\n");
+    queryDef->destroy();
+  }
+
+  if (result != 0) {
+    printf("%sFAILED (see the FAILED line above)\n", head);
+    return -1;
+  }
+
+  if (restarter.waitClusterStarted(30) != 0) {
+    printf("%sFAILED (a data node is not started after the queries)\n",
+           head);
+    return -1;
+  }
+
+  V("  Re-running query to verify cluster health...\n");
+  if (runAndVerifyT14Query(ndb, conn, "post-8321") != 0) {
+    printf("%sFAILED (the next query failed, see the FAILED line above)\n",
+           head);
+    return -1;
+  }
+
+  printf("%sOK (nextResult failed with 4008, buddy query after the crossed "
+         "close correct, next query correct)\n",
+         head);
+  return 0;
+#endif
+}
+
+/* ------------------------------------------------------------------ */
 /* Main                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -6330,7 +6656,7 @@ usage(const char *prog)
           "Options:\n"
           "  -c  NDB management server connect string (default: localhost:1186)\n"
           "  -m  MySQL server port (default: 3306)\n"
-          "  --only <N>     Run only test N (Tests 25 and 26 run only this way)\n"
+          "  --only <N>     Run only test N (Tests 25-27 run only this way)\n"
           "  --skip <N>     Skip test N\n"
           "  -v, --verbose  Show detailed progress output\n"
           "  -h, --help     Show this help\n",
@@ -6705,6 +7031,21 @@ int main(int argc, char **argv)
           NdbRestarter restarter(connectString);
           if (createTest14Tables(conn) == 0 && insertTest14Data(conn) == 0) {
             if (testDuplicateEndOfData(&ndb, conn, restarter) != 0)
+              exitCode = 1;
+          } else {
+            exitCode = 1;
+          }
+          dropTest14Tables(conn);
+        }
+
+        /* Test 27: a close that crosses the end of a join aggregation
+         * after a receive timeout.  Only on request: it needs a debug
+         * NDB API and data nodes with error inserts, and waits 6 s for
+         * the end that DBTC holds. */
+        if (onlyTest == 27) {
+          NdbRestarter restarter(connectString);
+          if (createTest14Tables(conn) == 0 && insertTest14Data(conn) == 0) {
+            if (testCrossedCloseAfterTimeout(&ndb, conn, restarter) != 0)
               exitCode = 1;
           } else {
             exitCode = 1;

@@ -2815,6 +2815,15 @@ class Dbtc : public SimulatedBlock {
   void sendJoinAggScanTabConf(Signal *,
                               ScanRecordPtr,
                               ApiConnectRecordPtr);
+  /* Every COMPLETE_CONF of a main join aggregation is in: send the
+   * aggregate SCAN_TABCONF and the pure EndOfData, release the scan. */
+  void completeJoinAggMainScan(Signal *, ScanRecordPtr, ApiConnectRecordPtr);
+#ifdef ERROR_INSERT
+  /* ERROR_INSERT 8321: the API's close of a scan whose end is held. */
+  bool crossHeldJoinAggEnd(Signal *, ScanRecordPtr, ApiConnectRecordPtr);
+  /* ERROR_INSERT 8321: send the held answer to a crossed close. */
+  void sendHeldCloseConf(Signal *, ApiConnectRecordPtr, BlockReference);
+#endif
   void sendJoinAggReleaseReqs(Signal *, ScanRecordPtr);
   void joinAggAbortAfterRelease(Signal *, ScanRecordPtr);
 
@@ -3942,6 +3951,25 @@ class Dbtc : public SimulatedBlock {
 #ifdef ERROR_INSERT
   // Used with ERROR_INSERT 8078 + 8079 to check API_FAILREQ handling
   Uint32 c_lastFailedApi;
+
+  /**
+   * ERROR_INSERT 8321 (testJoinAggNdbApi --only 27): an API scan close
+   * that crosses the end of a join aggregation.
+   *
+   * c_crossedCloseScanPtrI is the join aggregation scan whose end
+   * execJOIN_AGG_COMPLETE_CONF holds until the API's close of it
+   * arrives, RNIL if none.  c_heldCloseConf is DBTC's answer to that
+   * close, a pure EndOfData, held until the API's next request on the
+   * same ApiConnectRecord; its apiConnectPtrI is RNIL if none is held.
+   */
+  Uint32 c_crossedCloseScanPtrI;
+  struct HeldCloseConf {
+    Uint32 apiConnectPtrI;
+    BlockReference apiRef;
+    Uint32 ndbapiConnect;
+    Uint32 transid[2];
+  };
+  HeldCloseConf c_heldCloseConf;
 #endif
   Uint32 m_deferred_enabled;
   Uint32 m_max_writes_per_trans;

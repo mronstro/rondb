@@ -148,6 +148,10 @@ void Dbtc::initData()
   m_tot_queued_scan_nextreq = 0;
   m_tot_send_queued_scan_nextreq = 0;
 #endif
+#ifdef ERROR_INSERT
+  c_crossedCloseScanPtrI = RNIL;
+  c_heldCloseConf.apiConnectPtrI = RNIL;
+#endif
 #ifdef DEBUG_QUERY_THREAD_USAGE
   c_qt_used_dirty_flag = 0;
   c_qt_used_locked_read = 0;

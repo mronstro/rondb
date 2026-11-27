@@ -2530,6 +2530,13 @@ void Dbtc::execTCRELEASEREQ(Signal *signal) {
     sendSignal(tapiBlockref, GSN_TCRELEASEREF, signal, 3, JBB);
     return;
   }
+#ifdef ERROR_INSERT
+  if (unlikely(c_heldCloseConf.apiConnectPtrI == apiConnectptr.i)) {
+    jam();
+    /* 8321: the answer to a crossed close goes out before this release */
+    sendHeldCloseConf(signal, apiConnectptr, signal->getSendersBlockRef());
+  }
+#endif
   if (apiConnectptr.p->apiConnectstate == CS_DISCONNECTED ||
       apiConnectptr.p->apiFailState == ApiConnectRecord::AFS_API_DISCONNECTED) {
     jam();
@@ -17157,6 +17164,14 @@ void Dbtc::execSCAN_TABREQ(Signal *signal) {
     return;
   }  // if
 
+#ifdef ERROR_INSERT
+  if (unlikely(c_heldCloseConf.apiConnectPtrI == apiConnectptr.i)) {
+    jam();
+    /* 8321: the answer to a crossed close goes out before this scan */
+    sendHeldCloseConf(signal, apiConnectptr, sendersBlockRef);
+  }
+#endif
+
   ApiConnectRecord *transP = apiConnectptr.p;
   passQueueingFlag = passQueueingFlag &&
                      (refToMain(sendersBlockRef) == DBTC);
@@ -20050,6 +20065,13 @@ void Dbtc::execSCAN_NEXTREQ(Signal *signal) {
     /*********************************************************************
      * APPLICATION IS CLOSING THE SCAN.
      **********************************************************************/
+#ifdef ERROR_INSERT
+    if (unlikely(scanptr.i == c_crossedCloseScanPtrI) &&
+        crossHeldJoinAggEnd(signal, scanptr, apiConnectptr)) {
+      jam();
+      return;
+    }
+#endif
     close_scan_req(signal, scanptr, true, apiConnectptr);
     return;
   }  // if
@@ -32887,26 +32909,137 @@ void Dbtc::execJOIN_AGG_COMPLETE_CONF(Signal *signal) {
       sendJoinAggReleaseReqs(signal, scanptr);
       return;
     }
-    sendJoinAggScanTabConf(signal, scanptr, apiConnectptr);
-    /* Fire-and-forget release: the nodes free their aggregation state
-     * unconditionally on JOIN_AGG_RELEASE_REQ — the CONFs were pure TC
-     * bookkeeping.  Skip WAIT_JOIN_AGG_RELEASE and close immediately:
-     * releaseJoinAggResources (called from releaseScanResources on the
-     * close path below) sends the noReply=1 RELEASE_REQs for every
-     * node still in m_aggNodes.  This returns the scan record and the
-     * ApiConnectRecord one exchange earlier and closes the window
-     * where a back-to-back SCAN_TABREQ on the reused API connection
-     * hit CS_START_SCAN (error 202).  The close path's pure EndOfData
-     * SCAN_TABCONF is still sent — the API completes only on it (it
-     * triggers execCLOSE_SCAN_REP, finalizing the scan workers; the
-     * agg conf above only sets the aggregate receiver's expected-row
-     * accounting), so the two confs now go out back-to-back. */
-    cancelJoinAggSetup(scanptr.p);
-    scanptr.p->scanState = ScanRecord::CLOSING_SCAN;
-    scanptr.p->m_close_scan_req = true;
-    close_scan_req_send_conf(signal, scanptr, apiConnectptr);
+#ifdef ERROR_INSERT
+    if (ERROR_INSERTED(8321)) {
+      jam();
+      /* Hold the end of this scan, with every COMPLETE_CONF in, until
+       * the API's close of it arrives (crossHeldJoinAggEnd), so that the
+       * close crosses the end.  The API waits for the aggregate
+       * SCAN_TABCONF and the pure EndOfData until its receive timeout,
+       * and only then sends the close.  One scan per insert. */
+      CLEAR_ERROR_INSERT_VALUE;
+      c_crossedCloseScanPtrI = scanptr.i;
+      g_eventLogger->info("DBTC %u: ERROR 8321: the end of join aggregation"
+                          " scan %u waits for the API's close",
+                          instance(), scanptr.i);
+      return;
+    }
+#endif
+    completeJoinAggMainScan(signal, scanptr, apiConnectptr);
   }
 }
+
+void Dbtc::completeJoinAggMainScan(Signal *signal, ScanRecordPtr scanptr,
+                                   ApiConnectRecordPtr apiConnectptr) {
+  jam();
+  sendJoinAggScanTabConf(signal, scanptr, apiConnectptr);
+  /* Fire-and-forget release: the nodes free their aggregation state
+   * unconditionally on JOIN_AGG_RELEASE_REQ — the CONFs were pure TC
+   * bookkeeping.  Skip WAIT_JOIN_AGG_RELEASE and close immediately:
+   * releaseJoinAggResources (called from releaseScanResources on the
+   * close path below) sends the noReply=1 RELEASE_REQs for every
+   * node still in m_aggNodes.  This returns the scan record and the
+   * ApiConnectRecord one exchange earlier and closes the window
+   * where a back-to-back SCAN_TABREQ on the reused API connection
+   * hit CS_START_SCAN (error 202).  The close path's pure EndOfData
+   * SCAN_TABCONF is still sent — the API completes only on it (it
+   * triggers execCLOSE_SCAN_REP, finalizing the scan workers; the
+   * agg conf above only sets the aggregate receiver's expected-row
+   * accounting), so the two confs now go out back-to-back. */
+  cancelJoinAggSetup(scanptr.p);
+  scanptr.p->scanState = ScanRecord::CLOSING_SCAN;
+  scanptr.p->m_close_scan_req = true;
+  close_scan_req_send_conf(signal, scanptr, apiConnectptr);
+}
+
+#ifdef ERROR_INSERT
+/**
+ * ERROR_INSERT 8321: the API's close of the join aggregation scan whose
+ * end execJOIN_AGG_COMPLETE_CONF holds.  This is the order of events of a
+ * close that crosses the end of the scan: DBTC ends the scan first, as if
+ * it had ended just before the close arrived, so that the aggregate
+ * SCAN_TABCONF and the pure EndOfData go to the API and the scan is
+ * released, which puts the ApiConnectRecord back in CS_CONNECTED.  Then
+ * it answers the close as execSCAN_NEXTREQ does when it finds the scan
+ * released ("Confirming scan close"): with another pure EndOfData.  That
+ * answer is held until the API's next request on this ApiConnectRecord
+ * (sendHeldCloseConf), so that it reaches the API after the API has
+ * finished the close, the latest it could come.
+ *
+ * Returns false, and leaves the close to close_scan_req(), if the scan is
+ * not a held end.
+ */
+bool Dbtc::crossHeldJoinAggEnd(Signal *signal, ScanRecordPtr scanptr,
+                               ApiConnectRecordPtr apiConnectptr) {
+  c_crossedCloseScanPtrI = RNIL;
+  if (scanptr.p->scanState != ScanRecord::WAIT_JOIN_AGG_COMPLETE ||
+      !scanptr.p->m_joinAgg || scanptr.p->m_aggErrorCode != 0 ||
+      joinAggCompleteResponsesOutstanding(scanptr)) {
+    jam();
+    /* The held scan was released some other way (API or node failure)
+     * and its record is used again. */
+    return false;
+  }
+  const BlockReference apiRef = signal->getSendersBlockRef();
+  completeJoinAggMainScan(signal, scanptr, apiConnectptr);
+  if (apiConnectptr.p->apiConnectstate != CS_CONNECTED ||
+      apiConnectptr.p->ndbapiBlockref != apiRef) {
+    jam();
+    /* As execSCAN_NEXTREQ, confirm the close only to the owner of a
+     * released scan. */
+    return true;
+  }
+  c_heldCloseConf.apiConnectPtrI = apiConnectptr.i;
+  c_heldCloseConf.apiRef = apiRef;
+  c_heldCloseConf.ndbapiConnect = apiConnectptr.p->ndbapiConnect;
+  c_heldCloseConf.transid[0] = apiConnectptr.p->transid[0];
+  c_heldCloseConf.transid[1] = apiConnectptr.p->transid[1];
+  g_eventLogger->info("DBTC %u: ERROR 8321: the close of scan %u crossed its"
+                      " end, the answer waits for the next request on ACR"
+                      " %u",
+                      instance(), scanptr.i, apiConnectptr.i);
+  return true;
+}
+
+/**
+ * ERROR_INSERT 8321: the API's next request on the ApiConnectRecord whose
+ * answer to a crossed close is held (crossHeldJoinAggEnd) has arrived.
+ * Send the answer first, as DBTC sent it before it received this request.
+ * The caller goes on with the request in signal, so its data words and
+ * header are put back as they came.
+ */
+void Dbtc::sendHeldCloseConf(Signal *signal,
+                             ApiConnectRecordPtr apiConnectptr,
+                             BlockReference senderRef) {
+  if (senderRef != c_heldCloseConf.apiRef) {
+    jam();
+    /* Not the API's own request (a request resent from the rate
+     * queue); the API's request came first and took the answer. */
+    return;
+  }
+  c_heldCloseConf.apiConnectPtrI = RNIL;
+  if (apiConnectptr.p->ndbapiBlockref != c_heldCloseConf.apiRef ||
+      apiConnectptr.p->ndbapiConnect != c_heldCloseConf.ndbapiConnect) {
+    jam();
+    /* The record has another owner now: the answer is for nobody. */
+    return;
+  }
+  const SignalHeader savedHeader = signal->header;
+  Uint32 savedData[ScanTabConf::SignalLength];
+  memcpy(savedData, signal->theData, sizeof(savedData));
+
+  ScanTabConf *conf = (ScanTabConf *)&signal->theData[0];
+  conf->apiConnectPtr = c_heldCloseConf.ndbapiConnect;
+  conf->requestInfo = ScanTabConf::EndOfData;
+  conf->transId1 = c_heldCloseConf.transid[0];
+  conf->transId2 = c_heldCloseConf.transid[1];
+  sendSignal(c_heldCloseConf.apiRef, GSN_SCAN_TABCONF, signal,
+             ScanTabConf::SignalLength, JBB);
+
+  memcpy(signal->theData, savedData, sizeof(savedData));
+  signal->header = savedHeader;
+}
+#endif
 
 /* Phase L (C): unified JOIN_AGG_COMPLETE_REF handler.  Same lookup
  * pattern as the CONF handler; on success records the per-record
