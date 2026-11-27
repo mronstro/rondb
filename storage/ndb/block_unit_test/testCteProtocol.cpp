@@ -142,6 +142,15 @@
  *         key holds: CTE_SCAN_REF 1268 again, and every group once the
  *         insert is cleared.  Without the key check (before RONDB-1124)
  *         DBLQH accepted both rows.
+ *   CK-1  CTE_LOOKUP_REQ on a grouped CTE whose BIGINT key entry runs
+ *         past the key: three words, with an AttributeHeader that
+ *         claims four data words.  DBLQH refuses it with CTE_LOOKUP_REF
+ *         1265 (JoinGBHashTable::checkKey) on every data node; the same
+ *         key with its true length and a value no group has misses with
+ *         1263, and a scan afterwards returns every group.  Before
+ *         e226cead16a the key was hashed past its end and missed: 1263.
+ *         The NDB API cannot send such a key: DBSPJ builds every key
+ *         entry with the AttributeHeader of its value.
  *
  * Section 6, parking.  A consumer signal that arrives before its SETUP
  * parks on an identity placeholder; the SETUP's flush replays it, the 10
@@ -262,6 +271,8 @@ static const Uint32 AGG_MAGIC = 0x0721;
 static const Uint32 AGG_RESULT_ATTR = 0xFF00;
 static const Uint32 ZNODEFAIL_BEFORE_COMMIT = 286;
 static const Uint32 ZJOIN_AGG_STATE_NOT_FOUND = 1251;
+static const Uint32 ZCTE_LOOKUP_GROUP_NOT_FOUND = 1263;
+static const Uint32 ZCTE_LOOKUP_ATTRINFO_MALFORMED = 1265;
 static const Uint32 ZCTE_LOOKUP_OUTPUT_OVERFLOW = 1266;
 static const Uint32 ZCTE_LOOKUP_FILTER_ERROR = 1268;
 /* Temporary (TR): a race or a resource shortage a retry survives. */
@@ -2918,6 +2929,115 @@ ov3(Ctx &c)
   return checkLeaks(c.ss, c.restarter, "OV-3");
 }
 
+/* CK-1: a grouped CTE_LOOKUP key whose entry runs past the key.  The CTE
+ * groups by the BIGINT a, 1..ROWS.  The key section holds one BIGINT
+ * entry of a = 0, a value no group has: its AttributeHeader and two data
+ * words.  The control gives the header the true length, 8 bytes; the
+ * malformed key gives it 16 bytes, four data words, two past the key.
+ * The AttrInfo is the 5-word header with empty sections: a request
+ * whose result goes to the API needs at least that much, and a miss
+ * reads none of it.  Every data node's owner LDM must answer
+ *   control:   CTE_LOOKUP_REF 1263 (group not found), which shows that
+ *              the probe reaches the group table;
+ *   malformed: CTE_LOOKUP_REF 1265 (JoinGBHashTable::checkKey).
+ * Before e226cead16a hashKeyFull hashed the 16 bytes the header gave,
+ * eight of them from past the key's copy, and findInBucket found no
+ * group for the truncated entry: the malformed key answered 1263 too.
+ * Afterwards every group is still there and no data node stopped. */
+static const Uint32 CK1_KEY_WORDS = 3;
+static const Uint32 CK1_TRUE_BYTES = 8;      /* a BIGINT */
+static const Uint32 CK1_CLAIMED_BYTES = 16;  /* two words past the key */
+static const Uint32 CK1_MISSING_A = 0;
+static const Uint32 CK1_ATTRINFO_WORDS = 5;
+
+static int
+sendCk1LookupReq(SignalSender &ss, const CteNode &n, Uint32 claimedBytes)
+{
+  SimpleSignal ssig;
+  CteLookupReq *req = reinterpret_cast<CteLookupReq *>(ssig.getDataPtrSend());
+  req->senderRef = ss.getOwnRef();
+  req->senderData = FAKE_SENDER_DATA;
+  req->aggStateKey = n.key;
+  req->keyLen = CK1_KEY_WORDS * sizeof(Uint32);
+  req->resultRef = ss.getOwnRef();
+  req->resultData = FAKE_SENDER_DATA;
+  req->routeRef = ss.getOwnRef();
+  req->correlation = FAKE_SENDER_DATA;
+  req->joinAggStateKey = RNIL;
+  req->flags = 0;
+  ssig.set(ss, 0, numberToBlock(DBLQH, n.owner), GSN_CTE_LOOKUP_REQ,
+           CteLookupReq::SignalLength);
+  Uint32 keySection[CK1_KEY_WORDS];
+  AttributeHeader::init(&keySection[0], 0, claimedBytes);
+  keySection[1] = CK1_MISSING_A;  /* a, low word */
+  keySection[2] = 0;              /* a, high word */
+  Uint32 attrInfo[CK1_ATTRINFO_WORDS] = {0, 0, 0, 0, 0};
+  ssig.header.m_noOfSections = 2;
+  ssig.ptr[CteLookupReq::KeySectionNum].p = keySection;
+  ssig.ptr[CteLookupReq::KeySectionNum].sz = CK1_KEY_WORDS;
+  ssig.ptr[CteLookupReq::AttrInfoSectionNum].p = attrInfo;
+  ssig.ptr[CteLookupReq::AttrInfoSectionNum].sz = CK1_ATTRINFO_WORDS;
+  if (ss.sendSignal(n.node, &ssig) != SEND_OK) {
+    fprintf(stderr, "sendSignal CTE_LOOKUP_REQ failed\n");
+    return -1;
+  }
+  return 0;
+}
+
+/* Every data node STARTED, with its connection count (an automatic
+ * restart changes it).  The management call must not block the
+ * SignalSender's heartbeats. */
+static bool
+readNodeConnections(Ctx &c, std::map<int, int> &connections,
+                    const char *label)
+{
+  ScopedSenderUnlock unlock(c.ss);
+  return readStartedNodeConnections(c.restarter, connections, label);
+}
+
+static int
+ck1(Ctx &c)
+{
+  std::vector<CteNode> nodes;
+  Uint32 rows = 0;
+  if (cteSetupAndScan(c, nodes, rows) != 0) return -1;
+  if (cteCompleteAndVerify(c, nodes, rows, "CK-1") != 0) return -1;
+  std::map<int, int> before;
+  if (!readNodeConnections(c, before, "CK-1")) return -1;
+
+  for (const CteNode &n : nodes) {
+    char context[96];
+    snprintf(context, sizeof(context), "CK-1 node %u, key of no group",
+             n.node);
+    if (sendCk1LookupReq(c.ss, n, CK1_TRUE_BYTES) != 0 ||
+        expectRef(c.ss, GSN_CTE_LOOKUP_REF, ZCTE_LOOKUP_GROUP_NOT_FOUND,
+                  context) != 0)
+      return -1;
+    snprintf(context, sizeof(context), "CK-1 node %u, entry past the key",
+             n.node);
+    if (sendCk1LookupReq(c.ss, n, CK1_CLAIMED_BYTES) != 0 ||
+        expectRef(c.ss, GSN_CTE_LOOKUP_REF, ZCTE_LOOKUP_ATTRINFO_MALFORMED,
+                  context) != 0)
+      return -1;
+  }
+
+  /* The refused probes changed nothing. */
+  Uint32 groups = 0;
+  if (cteScanGroups(c, nodes, groups) != 0) return -1;
+  if (groups != rows) {
+    fprintf(stderr, "CK-1: %u groups scanned, expected %u\n", groups, rows);
+    return -1;
+  }
+  std::map<int, int> after;
+  if (!readNodeConnections(c, after, "CK-1")) return -1;
+  if (after != before) {
+    fprintf(stderr, "CK-1: a data node stopped or restarted\n");
+    return -1;
+  }
+  if (cteReleaseAll(c, nodes) != 0) return -1;
+  return checkLeaks(c.ss, c.restarter, "CK-1");
+}
+
 /* ------------------------------------------------------------------ */
 /* Section 6: parking                                                  */
 /* ------------------------------------------------------------------ */
@@ -3933,6 +4053,7 @@ int main(int argc, char **argv)
           {"OV-1 CTE scan row wider than the output buffer", ov1},
           {"OV-2 CTE filter row wider than the linked buffer", ov2},
           {"OV-3 CTE filter GROUP BY key past the linked buffer", ov3},
+          {"CK-1 CTE_LOOKUP key entry past the key", ck1},
           {"PK-1a owner-plane signals parked and replayed", pk1OwnerPlane},
           {"PK-1b consumer feeds parked and replayed", pk1Feeds},
           {"PK-2 identity-addressed COMPLETE", pk2},

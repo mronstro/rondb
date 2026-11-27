@@ -602,8 +602,17 @@ Optional, performance only:
   does for sibling CTE_LOOKUPs, then clear Q9's skip in
   `ronsqltpch/handler_test.go`.
 - **Untested paths of the 2026-11-26 fixes:**
-  - the CTE_LOOKUP probe and CTE ORDER BY paths of `e226cead16a`:
-    testSpjMalformed cannot build a CTE;
+  - the CTE_LOOKUP probe and CTE ORDER BY paths of `e226cead16a` are
+    tested now: testCteNdbApiFilter Tests 36-38 (a BINARY parent column
+    as a VARCHAR / LONGVARCHAR key whose length prefix runs past it:
+    DBLQH 1265 on one data node, DBSPJ 20002 on more; 1265 with LIMIT
+    and for a single-row CTE), Test 39 (a NaN DOUBLE / FLOAT GROUP BY
+    value in a CTE ORDER BY / LIMIT: 1869) and testCteProtocol CK-1 (a
+    raw CTE_LOOKUP_REQ key entry past the key: 1265). Still untested,
+    since only a raw SPJ request with a CTE reaches them: DBSPJ refusing
+    a key entry past the key, and a VARCHAR prefix past its value in the
+    ORDER BY top-N. Tests 36-38 rely on `lookupCte` not comparing the
+    key with the CTE's GROUP BY type;
   - the single-table paths of `b306c658e03` (a GROUP BY or kOpLoadCol
     column id past the table, a pseudo column) and `9d013e4d714` (a TEXT
     or BLOB GROUP BY column) are tested now: P61 changes one column id
