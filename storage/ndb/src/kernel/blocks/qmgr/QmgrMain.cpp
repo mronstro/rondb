@@ -911,7 +911,8 @@ void Qmgr::execDIH_RESTARTCONF(Signal *signal) {
 }
 
 /**
- * RONDB-1150, before the election, DIH having read the sysfile:
+ * RONDB-1150, before the election, DIH having read the sysfile, whose g
+ * says whether this node's log was written with durable commits (X7):
  *   X6.3  the failures this node recorded that make a node stale
  *         (c_nodeFailRecGci), which no candidate may be
  *   X6.7  whether this start follows an unsafe shutdown of the persistent
@@ -7917,15 +7918,18 @@ void Qmgr::execCLOSE_COMCONF(Signal *signal) {
 
 /**
  * RONDB-1150, X6.1 (plan §5.4): the node-failure file beside REDO path 0,
- * mapped as the REDO log is, only with durable commits. A file that is
- * missing, of another size, or with a header of another node starts empty;
- * an initial start has removed it with the rest of the file system
- * (Ndbcntr::clearFilesystem(), NodeFailFile::removeFile()). The
- * node cannot run durable commits without it (D8).
+ * mapped as the REDO log is, only with durable commits on or configured
+ * (X7: on as the node's sysfile says, configured for a system restart
+ * that turns them on). A file that is missing, of another size, or with a
+ * header of another node starts empty; an initial start has removed it
+ * with the rest of the file system (Ndbcntr::clearFilesystem(),
+ * NodeFailFile::removeFile()). The node cannot run durable commits
+ * without it (D8); a node restart into a cluster that runs them stops
+ * if it did not map it (Dbdih::execSTART_MECONF()).
  */
 void Qmgr::openNodeFailFile() {
   const Dbdih *dih = (const Dbdih *)globalData.getBlock(DBDIH, instance());
-  if (!dih->durableCommitsOn()) return;
+  if (!dih->nodeFailFileNeeded()) return;
   const char *dir = globalData.theNodeFailFileDir;
   ndbrequire(dir != nullptr && c_nodeFailBase == nullptr);
   BaseString path;

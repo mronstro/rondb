@@ -477,6 +477,9 @@ GCP Stop so that isolation is required to remove a node.
 
 7262: RONDB-1150, X5.7: crash in COPY_GCIREQ(RESTART_DURABLE), before the
       sysfile with the restorable GCI raised to G' is written
+7264: RONDB-1150, X7: the master of a system restart takes DurableCommits
+      as 0 at the end of the restart, which turns durable commits off
+      (set in NOSTART on every node)
 
 Related (LQH):
   5085 : Ignore request to kill via DUMP 2305

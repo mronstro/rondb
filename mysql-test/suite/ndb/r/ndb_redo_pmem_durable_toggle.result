@@ -1,0 +1,30 @@
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=NDB;
+INSERT INTO t1 VALUES (1, 1);
+== 1 == a system restart with DurableCommits=1 leaves them on
+g: on
+== 2 == a system restart that takes DurableCommits as 0 ends them
+node 1: 1
+node 2: 1
+INSERT INTO t1 VALUES (2, 2);
+g: off
+== 3 == the next system restart turns them on from its first GCI
+node 1: 1
+node 2: 1
+INSERT INTO t1 VALUES (3, 3);
+g: the GCI in the log of the restart
+== 4 == the system restart runs phase 2 with g of the sysfile
+all nodes: 1
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+2	2
+3	3
+== 5 == an initial node restart takes g from the master
+node 1: 0
+node 2: 1
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+2	2
+3	3
+DROP TABLE t1;

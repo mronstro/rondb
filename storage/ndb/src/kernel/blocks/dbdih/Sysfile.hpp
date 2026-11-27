@@ -57,10 +57,12 @@
  */
 #define _SYSFILE_SIZE32_v1 (6 + 49 + 7 + 13 + 13 + 2)
 
+/* + 2: the extension with g of durable commits (Sysfile::durableGci) */
 #define _SYSFILE_SIZE32_v2                                 \
   (7 + ABS_MAX_NDB_NODES + NODE_ARRAY_SIZE(ABS_MAX_NDB_NODES, 4) + \
    NODE_ARRAY_SIZE(ABS_MAX_NDB_NODES, NODEID_BITS) +           \
-   NODE_ARRAY_SIZE(ABS_MAX_NDB_NODES, NODEID_BITS) + _NDB_NODE_BITMASK_SIZE)
+   NODE_ARRAY_SIZE(ABS_MAX_NDB_NODES, NODEID_BITS) + _NDB_NODE_BITMASK_SIZE + \
+   2)
 
 #define _SYSFILE_FILE_SIZE 1536
 
@@ -171,6 +173,18 @@ struct Sysfile {
    * Is a node running a LCP
    */
   Uint32 lcpActive[NdbNodeBitmask::Size];
+
+  /**
+   * RONDB-1150, X7: g, the first GCI whose write transactions commit
+   * durably, 0 when durable commits are off. The v2 format carries it
+   * after the node groups, as the word EXT_DURABLE_GCI followed by g, and
+   * only when g is not 0. A reader of the v2 format without it checks
+   * only that the node groups fit in the size, so an older version reads
+   * such a file as one with durable commits off; with them off the file
+   * is the same as before. The v1 format has no g.
+   */
+  Uint32 durableGci;
+  static constexpr Uint32 EXT_DURABLE_GCI = 0x47525544;  // "DURG"
 
   int pack_sysfile_format_v2(Uint32 cdata[], Uint32 *cdata_size_ptr) const;
   int pack_sysfile_format_v1(Uint32 cdata[], Uint32 *cdata_size_ptr) const;

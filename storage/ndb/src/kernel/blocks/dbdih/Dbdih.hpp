@@ -2227,8 +2227,10 @@ class Dbdih : public SimulatedBlock {
     /**
      * RONDB-1150: g, the first gci_hi whose write transactions commit
      * durably, 0 when durable commits are off; DIVERIFY reports it under
-     * m_lock. Until online activation (X7) it is 1 with DurableCommits set
-     * at the start.
+     * m_lock. 1 with DurableCommits until DIH has read a sysfile, then the
+     * g of that sysfile (Sysfile::durableGci): this node's own before the
+     * election, the restart's in a system restart, the master's in a node
+     * restart. A system restart ends with g from the config (X7).
      */
     Uint32 m_durable_gci;
     enum State {
@@ -2270,11 +2272,19 @@ class Dbdih : public SimulatedBlock {
    * RONDB-1150, X5.7: G', the GCI that phase 2 raised the restart to, the
    * same in the START_RECCONF of every SR node; 0 until the first. Above
    * R, the master raises the restorable GCI to it with COPY_GCIREQ
-   * (RESTART_DURABLE) before the restart goes on.
+   * (RESTART_DURABLE) before the restart goes on, and so it writes g when
+   * the restart changes it (srDurableGciAtEnd(), X7).
    */
   Uint32 c_sr_gci_prime;
-  void srRaiseRestorableGci(Signal *);
+  Uint32 srDurableGciAtEnd() const;
+  void srDurableCopy(Signal *);
   void startRecConfAllLab(Signal *);
+  /**
+   * RONDB-1150: DurableCommits, and whether RedoLogMode is pmem, from the
+   * config at the start
+   */
+  bool c_durable_commits_config;
+  bool c_redo_log_pmem;
 
   struct GcpMonitor {
     struct {
@@ -3038,6 +3048,15 @@ public:
    * system restart restores
    */
   bool durableCommitsOn() const { return m_micro_gcp.m_durable_gci != 0; }
+  /**
+   * RONDB-1150, X6.1: whether QMGR maps the node-failure file at its start
+   * phase 3, as durable commits are on or configured. A node restart that
+   * learns later that they are on stops if this was false then
+   * (execSTART_MECONF()), as its failures would not be recorded.
+   */
+  bool nodeFailFileNeeded() const {
+    return durableCommitsOn() || c_durable_commits_config;
+  }
   Uint32 currentGciHi() const {
     return Uint32(m_micro_gcp.m_current_gci >> 32);
   }

@@ -1061,7 +1061,7 @@ there is:
   G'. START_RECCONF carries G' (length 3); the LQH proxy checks that its
   workers agree.
 - X5.7: the DIH master checks that every SR node reports the same G'; if
-  it is above R, `srRaiseRestorableGci()` sets the newest restorable GCI
+  it is above R, `srDurableCopy()` sets the newest restorable GCI
   and the last completed GCI of each SR node to G' and sends COPY_GCIREQ
   with the new reason `RESTART_DURABLE` (6); each node writes the sysfile
   and sets `crestartGci`, `c_newest_restorable_gci` and the micro-GCP
@@ -1642,13 +1642,14 @@ transactions before arming, none after; master failure during activation
 handled; a node restart after activation works; activation refused with a
 file-mode node or an old version.
 
-**State (2026-11-27): re-scoped against the code, next.** Only the
-start-time path exists. `__DurableCommits` (CFG 716) sets
-`m_micro_gcp.m_durable_gci = 1` in `Dbdih::initCommonData()`, and g lives
-nowhere else: not in the sysfile, not in a signal. A system restart takes
-g from the config (`srDurableParams()`), and so does a node restart. TC
+**State (2026-11-27): parts 1 and 2 written, to be built and tested;
+part 3 next.** Re-scoped against the code first: only the start-time
+path existed. `__DurableCommits` (CFG 716) set
+`m_micro_gcp.m_durable_gci = 1` in `Dbdih::initCommonData()`, and g lived
+nowhere else: not in the sysfile, not in a signal. A system restart took
+g from the config (`srDurableParams()`), and so did a node restart. TC
 gets the durable flag per transaction from DIVERIFYCONF, LQH per
-operation from its signals; neither needs a cluster-wide flag. There is
+operation from its signals; neither needs a cluster-wide flag. There was
 no version function, no DURABLE_ACTIVATE signal, no online case in CMVMI
 and no ndbinfo table for it.
 
@@ -1664,9 +1665,16 @@ Changes to the plan below, found by the re-scope:
   g, for an activation the old master prepared but did not commit.
 - No GCP_SAVEREQ flag: LQH needs no cluster-wide flag (dirty writes are
   best effort, DI-1).
-- Sysfile v3 is written only while g ≠ 0, so a node of an older version
-  never receives one (activation needs every node to support it); v2
-  reads as g = 0.
+- g goes in the v2 sysfile format as an extension after the node groups,
+  written only while g ≠ 0, not in a v3 format: the reader of the v2
+  format checks only that the node groups fit, so an older version reads
+  a file with g as one with durable commits off, where a new magic would
+  send `readingGcpLab()` to the v1 reader and garbage. With g = 0 the
+  file is the same bytes as before.
+- A system restart with `DurableCommits=1` and g = 0 in its sysfile turns
+  durable commits on at its end, with g = the restorable GCI + 1, in the
+  copy that writes G' (no transaction runs during the restart, so the GCP
+  protocol is not needed); part 3 is only for the online path.
 - `check_enable_micro_gcp()` computes a minimum version it does not use;
   the activation check uses the alive nodes' versions (`getMinVersion()`,
   without callers today).
@@ -1692,20 +1700,51 @@ Parts, each a commit to be built and tested:
      durable commit.
    - The parameter is visible now (no `__`); no result file lists the
      parameters by name.
-2. g in the sysfile (X7.3, X7.4): sysfile v3 with `durableGci`; an
-   initial start with `DurableCommits=1` writes g = 1; a system restart
-   takes g from the sysfile, a node restart from the master's copy;
+2. g in the sysfile (X7.3, X7.4): `Sysfile::durableGci`; an initial
+   start with `DurableCommits=1` writes g = 1; a system restart takes g
+   from the sysfile, a node restart from the master's copy;
    `RESTART_DURABLE` writes g = 0 when the master's config is 0
    (deactivation; that restart still runs phase 2 with the old g).
+   **Written (2026-11-27), to be built and tested.**
+   - The format: the words `EXT_DURABLE_GCI` ("DURG") and g after the node
+     groups of the v2 format, only while g ≠ 0 (above);
+     `ndb_print_sys_file` prints `durableGci` when it is there.
+   - Where each node takes g (`m_micro_gcp.m_durable_gci`): the config
+     (1 or 0) until a sysfile is read; an initial start writes it
+     (`initRestartInfo()`); otherwise the node's own sysfile before the
+     election (`closingGcpLab()`), so that QMGR's rules (X6.3, X6.7, X6.9)
+     follow the mode its log was written in; the restart's at
+     COPY_GCIREQ(RESTART); the master's at START_MECONF in a node
+     restart. Phase 2 takes g from the restart's sysfile
+     (`srDurableParams()`).
+   - The end of a system restart (`srDurableGciAtEnd()`): config 0 gives
+     0, config 1 keeps g, or turns them on with the restorable GCI + 1
+     when g was 0. `srDurableCopy()` (was `srRaiseRestorableGci()`) runs
+     the RESTART_DURABLE copy when G' > R or g changes. A crash in that
+     copy restarts with the old g or the new one; the new one is 0 only
+     after phase 2 ran with the old, and above 0 only for a GCI that no
+     transaction has committed in.
+   - QMGR maps the node-failure file when durable commits are on or
+     configured (`Dbdih::nodeFailFileNeeded()`). A node restart into a
+     cluster with g ≠ 0 stops if the node has `RedoLogMode=file`, or if
+     it did not map the file (`DurableCommits=0` and g = 0 in its own
+     sysfile, as an initial node restart during a change of the config
+     from 1 to 0); the version check of a joining node stays in part 3.
+   - Error insert 7264: the master takes `DurableCommits` as 0 at the end
+     of the restart. Test `ndb_redo_pmem_durable_toggle`: off by a system
+     restart with 7264, on again by the next, with g in every sysfile and
+     the log lines; a row committed just before a stop of every node
+     survives, with phase 2 under the new g; an initial node restart
+     takes g from the master. Step 1 runs a system restart first, since
+     a rerun of a failed test finds the file system as that run left it.
 3. Online activation (X7.1 online, X7.2): GSNs 990-992
    `DURABLE_ACTIVATE_REQ/CONF/REF`; the CMVMI case and `SET
    DurableCommits` in the client; the master's checks (every alive node
    asked, versions, PMEM mode, no node restart running, Q-B7) and g at
    the next gci_hi switch; g in GCP_PREPARE, GCP_COMMIT and
    MASTER_GCPCONF; armed at the COPY_GCICONF of the save of g − 1, with
-   an event; `SET DurableCommits=0` accepted as pending (Q-B6); config 1
-   with sysfile g = 0 after a system restart activates at its first GCP;
-   error inserts 7260, 7261, 7263.
+   an event; `SET DurableCommits=0` accepted as pending (Q-B6); error
+   inserts 7260, 7261, 7263.
 4. ndbinfo (X7.5): `durable_commits` (DIH, a row per node) and
    `node_failure_records` (QMGR). `durable_commit_stats` per LDM moves
    to X8, beside the persist counters it would report with.
@@ -1765,8 +1804,8 @@ Parts, each a commit to be built and tested:
 
 At SR the sysfile g governs the tail (X5). In the RESTART_DURABLE
 COPY_GCIREQ (X5.7) the master writes `durableGci = 0` if its config is 0,
-else keeps g. Config 1 with sysfile 0: activate through X7.2 at the first
-GCP after the SR.
+else keeps g. Config 1 with sysfile 0: g = the restorable GCI + 1 in the
+same copy (part 2 above), not through X7.2.
 
 ### X7.4 The R ≥ g − 1 rule (S, 1 pd)
 

@@ -1,0 +1,11 @@
+!include ../my.cnf
+
+# RONDB-1150 X7: durable commits on the REDO log in PMEM mode, turned off
+# and on again by system restarts; GCP saves twice a second.
+[cluster_config.1]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+DurableCommits=1
+NoOfFragmentLogFiles=4
+FragmentLogFileSize=4M
+TimeBetweenGlobalCheckpoints=500

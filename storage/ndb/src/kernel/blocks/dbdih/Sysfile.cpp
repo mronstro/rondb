@@ -72,6 +72,7 @@ int Sysfile::pack_sysfile_format_v2(Uint32 cdata[],
    * 15) GCIs in non-packed form
    * 16) Node group bit (m_max_node_id bits)
    * 17) Node groups in non-packed form (16 bits per node group)
+   * 18) EXT_DURABLE_GCI and durableGci, only if durableGci is not 0
    */
 #ifdef VM_TRACE
   // memset(takeOver, 0, sizeof(takeOver)); // TODO clear takeover at caller??
@@ -304,7 +305,13 @@ int Sysfile::pack_sysfile_format_v2(Uint32 cdata[],
     index++;
   }
   require(index == index_ng);
-  *cdata_size_ptr = index_ng + ((numNodeGroups + 1) / 2);
+  index = index_ng + ((numNodeGroups + 1) / 2);
+  if (durableGci != 0) {
+    cdata[index] = EXT_DURABLE_GCI;
+    cdata[index + 1] = durableGci;
+    index += 2;
+  }
+  *cdata_size_ptr = index;
   cdata[index_cdata_size_in_words] = *cdata_size_ptr;
   cdata[index_numGCIs] = numGCIs;
   cdata[index_numNodeGroups] = numNodeGroups;
@@ -523,6 +530,9 @@ int Sysfile::unpack_sysfile_format_v2(const Uint32 cdata[],
   index = index_ng + ((ng_index + 1) / 2);
   if (index > cdata_size) {
     return -6;
+  }
+  if (index + 2 <= cdata_size && cdata[index] == EXT_DURABLE_GCI) {
+    durableGci = cdata[index + 1];
   }
   *cdata_size_ptr = cdata_size;
 

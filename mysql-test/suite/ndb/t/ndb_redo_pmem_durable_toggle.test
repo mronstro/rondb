@@ -1,0 +1,88 @@
+--source include/have_ndb.inc
+--source have_ndb_error_insert.inc
+
+# RONDB-1150 X7 part 2 (impl_next_steps.md §7): g, the first GCI of
+# durable commits, is in the sysfile of every data node. A system restart
+# runs with the g of its sysfile and ends with the g of the config: error
+# insert 7264 takes DurableCommits as 0, which ends durable commits, and
+# the next system restart with DurableCommits=1 turns them on from its
+# first GCI. A node restart takes g from the master. The sysfiles are read
+# while the data nodes are stopped, ndbd.log once they have started. That
+# an initial start writes g = 1 the ledger cases show, which stop the
+# cluster before its first system restart.
+
+# A rerun of a failed test finds the cluster as the failed run left it
+--error 0,1
+--remove_file $MYSQLTEST_VARDIR/tmp/redo_pmem_durable_logged_gci.txt
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=NDB;
+INSERT INTO t1 VALUES (1, 1);
+
+--echo == 1 == a system restart with DurableCommits=1 leaves them on
+# Also where a failed run left them off
+--exec $NDB_MGM -e "all restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "all start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+--source include/ndb_not_readonly.inc
+--exec $NDB_MGM -e "all restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started >> $NDB_TOOLS_OUTPUT
+--source suite/ndb/include/redo_pmem_durable_gci.inc
+
+--echo == 2 == a system restart that takes DurableCommits as 0 ends them
+--exec $NDB_MGM -e "all error 7264" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "all start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+--source include/ndb_not_readonly.inc
+--exec $NDB_MGM -e "all error 0" >> $NDB_TOOLS_OUTPUT
+--let LOG_SUM = 0
+--let LOG_LINE = DIH: durable commits end with the system restart; they were on from GCI <g>
+--source suite/ndb/include/redo_pmem_durable_log.inc
+INSERT INTO t1 VALUES (2, 2);
+--exec $NDB_MGM -e "all restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started >> $NDB_TOOLS_OUTPUT
+--source suite/ndb/include/redo_pmem_durable_gci.inc
+
+--echo == 3 == the next system restart turns them on from its first GCI
+--exec $NDB_MGM -e "all start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+--source include/ndb_not_readonly.inc
+--let LOG_LINE = DIH: durable commits from GCI <n>, the first after the system restart
+--source suite/ndb/include/redo_pmem_durable_log.inc
+# Durable: the row survives the stop that follows its commit at once
+INSERT INTO t1 VALUES (3, 3);
+--exec $NDB_MGM -e "all restart -n -a" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started >> $NDB_TOOLS_OUTPUT
+--source suite/ndb/include/redo_pmem_durable_gci.inc
+
+--echo == 4 == the system restart runs phase 2 with g of the sysfile
+--exec $NDB_MGM -e "all start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+--source include/ndb_not_readonly.inc
+# Only the master logs it
+--let LOG_SUM = 1
+--let LOG_LINE = then phase 2 on the durable tail (g <g>)
+--source suite/ndb/include/redo_pmem_durable_log.inc
+--let LOG_SUM = 0
+SELECT * FROM t1 ORDER BY a;
+
+--echo == 5 == an initial node restart takes g from the master
+# The second mysqld sets up its binlog after the system restart too and
+# holds the global schema lock while it does: the node restart would abort
+# that transaction (error 286) and mysqld.2 would warn.
+--connect(s2,127.0.0.1,root,,test,$MASTER_MYPORT1,)
+--source include/ndb_not_readonly.inc
+--disconnect s2
+--connection default
+--exec $NDB_MGM -e "2 restart -n -i" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --wait-nodes=2 --not-started >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "2 start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+--source include/ndb_not_readonly.inc
+--let LOG_LINE = DIH: the cluster runs durable commits from GCI <g>
+--source suite/ndb/include/redo_pmem_durable_log.inc
+SELECT * FROM t1 ORDER BY a;
+
+DROP TABLE t1;
+--remove_file $MYSQLTEST_VARDIR/tmp/redo_pmem_durable_gci.txt
+--remove_file $NDB_TOOLS_OUTPUT

@@ -527,13 +527,13 @@ void Dbdih::sendSTART_RECREQ(Signal *signal, Uint32 nodeId, Uint32 extra) {
 /**
  * RONDB-1150, X5.1: the words of section 1 of START_RECREQ, 0 when
  * durable commits do not govern the tail; *why says why phase 2 does
- * not run on it when they do. g is the configured one until X5.7 records
- * it in the sysfile, where a restart reads the mode that wrote the tail
- * (plan §2.2). Phase 2 needs R >= g - 1, as a durable transaction may
- * depend on one of a GCI below g.
+ * not run on it when they do. g is the one of the restart's sysfile, of
+ * the mode that wrote the tail (plan §2.2, X7), whatever the config says
+ * now. Phase 2 needs R >= g - 1, as a durable transaction may depend on
+ * one of a GCI below g.
  */
 Uint32 Dbdih::srDurableParams(Uint32 *words, const char **why) {
-  const Uint32 g = m_micro_gcp.m_durable_gci;
+  const Uint32 g = SYSFILE->durableGci;
   if (g == 0) {
     jam();
     return 0;
@@ -1171,6 +1171,21 @@ void Dbdih::execCOPY_GCIREQ(Signal *signal) {
       c_newest_restorable_gci = newest;
       SYSFILE->setRestartOngoing();
       m_micro_gcp.m_current_gci = Uint64(newest + 1) << 32;
+      /* RONDB-1150, X7: g of the restart's sysfile, the master's */
+      if (SYSFILE->durableGci != m_micro_gcp.m_durable_gci) {
+        jam();
+        if (SYSFILE->durableGci != 0) {
+          g_eventLogger->info(
+              "DIH: the system restart has durable commits from GCI %u",
+              SYSFILE->durableGci);
+        } else {
+          g_eventLogger->info(
+              "DIH: the system restart has durable commits off; the sysfile "
+              "of this node had them from GCI %u",
+              m_micro_gcp.m_durable_gci);
+        }
+      }
+      m_micro_gcp.m_durable_gci = SYSFILE->durableGci;
       setNodeActiveStatus();
       setNodeGroups();
       if (SYSFILE->getLCPOngoing()) {
@@ -1239,8 +1254,9 @@ void Dbdih::execCOPY_GCIREQ(Signal *signal) {
       break;
     case CopyGCIReq::RESTART_DURABLE: {
       /**
-       * RONDB-1150, X5.7: R raised to G' (srRaiseRestorableGci()), on
-       * disk below and here in memory, as RESTART set it to R
+       * RONDB-1150, X5.7: R raised to G' (srDurableCopy()), on disk below
+       * and here in memory, as RESTART set it to R. X7: and g that the
+       * restart leaves, which the first GCI after the restart follows.
        */
       ok = true;
       jam();
@@ -1251,6 +1267,21 @@ void Dbdih::execCOPY_GCIREQ(Signal *signal) {
       crestartGci = newest;
       c_newest_restorable_gci = newest;
       m_micro_gcp.m_current_gci = Uint64(newest + 1) << 32;
+      if (m_micro_gcp.m_durable_gci != SYSFILE->durableGci) {
+        jam();
+        if (SYSFILE->durableGci != 0) {
+          g_eventLogger->info(
+              "DIH: durable commits from GCI %u, the first after the "
+              "system restart",
+              SYSFILE->durableGci);
+        } else {
+          g_eventLogger->info(
+              "DIH: durable commits end with the system restart; they "
+              "were on from GCI %u",
+              m_micro_gcp.m_durable_gci);
+        }
+      }
+      m_micro_gcp.m_durable_gci = SYSFILE->durableGci;
       break;
     }
     case CopyGCIReq::RESTART_NR:
@@ -3448,6 +3479,45 @@ void Dbdih::execSTART_MECONF(Signal *signal) {
   SYSFILE->m_restart_seq = key;
   for (Uint32 i = 1; i <= m_max_node_id; i++) {
     SYSFILE->lastCompletedGCI[i] = tempGCP[i];
+  }
+  {
+    /**
+     * RONDB-1150, X7: g of the cluster, from the master's sysfile, whatever
+     * this node's DurableCommits says, which takes effect at the end of a
+     * system restart. With durable commits on, the node needs its REDO log
+     * on persistent memory, and its node-failure file mapped since start
+     * phase 3 (nodeFailFileNeeded(), evaluated with the g it had then).
+     */
+    const Uint32 g = SYSFILE->durableGci;
+    if (g != 0 && !c_redo_log_pmem) {
+      char buf[160];
+      BaseString::snprintf(buf, sizeof(buf),
+                           "The cluster runs durable commits from GCI %u, "
+                           "which need RedoLogMode=pmem on this node",
+                           g);
+      progError(__LINE__, NDBD_EXIT_INVALID_CONFIG, buf);
+    }
+    if (g != 0 && !nodeFailFileNeeded()) {
+      char buf[200];
+      BaseString::snprintf(buf, sizeof(buf),
+                           "The cluster runs durable commits from GCI %u; "
+                           "this node started with DurableCommits=0 and "
+                           "without its node-failure file: start it with "
+                           "DurableCommits=1, or end them by a system "
+                           "restart first",
+                           g);
+      progError(__LINE__, NDBD_EXIT_INVALID_CONFIG, buf);
+    }
+    if (g != m_micro_gcp.m_durable_gci) {
+      jam();
+      if (g != 0) {
+        g_eventLogger->info("DIH: the cluster runs durable commits from GCI %u",
+                            g);
+      } else {
+        g_eventLogger->info("DIH: the cluster runs without durable commits");
+      }
+    }
+    m_micro_gcp.m_durable_gci = g;
   }
   setNodeActiveStatus();
   setNodeGroups();
@@ -10096,6 +10166,22 @@ void Dbdih::readingGcpLab(Signal *signal, FileRecordPtr filePtr,
 void Dbdih::closingGcpLab(Signal *signal, FileRecordPtr filePtr) {
   if (!SYSFILE->getInitialStartOngoing()) {
     jam();
+    /**
+     * RONDB-1150, X7: whether this node's log was written with durable
+     * commits, for the election (QMGR) and the node-failure file, until
+     * the sysfile of the restart arrives
+     */
+    if (SYSFILE->durableGci != 0) {
+      jam();
+      g_eventLogger->info(
+          "DIH: the sysfile of this node has durable commits from GCI %u",
+          SYSFILE->durableGci);
+    } else if (c_durable_commits_config) {
+      jam();
+      g_eventLogger->info(
+          "DIH: the sysfile of this node has durable commits off");
+    }
+    m_micro_gcp.m_durable_gci = SYSFILE->durableGci;
     selectMasterCandidateAndSend(signal);
     return;
   } else {
@@ -21468,12 +21554,29 @@ void Dbdih::execSTART_RECCONF(Signal *signal) {
     jam();
     nsl_stop_step();
   }
-  if (c_sr_gci_prime > SYSFILE->newestRestorableGCI) {
+  if (c_sr_gci_prime > SYSFILE->newestRestorableGCI ||
+      srDurableGciAtEnd() != SYSFILE->durableGci) {
     jam();
-    srRaiseRestorableGci(signal);
+    srDurableCopy(signal);
     return;
   }
   startRecConfAllLab(signal);
+}
+
+/**
+ * RONDB-1150, X7 (X7.3): g that the system restart leaves, from the
+ * master's DurableCommits, the same on every node (check_durable_commits()
+ * of the management server). Off: 0, and the restart has run phase 2
+ * with the old g first. On: the old g, or if they were off, the first
+ * GCI after the restart, newest restorable GCI + 1, which no transaction
+ * has committed in. The guarantee needs the save of g - 1, which the
+ * restart's GCI already is. Error insert 7264 takes DurableCommits as 0.
+ */
+Uint32 Dbdih::srDurableGciAtEnd() const {
+  const Uint32 g = SYSFILE->durableGci;
+  if (!c_durable_commits_config || ERROR_INSERTED(7264)) return 0;
+  if (g != 0) return g;
+  return std::max(c_sr_gci_prime, SYSFILE->newestRestorableGCI) + 1;
 }
 
 /**
@@ -21485,21 +21588,44 @@ void Dbdih::execSTART_RECCONF(Signal *signal) {
  * the micro GCP, so that the first new GCI is above G'. The LCP-restore
  * bound of this restart stays R. A crash before every node has written
  * the sysfile restarts from R or G', with the same verdicts (plan §5.6).
+ *
+ * X7: the same copy writes g that the restart leaves
+ * (srDurableGciAtEnd()). A crash before every node has written it
+ * restarts with the old g or the new one: with the old, the next restart
+ * changes it again; the new one is 0 only after phase 2 ran with the old,
+ * and above 0 only for a GCI that no transaction has committed in.
  */
-void Dbdih::srRaiseRestorableGci(Signal *signal) {
+void Dbdih::srDurableCopy(Signal *signal) {
   const Uint32 R = SYSFILE->newestRestorableGCI;
-  g_eventLogger->info(
-      "DIH: phase 2 of the restart executed the durable tail; the "
-      "restorable GCI goes from %u to %u",
-      R, c_sr_gci_prime);
-  infoEvent("Phase 2 of the restart raised the restorable GCI from %u to %u",
-            R, c_sr_gci_prime);
-  SYSFILE->newestRestorableGCI = c_sr_gci_prime;
-  for (Uint32 nodeId = m_sr_nodes.find_first();
-       nodeId != NdbNodeBitmask::NotFound;
-       nodeId = m_sr_nodes.find_next(nodeId + 1)) {
-    ndbrequire(SYSFILE->lastCompletedGCI[nodeId] <= c_sr_gci_prime);
-    SYSFILE->lastCompletedGCI[nodeId] = c_sr_gci_prime;
+  if (c_sr_gci_prime > R) {
+    jam();
+    g_eventLogger->info(
+        "DIH: phase 2 of the restart executed the durable tail; the "
+        "restorable GCI goes from %u to %u",
+        R, c_sr_gci_prime);
+    infoEvent("Phase 2 of the restart raised the restorable GCI from %u to %u",
+              R, c_sr_gci_prime);
+    SYSFILE->newestRestorableGCI = c_sr_gci_prime;
+    for (Uint32 nodeId = m_sr_nodes.find_first();
+         nodeId != NdbNodeBitmask::NotFound;
+         nodeId = m_sr_nodes.find_next(nodeId + 1)) {
+      ndbrequire(SYSFILE->lastCompletedGCI[nodeId] <= c_sr_gci_prime);
+      SYSFILE->lastCompletedGCI[nodeId] = c_sr_gci_prime;
+    }
+  }
+  const Uint32 g = srDurableGciAtEnd();
+  if (g != SYSFILE->durableGci) {
+    jam();
+    if (g != 0) {
+      infoEvent("Durable commits from GCI %u, the first after the system "
+                "restart (DurableCommits=1)",
+                g);
+    } else {
+      infoEvent("Durable commits end with the system restart "
+                "(DurableCommits=0); they were on from GCI %u",
+                SYSFILE->durableGci);
+    }
+    SYSFILE->durableGci = g;
   }
   copyGciLab(signal, CopyGCIReq::RESTART_DURABLE);
 }
@@ -25816,15 +25942,13 @@ void Dbdih::initCommonData() {
   NdbTick_Invalidate(&m_micro_gcp.m_master.m_start_time);
 
   /**
-   * RONDB-1150: durable commits, DurableCommits, set at the start until
-   * online activation (X7). A commit is durable only once its REDO record
-   * is persistent, so it needs RedoLogMode=pmem, as the management server
-   * checks too. In a test mode of the REDO log it survives a crash of the
-   * data nodes, not of the OS or a power loss (Q-A1). g is
-   * 1: every write transaction since the start commits durably, the same
-   * on every node, which a GCI seen first after the start would not be
-   * for a node that joins by a node restart. Read here, after the memset
-   * of m_micro_gcp above.
+   * RONDB-1150: durable commits, DurableCommits. A commit is durable only
+   * once its REDO record is persistent, so it needs RedoLogMode=pmem, as
+   * the management server checks too. In a test mode of the REDO log it
+   * survives a crash of the data nodes, not of the OS or a power loss
+   * (Q-A1). g is 1 until DIH reads a sysfile: an initial start writes it
+   * (initRestartInfo()), any other start takes g from a sysfile (X7).
+   * Read here, after the memset of m_micro_gcp above.
    */
   {
     Uint32 durable = 0;
@@ -25837,11 +25961,13 @@ void Dbdih::initCommonData() {
       progError(__LINE__, NDBD_EXIT_INVALID_CONFIG,
                 "DurableCommits=1 needs RedoLogMode=pmem");
     }
+    c_durable_commits_config = durable != 0;
+    c_redo_log_pmem = redoLogMode == NDB_REDO_LOG_MODE_PMEM;
     m_micro_gcp.m_durable_gci = durable != 0 ? 1 : 0;
     if (durable != 0) {
       g_eventLogger->info(
-          "DIH: durable commits from GCI %u (DurableCommits)%s",
-          m_micro_gcp.m_durable_gci,
+          "DIH: DurableCommits=1: an initial start turns durable commits "
+          "on from GCI 1, a system restart at its end%s",
           testMode != NDB_REDO_PMEM_TEST_MODE_OFF
               ? "; in a test mode of the REDO log a commit survives a crash "
                 "of the data nodes, not of the OS or a power loss"
@@ -25967,6 +26093,12 @@ void Dbdih::initRestartInfo(Signal *signal) {
   SYSFILE->oldestRestorableGCI = startGci;
   SYSFILE->newestRestorableGCI = startGci;
   SYSFILE->systemRestartBits = 0;
+  /**
+   * RONDB-1150, X7: g from the config; 1, as every write transaction
+   * after the initial start commits durably
+   */
+  m_micro_gcp.m_durable_gci = c_durable_commits_config ? 1 : 0;
+  SYSFILE->durableGci = m_micro_gcp.m_durable_gci;
   for (i = 0; i < NdbNodeBitmask::Size; i++) {
     SYSFILE->lcpActive[0] = 0;
   }  // for

@@ -102,6 +102,12 @@ void print(const char *filename, const Sysfile *sysfile) {
   fill(buf, 40);
   ndbout << " -- " << endl;
 
+  if (sysfile->durableGci != 0) {
+    sprintf(buf, "durableGci = %u", sysfile->durableGci);
+    fill(buf, 40);
+    ndbout << " -- First GCI of durable commits" << endl;
+  }
+
   ndbout << "-- Node status: --" << endl;
   for (int i = 1; i < ABS_MAX_NDB_NODES; i++) {
     if (g_all || sysfile->getNodeStatus(i) != Sysfile::NS_NotDefined) {
