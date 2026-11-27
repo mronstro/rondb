@@ -2150,8 +2150,10 @@ Int32 JoinAggInterpreter::evictOneGroup(Uint32* buf, Uint32 buf_words,
 
   require(target != nullptr);
 
+  /* The group at the head of the chunk's list leaves the list below,
+   * once it fits a result record: one that does not stays in the list
+   * and the table, and the caller fails the operation. */
   char* raw = target->group_list;
-  target->group_list = *reinterpret_cast<char**>(raw);
   Uint32 key_len = *reinterpret_cast<Uint32*>(raw + 2 * sizeof(char*));
   char* data_ptr = raw + GROUP_LINK_OVERHEAD;
   Uint32 v_len_base = val_len();
@@ -2171,6 +2173,7 @@ Int32 JoinAggInterpreter::evictOneGroup(Uint32* buf, Uint32 buf_words,
       unlikely(!resultLensFit(key_len, v_len_total))) {
     return -1;
   }
+  target->group_list = *reinterpret_cast<char**>(raw);
 
   Uint32 pos = 0;
   buf[pos++] = marker << 16 | 0x0721;

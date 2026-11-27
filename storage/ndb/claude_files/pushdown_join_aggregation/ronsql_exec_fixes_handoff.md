@@ -614,9 +614,11 @@ Found by test runs:
   key and slots do not fit one 32 KB query memory chunk with the
   permanent error 1873 (`ZAGG_GROUP_TOO_LARGE`) instead of the temporary
   1870.
-- **`evictOneGroup` (JoinAggInterpreter.cpp:1992) pops the group before it
-  checks the size.** If the size check refuses the group, it is already off
-  the chunk list. This is minor.
+- **`evictOneGroup` popped the group before it checked the size: fixed
+  on 2026-11-27.** A group too long for a result record (a key or values
+  over 65535 bytes, which only string MIN / MAX payloads can reach) left
+  its chunk's list although it stayed in the table. The query fails then
+  either way; the group now leaves the list only once it fits.
 - **Mixed versions.** An API from before `9346d8ecc48` that gets fragmented
   join-aggregation records from an upgraded data node uses the old receive
   path, which mixes interleaved fragments. There is no version gate (alpha
@@ -706,8 +708,6 @@ Optional, performance only:
     whether the force-release on a close after a receive timeout
     (`81e0f764713` (c)) stays; a count of ApiConnectRecords there may
     drop by one after a timeout, which is that release, not a leak;
-  - `evictOneGroup` still pops the group before it checks the size
-    (§4.2);
   - `ndb_quota.ndb_basic` and warning 4721 (`5a833c08c77`): the race
     needs an initial cluster start just before the test, so a clean
     `--repeat` run is weak evidence. If the warning comes back, check the
