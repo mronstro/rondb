@@ -3960,7 +3960,11 @@ class SpjMalformedChecker {
  * does not know a table that the NDB API creates.  The cases read tables
  * that their MTR test creates, in MySQL's database test, which is the NDB
  * database "test", schema "def".  The program creates no table
- * (setCreateTable(false) in main). */
+ * (setCreateTable(false) in main), and makeChecker sets the step's Ndb
+ * object, which NDBT opens on TEST_DB, to this database for the whole
+ * run: HugoTransactions and UtilTransactions look their table up again
+ * by name in the Ndb object's database (getNdbOperation(tab.getName())),
+ * so a table of another database is not found (723). */
 const char *const MysqlDbName = "test";
 
 /* T1, the table every case reads: test.t1 with the columns of NDBT's T1,
@@ -3973,22 +3977,14 @@ const char *const T1OrderedIndexName = "PRIMARY";
 const int T1NumColumns = 5;
 
 /* Looks up test.<tabName>, and its index indexName unless that is
- * nullptr.  The step's Ndb object uses TEST_DB (NDBT), so the lookup
- * sets the database "test" and TEST_DB back after it, as testNdbApi's
- * RateQueueDirtyReadOtherDatabase does; the objects stay in the
- * dictionary cache.  creator names the MTR test or include that creates
- * the table.  Returns 0, or -1 after logging why. */
+ * nullptr, through pNdb, whose database makeChecker has set to "test".
+ * creator names the MTR test or include that creates the table.
+ * Returns 0, or -1 after logging why. */
 int lookupMysqlTable(Ndb *pNdb, const char *tabName, const char *indexName,
                      const char *creator, const NdbDictionary::Table *&tab,
                      const NdbDictionary::Index *&index) {
   tab = nullptr;
   index = nullptr;
-  const BaseString savedDb(pNdb->getDatabaseName());
-  if (pNdb->setDatabaseName(MysqlDbName) != 0) {
-    g_err << "setDatabaseName(" << MysqlDbName
-          << ") failed: " << pNdb->getNdbError() << endl;
-    return -1;
-  }
   NdbDictionary::Dictionary *dict = pNdb->getDictionary();
   int res = -1;
   const NdbDictionary::Table *found = dict->getTable(tabName);
@@ -4011,7 +4007,6 @@ int lookupMysqlTable(Ndb *pNdb, const char *tabName, const char *indexName,
       res = 0;
     }
   }
-  (void)pNdb->setDatabaseName(savedDb.c_str());
   return res;
 }
 
@@ -4050,6 +4045,11 @@ SpjMalformedChecker *makeChecker(NDBT_Step *step, Ndb *&pNdb,
                                  SignalSender *&ss,
                                  NdbRestarter *&restarter) {
   pNdb = GETNDB(step);
+  if (pNdb->setDatabaseName(MysqlDbName) != 0) {
+    g_err << "setDatabaseName(" << MysqlDbName
+          << ") failed: " << pNdb->getNdbError() << endl;
+    return nullptr;
+  }
   const NdbDictionary::Table *tab = nullptr;
   const NdbDictionary::Index *noIndex = nullptr;
   if (lookupT1(pNdb, nullptr, tab, noIndex) != 0) {
