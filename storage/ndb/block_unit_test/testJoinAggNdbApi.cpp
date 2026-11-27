@@ -6212,12 +6212,9 @@ fakeOkLineForErrorInsertTest(int testNum)
     case 19: return "Test 19: Multi-fragment + eviction 5126 (2000 rows, 16 frags) ... OK (20 groups, multi-fragment eviction merge verified)";
     case 20: return "Test 20: SETUP_REF error handling (ERROR_INSERT 5125) ... OK (SETUP_REF handled, cleanup verified)";
     case 22: return "Test 22: COMPLETE_REF error handling (ERROR_INSERT 5124) ... OK (COMPLETE_REF handled, cleanup verified)";
-    case 23: return "Test 23: JIT must compile SUM local attr ... OK (sum=1500, JIT required)";
-    case 24: return "Test 24: JIT must compile SUM local attr ... OK (sum=1500, JIT required)";
-    case 25: return "Test 25: JIT all-rejected SUM returns NULL ... OK (sum=NULL, JIT required)";
-    case 26: return "Test 26: JIT linked NULL filter ... OK (sum=900, JIT required)";
-    case 28: return "Test 28: JIT compiles SUM of column id > 255 ... OK (sum=1500, col_id=260, JIT required)";
-    case 29: return "Test 29: JIT CASE skip offset ... OK (dummy=NULL, amount=900, JIT required)";
+    /* Tests 23 and 24 need no error insert and run in every build.  The
+     * tests after them run only with --only, from debug-only MTR
+     * wrappers. */
     default: return nullptr;
   }
 }
