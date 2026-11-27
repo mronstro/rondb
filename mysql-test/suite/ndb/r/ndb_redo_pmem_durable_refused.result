@@ -1,0 +1,17 @@
+== 1 == ndb_mgm refuses ALL SET DurableCommits 1 and saves nothing
+DurableCommits=1 needs RedoLogMode=pmem, and data node 2 has another; the configuration is not changed
+SELECT node_id, config, state, durable_gci
+FROM ndbinfo.durable_commits ORDER BY node_id;
+node_id	config	state	durable_gci
+1	0	off	NULL
+2	0	off	NULL
+== 2 == the SET alone: node 2 refuses at the activation
+Running command
+Result of command: 0
+Test program success!
+all nodes: 1
+SELECT node_id, config, state, durable_gci
+FROM ndbinfo.durable_commits ORDER BY node_id;
+node_id	config	state	durable_gci
+1	0	off	NULL
+2	0	off	NULL

@@ -22,3 +22,6 @@ ndb.ndb_redo_pmem_mode_switch_path : RONDB-1150 RedoLogMode=file with DurableCom
 
 # Turns durable commits on online, so they must be off at its start
 ndb.ndb_redo_pmem_durable_online : RONDB-1150 durable commits on from the start
+ndb.ndb_redo_pmem_durable_activate : RONDB-1150 durable commits on from the start
+# Node 2 in RedoLogMode=file does not start with DurableCommits=1
+ndb.ndb_redo_pmem_durable_refused : RONDB-1150 RedoLogMode=file with DurableCommits=1

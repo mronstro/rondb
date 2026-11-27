@@ -2282,6 +2282,13 @@ class Dbdih : public SimulatedBlock {
   bool m_sr_tail_own_log;
   Uint32 srDurableParams(Uint32 *words, const char **why);
   /**
+   * RONDB-1150, X7 part 5a: the first node of the system restart that
+   * cannot recover durably, with why in *what; 0 when every node can.
+   * c_sr_durable_why is the reason srDurableParams() gives then.
+   */
+  Uint32 srDurableMissing(const char **what) const;
+  char c_sr_durable_why[128];
+  /**
    * RONDB-1150, X5.7: G', the GCI that phase 2 raised the restart to, the
    * same in the START_RECCONF of every SR node; 0 until the first. Above
    * R, the master raises the restorable GCI to it with COPY_GCIREQ
@@ -2330,7 +2337,7 @@ class Dbdih : public SimulatedBlock {
     const Uint32 activated = m_micro_gcp.m_master.m_durable_gci;
     return activated > g ? activated : g;
   }
-  void durableGciLearned(Signal *, Uint32 g);
+  void durableGciLearned(Signal *, Uint32 g, bool systemRestart);
   Uint32 durableMapNodeFailFile(Signal *);
   Uint32 durableActivateCheck();
   void durableActivatePrepared(Signal *);
@@ -3121,10 +3128,13 @@ public:
   /**
    * RONDB-1150, X6.1: whether QMGR maps the node-failure file at its start
    * phase 3, as durable commits are on or configured. A node that learns
-   * later that they are on maps it then (durableGciLearned()).
+   * later that they are on maps it then (durableGciLearned()). A node in
+   * RedoLogMode=file has none: it cannot run durable commits, and a
+   * system restart with it ends them (srDurableMissing()).
    */
   bool nodeFailFileNeeded() const {
-    return durableCommitsOn() || c_durable_commits_config;
+    return (durableCommitsOn() || c_durable_commits_config) &&
+           c_redo_log_pmem;
   }
   /**
    * RONDB-1150, X7: for QMGR's CM_REGREQ, whether a joining node must

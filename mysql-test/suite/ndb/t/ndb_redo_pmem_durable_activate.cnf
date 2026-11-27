@@ -1,0 +1,14 @@
+!include ../my.cnf
+
+# RONDB-1150 X7.7: the REDO log in PMEM mode on any file system without
+# durable commits, which the test turns on online while the ledger of
+# testRestartGci writes; small REDO files, so that the writes cross
+# mbytes and files; GCP saves twice a second, so that a durable tail is
+# short.
+[cluster_config.1]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+NoOfFragmentLogFiles=5
+FragmentLogFileSize=4M
+TimeBetweenLocalCheckpoints=6
+TimeBetweenGlobalCheckpoints=500

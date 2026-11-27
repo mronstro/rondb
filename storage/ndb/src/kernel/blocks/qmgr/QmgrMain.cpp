@@ -1645,12 +1645,16 @@ void Qmgr::execCM_REGREQ(Signal *signal) {
 
   {
     /**
-     * RONDB-1150, X7: with durable commits on, or activated by this
-     * master, every data node must run them; an older one would commit
-     * without them, and read the sysfile as one with them off
+     * RONDB-1150, X7: with durable commits on in a running cluster, or
+     * activated by this master, every data node must run them; an older
+     * one would commit without them, and read the sysfile as one with them
+     * off. In a system restart, where this node has not started, such a
+     * node takes part: the restart is then the traditional one to the
+     * restorable GCI and ends durable commits (Dbdih::srDurableMissing()).
      */
     const Dbdih *dih = (const Dbdih *)globalData.getBlock(DBDIH, instance());
-    if (dih->durableCommitsOnOrActivating() &&
+    if (getNodeState().startLevel >= NodeState::SL_STARTED &&
+        dih->durableCommitsOnOrActivating() &&
         !ndbd_support_durable_commits(startingVersion)) {
       jam();
       infoEvent(

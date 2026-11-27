@@ -36,6 +36,7 @@
 #include "NDBT_ReturnCodes.h"
 #include "NDBT_Test.hpp"
 #include "NdbConfig.hpp"
+#include "NdbMgmd.hpp"
 #include "NdbRestarter.hpp"
 #include "UtilTransactions.hpp"
 
@@ -2637,6 +2638,348 @@ int runLedgerDurableSchema(NDBT_Context *ctx, NDBT_Step *step) {
   return result;
 }
 
+/**
+ * RONDB-1150, X7.7: durable commits turned on online. The state column
+ * of ndbinfo durable_commits (Dbdih::DurableState).
+ */
+enum LedgerDurableState : Uint32 {
+  LEDGER_DS_OFF = 0,
+  LEDGER_DS_ACTIVATING = 1,
+  LEDGER_DS_ON = 2,
+  LEDGER_DS_ARMED = 3,
+  LEDGER_DS_ENDING = 4
+};
+const char *const LEDGER_DS_NAMES[] = {"off", "activating", "on", "armed",
+                                       "ending"};
+
+struct LedgerDurableRow {
+  Uint32 nodeId;
+  Uint32 config;
+  Uint32 state;
+  Uint32 g;
+  Uint32 restorableGci;
+};
+
+/* The rows of ndbinfo durable_commits, one per data node */
+static bool ledgerDurableRows(NDBT_Context *ctx,
+                              std::vector<LedgerDurableRow> *rows) {
+  rows->clear();
+  NdbInfo ndbinfo(&ctx->m_cluster_connection, "ndbinfo/");
+  const NdbInfo::Table *table = nullptr;
+  if (!ndbinfo.init() ||
+      ndbinfo.openTable("ndbinfo/durable_commits", &table) != 0) {
+    ndbout_c("ERR: ledger: ndbinfo durable_commits cannot be read");
+    return false;
+  }
+  NdbInfoScanOperation *scanOp = nullptr;
+  int ret = ndbinfo.createScanOperation(table, &scanOp);
+  const char *const names[] = {"node_id", "config", "state", "durable_gci",
+                               "restorable_gci"};
+  const NdbInfoRecAttr *cols[5] = {};
+  if (ret == 0) ret = scanOp->readTuples();
+  if (ret == 0) {
+    for (int i = 0; i < 5; i++) cols[i] = scanOp->getValue(names[i]);
+    ret = scanOp->execute();
+  }
+  while (ret == 0 && (ret = scanOp->nextResult()) == 1) {
+    ret = 0;
+    rows->push_back({cols[0]->u_32_value(), cols[1]->u_32_value(),
+                     cols[2]->u_32_value(), cols[3]->u_32_value(),
+                     cols[4]->u_32_value()});
+  }
+  if (scanOp != nullptr) ndbinfo.releaseScanOperation(scanOp);
+  ndbinfo.closeTable(table);
+  return ret == 0;
+}
+
+/**
+ * Until every data node has durable commits in state, with DurableCommits
+ * config in its config now and the same g, *g (0 when off); a single read
+ * when seconds is 0. Armed needs the restorable GCI at least g - 1.
+ */
+static bool ledgerWaitDurable(NDBT_Context *ctx, Uint32 state, Uint32 config,
+                              Uint32 *g, Uint32 seconds) {
+  NdbRestarter restarter;
+  const size_t dbNodes = size_t(restarter.getNumDbNodes());
+  std::vector<LedgerDurableRow> rows;
+  for (Uint32 i = 0;; i++) {
+    bool ok = ledgerDurableRows(ctx, &rows) && rows.size() == dbNodes;
+    for (const LedgerDurableRow &r : rows) {
+      ok = ok && r.state == state && r.config == config && r.g == rows[0].g &&
+           (state != LEDGER_DS_ARMED || r.restorableGci + 1 >= r.g);
+    }
+    if (ok) {
+      *g = rows.empty() ? 0 : rows[0].g;
+      return true;
+    }
+    if (i >= 2 * seconds) break;
+    NdbSleep_MilliSleep(500);
+  }
+  ndbout_c("ERR: ledger: durable commits are not %s with DurableCommits=%u "
+           "in all %u data nodes:",
+           LEDGER_DS_NAMES[state], config, Uint32(dbNodes));
+  for (const LedgerDurableRow &r : rows) {
+    ndbout_c("  node %u: DurableCommits=%u, %s, g %u, restorable GCI %u",
+             r.nodeId, r.config,
+             r.state <= LEDGER_DS_ENDING ? LEDGER_DS_NAMES[r.state] : "?",
+             r.g, r.restorableGci);
+  }
+  return false;
+}
+
+/**
+ * ALL SET DurableCommits value as ndb_mgm runs it: the value saved in the
+ * config of every data node, then set in the running ones; save false
+ * leaves the saved config. The answer of the SET: 0 when every node took
+ * the value, for 1 once durable commits are armed.
+ */
+static int ledgerSetDurable(Uint32 value, bool save = true) {
+  NdbMgmd mgmd;
+  mgmd.use_tls(opt_tls_search_path, opt_mgm_tls);
+  if (!mgmd.connect()) {
+    ndbout_c("ERR: ledger: no connection to the management server");
+    return -1;
+  }
+  if (save) {
+    Config conf;
+    if (!mgmd.get_config(conf)) {
+      ndbout_c("ERR: ledger: the config cannot be read");
+      return -1;
+    }
+    ConfigValues::Iterator iter(conf.m_configuration->m_config_values);
+    for (int i = 0; i < ABS_MAX_NODES; i++) {
+      if (!iter.openSection(CFG_SECTION_NODE, i)) continue;
+      Uint32 nodeType = 0;
+      iter.get(CFG_TYPE_OF_SECTION, &nodeType);
+      if (nodeType == NODE_TYPE_DB) iter.set(CFG_DB_DURABLE_COMMITS, value);
+      iter.closeSection();
+    }
+    if (!mgmd.set_config(conf)) {
+      ndbout_c("ERR: ledger: the config with DurableCommits=%u cannot be "
+               "saved",
+               value);
+      return -1;
+    }
+  }
+  const int res = ndb_mgm_set_config_param(mgmd.handle(), 0,
+                                           CFG_DB_DURABLE_COMMITS, value);
+  if (res != 0) {
+    ndbout_c("Ledger: ALL SET DurableCommits %u failed: %s: %s", value,
+             ndb_mgm_get_latest_error_msg(mgmd.handle()),
+             ndb_mgm_get_latest_error_desc(mgmd.handle()));
+  }
+  return res;
+}
+
+/* The activation cases start with DurableCommits=0 */
+int runLedgerNeedsDurableOff(NDBT_Context *ctx, NDBT_Step *step) {
+  NdbConfig conf;
+  for (int i = 0; i < conf.getNumDbNodes(); i++) {
+    const int node = conf.getDbNodeId(i);
+    Uint32 durable = 0;
+    conf.getProperty(node, NODE_TYPE_DB, CFG_DB_DURABLE_COMMITS, &durable);
+    if (durable != 0) {
+      ndbout_c("Node %d: this test needs DurableCommits=0", node);
+      return NDBT_SKIPPED;
+    }
+  }
+  return NDBT_OK;
+}
+
+/**
+ * ALL SET DurableCommits 0 and a system restart, with abort while the
+ * writers write or graceful with them parked. The restart runs phase 2
+ * with the old g, so every acknowledged transaction stays, and ends
+ * durable commits. The writers write on return.
+ */
+static int ledgerDurableEnd(NDBT_Context *ctx, NDBT_Step *step, bool abort) {
+  NdbRestarter restarter;
+  Uint32 g = 0;
+  ndbout_c("Ledger: ALL SET DurableCommits 0, then %s",
+           abort ? "a system restart with abort"
+                 : "a graceful system restart");
+  if (ledgerSetDurable(0) != 0 ||
+      !ledgerWaitDurable(ctx, LEDGER_DS_ENDING, 0, &g, 0)) {
+    return NDBT_FAILED;
+  }
+  if (!abort && !ledgerPause(ctx)) return NDBT_FAILED;
+  if (restarter.restartAll(false, false, abort) != 0) return NDBT_FAILED;
+  if (abort && !ledgerPause(ctx)) return NDBT_FAILED;
+  const int res = ledgerCheckRestart(
+      ctx, step,
+      abort ? "system restart that ends durable commits"
+            : "graceful system restart that ends durable commits",
+      true);
+  ctx->setProperty("LedgerDurable", Uint32(0));
+  ledgerResume(ctx);
+  if (res != NDBT_OK || !ledgerWaitDurable(ctx, LEDGER_DS_OFF, 0, &g, 30)) {
+    return NDBT_FAILED;
+  }
+  ndbout_c("Ledger: durable commits are off");
+  return NDBT_OK;
+}
+
+/**
+ * X7.7: ALL SET DurableCommits 1 while the writers write. Once it returns
+ * every node is armed with one g, and from then on every acknowledged
+ * transaction stays: those of a GCI below g are at most the restorable
+ * GCI g - 1 of the save that armed, the others are in the durable tail.
+ * A system restart with abort keeps g, so does the one that ends them
+ * (DurableCommits 0), and the one after it has the rules without durable
+ * commits.
+ */
+int runLedgerDurableActivate(NDBT_Context *ctx, NDBT_Step *step) {
+  const Uint32 seconds = ctx->getProperty("LedgerSeconds", Uint32(5));
+  int result = NDBT_OK;
+  for (int l = 0; l < ctx->getNumLoops() && result == NDBT_OK; l++) {
+    Uint32 g = 0;
+    Uint32 gAfter = 0;
+    result = NDBT_FAILED;
+    if (!ledgerSleep(ctx, seconds) ||
+        !ledgerWaitDurable(ctx, LEDGER_DS_OFF, 0, &g, 30)) {
+      break;
+    }
+    ndbout_c("Ledger loop %d: ALL SET DurableCommits 1 while the writers "
+             "write",
+             l);
+    if (ledgerSetDurable(1) != 0 ||
+        !ledgerWaitDurable(ctx, LEDGER_DS_ARMED, 1, &g, 0)) {
+      break;
+    }
+    ndbout_c("Ledger: durable commits armed from GCI %u", g);
+    ctx->setProperty("LedgerDurable", Uint32(1));
+    if (!ledgerSleep(ctx, seconds) ||
+        ledgerSystemRestart(ctx, step) != NDBT_OK ||
+        !ledgerWaitDurable(ctx, LEDGER_DS_ARMED, 1, &gAfter, 30)) {
+      break;
+    }
+    if (gAfter != g) {
+      ndbout_c("ERR: ledger: g is %u after the system restart, %u before",
+               gAfter, g);
+      break;
+    }
+    if (!ledgerSleep(ctx, seconds) ||
+        ledgerDurableEnd(ctx, step, true) != NDBT_OK ||
+        !ledgerSleep(ctx, seconds)) {
+      break;
+    }
+    result = ledgerSystemRestart(ctx, step);
+  }
+  ctx->stopTest();
+  return result;
+}
+
+/**
+ * X7.7: the master stops during the activation, after GCP_PREPARE(g)
+ * (error insert 7260) or before the copy that arms (7261), and restarts
+ * into NOSTART. The SET fails, as the nodes asked the failed master, but
+ * the new master goes on with g: durable commits are armed, the failed
+ * node takes g at its node restart, after which every transaction stays,
+ * and a SET returns at once. A system restart with abort keeps every
+ * acknowledged transaction; a graceful one with DurableCommits 0 turns
+ * durable commits off for the next code.
+ */
+const Uint32 LEDGER_DURABLE_ACTIVATE_CODES[] = {7260, 7261};
+
+int runLedgerDurableActivateMasterCrash(NDBT_Context *ctx,
+                                        NDBT_Step *step) {
+  const Uint32 seconds = ctx->getProperty("LedgerSeconds", Uint32(5));
+  NdbRestarter restarter;
+  int result = NDBT_OK;
+  for (const Uint32 code : LEDGER_DURABLE_ACTIVATE_CODES) {
+    Uint32 g = 0;
+    Uint32 gAfter = 0;
+    result = NDBT_FAILED;
+    if (!ledgerSleep(ctx, seconds) ||
+        !ledgerWaitDurable(ctx, LEDGER_DS_OFF, 0, &g, 30)) {
+      break;
+    }
+    int master = restarter.getMasterNodeId();
+    const int restartOnError[] = {DumpStateOrd::CmvmiSetRestartOnErrorInsert,
+                                  1};
+    ndbout_c("Ledger: error insert %u in the master, node %d; ALL SET "
+             "DurableCommits 1 while the writers write",
+             code, master);
+    if (restarter.dumpStateOneNode(master, restartOnError, 2) != 0 ||
+        restarter.insertErrorInNode(master, code) != 0) {
+      break;
+    }
+    if (ledgerSetDurable(1) == 0) {
+      ndbout_c("ERR: ledger: the SET succeeded; the master did not stop");
+      restarter.insertErrorInNode(master, 0);
+      break;
+    }
+    if (restarter.waitNodesNoStart(&master, 1, 120) != 0 ||
+        restarter.startNodes(&master, 1) != 0 ||
+        restarter.waitClusterStarted(300) != 0) {
+      ndbout_c("ERR: ledger: node %d did not start again", master);
+      break;
+    }
+    if (!ledgerWaitDurable(ctx, LEDGER_DS_ARMED, 1, &g, 60)) break;
+    ndbout_c("Ledger: the new master, node %d, armed durable commits from "
+             "GCI %u, and node %d took g at its node restart",
+             restarter.getMasterNodeId(), g, master);
+    if (ledgerSetDurable(1) != 0 ||
+        !ledgerWaitDurable(ctx, LEDGER_DS_ARMED, 1, &gAfter, 0)) {
+      break;
+    }
+    ctx->setProperty("LedgerDurable", Uint32(1));
+    if (!ledgerPause(ctx)) break;
+    const int nr =
+        ledgerVerify(ctx, step, ~Uint64(0), "node restart of the master");
+    ledgerResume(ctx);
+    if (nr != NDBT_OK || !ledgerSleep(ctx, seconds) ||
+        ledgerSystemRestart(ctx, step) != NDBT_OK ||
+        !ledgerWaitDurable(ctx, LEDGER_DS_ARMED, 1, &gAfter, 30)) {
+      break;
+    }
+    if (gAfter != g) {
+      ndbout_c("ERR: ledger: g is %u after the system restart, %u before",
+               gAfter, g);
+      break;
+    }
+    result = ledgerDurableEnd(ctx, step, false);
+    if (result != NDBT_OK) break;
+  }
+  ctx->stopTest();
+  return result;
+}
+
+/**
+ * X7.7: with a data node in RedoLogMode=file the activation is refused
+ * (DurableActivateRef::NotPmem). ndb_mgm refuses to save such a config,
+ * so the SET is sent alone, as an application of the management API may:
+ * it fails, durable commits stay off, and the config of each node has
+ * the value of the SET until SET DurableCommits 0.
+ */
+int runDurableActivateRefused(NDBT_Context *ctx, NDBT_Step *step) {
+  NdbConfig conf;
+  bool fileNode = false;
+  for (int i = 0; i < conf.getNumDbNodes(); i++) {
+    Uint32 mode = NDB_REDO_LOG_MODE_FILE;
+    conf.getProperty(conf.getDbNodeId(i), NODE_TYPE_DB, CFG_DB_REDO_LOG_MODE,
+                     &mode);
+    fileNode |= mode != NDB_REDO_LOG_MODE_PMEM;
+  }
+  if (!fileNode) {
+    ndbout_c("This test needs a data node with RedoLogMode=file");
+    return NDBT_SKIPPED;
+  }
+  Uint32 g = 0;
+  if (ledgerSetDurable(1, false) == 0) {
+    ndbout_c("ERR: SET DurableCommits 1 succeeded with a data node in "
+             "RedoLogMode=file");
+    return NDBT_FAILED;
+  }
+  if (!ledgerWaitDurable(ctx, LEDGER_DS_OFF, 1, &g, 0)) return NDBT_FAILED;
+  if (ledgerSetDurable(0, false) != 0 ||
+      !ledgerWaitDurable(ctx, LEDGER_DS_OFF, 0, &g, 0)) {
+    return NDBT_FAILED;
+  }
+  ndbout_c("SET DurableCommits 1 refused; durable commits are off");
+  return NDBT_OK;
+}
+
 NDBT_TESTSUITE(testRestartGci);
 TESTCASE("InsertRestartGci",
          "Verify that only expected records are still in NDB\n"
@@ -2868,6 +3211,40 @@ TESTCASE("GciLedgerDurableSchema",
   INITIALIZER(runLedgerInit);
   STEP(runLedgerDurableSchema);
   FINALIZER(runDropTable);
+}
+TESTCASE("GciLedgerDurableActivate",
+         "RONDB-1150 (X7.7), PMEM mode with DurableCommits=0: durable "
+         "commits turned on while the writers write (ALL SET DurableCommits "
+         "1); once armed a system restart with abort keeps every "
+         "acknowledged transaction, as does the one that ends them "
+         "(DurableCommits 0); ndbinfo durable_commits at each step") {
+  TC_PROPERTY("LedgerSeconds", Uint32(3));
+  INITIALIZER(runLedgerNeedsPmem);
+  INITIALIZER(runLedgerNeedsDurableOff);
+  INITIALIZER(runCreateTable);
+  INITIALIZER(runLedgerInit);
+  STEPS(runLedgerWriter, LEDGER_WRITERS);
+  STEP(runLedgerDurableActivate);
+  FINALIZER(runDropTable);
+}
+TESTCASE("GciLedgerDurableActivateMasterCrash",
+         "RONDB-1150 (X7.7), PMEM mode with DurableCommits=0: the master "
+         "stops during the activation, after GCP_PREPARE(g) (7260) and "
+         "before the copy that arms (7261); the SET fails, the new master "
+         "arms durable commits, and every acknowledged transaction stays") {
+  TC_PROPERTY("LedgerSeconds", Uint32(3));
+  INITIALIZER(runLedgerNeedsPmem);
+  INITIALIZER(runLedgerNeedsDurableOff);
+  INITIALIZER(runCreateTable);
+  INITIALIZER(runLedgerInit);
+  STEPS(runLedgerWriter, LEDGER_WRITERS);
+  STEP(runLedgerDurableActivateMasterCrash);
+  FINALIZER(runDropTable);
+}
+TESTCASE("DurableActivateRefused",
+         "RONDB-1150 (X7.7): with a data node in RedoLogMode=file the "
+         "activation is refused and durable commits stay off") {
+  INITIALIZER(runDurableActivateRefused);
 }
 NDBT_TESTSUITE_END(testRestartGci)
 

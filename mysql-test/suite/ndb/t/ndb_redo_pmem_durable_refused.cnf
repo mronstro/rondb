@@ -1,0 +1,11 @@
+!include ../my.cnf
+
+# RONDB-1150 X7.7: node 1 with the REDO log in PMEM mode on any file
+# system, node 2 in file mode, so that durable commits cannot be turned
+# on
+[cluster_config.ndbd.1.1]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+
+[cluster_config.ndbd.2.1]
+RedoLogMode=file

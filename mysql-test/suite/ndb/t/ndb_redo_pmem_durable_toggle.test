@@ -83,6 +83,43 @@ SELECT * FROM t1 ORDER BY a;
 --source suite/ndb/include/redo_pmem_durable_log.inc
 SELECT * FROM t1 ORDER BY a;
 
+--echo == 6 == a node of the restart without durable commits: the traditional restart, and they end
+# X7 part 5a: error insert 7265 has the master take the other node as one
+# of an older version
+--exec $NDB_MGM -e "all restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started >> $NDB_TOOLS_OUTPUT
+--source suite/ndb/include/redo_pmem_durable_gci.inc
+--exec $NDB_MGM -e "all error 7265" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_MGM -e "all start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+--source include/ndb_not_readonly.inc
+--exec $NDB_MGM -e "all error 0" >> $NDB_TOOLS_OUTPUT
+# Only the master logs it
+--let LOG_SUM = 1
+--let LOG_LINE = runs a version without durable commits, so the restart ends durable commits (g <g>)
+--source suite/ndb/include/redo_pmem_durable_log.inc
+--let LOG_SUM = 0
+--let LOG_LINE = DIH: durable commits end with the system restart; they were on from GCI <g>
+--source suite/ndb/include/redo_pmem_durable_log.inc
+# Off though DurableCommits=1; phase 2 did not run
+SELECT node_id, config, state, durable_gci
+FROM ndbinfo.durable_commits ORDER BY node_id;
+SELECT node_id, MAX(phase2) AS phase2
+FROM ndbinfo.durable_restart GROUP BY node_id ORDER BY node_id;
+SELECT * FROM t1 ORDER BY a;
+
+--echo == 7 == the next system restart, every node able, turns them on again
+--exec $NDB_MGM -e "all restart -n" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER --not-started >> $NDB_TOOLS_OUTPUT
+--source suite/ndb/include/redo_pmem_durable_gci.inc
+--exec $NDB_MGM -e "all start" >> $NDB_TOOLS_OUTPUT
+--exec $NDB_WAITER >> $NDB_TOOLS_OUTPUT
+--source include/ndb_not_readonly.inc
+--let LOG_LINE = DIH: durable commits from GCI <n>, the first after the system restart
+--source suite/ndb/include/redo_pmem_durable_log.inc
+SELECT node_id, config, state FROM ndbinfo.durable_commits ORDER BY node_id;
+
 DROP TABLE t1;
 --remove_file $MYSQLTEST_VARDIR/tmp/redo_pmem_durable_gci.txt
+--remove_file $MYSQLTEST_VARDIR/tmp/redo_pmem_durable_logged_gci.txt
 --remove_file $NDB_TOOLS_OUTPUT

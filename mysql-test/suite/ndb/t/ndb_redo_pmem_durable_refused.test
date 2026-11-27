@@ -1,0 +1,31 @@
+--source include/have_ndb.inc
+
+# RONDB-1150 X7.7: durable commits cannot be turned on while a data node
+# has RedoLogMode=file. ndb_mgm refuses ALL SET DurableCommits 1 and
+# saves nothing, as the management server checks the config rules of a
+# config file only. A SET sent alone through the management API, as
+# testRestartGci DurableActivateRefused sends it, gets to the activation,
+# which node 2 refuses: the SET fails and durable commits stay off.
+
+--echo == 1 == ndb_mgm refuses ALL SET DurableCommits 1 and saves nothing
+--error 255
+--exec $NDB_MGM -e "ALL SET DurableCommits 1" > $MYSQLTEST_VARDIR/tmp/durable_refused.txt
+--exec grep "DurableCommits=1 needs" $MYSQLTEST_VARDIR/tmp/durable_refused.txt
+--remove_file $MYSQLTEST_VARDIR/tmp/durable_refused.txt
+SELECT node_id, config, state, durable_gci
+FROM ndbinfo.durable_commits ORDER BY node_id;
+
+--echo == 2 == the SET alone: node 2 refuses at the activation
+let NDBAPITEST_CLEANUP_QUERY=;
+let NDBAPITEST_NAME=testRestartGci;
+let NDBAPITEST_ARGS=-n DurableActivateRefused T1;
+--source suite/ndb/include/run_ndbapitest.inc
+# The master logs why
+--let LOG_WAIT = 1
+--let LOG_SUM = 1
+--let LOG_LINE = DIH: durable commits not activated: a data node has a RedoLogMode other than pmem
+--source suite/ndb/include/redo_pmem_durable_log.inc
+--let LOG_WAIT = 0
+--let LOG_SUM = 0
+SELECT node_id, config, state, durable_gci
+FROM ndbinfo.durable_commits ORDER BY node_id;

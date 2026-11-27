@@ -1,0 +1,65 @@
+--source include/have_ndb.inc
+--source have_ndb_error_insert.inc
+
+# RONDB-1150 X7.7: durable commits turned on online while the ledger of
+# testRestartGci writes.
+#  - GciLedgerDurableActivate: ALL SET DurableCommits 1 returns once every
+#    node is armed; a system restart with abort then keeps every
+#    acknowledged transaction and g, so does the one after ALL SET
+#    DurableCommits 0, which ends them, and the one after that has the
+#    rules without durable commits.
+#  - GciLedgerDurableActivateMasterCrash: the master stops after
+#    GCP_PREPARE(g) (error insert 7260) and before the copy that arms
+#    (7261). The SET fails, the new master arms durable commits with g,
+#    the failed node takes g at its node restart, and every acknowledged
+#    transaction stays.
+# The test program reads ndbinfo durable_commits at each step.
+
+# NDBT creates TEST_DB.T1 directly through the NDB API. Keep both
+# mysqlds stopped so metadata discovery cannot import the API table;
+# on a case-insensitive file system it retries CREATE DATABASE TEST_DB
+# after each system restart and fails.
+--connect(s2,127.0.0.1,root,,test,$MASTER_MYPORT1,)
+--connection default
+--echo # Shutting down mysqld 1
+--let $mysqld_name=mysqld.1.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld1_file_name= $_expect_file_name
+
+--connection s2
+--echo # Shutting down mysqld 2
+--let $mysqld_name=mysqld.2.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld2_file_name= $_expect_file_name
+
+let NDBAPITEST_CLEANUP_QUERY=;
+let NDBAPITEST_NAME=testRestartGci;
+
+--echo == 1 == ALL SET DurableCommits 1 while the ledger writes, then system restarts with abort
+let NDBAPITEST_ARGS=-n GciLedgerDurableActivate -l 1 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+--echo == 2 == the master stops during the activation (7260, 7261)
+let NDBAPITEST_ARGS=-n GciLedgerDurableActivateMasterCrash T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+--connection default
+--echo # Starting mysqld 1
+--let $_expect_file_name= $expect_mysqld1_file_name
+--let $mysqld_name=mysqld.1.1
+--source include/start_mysqld.inc
+
+--connection s2
+--echo # Starting mysqld 2
+--let $_expect_file_name= $expect_mysqld2_file_name
+--let $mysqld_name=mysqld.2.1
+--source include/start_mysqld.inc
+
+--connection default
+--disconnect s2
+
+--echo == 3 == off again, after a system restart that ran under g
+SELECT node_id, config, state, durable_gci
+FROM ndbinfo.durable_commits ORDER BY node_id;
+SELECT node_id, COUNT(*) > 0 AS has_rows
+FROM ndbinfo.durable_restart GROUP BY node_id ORDER BY node_id;

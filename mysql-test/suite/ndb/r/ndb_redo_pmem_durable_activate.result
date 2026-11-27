@@ -1,0 +1,25 @@
+# Shutting down mysqld 1
+# Shutting down mysqld 2
+== 1 == ALL SET DurableCommits 1 while the ledger writes, then system restarts with abort
+Running command
+Result of command: 0
+Test program success!
+== 2 == the master stops during the activation (7260, 7261)
+Running command
+Result of command: 0
+Test program success!
+# Starting mysqld 1
+# restart
+# Starting mysqld 2
+# restart
+== 3 == off again, after a system restart that ran under g
+SELECT node_id, config, state, durable_gci
+FROM ndbinfo.durable_commits ORDER BY node_id;
+node_id	config	state	durable_gci
+1	0	off	NULL
+2	0	off	NULL
+SELECT node_id, COUNT(*) > 0 AS has_rows
+FROM ndbinfo.durable_restart GROUP BY node_id ORDER BY node_id;
+node_id	has_rows
+1	1
+2	1

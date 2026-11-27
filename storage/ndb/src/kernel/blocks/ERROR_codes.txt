@@ -487,6 +487,10 @@ GCP Stop so that isolation is required to remove a node.
 7264: RONDB-1150, X7: the master of a system restart takes DurableCommits
       as 0 at the end of the restart, which turns durable commits off
       (set in NOSTART on every node)
+7265: RONDB-1150, X7: the master of a system restart takes every other node
+      of the restart as one of a version without durable commits: the
+      restart is the traditional one, without phase 2, and ends durable
+      commits whatever DurableCommits says (set in NOSTART on every node)
 
 Related (LQH):
   5085 : Ignore request to kill via DUMP 2305

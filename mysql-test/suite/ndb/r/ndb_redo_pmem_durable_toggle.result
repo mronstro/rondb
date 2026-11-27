@@ -27,4 +27,32 @@ a	b
 1	1
 2	2
 3	3
+== 6 == a node of the restart without durable commits: the traditional restart, and they end
+g: on
+all nodes: 1
+node 1: 1
+node 2: 1
+SELECT node_id, config, state, durable_gci
+FROM ndbinfo.durable_commits ORDER BY node_id;
+node_id	config	state	durable_gci
+1	1	off	NULL
+2	1	off	NULL
+SELECT node_id, MAX(phase2) AS phase2
+FROM ndbinfo.durable_restart GROUP BY node_id ORDER BY node_id;
+node_id	phase2
+1	0
+2	0
+SELECT * FROM t1 ORDER BY a;
+a	b
+1	1
+2	2
+3	3
+== 7 == the next system restart, every node able, turns them on again
+g: off
+node 1: 1
+node 2: 1
+SELECT node_id, config, state FROM ndbinfo.durable_commits ORDER BY node_id;
+node_id	config	state
+1	1	armed
+2	1	armed
 DROP TABLE t1;

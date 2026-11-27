@@ -1642,7 +1642,7 @@ transactions before arming, none after; master failure during activation
 handled; a node restart after activation works; activation refused with a
 file-mode node or an old version.
 
-**State (2026-11-27): parts 1-4 committed; part 5 next.** Re-scoped against the code first: only the start-time
+**State (2026-11-27): parts 1-4 committed; parts 5a and 5 written, to be built and tested.** Re-scoped against the code first: only the start-time
 path existed. `__DurableCommits` (CFG 716) set
 `m_micro_gcp.m_durable_gci = 1` in `Dbdih::initCommonData()`, and g lived
 nowhere else: not in the sysfile, not in a signal. A system restart took
@@ -1843,12 +1843,65 @@ Parts, each a commit to be built and tested:
      node 1 records the failure of node 2, node 2 takes g from the
      master and has no `durable_restart` rows. `ndbinfo` and
      `ndbinfo_plans` count the new tables.
-5. Tests (X7.7): activation under ledger load, with no loss after arming;
-   refusal with a file-mode node; master crash after
-   GCP_PREPARE(activate) (7260) and before arming (7261); deactivation
-   through a system restart; the ndbinfo values under those. A node
-   restart after activation is in `ndb_redo_pmem_durable_online` (part
-   4).
+5a. Durable commits are a feature of the whole cluster (decided
+   2026-11-27): a system restart recovers durably only when every node
+   that takes part in it can; otherwise it is the traditional restart to
+   the restorable GCI, not one that refuses the node. **Written
+   (2026-11-27), to be built and tested.**
+   - The master checks each SR node (`Dbdih::srDurableMissing()`): a
+     version with durable commits, and RedoLogMode=pmem in the cluster
+     config, which every node of the restart started with. The first
+     node that fails makes the restart run without phase 2
+     (`srDurableParams()`, logged as why phase 2 does not run) and end
+     durable commits (`srDurableGciAtEnd()` gives 0 whatever
+     DurableCommits says); the cluster log names the node.
+   - A node of an older version gets no durable section in START_RECREQ,
+     and QMGR refuses it at CM_REGREQ only when the president has
+     started: in a system restart it takes part.
+   - A node in RedoLogMode=file takes g from the RESTART copy without
+     stopping (`durableGciLearned(..., systemRestart)`), and never maps a
+     node-failure file (`nodeFailFileNeeded()` needs PMEM mode). Such a
+     node can in practice not be in a restart with g, as RedoLogMode
+     changes only with an initial node restart, which a cluster with
+     durable commits on refuses; the check is for completeness.
+   - A node restart into a cluster that runs durable commits is still
+     refused for such a node: they end only at a system restart.
+   - Not changed: stale nodes and an unsafe shutdown of PMEM (X6.3, X6.4,
+     X6.7, X6.9) keep their rules: the restart waits for a node that has
+     the commits, or stops when every node is stale.
+   - Error insert 7265: the master takes every other node of the restart
+     as one of an older version. `ndb_redo_pmem_durable_toggle` step 6:
+     the restart with it runs without phase 2 and ends durable commits
+     with DurableCommits=1; step 7: the next one turns them on again.
+5. Tests (X7.7). **Written (2026-11-27), to be built and tested.**
+   - `testRestartGci -n GciLedgerDurableActivate`: from DurableCommits=0
+     the ledger writes, ALL SET DurableCommits 1 (saved in the config and
+     set, as ndb_mgm does, `ledgerSetDurable()`) returns with every node
+     armed and one g (ndbinfo `durable_commits` through NdbInfo,
+     `ledgerWaitDurable()`); from then on every acknowledged transaction
+     stays, those of a GCI below g too, as they are at most g - 1, the
+     restorable GCI of the save that armed. A system restart with abort
+     keeps g; one after ALL SET DurableCommits 0 keeps every transaction
+     and ends them; the one after has the rules without durable commits.
+   - `GciLedgerDurableActivateMasterCrash`: 7260 and 7261 in the master,
+     which restarts into NOSTART. The SET fails (the nodes that asked the
+     failed master answer with MasterFailure); the new master arms
+     durable commits with g, the failed node takes g at its node restart,
+     a SET returns at once, every transaction stays through the node
+     restart and a system restart with abort.
+   - `DurableActivateRefused`: with a node in RedoLogMode=file a SET sent
+     alone through the management API fails (NotPmem), and durable
+     commits stay off; the node's config has the value of the SET, as
+     CMVMI sets it before DIH answers, until SET DurableCommits 0.
+   - MTR: `ndb_redo_pmem_durable_activate` runs the two ledger cases and
+     reads ndbinfo after them; `ndb_redo_pmem_durable_refused` has node 2
+     in file mode: ndb_mgm refuses the SET and saves nothing, then the
+     case above, and the master logs why. Both are skipped in the
+     DurableCommits=1 variant (`pmem_redo_durable.skip`).
+   - A node restart after activation is in `ndb_redo_pmem_durable_online`
+     (part 4). Not tested: a node restart while 7263 holds an activation
+     (Q-B7 both ways), as the node's start makes the held activation fail
+     (a node restart runs) or wait, depending on where the node is.
 
 ### X7.1 Config `DurableCommits` (S, 3 pd)
 
