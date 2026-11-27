@@ -50,7 +50,7 @@ continues both lists. Their status is in `../ronsql_executor/README.md`.
   - DBLQH 5165. A DBLQH number can also be taken by an entry outside
     the RONDB-1124 block of `ERROR_codes.txt`: check with
     `git grep -w <n> storage/ndb/src/kernel` before taking one;
-  - DBTC 8135 / 8321 (RonDB);
+  - DBTC 8135 / 8322 (RonDB);
   - DBSPJ 17542.
 
   Update the "Next" line in the same commit as the new insert.
@@ -139,7 +139,14 @@ New error codes and inserts added by these fixes:
 - `JIT_BRIDGE_EMBEDDED_NO_OUTPUT` (10, `917434677ee`): an embedded block
   with a path that ends without output 0 runs on the interpreter;
 - a missing interpreter parameter fails with 876
-  (`ZOUTSIDE_OF_PROGRAM_ERROR`, `75b7d80d4ba`), where it gave 99.
+  (`ZOUTSIDE_OF_PROGRAM_ERROR`, `75b7d80d4ba`), where it gave 99;
+- error insert DBTC 8321: hold the end of the next main join
+  aggregation until the API's close of it, end the scan then, and hold
+  DBTC's "Confirming scan close" answer until the API's next SCAN_TABREQ
+  or TCRELEASEREQ on that ApiConnectRecord (testJoinAggNdbApi Test 27);
+- DBUG keyword `ndb_query_close_nodefail_at_end` (NDB API,
+  `NdbQueryImpl::closeTcCursor`): a close wait that made every worker
+  final reports a node failure (testJoinAggNdbApi Test 28).
 
 Bug 14 adds `AggInterpreterBase::checkProgram`, which runs:
 - in `DblqhProxy::execJOIN_AGG_SETUP_REQ` for every leaf, before the
@@ -618,8 +625,14 @@ Optional, performance only:
     or BLOB GROUP BY column) are tested now: P61 changes one column id
     of a finished NdbAggregator program for `test.p61_agg` and expects
     879 or 1869. The JIT arm of P61 (c) and (d) is not tested;
-  - `2ce87f392be` and the reused-connection case of `81e0f764713`
-    (timing that no test can force).
+  - `2ce87f392be` and the reused-connection case (c) of `81e0f764713`
+    are tested now: testJoinAggNdbApi Test 27
+    (`ndb_push_agg.testJoinAggNdbApiCrossedClose`, error insert 8321) and
+    Test 28 (`ndb_push_agg.testJoinAggNdbApiCloseNodeFail`, DBUG keyword
+    `ndb_query_close_nodefail_at_end`), both debug only. Case (c) is
+    reachable only through a buddy transaction from `Ndb::hupp()`: the
+    4008 aborts the query's own transaction. Test 28's wait for
+    outstanding batches is checked, not forced (up to 5 tries).
 - **NdbAggregator follows no CASE arms:** a program in which a string
   reaches arithmetic on one path only passes the builder; the data node
   refuses it (`checkAggSlotKinds`).
@@ -634,7 +647,8 @@ Optional, performance only:
     (`9d013e4d714`); the `ronsql_cte` suites would show it;
   - `ndb_scan_protocol_timeout`: the "Leaks" lines of its results decide
     whether the force-release on a close after a receive timeout
-    (`81e0f764713` (c)) stays;
+    (`81e0f764713` (c)) stays; a count of ApiConnectRecords there may
+    drop by one after a timeout, which is that release, not a leak;
   - `evictOneGroup` still pops the group before it checks the size
     (§4.2).
 

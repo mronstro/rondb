@@ -5252,11 +5252,17 @@ int NdbQueryImpl::closeTcCursor(bool forceSend) {
   /* Wait for outstanding scan results from current batch fetch */
   while (m_pendingWorkers > 0)
   {
-    const FetchResult result = static_cast<FetchResult>
+    FetchResult result = static_cast<FetchResult>
         (poll_guard.wait_scan(3*timeout,
                               nodeId,
                               forceSend,
                               &ndb->m_start_time));
+    /* Test hook (testJoinAggNdbApi --only 28): the TC node fails in the
+     * poll that made every worker final. */
+    DBUG_EXECUTE_IF("ndb_query_close_nodefail_at_end", {
+      if (result == FetchResult_ok && m_finalWorkers == getWorkerCount())
+        result = FetchResult_nodeFail;
+    });
 
     /* The EndOfData that makes every worker final can come in the same
      * poll as the TC node's disconnect: setWaitFailed(). */
@@ -5315,11 +5321,16 @@ int NdbQueryImpl::closeTcCursor(bool forceSend) {
     /* Wait for close to be confirmed: */
     while (m_pendingWorkers > 0)
     {
-      const FetchResult result = static_cast<FetchResult>
+      FetchResult result = static_cast<FetchResult>
           (poll_guard.wait_scan(3*timeout,
                                 nodeId,
                                 forceSend,
                                 &ndb->m_start_time));
+      /* Test hook, as in the wait above. */
+      DBUG_EXECUTE_IF("ndb_query_close_nodefail_at_end", {
+        if (result == FetchResult_ok && m_finalWorkers == getWorkerCount())
+          result = FetchResult_nodeFail;
+      });
 
       /* As in the wait above: setWaitFailed(). */
       if (unlikely(ndb->getNodeSequence(nodeId) != seq))

@@ -6186,7 +6186,7 @@ testDuplicateEndOfData(Ndb *ndb, MYSQL *conn, NdbRestarter &restarter)
 }
 
 /* ------------------------------------------------------------------ */
-/* Helpers for Test 27, which runs only with a debug NDB API           */
+/* Helpers for Tests 27 and 28, which run only with a debug NDB API    */
 /* ------------------------------------------------------------------ */
 
 #ifndef NDEBUG
@@ -6227,6 +6227,39 @@ prepareT14SumCountDef(Ndb *ndb, const NdbDictionary::Table *parentTab,
 
   const NdbQueryLookupOperationDef *childOp =
       qb->readTuple(childTab, joinKey, &opts);
+  if (childOp == nullptr) {
+    printf("%sFAILED (readTuple: %s)\n", head, qb->getNdbError().message);
+    qb->destroy();
+    return nullptr;
+  }
+
+  const NdbQueryDef *queryDef = qb->prepare(ndb);
+  if (queryDef == nullptr) {
+    printf("%sFAILED (prepare: %s)\n", head, qb->getNdbError().message);
+  }
+  qb->destroy();
+  return queryDef;
+}
+
+/* SELECT p.id, c.val FROM t14_parent p JOIN t14_child c
+ * ON c.parent_id = p.id: a pushed join without aggregation.  On error
+ * prints a FAILED line that starts with head and returns nullptr. */
+static const NdbQueryDef *
+prepareT14JoinScanDef(Ndb *ndb, const NdbDictionary::Table *parentTab,
+                      const NdbDictionary::Table *childTab, const char *head)
+{
+  NdbQueryBuilder *qb = NdbQueryBuilder::create();
+  const NdbQueryTableScanOperationDef *parentOp = qb->scanTable(parentTab);
+  if (parentOp == nullptr) {
+    printf("%sFAILED (scanTable: %s)\n", head, qb->getNdbError().message);
+    qb->destroy();
+    return nullptr;
+  }
+  const NdbQueryOperand *joinKey[] = {
+    qb->linkedValue(parentOp, "id"), nullptr
+  };
+  const NdbQueryLookupOperationDef *childOp =
+      qb->readTuple(childTab, joinKey);
   if (childOp == nullptr) {
     printf("%sFAILED (readTuple: %s)\n", head, qb->getNdbError().message);
     qb->destroy();
@@ -6512,6 +6545,235 @@ testCrossedCloseAfterTimeout(Ndb *ndb, MYSQL *conn, NdbRestarter &restarter)
 }
 
 /* ------------------------------------------------------------------ */
+/* Test 28: the wait in NdbQueryImpl::closeTcCursor() that makes every */
+/*          worker final also sees the TC node fail (DBUG keyword      */
+/*          ndb_query_close_nodefail_at_end).  Not part of the default */
+/*          run: --only 28, from the debug-only MTR wrapper            */
+/*          testJoinAggNdbApiCloseNodeFail.                            */
+/*                                                                     */
+/* closeTcCursor() waits first for the batches still outstanding, then */
+/* for DBTC's answer to its SCAN_NEXTREQ(close).  When the TC node     */
+/* disconnects in the poll that delivers the EndOfData that makes      */
+/* every worker final, the wait ends in a node failure with no cursor  */
+/* left.  The DBUG keyword makes every such wait report a node failure */
+/* (FetchResult_nodeFail).  Before the fix closeTcCursor() then called */
+/* setFetchTerminated() with every worker final, and a debug API       */
+/* aborted on assert(m_finalWorkers < getWorkerCount()).  Now it only  */
+/* records the error: close() returns, the transaction has error 4028, */
+/* and the next query on the Ndb object gets the right result.         */
+/*                                                                     */
+/* The close wait: a pushed join without aggregation, with batch size  */
+/* 1, is read with nextResult(false) until its first batches are used  */
+/* up (NextResult_bufferEmpty: no batch outstanding, no worker final). */
+/* close() then sends the close at once and waits for DBTC's EndOfData */
+/* answer, which can only come in that wait.                           */
+/*                                                                     */
+/* The wait for outstanding batches: the t14 SUM/COUNT query is closed */
+/* right after execute(), long before DBTC can have ended it, so that  */
+/* close() waits for the pure EndOfData that ends the join             */
+/* aggregation.  Whether that wait was reached shows in the            */
+/* transaction's error: 4028 if it was, 0 if the EndOfData came before */
+/* close().  Up to 5 attempts.                                         */
+/* ------------------------------------------------------------------ */
+
+#ifndef NDEBUG
+/* Test 28, the close wait.  On failure prints a FAILED line and
+ * returns -1. */
+static int
+runCloseWaitNodeFailure(Ndb *ndb, const NdbQueryDef *scanDef)
+{
+  NdbTransaction *trans = ndb->startTransaction();
+  if (trans == nullptr) {
+    printf("FAILED (close wait: startTransaction: %s)\n",
+           ndb->getNdbError().message);
+    return -1;
+  }
+  NdbQuery *query = trans->createQuery(scanDef);
+  if (query == nullptr) {
+    printf("FAILED (close wait: createQuery: %s)\n",
+           trans->getNdbError().message);
+    trans->close();
+    return -1;
+  }
+  NdbQueryOperation *rootOp = query->getQueryOperation(0U);
+  NdbQueryOperation *childOp = query->getQueryOperation(1U);
+  if (rootOp == nullptr || childOp == nullptr ||
+      rootOp->setBatchSize(1) != 0 ||
+      rootOp->getValue("id") == nullptr ||
+      childOp->getValue("val") == nullptr) {
+    printf("FAILED (close wait: query setup: %s)\n",
+           query->getNdbError().message);
+    query->close();
+    trans->close();
+    return -1;
+  }
+  if (trans->execute(NdbTransaction::NoCommit) != 0) {
+    printf("FAILED (close wait: execute: %s)\n",
+           trans->getNdbError().message);
+    query->close();
+    trans->close();
+    return -1;
+  }
+
+  int rows = 0;
+  NdbQuery::NextResultOutcome outcome;
+  while ((outcome = query->nextResult(false)) ==
+         NdbQuery::NextResult_gotRow) {
+    rows++;
+  }
+  if (outcome != NdbQuery::NextResult_bufferEmpty) {
+    printf("FAILED (close wait: expected the first batches to leave the "
+           "scan open, got outcome %d after %d rows)\n",
+           static_cast<int>(outcome), rows);
+    query->close();
+    trans->close();
+    return -1;
+  }
+  V("  close wait: %d rows read, closing\n", rows);
+
+  DBUG_PUSH("d,ndb_query_close_nodefail_at_end");
+  query->close();
+  DBUG_POP();
+  const int closeError = trans->getNdbError().code;
+  trans->close();
+
+  if (closeError != 4028) {
+    printf("FAILED (close wait: expected the close to end in 4028, got "
+           "%d)\n",
+           closeError);
+    return -1;
+  }
+  return 0;
+}
+
+/* Test 28, the wait for outstanding batches.  Returns 1 if the pure
+ * EndOfData came before close(), so that close() did not wait.  On
+ * failure prints a FAILED line and returns -1. */
+static int
+runBatchWaitNodeFailure(Ndb *ndb, const NdbQueryDef *aggDef)
+{
+  NdbTransaction *trans = ndb->startTransaction();
+  if (trans == nullptr) {
+    printf("FAILED (batch wait: startTransaction: %s)\n",
+           ndb->getNdbError().message);
+    return -1;
+  }
+  NdbQuery *query = trans->createQuery(aggDef);
+  if (query == nullptr) {
+    printf("FAILED (batch wait: createQuery: %s)\n",
+           trans->getNdbError().message);
+    trans->close();
+    return -1;
+  }
+  if (trans->execute(NdbTransaction::NoCommit) != 0) {
+    printf("FAILED (batch wait: execute: %s)\n",
+           trans->getNdbError().message);
+    query->close();
+    trans->close();
+    return -1;
+  }
+
+  DBUG_PUSH("d,ndb_query_close_nodefail_at_end");
+  query->close();
+  DBUG_POP();
+  const int closeError = trans->getNdbError().code;
+  trans->close();
+
+  if (closeError == 0) {
+    return 1;
+  }
+  if (closeError != 4028) {
+    printf("FAILED (batch wait: expected the close to end in 4028, got "
+           "%d)\n",
+           closeError);
+    return -1;
+  }
+  return 0;
+}
+#endif
+
+static int
+testCloseWaitNodeFailure(Ndb *ndb, MYSQL *conn)
+{
+  static const char *const head =
+      "Test 28: TC node failure in a close() wait that ends the scan "
+      "(DBUG ndb_query_close_nodefail_at_end) ... ";
+
+#ifdef NDEBUG
+  /* ndb_query_close_nodefail_at_end is a DBUG keyword. */
+  (void)ndb;
+  (void)conn;
+  printf("%sSKIPPED (needs a debug NDB API)\n", head);
+  return 0;
+#else
+  static const int attempts = 5;
+
+  NdbDictionary::Dictionary *dict = ndb->getDictionary();
+  dict->invalidateTable(T14_PARENT);
+  dict->invalidateTable(T14_CHILD);
+  const NdbDictionary::Table *parentTab = dict->getTable(T14_PARENT);
+  const NdbDictionary::Table *childTab = dict->getTable(T14_CHILD);
+  if (parentTab == nullptr || childTab == nullptr) {
+    printf("%sFAILED (table lookup: %s)\n", head,
+           dict->getNdbError().message);
+    return -1;
+  }
+
+  const NdbQueryDef *scanDef =
+      prepareT14JoinScanDef(ndb, parentTab, childTab, head);
+  if (scanDef == nullptr) {
+    return -1;
+  }
+  const NdbQueryDef *aggDef =
+      prepareT14SumCountDef(ndb, parentTab, childTab, head);
+  if (aggDef == nullptr) {
+    scanDef->destroy();
+    return -1;
+  }
+
+  int result = runCloseWaitNodeFailure(ndb, scanDef);
+  if (result == 0) {
+    result = 1;
+    for (int attempt = 1; attempt <= attempts && result == 1; attempt++) {
+      result = runBatchWaitNodeFailure(ndb, aggDef);
+      if (result == 1) {
+        V("  batch wait, attempt %d: the EndOfData came before close()\n",
+          attempt);
+      }
+    }
+    if (result == 1) {
+      printf("FAILED (batch wait: the EndOfData came before close() in %d "
+             "attempts)\n",
+             attempts);
+      result = -1;
+    }
+  }
+
+  /* Destroyed before runAndVerifyT14Query() invalidates the tables
+   * they point to. */
+  scanDef->destroy();
+  aggDef->destroy();
+
+  if (result != 0) {
+    printf("%sFAILED (see the FAILED line above)\n", head);
+    return -1;
+  }
+
+  V("  Re-running query to verify cluster health...\n");
+  if (runAndVerifyT14Query(ndb, conn, "post-close-nodefail") != 0) {
+    printf("%sFAILED (the next query failed, see the FAILED line above)\n",
+           head);
+    return -1;
+  }
+
+  printf("%sOK (batch wait and close wait ended in 4028, next query "
+         "correct)\n",
+         head);
+  return 0;
+#endif
+}
+
+/* ------------------------------------------------------------------ */
 /* Main                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -6656,7 +6918,7 @@ usage(const char *prog)
           "Options:\n"
           "  -c  NDB management server connect string (default: localhost:1186)\n"
           "  -m  MySQL server port (default: 3306)\n"
-          "  --only <N>     Run only test N (Tests 25-27 run only this way)\n"
+          "  --only <N>     Run only test N (Tests 25-28 run only this way)\n"
           "  --skip <N>     Skip test N\n"
           "  -v, --verbose  Show detailed progress output\n"
           "  -h, --help     Show this help\n",
@@ -7047,6 +7309,17 @@ int main(int argc, char **argv)
           if (createTest14Tables(conn) == 0 && insertTest14Data(conn) == 0) {
             if (testCrossedCloseAfterTimeout(&ndb, conn, restarter) != 0)
               exitCode = 1;
+          } else {
+            exitCode = 1;
+          }
+          dropTest14Tables(conn);
+        }
+
+        /* Test 28: a TC node failure in the close wait that ends the
+         * scan.  Only on request: it needs a debug NDB API. */
+        if (onlyTest == 28) {
+          if (createTest14Tables(conn) == 0 && insertTest14Data(conn) == 0) {
+            if (testCloseWaitNodeFailure(&ndb, conn) != 0) exitCode = 1;
           } else {
             exitCode = 1;
           }

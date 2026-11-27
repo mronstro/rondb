@@ -1,0 +1,30 @@
+# RONDB-1124: a TC node failure in a wait of
+# NdbQueryImpl::closeTcCursor() that makes every worker final
+# (testJoinAggNdbApi Test 28).  The DBUG keyword
+# ndb_query_close_nodefail_at_end makes such a wait report a node
+# failure, as when the TC node disconnects in the poll that delivers
+# the final EndOfData: in the wait for DBTC's answer to the close of a
+# pushed join read until its first batches were used up, and in the
+# wait for the pure EndOfData of a join aggregation closed right after
+# execute().  Each close must return with error 4028 on the
+# transaction, and the next query must give the right result.  Before
+# the fix a debug NDB API aborted on
+# assert(m_finalWorkers < getWorkerCount()) in
+# NdbQueryImpl::setFetchTerminated().  Debug only: the DBUG keyword
+# needs a debug NDB API.
+#
+# The program's output goes to a file and only its result lines are
+# compared.  A crash fails the --exec; a failed check prints a FAILED
+# line and "Some tests FAILED", which differ from the result file.
+--source include/have_ndb.inc
+--source include/have_debug.inc
+
+--let $close_nodefail_out = $MYSQLTEST_VARDIR/tmp/testJoinAggNdbApiCloseNodeFail.out
+--echo Running testJoinAggNdbApi --only 28
+--error 0,1
+--exec $NDB_PUSH_AGG_DIR/testJoinAggNdbApi -c "$NDB_CONNECTSTRING" -m $MASTER_MYPORT --only 28 > $close_nodefail_out 2>&1
+--exec grep -E "^(Test 28|FAILED|All tests|Some tests)" $close_nodefail_out
+--remove_file $close_nodefail_out
+
+# Clean up database created by test program
+DROP DATABASE IF EXISTS test_db;
