@@ -1,13 +1,15 @@
 --source include/have_ndb.inc
 --source have_ndb_error_insert.inc
 
-# RONDB-1150 X5.9: schema changes in the durable tail. With GCP saves held
-# back (error insert 7243) a table is created and filled, gets a column
-# online and every row updated, gets more partitions online and every row
-# updated again, and a table filled before is dropped; then every node
-# stops together. After the system restart the table has its column, its
-# partitions and every row of its last update, with identical replicas,
-# and the dropped table is gone.
+# RONDB-1150 X5.9: schema changes in the durable tail. A table gets more
+# partitions online; then, with GCP saves held back (error insert 7243),
+# a second table is created and filled, gets a column online and every
+# row updated, every row of the first table is updated in its new
+# partitions, and a table filled before is dropped; then every node
+# stops together. After the system restart the tables have the column,
+# the partitions and every row of the last update, with identical
+# replicas, and the dropped table is gone. The partitions are added
+# before the saves stop: that change needs three GCP saves to complete.
 
 # NDBT creates TEST_DB.T1 directly through the NDB API. Keep both
 # mysqlds stopped so metadata discovery cannot import the API table;
@@ -29,7 +31,7 @@
 let NDBAPITEST_CLEANUP_QUERY=;
 let NDBAPITEST_NAME=testRestartGci;
 
---echo == 1 == create table, add column, add partitions, drop table in the durable tail
+--echo == 1 == create table, add column, writes to added partitions, drop table in the durable tail
 let NDBAPITEST_ARGS=-n GciLedgerDurableSchema -l 2 T1;
 --source suite/ndb/include/run_ndbapitest.inc
 

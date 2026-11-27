@@ -966,18 +966,26 @@ are written, to be built and tested.**
   it, so `ndb_redo_pmem_ledger_crash` with `pmem_redo_durable.cnf` would
   have stopped on it. `pmem_redo_scan-t`: `fileSwitchHeadAtNextMbyte`.
 - X5.9: `testRestartGci -n GciLedgerDurableSchema`, MTR
-  `ndb_redo_pmem_durable_schema`: with GCP saves held back (error insert
-  7243) a table is created and filled, gets a column online and every
-  row updated, gets more partitions online and every row updated again,
-  and a table filled before is dropped; then every node stops together.
-  The table must have its column, partitions and every row of the last
-  update, with identical replicas, and the dropped table must be gone.
+  `ndb_redo_pmem_durable_schema`: a table gets more partitions online;
+  then, with GCP saves held back (error insert 7243), a second table is
+  created and filled, gets a column online and every row updated, every
+  row of the first table is updated in its new partitions, and a table
+  filled before is dropped; then every node stops together. The tables
+  must have the column, the partitions and every row of the last update,
+  with identical replicas, and the dropped table must be gone.
   Read while writing it: DICT keeps no GCI filter at a restart, so a table
   created in the tail comes back from the schema file, and its tail
   COMMITs execute (`checkIfExecLog()` compares the major schema version);
   the COMMITs of a dropped table find no table and are skipped. DICT's
   commit waits only for the next epoch (`trans_commit_wait_gci()`), TRIX
-  for the current GCI, so 7243 holds no schema change back.
+  for the current GCI, so 7243 holds back no create, add column or drop.
+  It does hold back add partitions (2026-11-27): DBLQH answers
+  AlterTableSumaFilter when three more GCIs are completed
+  (`wait_reorg_suma_filter_enabled()`), so with the saves stopped the
+  change never ended and the GCP monitor stopped the cluster after
+  278 s. A reorganisation cannot lie within one tail GCI; the test adds
+  the partitions before the saves stop and has the first writes to the
+  new fragments in the tail.
 
 Earlier state (2026-11-25): X5.1-X5.3 committed; X5.4-X5.7 and the tests
 of X5.10 written; phase 2 is on (`Dbdih::SR_DURABLE_TAIL` true). Until

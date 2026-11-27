@@ -1,6 +1,6 @@
 # Shutting down mysqld 1
 # Shutting down mysqld 2
-== 1 == create table, add column, add partitions, drop table in the durable tail
+== 1 == create table, add column, writes to added partitions, drop table in the durable tail
 Running command
 Result of command: 0
 Test program success!

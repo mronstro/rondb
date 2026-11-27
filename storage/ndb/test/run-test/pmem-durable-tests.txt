@@ -101,8 +101,8 @@ cmd: testRestartGci
 args: -n GciLedgerDurablePartialSR -l 2 T1
 max-time: 5400
 
-# X5.9: create table, add column, add partitions and drop table in the
-# durable tail
+# X5.9: create table, add column, the first writes to added partitions and
+# drop table in the durable tail
 cmd: testRestartGci
 args: -n GciLedgerDurableSchema -l 2 T1
 max-time: 1800

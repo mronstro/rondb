@@ -2525,15 +2525,23 @@ int runLedgerDurablePartialSR(NDBT_Context *ctx, NDBT_Step *step) {
 }
 
 /**
- * RONDB-1150, X5.9: schema changes in the durable tail. GCP saves stop
- * (error insert 7243); then a table S is created and filled, gets a
- * column online and every row updated, gets more partitions online and
- * every row updated again, and a table D, filled before the stop, is
- * dropped; then every data node stops together. After the system restart
- * S has the column, the partitions and every row at its last update,
- * with identical replicas, and D is gone: the replay's schema-version
- * check keeps the records of the changed and the dropped tables apart,
- * and no transaction of S is half applied.
+ * RONDB-1150, X5.9: schema changes in the durable tail. A table P is
+ * filled and gets more partitions online, and a table D is filled; then
+ * GCP saves stop (error insert 7243). In the tail a table S is created
+ * and filled, gets a column online and every row updated, every row of P
+ * is updated in its new partitions, and D is dropped; then every data
+ * node stops together. After the system restart S has the column and
+ * every row at its last update, P has its partitions and every row at
+ * its last update, both with identical replicas, and D is gone: the
+ * replay's schema-version check keeps the records of the changed and the
+ * dropped tables apart, and no transaction is half applied.
+ *
+ * The partitions are added before the saves stop, since the change
+ * cannot complete in the tail: DBLQH answers the last step of the
+ * reorganisation (AlterTableSumaFilter) when three more GCIs are
+ * completed (wait_reorg_suma_filter_enabled()). The saves stop as soon
+ * as the change returns, so the tail has the first writes to the new
+ * fragments.
  */
 int runLedgerDurableSchema(NDBT_Context *ctx, NDBT_Step *step) {
   const Uint32 rows = ctx->getProperty("LedgerSchemaRows", Uint32(512));
@@ -2544,29 +2552,35 @@ int runLedgerDurableSchema(NDBT_Context *ctx, NDBT_Step *step) {
   int result = NDBT_OK;
   for (int l = 0; l < ctx->getNumLoops() && result == NDBT_OK; l++) {
     char sName[64];
+    char pName[64];
     char dName[64];
     BaseString::snprintf(sName, sizeof(sName), "%s_S%d",
+                         ctx->getTab()->getName(), l);
+    BaseString::snprintf(pName, sizeof(pName), "%s_P%d",
                          ctx->getTab()->getName(), l);
     BaseString::snprintf(dName, sizeof(dName), "%s_D%d",
                          ctx->getTab()->getName(), l);
     result = NDBT_FAILED;
     const NdbDictionary::Table *d = ledgerCopyTable(ctx, pNdb, dName);
     if (d == nullptr || !ledgerSchemaWrite(pNdb, d, rows, true, 0)) break;
-    /* GCP saves take D and its rows before R */
+    const NdbDictionary::Table *p = ledgerCopyTable(ctx, pNdb, pName);
+    if (p == nullptr || !ledgerSchemaWrite(pNdb, p, rows, true, 0)) break;
+    /* GCP saves take D, P and their rows before R */
     NdbSleep_MilliSleep(3000);
+    p = ledgerAddPartitions(pNdb, restarter, p);
+    if (p == nullptr) break;
+    const Uint32 frags = p->getFragmentCount();
     if (restarter.insertErrorInAllNodes(7243) != 0) break;
     NdbSleep_MilliSleep(1000);
-    ndbout_c("Ledger loop %d: GCP saves stopped (error insert 7243); in the "
-             "tail %s is created, gets a column and partitions, %s is "
-             "dropped",
-             l, sName, dName);
+    ndbout_c("Ledger loop %d: %s has %u fragments; GCP saves stopped (error "
+             "insert 7243); in the tail %s is created and gets a column, the "
+             "rows of %s are updated, %s is dropped",
+             l, pName, frags, sName, pName, dName);
     const NdbDictionary::Table *s = ledgerCopyTable(ctx, pNdb, sName);
     if (s == nullptr || !ledgerSchemaWrite(pNdb, s, rows, true, 0)) break;
     s = ledgerAddColumn(pNdb, s);
     if (s == nullptr || !ledgerSchemaWrite(pNdb, s, rows, false, 1)) break;
-    s = ledgerAddPartitions(pNdb, restarter, s);
-    if (s == nullptr || !ledgerSchemaWrite(pNdb, s, rows, false, 2)) break;
-    const Uint32 frags = s->getFragmentCount();
+    if (!ledgerSchemaWrite(pNdb, p, rows, false, 1)) break;
     if (dict->dropTable(dName) != 0) {
       ndbout << "ERR: ledger: drop table " << dName << ": "
              << dict->getNdbError() << endl;
@@ -2581,28 +2595,33 @@ int runLedgerDurableSchema(NDBT_Context *ctx, NDBT_Step *step) {
                                 "tail",
                                 true);
     dict->invalidateTable(sName);
+    dict->invalidateTable(pName);
     dict->invalidateTable(dName);
     s = dict->getTable(sName);
-    if (s == nullptr) {
+    p = dict->getTable(pName);
+    if (s == nullptr || p == nullptr) {
       ndbout_c("ERR: ledger: table %s is gone after the system restart",
-               sName);
+               s == nullptr ? sName : pName);
       result = NDBT_FAILED;
-    } else if (s->getColumn(LEDGER_SCHEMA_COLUMN) == nullptr ||
-               s->getFragmentCount() != frags) {
-      ndbout_c("ERR: ledger: table %s has %s column %s and %u fragments, "
-               "%u expected",
-               sName,
-               s->getColumn(LEDGER_SCHEMA_COLUMN) == nullptr ? "no" : "the",
-               LEDGER_SCHEMA_COLUMN, s->getFragmentCount(), frags);
+    } else if (s->getColumn(LEDGER_SCHEMA_COLUMN) == nullptr) {
+      ndbout_c("ERR: ledger: table %s has no column %s", sName,
+               LEDGER_SCHEMA_COLUMN);
       result = NDBT_FAILED;
-    } else if (!ledgerSchemaCheck(pNdb, s, rows, 2) ||
+    } else if (p->getFragmentCount() != frags) {
+      ndbout_c("ERR: ledger: table %s has %u fragments, %u expected", pName,
+               p->getFragmentCount(), frags);
+      result = NDBT_FAILED;
+    } else if (!ledgerSchemaCheck(pNdb, s, rows, 1) ||
+               !ledgerSchemaCheck(pNdb, p, rows, 1) ||
                !ledgerReplicasAgree(ctx, step, "schema changes in the tail",
-                                    s)) {
+                                    s) ||
+               !ledgerReplicasAgree(ctx, step, "schema changes in the tail",
+                                    p)) {
       result = NDBT_FAILED;
     } else {
-      ndbout_c("Ledger: %s has its column, %u fragments and every row of its "
-               "last update",
-               sName, frags);
+      ndbout_c("Ledger: %s has its column, %s its %u fragments, and both "
+               "every row of the last update",
+               sName, pName, frags);
     }
     if (dict->getTable(dName) != nullptr) {
       ndbout_c("ERR: ledger: table %s, dropped in the tail, exists after the "
@@ -2611,6 +2630,7 @@ int runLedgerDurableSchema(NDBT_Context *ctx, NDBT_Step *step) {
       result = NDBT_FAILED;
     }
     (void)dict->dropTable(sName);
+    (void)dict->dropTable(pName);
   }
   if (result != NDBT_OK) ledgerDisarm(restarter);
   ctx->stopTest();
@@ -2839,9 +2859,9 @@ TESTCASE("GciLedgerDurablePartialSR",
 }
 TESTCASE("GciLedgerDurableSchema",
          "RONDB-1150 (X5.9), PMEM mode with DurableCommits: create table, "
-         "add column, add partitions and drop table in the durable tail, "
-         "then every node stops; the changed tables and their rows are as "
-         "acknowledged") {
+         "add column, the first writes to added partitions and drop table "
+         "in the durable tail, then every node stops; the changed tables "
+         "and their rows are as acknowledged") {
   TC_PROPERTY("LedgerDurable", Uint32(1));
   INITIALIZER(runLedgerNeedsPmem);
   INITIALIZER(runCreateTable);
