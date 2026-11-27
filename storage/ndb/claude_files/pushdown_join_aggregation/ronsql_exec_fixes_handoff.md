@@ -683,9 +683,15 @@ Optional, performance only:
     reachable only through a buddy transaction from `Ndb::hupp()`: the
     4008 aborts the query's own transaction. Test 28's wait for
     outstanding batches is checked, not forced (up to 5 tries).
-- **NdbAggregator follows no CASE arms:** a program in which a string
-  reaches arithmetic on one path only passes the builder; the data node
-  refuses it (`checkAggSlotKinds`).
+- **NdbAggregator follows no CASE arms (won't fix, 2026-11-27):** a
+  program in which a string reaches arithmetic on one path only passes
+  the builder, and the data node refuses it when the scan runs
+  (`checkAggSlotKinds`: 1868, or JOIN_AGG_SETUP_REF 20002). No
+  NdbAggregator user (RonSQL, ha_ndbcluster's pushed aggregation) writes
+  such a program, and following the arms in the builder would need the
+  kernel's walk of the embedded programs' skips (`embeddedSkips`), either
+  shared with the NDB API or copied. The maintainer chose to leave it;
+  `NdbAggregator.hpp` documents the limit at `Add`.
 - **Tables created through the NDB API in tests: fixed** (`a7ed6e15f1c`,
   `2d2348f99c0`). testSpjMalformed
   created `TEST_DB.T1`, and P46 / P49 an ordered index on it, through the
