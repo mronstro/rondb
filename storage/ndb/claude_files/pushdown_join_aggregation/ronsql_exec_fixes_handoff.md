@@ -698,6 +698,19 @@ Optional, performance only:
   kernel's walk of the embedded programs' skips (`embeddedSkips`), either
   shared with the NDB API or copied. The maintainer chose to leave it;
   `NdbAggregator.hpp` documents the limit at `Add`.
+- **GROUP BY of a CTE output of undefined type (closed, 2026-11-27):**
+  `publishGBTypes` (`9d013e4d714`) refuses a GROUP BY type without a
+  compare function, but no RonSQL query has one. Every join-aggregation
+  state, main or CTE, gets its GROUP BY types from the setup metadata
+  before any row (DblqhProxy, `initGBTypesFromMetadata`), typed from the
+  program's GROUP BY columns: for a CTE output the virtual column, which
+  `build_cte_virtual_tables` always types (source type, COUNT, or a fixed
+  widening), and NdbAggregator refuses TEXT and BLOB. The CTE markers of
+  the rows do not type the GROUP BY then. Type 0 remains only for an NDB
+  API column set to `Undefined` on purpose (JOIN_AGG_SETUP_REF 20002),
+  and for a CTE state without setup metadata (raw requests): a node that
+  got its groups only by redistribution has no GROUP BY types, and
+  `buildCteLinkedBuffer` writes type 0 for its GROUP BY columns.
 - **Tables created through the NDB API in tests: fixed** (`a7ed6e15f1c`,
   `2d2348f99c0`). testSpjMalformed
   created `TEST_DB.T1`, and P46 / P49 an ordered index on it, through the
@@ -705,9 +718,6 @@ Optional, performance only:
   the program looks it up, and P46 / P49 scan its PRIMARY ordered index;
   `suite/ndb_spj/my.cnf` no longer needs `ndb_metadata_check = false`.
 - **Watch items:**
-  - a RonSQL CTE output column of undefined type used as an outer
-    GROUP BY key could now get 1869 from `publishGBTypes`
-    (`9d013e4d714`); the `ronsql_cte` suites would show it;
   - `ndb_quota.ndb_basic` and warning 4721 (`5a833c08c77`): the race
     needs an initial cluster start just before the test, so a clean
     `--repeat` run is weak evidence. If the warning comes back, check the
