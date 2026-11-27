@@ -9,7 +9,9 @@
 # restart with abort, and the next system restart stops at it; the
 # restart after it reaches the same verdicts. 5185 (every verdict from
 # the node-group counts) and 5190 (one entry per batch of step B) change
-# phase 2 without a stop. Every acknowledged transaction stays.
+# phase 2 without a stop. Then every node is stale at its start (993,
+# X6.3), and the system restart must end with an error instead of
+# hanging in the election. Every acknowledged transaction stays.
 
 # NDBT creates TEST_DB.T1 directly through the NDB API. Keep both
 # mysqlds stopped so metadata discovery cannot import the API table;

@@ -1616,6 +1616,72 @@ static int ledgerRestartWaits(NdbRestarter &restarter,
 }
 
 /**
+ * RONDB-1150, X6.3: the system restart of nodes ends within seconds, as
+ * a node stops that ends it with an error (2353, say). Returns that node;
+ * 0 when every node still starts at the end, -1 when a node started.
+ */
+static int ledgerRestartStops(NdbRestarter &restarter,
+                              const std::vector<int> &nodes, Uint32 seconds) {
+  std::vector<bool> starting(nodes.size(), false);
+  for (Uint32 i = 0; i < 10 * seconds; i++) {
+    for (size_t k = 0; k < nodes.size(); k++) {
+      const int status = restarter.getNodeStatus(nodes[k]);
+      if (status == NDB_MGM_NODE_STATUS_STARTED) return -1;
+      if (status == NDB_MGM_NODE_STATUS_STARTING) {
+        starting[k] = true;
+      } else if (status >= 0 && starting[k]) {
+        return nodes[k];
+      }
+    }
+    NdbSleep_MilliSleep(100);
+  }
+  return 0;
+}
+
+/**
+ * RONDB-1150, X6.3: every data node stops together, and at its start each
+ * takes the failure of every other node as recorded after any GCI (error
+ * insert 993, set in NOSTART), as with a node-failure file left by an
+ * earlier cluster: every node is stale. The election must still settle on
+ * a president, whose check_startup() ends the system restart with 2353,
+ * as no node can restore its node group; every node kept itself as its
+ * candidate before, and the restart hung. Then every node starts without
+ * the error insert and every acknowledged transaction stays. Needs
+ * StopOnError=0, so that the node that ends the restart starts again.
+ */
+int ledgerAllStaleStops(NDBT_Context *ctx, NDBT_Step *step) {
+  NdbRestarter restarter;
+  const std::vector<int> nodes = ledgerDataNodes(restarter);
+  ndbout_c("Ledger: every data node stops together; each finds every other "
+           "node stale (error insert 993)");
+  if (!ledgerStopRestTogether(restarter, nodes, 0) || !ledgerPause(ctx) ||
+      !ledgerArm(restarter, nodes, 993, 0) || restarter.startAll() != 0) {
+    return NDBT_FAILED;
+  }
+  const int stopped = ledgerRestartStops(restarter, nodes, 60);
+  if (stopped <= 0) {
+    ndbout_c(stopped == 0
+                 ? "ERR: ledger: the system restart of stale nodes did not "
+                   "end in 60 s; the election hangs"
+                 : "ERR: ledger: a node started although every node is "
+                   "stale");
+    ledgerDisarm(restarter);
+    ledgerResume(ctx);
+    return NDBT_FAILED;
+  }
+  ndbout_c("Ledger: node %d ended the system restart of stale nodes",
+           stopped);
+  int res = NDBT_FAILED;
+  if (ledgerAllNoStart(restarter, nodes) && restarter.startAll() == 0) {
+    res = ledgerCheckRestart(ctx, step,
+                             "system restart after one of stale nodes", true);
+  }
+  ledgerDisarm(restarter);
+  ledgerResume(ctx);
+  return res;
+}
+
+/**
  * RONDB-1150, X6.8 (X6.4, plan §5.5, D4): node x fails in the durable
  * tail and the writers commit on both node groups; every node stops
  * together, and x's peer y does not start. x is stale, so its node group
@@ -2195,7 +2261,8 @@ int runLedgerDurableSR(NDBT_Context *ctx, NDBT_Step *step) {
  * LEDGER_RESTART_ATTEMPTS restarts; the next restart reaches the same
  * verdicts and keeps every acknowledged transaction. 5185 (every verdict
  * from the counts) and 5190 (one entry per batch) change phase 2 without
- * a stop: the restart with them is checked.
+ * a stop: the restart with them is checked. Then every node stale (993,
+ * X6.3): the restart must end with an error, not hang.
  */
 const Uint32 LEDGER_DURABLE_CRASH_CODES[] = {5186, 5187, 5188, 5189, 7262};
 const Uint32 LEDGER_DURABLE_MODE_CODES[] = {5185, 5190};
@@ -2243,6 +2310,13 @@ int runLedgerDurableCrashPoints(NDBT_Context *ctx, NDBT_Step *step) {
         result = NDBT_FAILED;
       }
     }
+    if (result != NDBT_OK) break;
+    if (!ledgerSleep(ctx, seconds)) {
+      result = NDBT_FAILED;
+      break;
+    }
+    ndbout_c("Ledger loop %d: every node stale (993)", l);
+    result = ledgerAllStaleStops(ctx, step);
   }
   ctx->stopTest();
   return result;
@@ -2708,7 +2782,9 @@ TESTCASE("GciLedgerDurablePowerLoss",
 TESTCASE("GciLedgerDurableCrashPoints",
          "RONDB-1150 (X5.10), PMEM mode with __DurableCommits and "
          "StopOnError=0: the error inserts of phase 2 of a system restart, "
-         "5185-5190 and 7262; every acknowledged transaction stays") {
+         "5185-5190 and 7262, and every node stale (993), which must end "
+         "the restart with an error; every acknowledged transaction "
+         "stays") {
   TC_PROPERTY("LedgerSeconds", Uint32(2));
   TC_PROPERTY("LedgerDurable", Uint32(1));
   INITIALIZER(runLedgerNeedsPmem);

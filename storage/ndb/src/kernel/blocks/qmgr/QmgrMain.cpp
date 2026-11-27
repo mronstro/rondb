@@ -925,6 +925,13 @@ void Qmgr::readNodeFailFile() {
   NodeFailFile::fillView(dih, &view);
   NodeFailFile::readStaleGcis(globalData.theNodeFailFileDir, getOwnNodeId(),
                               view, c_nodeFailRecGci);
+  if (ERROR_INSERTED(993)) {
+    /* As a file of an earlier cluster: every other node is stale */
+    jam();
+    for (Uint32 i = 1; i < MAX_NDB_NODES; i++) {
+      if (i != getOwnNodeId()) c_nodeFailRecGci[i] = ~Uint32(0);
+    }
+  }
   globalData.theNodeFailUnsafeShutdown = false;
   if (!dih->durableCommitsOn()) return;
   std::unique_ptr<Uint8[]> file;
@@ -2844,9 +2851,13 @@ missing_nodegroup:
     tmp.assign(c_start.m_starting_nodes);
     tmp.bitANDC(c_start.m_starting_nodes_w_log);
     tmp.getText(mask2);
+    /* RONDB-1150, X6.3: a node without a log may have found itself stale */
     BaseString::snprintf(buf, sizeof(buf),
-                         "Unable to start missing node group! "
-                         " starting: %s (missing working fs for: %s)",
+                         durable ? "Unable to start missing node group! "
+                                   " starting: %s (no log to restart from, "
+                                   "none or stale, for: %s)"
+                                 : "Unable to start missing node group! "
+                                   " starting: %s (missing working fs for: %s)",
                          mask1, mask2);
     CRASH_INSERTION(944);
     progError(__LINE__, NDBD_EXIT_INSUFFICENT_NODES, buf);

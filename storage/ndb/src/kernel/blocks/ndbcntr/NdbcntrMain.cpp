@@ -6155,7 +6155,17 @@ void Ndbcntr::clearFilesystem(Signal *signal) {
     jam();
     /* RONDB-1150, X6.1: not in a directory cleared below, unless REDO
      * path 0 is a FileSystemPathRedoLog */
-    NodeFailFile::removeFile(globalData.theNodeFailFileDir);
+    const int err = NodeFailFile::removeFile(globalData.theNodeFailFileDir);
+    if (err != 0) {
+      /* Left behind, it makes every node stale in the next system restart */
+      char msg[300];
+      BaseString::snprintf(msg, sizeof(msg),
+                           "Initial start: the node-failure file %s%s "
+                           "cannot be removed: %s",
+                           globalData.theNodeFailFileDir,
+                           NodeFailFile::FILE_NAME, strerror(err));
+      progError(__LINE__, NDBD_EXIT_INVALID_CONFIG, msg);
+    }
   }
   if (c_fsRemoveCount < DX) {
     FsOpenReq::setVersion(req->fileNumber, FsOpenReq::V_DISK);

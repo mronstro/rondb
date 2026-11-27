@@ -254,13 +254,14 @@ inline bool readFile(const char *dir, Uint32 ownNodeId,
  * is FileSystemPath itself, where the file is not in any of the cleared
  * directories. Left behind, its records carry GCIs of the cluster before
  * the initial start, far above those of the new one, and the first
- * system restart finds every node stale.
+ * system restart finds every node stale. 0 when the file is gone or was
+ * not there, else the errno of the unlink.
  */
-inline void removeFile(const char *dir) {
-  if (dir == nullptr) return;
+inline int removeFile(const char *dir) {
+  if (dir == nullptr) return 0;
   char path[1024];
   snprintf(path, sizeof(path), "%s%s", dir, FILE_NAME);
-  (void)::unlink(path);
+  return ::unlink(path) == 0 || errno == ENOENT ? 0 : errno;
 }
 
 /**

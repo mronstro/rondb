@@ -1383,6 +1383,42 @@ tested.**
     waited. `ledgerRestartWaits()` now also fails when a waiting node
     leaves STARTING, or is not STARTING at the end. Used by the D4 and
     X6.9 waits.
+- Every node stale, and the election hung (found 2026-11-27,
+  `ndb_restart2` with `pmem_redo_durable.cnf`, Linux): without a
+  FileSystemPathRedoLog the node-failure file lies in FileSystemPath
+  itself, which an initial start does not clear, so it survived with the
+  records of the cluster before. In the first system restart every node
+  found itself stale ("node 2 recorded the failure of this node in GCI
+  958, after its GCI 6") and the restart hung until MTR's 900 s timeout.
+  The file is now removed ("an initial start removes the node-failure
+  file"), and the initial start stops if the unlink fails.
+  - Why no candidate reached `check_startup()`: a stale node keeps
+    itself as its candidate with GCI 0 (X6.3), and the candidate rules
+    of X6.3 (`execCM_REGREQ()`, `execCM_REGREF()`) refused every
+    candidate whose failure the node had recorded, also one with GCI 0.
+    With every node stale each kept itself, no candidate had the
+    agreement of all (`execCM_REGREF()` sets `m_regReqReqRecv = ~0` when
+    the sender names another), and no node ran `check_startup()`, which
+    would have stopped the restart. 26.10-main settles on the lowest
+    node id among candidates with GCI 0. Now `nodeFailStale()` counts
+    only a node with a GCI above ZUNDEFINED_GCI_LIMIT, as one with 0 or
+    ZUNDEFINED claims no log: the election settles as in 26.10-main, and
+    the president's direct check finds a node group with every node here
+    and none with a log, and stops with 2353 at once ("no log to restart
+    from, none or stale"). With nodes missing it waits as D4 does, with
+    start report 2 and the log line, where each stale node used to wait
+    as its own candidate without a report. Each stale node still marks
+    itself on the other nodes' records, so no stale node runs with its
+    log.
+  - The node that stops leaves the others waiting for it (D4): they
+    cannot tell that it is stale. With StopOnError=0 it starts again and
+    stops again until the operator acts.
+  - Test: `ledgerAllStaleStops()` in `GciLedgerDurableCrashPoints`
+    (`ndb_redo_pmem_durable_ledger_crash`, StopOnError=0): error insert
+    993 in NOSTART makes every node take every other's failure as
+    recorded after any GCI; the restart must end with a node that stops
+    within 60 s, then every node starts without it and every
+    acknowledged transaction stays.
 - X6.3 refined (found while writing X6.8): with the rule "a record after
   R makes the node stale", a cluster that loses a whole node group could
   not restart. Node group 0 of X and Y: X fails, Y fails later, the

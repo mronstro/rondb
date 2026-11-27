@@ -988,8 +988,19 @@ class Qmgr : public SimulatedBlock {
    * GCI it runs with
    */
   Uint32 c_nodeFailRecGci[ABS_MAX_NDB_NODES];
+  /**
+   * Only a node that runs with a GCI to restart from can be stale; one
+   * with 0 or ZUNDEFINED_GCI_LIMIT claims no log. A candidate with GCI 0
+   * has given up its claim (it found itself stale, or stands for want of
+   * another), and the election settles on the lowest node id among such
+   * candidates, as without durable commits. Were they stale too, every
+   * node would keep itself when all are stale, none would have the
+   * agreement of all, and check_startup() would never run to stop the
+   * restart: it hung (ndb_restart2, a node-failure file left by an
+   * initial start).
+   */
   bool nodeFailStale(Uint32 nodeId, Uint32 gci) const {
-    return gci != ZUNDEFINED_GCI_LIMIT && c_nodeFailRecGci[nodeId] > gci;
+    return gci > ZUNDEFINED_GCI_LIMIT && c_nodeFailRecGci[nodeId] > gci;
   }
   /* RONDB-1150, X6.9: check_startup() logged its wait for a node group */
   bool c_durableWaitLogged;
