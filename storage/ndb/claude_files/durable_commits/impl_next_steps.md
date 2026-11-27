@@ -1346,7 +1346,13 @@ tested.**
     `MC_lazy_joint_fail_old` (without `WholeGroup`; expected: G1
     violated). The other configurations keep `WholeGroup = FALSE`: they
     check more restarts than the code allows, and pass without the rule
-    as their failures are one node at a time.
+    as their failures are one node at a time. Run 2026-11-26: both as
+    expected. The run also found a fault of the model in X6.3's
+    `MC_lazy_group_loss`, its first run: the takeover went on after
+    `NodeFailLast` had stopped the cluster and acknowledged a transaction.
+    The takeover steps now need a live node (tla/README.md, third run);
+    run again, `MC_lazy_group_loss` passes and its control still fails.
+    Every one of the twenty-six configurations gives its expected result.
   - Test: `ledgerPartitionedSRWaits()` in `GciLedgerDurablePartialSR`:
     nodes x and z of two node groups fail in the tail (error insert 991
     in z, so that it does not record x), their peers y and w commit and
@@ -1356,6 +1362,27 @@ tested.**
     transaction stays. `ndb_redo_pmem_durable_partial.cnf` sets
     `StartPartitionedTimeout=2000`, so that without the rule QMGR would
     have started them.
+- D4 in QMGR (found 2026-11-27, the first run of
+  `ndb_redo_pmem_durable_partial`, macOS): the D4 scenario stopped the
+  cluster with 2353 ("Unable to start missing node group") instead of
+  waiting. Node 1 was stale and node 2, its peer, absent. In the
+  election nodes 3 and 4 told node 1 it was stale (X6.3), so it started
+  without a log. After StartPartialTimeout `check_startup()` found no
+  node of node group 0 with a log and took stock NDB's way out, although
+  node 2 could still restore the node group. NDBCNTR's D4 wait was never
+  reached, as it comes after the election. Now with durable commits a
+  set of starting nodes where a node group has no node with a log waits,
+  past StartPartialTimeout and also for no-wait nodes, when a node not
+  here can restore it. Start report 2 ("Waiting until nodes: ...
+  connects") and one log line ("a node group has no starting node with a
+  log"). When no node that is not here can restore it, the direct check
+  still stops the restart with 2353 at once. Not caused by X6.9; the D4
+  scenario had not been run before.
+  - The test did not see it: its wait loops failed only when a node
+    reached STARTED, so a node that stopped looked like a node that
+    waited. `ledgerRestartWaits()` now also fails when a waiting node
+    leaves STARTING, or is not STARTING at the end. Used by the D4 and
+    X6.9 waits.
 - X6.3 refined (found while writing X6.8): with the rule "a record after
   R makes the node stale", a cluster that loses a whole node group could
   not restart. Node group 0 of X and Y: X fails, Y fails later, the

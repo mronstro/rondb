@@ -388,6 +388,7 @@ AbortTargets(t) ==
 AbortFDone(t) ==
     /\ tcState[t] \in {"abortingF", "toAbortF"}
     /\ tcState[t] = "abortingF" => TC[t] \in alive
+    /\ tcState[t] = "toAbortF" => alive # {}
     /\ \A k \in AbortTargets(t) :
            rep[t][k[1]][k[2]] \notin {"prepared", "committed"}
     /\ tcState' = [tcState EXCEPT ![t] = "abortedF"]
@@ -520,9 +521,12 @@ AbortFCommitted(t) == RuleF /\ TakeoverFCommitted /\ ~CompleteSent(t)
 \* CS_FAIL_COMMITTED completes, or with TakeoverFCommitted aborts by rule F
 \* unless a COMPLETE was sent; markers alone (CS_FAIL_COMPLETED) acknowledge.
 \* A transaction the takeover does not find gets 4010 from TAKE_OVERTCCONF:
-\* unknown.
+\* unknown. The takeover runs in DBTC on a live node: once the cluster has
+\* stopped (NodeFailLast) it decides and acknowledges nothing, here and in
+\* the steps after it that need no live replica.
 TakeoverDecide(t) ==
     /\ tcState[t] = "takeover"
+    /\ alive # {}
     /\ alive \subseteq scanned[t]
     /\ LET Pr == {k \in reports[t] : k[3] = "prepared"}
            Co == {k \in reports[t] : k[3] = "committed"}
@@ -560,6 +564,7 @@ TOAbortAt(t, r, n) ==
 
 TOAbortDone(t) ==
     /\ tcState[t] = "toAbort"
+    /\ alive # {}
     /\ \A k \in Reported(t) :
            k[2] \in alive => rep[t][k[1]][k[2]] \notin {"prepared", "committed"}
     /\ tcState' = [tcState EXCEPT ![t] = "aborted"]
@@ -581,6 +586,7 @@ TOCommitAt(t, r, n) ==
 
 TOCommitDone(t) ==
     /\ tcState[t] = "toCommit"
+    /\ alive # {}
     /\ \A k \in Reported(t) :
            k[2] \in alive => rep[t][k[1]][k[2]] # "prepared"
     /\ tcState' = [tcState EXCEPT ![t] = "toComplete"]
@@ -606,6 +612,7 @@ TOCompleteAt(t, r, n) ==
 \* X1: TCKEY_FAILCONF after the complete phase
 TOCompleteDone(t) ==
     /\ tcState[t] = "toComplete"
+    /\ alive # {}
     /\ \A k \in Reported(t) :
            k[2] \in alive => rep[t][k[1]][k[2]] # "committed"
     /\ tcState' = [tcState EXCEPT ![t] = "done"]

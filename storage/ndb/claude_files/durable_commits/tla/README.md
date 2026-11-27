@@ -182,6 +182,27 @@ two node failures and partial restarts. `MC_twofail_lqh` confirmed finding
 X4.9's drop is needed while the takeover can abort a transaction whose
 operations all report Committed.
 
+### Third run (2026-11-26)
+
+The first run of X6.3's and X6.9's configurations. `MC_lazy_joint_fail`
+passed (5 min 38 s, 511,052 distinct states), and `MC_lazy_joint_fail_old`
+found the case X6.9 closes: n1 and n3 fail together, t2 commits on n2 and
+n4, and a restart of n1 and n3 alone does not have it. Every other
+configuration gave its expected result but `MC_lazy_group_loss`, which
+stopped at `G1` on a fault of the model. `NodeFailLast` stops the cluster
+by emptying `alive`, and the takeover steps that need no live replica
+(`TakeoverDecide`, the `TO*Done` steps) had no guard on a live node, so
+their conditions over `alive` held on the empty set. t1's TC n3 fails
+after n2 has written t1's COMMIT of a; the takeover scans n2; n4, the last
+node of n3's node group, fails and the cluster stops; the takeover then
+completes t1 and acknowledges it, with b on no log. In the cluster no node
+runs a takeover after the stop. The takeover steps now need a live node,
+which changes only the two `GroupLoss` configurations: elsewhere a node of
+each node group stays live. Run again, `MC_lazy_group_loss` passed (7 min
+53 s, 487,785 distinct states) and `MC_lazy_group_loss_old` still breaks
+`FullRestartAllowed`: within the model the refined stale rule of X6.3
+holds when a node group is lost.
+
 ### The expected violations
 
 1. **Rule F in the takeover aborts a visible transaction.** t2's TC is on

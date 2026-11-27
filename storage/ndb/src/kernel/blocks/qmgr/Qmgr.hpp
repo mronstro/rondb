@@ -993,6 +993,8 @@ class Qmgr : public SimulatedBlock {
   }
   /* RONDB-1150, X6.9: check_startup() logged its wait for a node group */
   bool c_durableWaitLogged;
+  /* RONDB-1150, X6.4 (D4): check_startup() logged its wait for a log */
+  bool c_durableLogWaitLogged;
   Uint32 c_keepalive_seqnum;
 
   Timer interface_check_timer;

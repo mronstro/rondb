@@ -1581,6 +1581,41 @@ int ledgerPartialSR(NDBT_Context *ctx, NDBT_Step *step) {
 }
 
 /**
+ * RONDB-1150, X6.8, X6.9: the system restart of nodes waits for seconds.
+ * Returns the node that started, or 0 when every node waited; -1 when a
+ * node stopped instead, as one does that ends the restart with an error
+ * (2353, say), or is not starting at the end.
+ */
+static int ledgerRestartWaits(NdbRestarter &restarter,
+                              const std::vector<int> &nodes, Uint32 seconds) {
+  std::vector<bool> starting(nodes.size(), false);
+  for (Uint32 i = 0; i < 10 * seconds; i++) {
+    for (size_t k = 0; k < nodes.size(); k++) {
+      const int status = restarter.getNodeStatus(nodes[k]);
+      if (status == NDB_MGM_NODE_STATUS_STARTED) return nodes[k];
+      if (status == NDB_MGM_NODE_STATUS_STARTING) {
+        starting[k] = true;
+      } else if (status >= 0 && starting[k]) {
+        ndbout_c("ERR: ledger: node %d stopped (status %d) instead of "
+                 "waiting in the system restart",
+                 nodes[k], status);
+        return -1;
+      }
+    }
+    NdbSleep_MilliSleep(100);
+  }
+  for (size_t k = 0; k < nodes.size(); k++) {
+    if (restarter.getNodeStatus(nodes[k]) != NDB_MGM_NODE_STATUS_STARTING) {
+      ndbout_c("ERR: ledger: node %d is not waiting in the system restart "
+               "after %u s",
+               nodes[k], seconds);
+      return -1;
+    }
+  }
+  return 0;
+}
+
+/**
  * RONDB-1150, X6.8 (X6.4, plan §5.5, D4): node x fails in the durable
  * tail and the writers commit on both node groups; every node stops
  * together, and x's peer y does not start. x is stale, so its node group
@@ -1616,17 +1651,15 @@ int ledgerStaleGroupWaits(NDBT_Context *ctx, NDBT_Step *step) {
       restarter.startNodes(rest.data(), int(rest.size())) != 0) {
     return NDBT_FAILED;
   }
-  for (Uint32 i = 0; i < 10 * wait; i++) {
-    for (int node : rest) {
-      if (restarter.getNodeStatus(node) == NDB_MGM_NODE_STATUS_STARTED) {
-        ndbout_c("ERR: ledger: node %d started without node %d, the only "
-                 "node that can restore the node group of stale node %d",
-                 node, y, x);
-        ledgerResume(ctx);
-        return NDBT_FAILED;
-      }
+  const int started = ledgerRestartWaits(restarter, rest, wait);
+  if (started != 0) {
+    if (started > 0) {
+      ndbout_c("ERR: ledger: node %d started without node %d, the only "
+               "node that can restore the node group of stale node %d",
+               started, y, x);
     }
-    NdbSleep_MilliSleep(100);
+    ledgerResume(ctx);
+    return NDBT_FAILED;
   }
   ndbout_c("Ledger: the system restart waited %u s for node %d; it starts",
            wait, y);
@@ -1698,18 +1731,17 @@ int ledgerPartitionedSRWaits(NDBT_Context *ctx, NDBT_Step *step) {
       restarter.startNodes(failed, 2) != 0) {
     return NDBT_FAILED;
   }
-  for (Uint32 i = 0; i < 10 * wait; i++) {
-    for (int node : failed) {
-      if (restarter.getNodeStatus(node) == NDB_MGM_NODE_STATUS_STARTED) {
-        ndbout_c("ERR: ledger: node %d started, with no node group having "
-                 "all its nodes; nodes %d and %d committed without nodes %d "
-                 "and %d",
-                 node, y, w, x, z);
-        ledgerResume(ctx);
-        return NDBT_FAILED;
-      }
+  const int started =
+      ledgerRestartWaits(restarter, std::vector<int>(failed, failed + 2), wait);
+  if (started != 0) {
+    if (started > 0) {
+      ndbout_c("ERR: ledger: node %d started, with no node group having "
+               "all its nodes; nodes %d and %d committed without nodes %d "
+               "and %d",
+               started, y, w, x, z);
     }
-    NdbSleep_MilliSleep(100);
+    ledgerResume(ctx);
+    return NDBT_FAILED;
   }
   ndbout_c("Ledger: the system restart of nodes %d and %d waited %u s; "
            "nodes %d and %d start",

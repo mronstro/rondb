@@ -2619,6 +2619,11 @@ Uint32 Qmgr::check_startup(Signal *signal) {
       switch (result_w_log) {
         case CheckNodeGroups::Lose: {
           jam();
+          if (durable && !all) {
+            /* RONDB-1150, X6.4 (D4): a no-wait node can restore it */
+            jam();
+            goto durable_wait_log;
+          }
           goto missing_nodegroup;
         }
         case CheckNodeGroups::Win: {
@@ -2679,6 +2684,11 @@ Uint32 Qmgr::check_startup(Signal *signal) {
     switch (result_w_log) {
       case CheckNodeGroups::Lose: {
         jam();
+        if (durable) {
+          /* RONDB-1150, X6.4 (D4): a node not here can restore it */
+          jam();
+          goto durable_wait_log;
+        }
         goto missing_nodegroup;
       }
       case CheckNodeGroups::Partitioning: {
@@ -2770,6 +2780,32 @@ durable_wait:
   signal->theData[2] = Uint32(~0);
   report_mask.assign(c_definedNodes);
   report_mask.bitANDC(c_start.m_starting_nodes);
+  retVal = 0;
+  goto start_report;
+
+durable_wait_log:
+  /**
+   * RONDB-1150, X6.4 (D4): a node group has no starting node with a log.
+   * Its starting nodes are stale, and start without a log as they learnt
+   * in the election, or have no log, and a node that is not here can
+   * restore it (the direct check above found no lost node group). Stock
+   * NDB stops after StartPartialTimeout (2353); with durable commits the
+   * system restart waits for it, as a forced start to an older GCI is not
+   * offered (Q3).
+   */
+  jam();
+  report_mask.assign(c_definedNodes);
+  report_mask.bitANDC(c_start.m_starting_nodes);
+  if (!c_durableLogWaitLogged) {
+    c_durableLogWaitLogged = true;
+    g_eventLogger->info(
+        "QMGR: durable commits: a node group has no starting node with a "
+        "log (its nodes here are stale or have none); the system restart "
+        "waits for nodes %s, also past StartPartialTimeout",
+        BaseString::getPrettyTextShort(report_mask).c_str());
+  }
+  signal->theData[1] = 2;
+  signal->theData[2] = Uint32(~0);
   retVal = 0;
   goto start_report;
 
