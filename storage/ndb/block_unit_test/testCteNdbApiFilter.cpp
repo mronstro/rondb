@@ -48,12 +48,25 @@
  *     not the length of the staged CHAR(8) key compares them padded; one
  *     that reads the key as a VARCHAR whose length byte runs past it
  *     fails with error 1268; the data nodes keep running.
+ *   - Tests 36-38: a CTE_LOOKUP key that the CTE's VARCHAR or
+ *     LONGVARCHAR GROUP BY type cannot hash or compare (its length
+ *     prefix runs past the value) fails the query: DBLQH refuses it with
+ *     1265, DBSPJ, when it hashes the key to choose the owner node, with
+ *     20002; the data nodes keep running.
+ *   - Test 39: a CTE with ORDER BY / LIMIT over a FLOAT or DOUBLE GROUP
+ *     BY column that holds a NaN fails the query with 1869; the data
+ *     nodes keep running.
  *
  * Schema (created via MySQL):
  *   filter_src(pk INT PK, grp INT, val BIGINT, tag CHAR(8))
  *   cmp_len_src(pk INT PK, grp INT, t8 CHAR(8), t12 CHAR(12))  -- Test 34
  *   e23_g / e23_s / e23_w (id INT PK, v VARCHAR(6000) latin1)
  *   e23_n (id INT PK, v VARCHAR(4000) latin1)    -- Tests 30-31
+ *   ck_src / ck_srow (pk INT PK, v VARCHAR(10) latin1,
+ *                     lv VARCHAR(300) latin1)    -- Tests 36-38
+ *   ck_probe (pk INT PK, good5 BINARY(5), bad5 BINARY(5),
+ *             good6 BINARY(6), bad1 BINARY(1))   -- Tests 36-38
+ *   ck_nan (pk INT PK, d DOUBLE, f FLOAT)        -- Test 39
  *
  * Test data (6 rows):
  *   (1, 1, 10, 'alpha')
@@ -86,6 +99,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <map>
 
 static bool verbose = false;
@@ -105,6 +119,11 @@ static const char *E23_WIDE_TABLE = "e23_g";    /* VARCHAR(6000), 5000 B */
 static const char *E23_NARROW_TABLE = "e23_n";  /* VARCHAR(4000), 3990 B */
 static const char *E23_SHORT_TABLE = "e23_s";   /* VARCHAR(6000), 'k1'.. */
 static const char *E23_PROBE_TABLE = "e23_w";   /* VARCHAR(6000), probes */
+/* Tests 36-39: the CTE sources and the probe table. */
+static const char *CK_SRC_TABLE = "ck_src";      /* grouped CTE source */
+static const char *CK_SROW_TABLE = "ck_srow";    /* single-row CTE body */
+static const char *CK_PROBE_TABLE = "ck_probe";  /* BINARY probe keys */
+static const char *CK_NAN_TABLE = "ck_nan";      /* DOUBLE / FLOAT keys */
 
 /* ------------------------------------------------------------------ */
 /* MySQL helpers                                                       */
@@ -151,6 +170,10 @@ createTestTables(MYSQL *conn)
   sqlExec(conn, "DROP TABLE IF EXISTS e23_s");
   sqlExec(conn, "DROP TABLE IF EXISTS e23_w");
   sqlExec(conn, "DROP TABLE IF EXISTS cmp_len_src");
+  sqlExec(conn, "DROP TABLE IF EXISTS ck_src");
+  sqlExec(conn, "DROP TABLE IF EXISTS ck_srow");
+  sqlExec(conn, "DROP TABLE IF EXISTS ck_probe");
+  sqlExec(conn, "DROP TABLE IF EXISTS ck_nan");
 
   /* Flat table for the baseline scan-filter tests (Tests 1-5). */
   if (sqlExec(conn,
@@ -219,6 +242,42 @@ createTestTables(MYSQL *conn)
       "  t12 CHAR(12) NOT NULL"
       ") ENGINE=NDB DEFAULT CHARSET=latin1") != 0) return -1;
 
+  /* Tests 36-38: the CTE sources (VARCHAR(300) latin1 is a LONGVARCHAR)
+   * and the probe table, whose BINARY columns hold the keys as bytes.
+   * The tests seed them. */
+  if (sqlExec(conn,
+      "CREATE TABLE ck_src ("
+      "  pk INT NOT NULL PRIMARY KEY,"
+      "  v VARCHAR(10) CHARACTER SET latin1 NOT NULL,"
+      "  lv VARCHAR(300) CHARACTER SET latin1 NOT NULL"
+      ") ENGINE=NDB") != 0) return -1;
+
+  if (sqlExec(conn,
+      "CREATE TABLE ck_srow ("
+      "  pk INT NOT NULL PRIMARY KEY,"
+      "  v VARCHAR(10) CHARACTER SET latin1 NOT NULL,"
+      "  lv VARCHAR(300) CHARACTER SET latin1 NOT NULL"
+      ") ENGINE=NDB") != 0) return -1;
+
+  if (sqlExec(conn,
+      "CREATE TABLE ck_probe ("
+      "  pk INT NOT NULL PRIMARY KEY,"
+      "  good5 BINARY(5) NOT NULL,"
+      "  bad5 BINARY(5) NOT NULL,"
+      "  good6 BINARY(6) NOT NULL,"
+      "  bad1 BINARY(1) NOT NULL"
+      ") ENGINE=NDB") != 0) return -1;
+
+  /* Test 39: FLOAT and DOUBLE GROUP BY columns, a NaN written through
+   * the NDB API.  Neither is indexed: an ordered index would compare a
+   * NaN with cmpFloat / cmpDouble. */
+  if (sqlExec(conn,
+      "CREATE TABLE ck_nan ("
+      "  pk INT NOT NULL PRIMARY KEY,"
+      "  d DOUBLE NOT NULL,"
+      "  f FLOAT NOT NULL"
+      ") ENGINE=NDB") != 0) return -1;
+
   return 0;
 }
 
@@ -251,6 +310,10 @@ dropTestTables(MYSQL *conn)
   sqlExec(conn, "DROP TABLE IF EXISTS e23_s");
   sqlExec(conn, "DROP TABLE IF EXISTS e23_w");
   sqlExec(conn, "DROP TABLE IF EXISTS cmp_len_src");
+  sqlExec(conn, "DROP TABLE IF EXISTS ck_src");
+  sqlExec(conn, "DROP TABLE IF EXISTS ck_srow");
+  sqlExec(conn, "DROP TABLE IF EXISTS ck_probe");
+  sqlExec(conn, "DROP TABLE IF EXISTS ck_nan");
 }
 
 /* ------------------------------------------------------------------ */
@@ -5142,10 +5205,11 @@ e23SeedShortTable(MYSQL *conn)
                  "(6,'k3'),(7,'k4'),(8,'k4'),(9,'k5'),(10,'k5')");
 }
 
-/* After a query that failed with 20023: every data node is still
- * STARTED with the connection count it had in `before` (a stop
- * changes it, even one followed by an automatic restart), and DBTC
- * and DBSPJ hold nothing of the query. */
+/* After a query that failed (Tests 30-31 with 20023, Tests 36-39 with
+ * a refused key or GROUP BY value): every data node is still STARTED
+ * with the connection count it had in `before` (a stop changes it,
+ * even one followed by an automatic restart), and DBTC and DBSPJ hold
+ * nothing of the query. */
 static int
 e23CheckDataNodes(NdbRestarter &restarter,
                   const std::map<int, int> &before, const char *label)
@@ -6267,6 +6331,682 @@ testCteLookupFilterInlineTypeLengths(Ndb *ndb, MYSQL * /*conn*/)
 }
 
 /* ------------------------------------------------------------------ */
+/* Tests 36-39: CTE keys and GROUP BY values that the compare function */
+/*              of their type cannot take (RONDB-1124, e226cead16a)    */
+/*                                                                     */
+/* DBLQH and DBSPJ type the key of a CTE_LOOKUP as the CTE's GROUP BY  */
+/* columns.  The NDB API binds a key operand to the key column of the  */
+/* virtual table, which must have the type of the parent column, but   */
+/* nothing compares that type with the CTE's GROUP BY type.  So a      */
+/* BINARY(n) parent column reaches the kernel as the value of a        */
+/* VARCHAR or LONGVARCHAR GROUP BY column whose length prefix is the   */
+/* client's bytes.  ck_probe holds one row (pk 1):                     */
+/*   good5 BINARY(5) X'0461626364'    as VARCHAR: [4]'abcd'            */
+/*   bad5  BINARY(5) X'FF61626364'    length byte 255 in 5 bytes       */
+/*   good6 BINARY(6) X'040061626364'  as LONGVARCHAR: [4]'abcd'        */
+/*   bad1  BINARY(1) X'41'            1 byte, no room for the 2-byte   */
+/*                                    length                           */
+/* ck_src (pk, v VARCHAR(10) latin1, lv VARCHAR(300) latin1, which NDB */
+/* stores as a LONGVARCHAR): (1,'abcd','abcd'), (2,'abcd','abcd'),     */
+/* (3,'wxyz','wxyz'); ck_srow: (1,'abcd','abcd'), the body of a        */
+/* single-row CTE.                                                     */
+/*                                                                     */
+/* Query shape (runCkQuery):                                           */
+/*   WITH c AS (SELECT <col>, COUNT(*) FROM <cte table> GROUP BY <col> */
+/*              [ORDER BY <col> DESC] [LIMIT n])                       */
+/*   SELECT COUNT(*) FROM <main table> m JOIN c ON c.<col> = m.<key>   */
+/* CTE body: scan + readTuple self-join on pk carrying the CTE         */
+/* aggregator (a single-row CTE: one scan with a GROUP BY-only         */
+/* projection program); main: scan + inner CTE_LOOKUP aggregate leaf   */
+/* with COUNT(*).  The virtual table is built in memory, as in         */
+/* runE23CteLookup: [k, the type of m.<key>; n BIGINT UNSIGNED].       */
+/* ------------------------------------------------------------------ */
+
+/* ZCTE_LOOKUP_ATTRINFO_MALFORMED: DBLQH refuses a CTE_LOOKUP key */
+static const int CK_LOOKUP_MALFORMED = 1265;
+/* ZAGG_OTHER_ERROR: DBTUP refuses a row whose GROUP BY key cannot be
+ * a group */
+static const int CK_AGG_OTHER_ERROR = 1869;
+/* The LIMIT of CK_CTE_LIMIT_ALL: above the two groups of ck_src */
+static const Uint32 CK_LIMIT_ALL = 10;
+/* A single-row probe binds projected column 0 */
+static const Uint32 CK_SINGLE_ROW_KEY_POSITIONS[] = {0};
+/* The ck_nan row that Test 39 writes through the NDB API */
+static const Int32 CK_NAN_PK = 7;
+
+/* The CTE of a query of Tests 36-39 */
+enum CkCteShape {
+  /* GROUP BY; a group lives on the data node its key hashes to, and
+   * DBSPJ hashes the key of a probe the same way when there is more
+   * than one data node */
+  CK_CTE_GROUPED,
+  /* GROUP BY with a LIMIT above the number of groups: CTE_LIMIT puts
+   * every group on the DBTC node, and DBSPJ sends every probe there
+   * without hashing its key */
+  CK_CTE_LIMIT_ALL,
+  /* GROUP BY, ORDER BY the GROUP BY column DESC, LIMIT 1 */
+  CK_CTE_ORDER_DESC_LIMIT_1,
+  /* single-row CTE (CTE_SINGLE_ROW), probed through
+   * setCteKeyColumns */
+  CK_CTE_SINGLE_ROW
+};
+
+struct CkQuery {
+  const char *label;
+  CkCteShape shape;
+  const char *cteTabName;   /* the CTE body reads it */
+  const char *cteCol;       /* the CTE's GROUP BY (projected) column */
+  const char *mainTabName;  /* the main query scans it */
+  const char *keyCol;       /* the main row's column that is the key */
+};
+
+/* Run the query of q.  Returns 0 with *countOut set when it succeeded,
+ * 1 with *errorOut set when it failed, -1 when it could not be built
+ * (the reason is printed). */
+static int
+runCkQuery(Ndb *ndb, const CkQuery &q, Int64 *countOut, int *errorOut)
+{
+  *countOut = -1;
+  *errorOut = 0;
+  const bool singleRow = (q.shape == CK_CTE_SINGLE_ROW);
+
+  NdbDictionary::Dictionary *dict = ndb->getDictionary();
+  const NdbDictionary::Table *cteTab = dict->getTable(q.cteTabName);
+  const NdbDictionary::Table *mainTab = dict->getTable(q.mainTabName);
+  if (cteTab == nullptr || mainTab == nullptr) {
+    printf("FAILED (%s table lookup: %s)\n", q.label,
+           dict->getNdbError().message);
+    return -1;
+  }
+  const NdbDictionary::Column *keySrc = mainTab->getColumn(q.keyCol);
+  if (keySrc == nullptr) {
+    printf("FAILED (%s column lookup: %s)\n", q.label, q.keyCol);
+    return -1;
+  }
+
+  /* lookupCte binds the key operand to the virtual primary key, which
+   * must have the type, length and charset of the parent column. */
+  NdbDictionary::Table virtTabSyn("__cte_ck_virt");
+  {
+    NdbDictionary::Column kCol;
+    kCol.setName("k");
+    kCol.setType(keySrc->getType());
+    kCol.setLength(keySrc->getLength());
+    kCol.setPrecision(keySrc->getPrecision());
+    kCol.setScale(keySrc->getScale());
+    kCol.setCharset(keySrc->getCharset());
+    kCol.setPrimaryKey(true);
+    kCol.setNullable(false);
+    virtTabSyn.addColumn(kCol);
+
+    NdbDictionary::Column nCol;
+    nCol.setName("n");
+    nCol.setType(NdbDictionary::Column::Bigunsigned);
+    nCol.setLength(1);
+    nCol.setPrimaryKey(false);
+    nCol.setNullable(true);
+    virtTabSyn.addColumn(nCol);
+  }
+  {
+    NdbError vtErr;
+    if (virtTabSyn.aggregate(vtErr) != 0) {
+      printf("FAILED (%s virtTab aggregate: %d %s)\n", q.label,
+             vtErr.code, vtErr.message);
+      return -1;
+    }
+  }
+  const NdbDictionary::Table *virtTab = &virtTabSyn;
+
+  NdbAggregator cteAgg(cteTab);
+  bool built = false;
+  if (singleRow) {
+    cteAgg.SetSingleRowMode();
+    built = cteAgg.GroupBy(q.cteCol) && cteAgg.Finalize();
+  } else {
+    built = cteAgg.GroupBy(q.cteCol) &&
+            cteAgg.LoadUint64(1, 0) &&
+            cteAgg.Count(0, 0);
+    if (built && q.shape == CK_CTE_LIMIT_ALL) {
+      built = cteAgg.Limit(CK_LIMIT_ALL);
+    } else if (built && q.shape == CK_CTE_ORDER_DESC_LIMIT_1) {
+      built = cteAgg.OrderBy(0, /*is_agg_result=*/false,
+                             /*descending=*/true) &&
+              cteAgg.Limit(1);
+    }
+    built = built && cteAgg.Finalize();
+  }
+  if (!built) {
+    printf("FAILED (%s cteAgg: %s)\n", q.label, cteAgg.GetError().err_msg_);
+    return -1;
+  }
+
+  NdbAggregator mainAgg(mainTab);
+  if (!mainAgg.LoadUint64(1, 0) ||
+      !mainAgg.Count(0, 0) ||
+      !mainAgg.Finalize()) {
+    printf("FAILED (%s mainAgg: %s)\n", q.label,
+           mainAgg.GetError().err_msg_);
+    return -1;
+  }
+
+  NdbQueryBuilder *qb = NdbQueryBuilder::create();
+  if (qb == nullptr) { printf("FAILED (%s create)\n", q.label); return -1; }
+
+  qb->beginCteSubtree(0);
+  if (singleRow) {
+    NdbQueryOptions bodyOpts;
+    bodyOpts.setAggregation(cteAgg);
+    if (qb->scanTable(cteTab, &bodyOpts) == nullptr) {
+      printf("FAILED (%s CTE scan: %s)\n", q.label,
+             qb->getNdbError().message);
+      qb->destroy();
+      return -1;
+    }
+  } else {
+    const NdbQueryTableScanOperationDef *cteScanOp = qb->scanTable(cteTab);
+    if (cteScanOp == nullptr) {
+      printf("FAILED (%s CTE scan: %s)\n", q.label,
+             qb->getNdbError().message);
+      qb->destroy();
+      return -1;
+    }
+    const NdbQueryOperand *cteJoinKey[] = {
+        qb->linkedValue(cteScanOp, "pk"), nullptr
+    };
+    NdbQueryOptions cteLeafOpts;
+    cteLeafOpts.setMatchType(NdbQueryOptions::MatchNonNull);
+    cteLeafOpts.setAggregation(cteAgg);
+    if (qb->readTuple(cteTab, cteJoinKey, &cteLeafOpts) == nullptr) {
+      printf("FAILED (%s CTE leaf: %s)\n", q.label,
+             qb->getNdbError().message);
+      qb->destroy();
+      return -1;
+    }
+  }
+  qb->endCteSubtree();
+  Uint32 cteFlags = 0;
+  if (singleRow) {
+    cteFlags = QN_CteSubtreeNode::CTE_SINGLE_ROW;
+  } else if (q.shape != CK_CTE_GROUPED) {
+    cteFlags = QN_CteSubtreeNode::CTE_LIMIT;
+  }
+  if (qb->defineCte(0, cteTab, cteAgg, /*depMask=*/0, cteFlags) != 0) {
+    printf("FAILED (%s defineCte: %s)\n", q.label, qb->getNdbError().message);
+    qb->destroy();
+    return -1;
+  }
+
+  const NdbQueryTableScanOperationDef *mainScanOp = qb->scanTable(mainTab);
+  if (mainScanOp == nullptr) {
+    printf("FAILED (%s main scan: %s)\n", q.label, qb->getNdbError().message);
+    qb->destroy();
+    return -1;
+  }
+  const NdbQueryOperand *cteKey[] = {
+      qb->linkedValue(mainScanOp, q.keyCol), nullptr
+  };
+  NdbQueryOptions cteLookupOpts;
+  cteLookupOpts.setMatchType(NdbQueryOptions::MatchNonNull);
+  cteLookupOpts.setAggregation(mainAgg);
+  if (singleRow &&
+      cteLookupOpts.setCteKeyColumns(
+          CK_SINGLE_ROW_KEY_POSITIONS,
+          NDB_ARRAY_SIZE(CK_SINGLE_ROW_KEY_POSITIONS)) != 0) {
+    printf("FAILED (%s setCteKeyColumns)\n", q.label);
+    qb->destroy();
+    return -1;
+  }
+  /* The CTE's columns: the GROUP BY column and COUNT(*), or the one
+   * projected column of the single-row CTE. */
+  const Uint32 numResultCols = singleRow ? 1 : 2;
+  if (qb->lookupCte(0, numResultCols, virtTab, cteKey, &cteLookupOpts) ==
+      nullptr) {
+    printf("FAILED (%s lookupCte: %s)\n", q.label, qb->getNdbError().message);
+    qb->destroy();
+    return -1;
+  }
+
+  const NdbQueryDef *queryDef = qb->prepare(ndb);
+  if (queryDef == nullptr) {
+    printf("FAILED (%s prepare: %s)\n", q.label, qb->getNdbError().message);
+    qb->destroy();
+    return -1;
+  }
+  qb->destroy();
+
+  NdbTransaction *trans = ndb->startTransaction();
+  if (trans == nullptr) {
+    printf("FAILED (%s startTransaction: %s)\n", q.label,
+           ndb->getNdbError().message);
+    queryDef->destroy();
+    return -1;
+  }
+  NdbQuery *query = trans->createQuery(queryDef);
+  if (query == nullptr) {
+    printf("FAILED (%s createQuery: %s)\n", q.label,
+           trans->getNdbError().message);
+    trans->close();
+    queryDef->destroy();
+    return -1;
+  }
+
+  bool sawError = false;
+  int errorCode = 0;
+  if (trans->execute(NdbTransaction::NoCommit) != 0) {
+    sawError = true;
+    errorCode = trans->getNdbError().code;
+    V("\n  %s execute error: %d: %s", q.label, errorCode,
+      trans->getNdbError().message);
+  } else {
+    NdbQuery::NextResultOutcome outcome;
+    while ((outcome = query->nextResult(true)) ==
+           NdbQuery::NextResult_gotRow) {
+      /* nothing: the main aggregator carries the count */
+    }
+    if (outcome == NdbQuery::NextResult_error) {
+      sawError = true;
+      errorCode = query->getNdbError().code;
+      V("\n  %s drain error: %d: %s", q.label, errorCode,
+        query->getNdbError().message);
+    }
+  }
+
+  Int64 count = -1;
+  if (!sawError) {
+    NdbAggregator *resultAgg = query->getAggregator();
+    if (resultAgg != nullptr) {
+      NdbAggregator::ResultRecord rec = resultAgg->FetchResultRecord();
+      if (!rec.end()) {
+        NdbAggregator::Result countRes = rec.FetchAggregationResult();
+        count = countRes.data_int64();
+      }
+    }
+  }
+
+  query->close();
+  trans->close();
+  queryDef->destroy();
+
+  if (sawError) {
+    *errorOut = errorCode;
+    return 1;
+  }
+  *countOut = count;
+  return 0;
+}
+
+/* The probes of Tests 36-38: for a VARCHAR and a LONGVARCHAR GROUP BY
+ * column, a control, whose key is the group 'abcd' (the one ck_probe
+ * row finds it: COUNT = 1), and a key whose length prefix runs past
+ * its value. */
+struct CkProbe {
+  const char *label;
+  const char *cteCol;   /* GROUP BY (projected) column of the CTE */
+  const char *keyCol;   /* ck_probe column that is the key */
+  bool malformed;
+};
+static const CkProbe CK_PROBES[] = {
+    {"VARCHAR [4]'abcd'", "v", "good5", false},
+    {"VARCHAR length byte 255 in 5 bytes", "v", "bad5", true},
+    {"LONGVARCHAR [4]'abcd'", "lv", "good6", false},
+    {"LONGVARCHAR of 1 byte", "lv", "bad1", true},
+};
+
+static int
+ckSeedProbeTables(MYSQL *conn)
+{
+  if (sqlExec(conn, "DELETE FROM ck_src") != 0 ||
+      sqlExec(conn,
+              "INSERT INTO ck_src VALUES "
+              "(1,'abcd','abcd'),(2,'abcd','abcd'),(3,'wxyz','wxyz')") != 0 ||
+      sqlExec(conn, "DELETE FROM ck_srow") != 0 ||
+      sqlExec(conn, "INSERT INTO ck_srow VALUES (1,'abcd','abcd')") != 0 ||
+      sqlExec(conn, "DELETE FROM ck_probe") != 0 ||
+      sqlExec(conn,
+              "INSERT INTO ck_probe VALUES "
+              "(1,X'0461626364',X'FF61626364',X'040061626364',X'41')") != 0) {
+    return -1;
+  }
+  return 0;
+}
+
+static CkQuery
+ckProbeQuery(CkCteShape shape, const CkProbe &p)
+{
+  const CkQuery q = {
+      p.label, shape,
+      shape == CK_CTE_SINGLE_ROW ? CK_SROW_TABLE : CK_SRC_TABLE,
+      p.cteCol, CK_PROBE_TABLE, p.keyCol};
+  return q;
+}
+
+/* Run CK_PROBES against a CTE of the given shape.  Each control must
+ * give COUNT = 1, each malformed key must fail the query with
+ * expectedOneNode on one data node and with expectedMultiNode on more
+ * (*expectedOut is set to the one that applies).  Afterwards every data
+ * node is still started with its connection count, DBTC and DBSPJ hold
+ * nothing of the queries, and the first control gives COUNT = 1 again.
+ * Returns 0, or -1 after printing FAILED. */
+static int
+runCkProbeSet(Ndb *ndb, MYSQL *conn, const char *testName,
+              CkCteShape shape, int expectedOneNode, int expectedMultiNode,
+              int *expectedOut)
+{
+  /* getNumDbNodes() also connects restarter to the management server. */
+  NdbRestarter restarter(g_connectString);
+  const int dataNodes = restarter.getNumDbNodes();
+  if (dataNodes < 0) {
+    printf("FAILED (no data node count from the management server)\n");
+    return -1;
+  }
+  const int expected = dataNodes > 1 ? expectedMultiNode : expectedOneNode;
+  *expectedOut = expected;
+
+  if (ckSeedProbeTables(conn) != 0) {
+    printf("FAILED (seed ck_src, ck_srow, ck_probe)\n");
+    return -1;
+  }
+  NdbDictionary::Dictionary *dict = ndb->getDictionary();
+  dict->invalidateTable(CK_SRC_TABLE);
+  dict->invalidateTable(CK_SROW_TABLE);
+  dict->invalidateTable(CK_PROBE_TABLE);
+
+  std::map<int, int> nodesBefore;
+  if (!readStartedNodeConnections(restarter, nodesBefore, testName)) {
+    printf("FAILED (data nodes not started before the test)\n");
+    return -1;
+  }
+
+  for (const CkProbe &p : CK_PROBES) {
+    Int64 count = -1;
+    int error = 0;
+    const int rc = runCkQuery(ndb, ckProbeQuery(shape, p), &count, &error);
+    if (rc < 0) return -1;
+    if (!p.malformed) {
+      if (rc != 0 || count != 1) {
+        printf("FAILED (%s: error %d, COUNT=%lld, expected COUNT=1)\n",
+               p.label, error, (long long)count);
+        return -1;
+      }
+      V("\n  %s: COUNT=%lld as expected", p.label, (long long)count);
+      continue;
+    }
+    if (rc == 0) {
+      printf("FAILED (%s: the query completed, COUNT=%lld; expected "
+             "error %d)\n", p.label, (long long)count, expected);
+      return -1;
+    }
+    if (error != expected) {
+      printf("FAILED (%s: expected error %d, got %d)\n", p.label, expected,
+             error);
+      return -1;
+    }
+    V("\n  %s: error %d as expected", p.label, error);
+  }
+
+  /* No data node stopped, nothing leaked, the first control still
+   * runs. */
+  if (e23CheckDataNodes(restarter, nodesBefore, testName) != 0) return -1;
+  Int64 count = -1;
+  int error = 0;
+  const int rc =
+      runCkQuery(ndb, ckProbeQuery(shape, CK_PROBES[0]), &count, &error);
+  if (rc < 0) return -1;
+  if (rc != 0 || count != 1) {
+    printf("FAILED (%s again: error %d, COUNT=%lld, expected COUNT=1)\n",
+           CK_PROBES[0].label, error, (long long)count);
+    return -1;
+  }
+  return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Test 36: CTE_LOOKUP key whose length prefix runs past it, grouped   */
+/*          CTE                                                        */
+/*                                                                     */
+/* CTE: SELECT <v | lv>, COUNT(*) FROM ck_src GROUP BY <v | lv>; the   */
+/* main scan of ck_probe looks it up by good5 / bad5 / good6 / bad1.   */
+/*   (a) the controls give COUNT = 1;                                  */
+/*   (b) the keys bad5 and bad1 fail the query.  On one data node      */
+/*       DBSPJ sends the probe to the local DBLQH as it is, and         */
+/*       JoinGBHashTable::checkKey refuses it: CTE_LOOKUP_REF 1265.     */
+/*       On more, DBSPJ hashes the key to choose the owner node, and    */
+/*       cte_lookup_hash_key refuses it: the query fails with 20002.    */
+/*   (c) every data node is still started, and none restarted; no      */
+/*       DBTC / DBSPJ leak; control (a) again.                         */
+/* Before e226cead16a get_var_length's result was ignored: DBLQH's     */
+/* hashKeyFull, and DBSPJ's hash, had strnxfrm_hash read the length    */
+/* the prefix gave (255 bytes, or for the 1-byte LONGVARCHAR a length  */
+/* never set) from past the key's copy, and findInBucket compared the  */
+/* key with a group of the bucket it reached in cmpVarchar /           */
+/* cmpLongvarchar, whose require stops the node.  The probe missed (an */
+/* inner join, so COUNT = 0) or stopped the data node; it never failed */
+/* the query.                                                          */
+/* ------------------------------------------------------------------ */
+
+static int
+testCteLookupKeyPrefixPastValue(Ndb *ndb, MYSQL *conn)
+{
+  printf("Test 36: CTE_LOOKUP key whose length prefix runs past it "
+         "(grouped CTE) ... ");
+  fflush(stdout);
+  int expected = 0;
+  if (runCkProbeSet(ndb, conn, "Test 36", CK_CTE_GROUPED,
+                    CK_LOOKUP_MALFORMED, DbspjErr::InvalidRequest,
+                    &expected) != 0)
+    return -1;
+  printf("OK (controls COUNT=1, malformed keys error %d, data nodes up)\n",
+         expected);
+  return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Test 37: the same keys against a CTE whose groups all live on the   */
+/*          DBTC node                                                  */
+/*                                                                     */
+/* The CTE of Test 36 with LIMIT 10 (more than its two groups, so it   */
+/* drops none) and CTE_LIMIT: DBSPJ sends every probe to the DBTC node */
+/* without hashing its key, so DBLQH's checkKey refuses the malformed  */
+/* keys with 1265 on any number of data nodes.  The controls give      */
+/* COUNT = 1; the data nodes keep running.  Before e226cead16a the     */
+/* probe missed or stopped the data node, as in Test 36.               */
+/* ------------------------------------------------------------------ */
+
+static int
+testCteLookupKeyPrefixPastValueOneOwner(Ndb *ndb, MYSQL *conn)
+{
+  printf("Test 37: CTE_LOOKUP key whose length prefix runs past it "
+         "(LIMIT CTE, one owner) ... ");
+  fflush(stdout);
+  int expected = 0;
+  if (runCkProbeSet(ndb, conn, "Test 37", CK_CTE_LIMIT_ALL,
+                    CK_LOOKUP_MALFORMED, CK_LOOKUP_MALFORMED,
+                    &expected) != 0)
+    return -1;
+  printf("OK (controls COUNT=1, malformed keys error %d, data nodes up)\n",
+         expected);
+  return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Test 38: single-row CTE probe whose value's length prefix runs past */
+/*          it                                                         */
+/*                                                                     */
+/* CTE: the one row of ck_srow, projecting v (VARCHAR) or lv           */
+/* (LONGVARCHAR), defined CTE_SINGLE_ROW; the main scan of ck_probe    */
+/* binds projected column 0 to good5 / bad5 / good6 / bad1.  DBSPJ     */
+/* sends the probe to the DBTC node, where DBLQH's singleRowCteProbe   */
+/* compares the value with the stored row:                             */
+/*   (a) the controls match it: COUNT = 1;                             */
+/*   (b) NdbSqlUtil::check_compare_values refuses bad5 and bad1: the   */
+/*       query fails with 1265 on any number of data nodes;            */
+/*   (c) every data node is still started, and none restarted; no      */
+/*       DBTC / DBSPJ leak; control (a) again.                         */
+/* Before e226cead16a the value went to cmpVarchar / cmpLongvarchar as */
+/* it was, whose require stopped the data node on the first probe.     */
+/* ------------------------------------------------------------------ */
+
+static int
+testCteSingleRowProbePrefixPastValue(Ndb *ndb, MYSQL *conn)
+{
+  printf("Test 38: single-row CTE probe whose length prefix runs past "
+         "it ... ");
+  fflush(stdout);
+  int expected = 0;
+  if (runCkProbeSet(ndb, conn, "Test 38", CK_CTE_SINGLE_ROW,
+                    CK_LOOKUP_MALFORMED, CK_LOOKUP_MALFORMED,
+                    &expected) != 0)
+    return -1;
+  printf("OK (controls COUNT=1, malformed values error %d, data nodes "
+         "up)\n", expected);
+  return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Test 39: CTE ORDER BY / LIMIT over a NaN GROUP BY value             */
+/*                                                                     */
+/* CTE: SELECT <d | f>, COUNT(*) FROM ck_nan GROUP BY <d | f>          */
+/*      ORDER BY <d | f> DESC LIMIT 1                                  */
+/* ck_nan (pk, d DOUBLE, f FLOAT): (1,1,1), (2,2,2), (3,2,2), (4,3,3), */
+/* (5,3,3), (6,3,3); the main scan of ck_nan looks the CTE up by d     */
+/* (f), so only the rows of the kept group 3 find it.                  */
+/*   (a) controls, DOUBLE and FLOAT: COUNT = 3;                        */
+/*   (b) the row (7, NaN, NaN), written through the NDB API (mysqld    */
+/*       cannot store a NaN): JoinAggInterpreter::checkGroupKey        */
+/*       refuses its GROUP BY value, as a value of the ORDER BY that   */
+/*       cmpDouble / cmpFloat cannot take, and the query fails with    */
+/*       1869, for DOUBLE and for FLOAT;                               */
+/*   (c) every data node is still started, and none restarted; no      */
+/*       DBTC / DBSPJ leak; with the row deleted, (a) again for        */
+/*       DOUBLE.                                                       */
+/* Before e226cead16a the NaN became a group, and the top-N select of  */
+/* the owner node (compareGroupsByOrderSpec, LIMIT 1 below the four    */
+/* groups) compared it with another group in cmpDouble / cmpFloat,     */
+/* whose require stopped that data node.                               */
+/* ------------------------------------------------------------------ */
+
+/* Insert (insert == true) or delete the row CK_NAN_PK of ck_nan.  The
+ * inserted row has a NaN in d and in f.  Returns 0, or -1 after
+ * printing FAILED. */
+static int
+ckWriteNanRow(Ndb *ndb, bool insert)
+{
+  const char *what = insert ? "insert" : "delete";
+  const NdbDictionary::Table *tab =
+      ndb->getDictionary()->getTable(CK_NAN_TABLE);
+  if (tab == nullptr) {
+    printf("FAILED (%s the NaN row: table lookup: %s)\n", what,
+           ndb->getDictionary()->getNdbError().message);
+    return -1;
+  }
+  NdbTransaction *trans = ndb->startTransaction();
+  if (trans == nullptr) {
+    printf("FAILED (%s the NaN row: startTransaction: %s)\n", what,
+           ndb->getNdbError().message);
+    return -1;
+  }
+  NdbOperation *op = trans->getNdbOperation(tab);
+  bool ok = op != nullptr &&
+            (insert ? op->insertTuple() : op->deleteTuple()) == 0 &&
+            op->equal("pk", CK_NAN_PK) == 0;
+  if (ok && insert) {
+    ok = op->setValue("d", std::numeric_limits<double>::quiet_NaN()) == 0 &&
+         op->setValue("f", std::numeric_limits<float>::quiet_NaN()) == 0;
+  }
+  ok = ok && trans->execute(NdbTransaction::Commit) == 0;
+  if (!ok) {
+    printf("FAILED (%s the NaN row: %d: %s)\n", what,
+           trans->getNdbError().code, trans->getNdbError().message);
+  }
+  trans->close();
+  return ok ? 0 : -1;
+}
+
+static int
+testCteOrderByNanGroupKey(Ndb *ndb, MYSQL *conn)
+{
+  const Int64 keptRows = 3;  /* the rows of group 3, the one kept */
+  printf("Test 39: CTE ORDER BY / LIMIT over a NaN GROUP BY value ... ");
+  fflush(stdout);
+
+  /* getNumDbNodes() also connects restarter to the management server. */
+  NdbRestarter restarter(g_connectString);
+  if (restarter.getNumDbNodes() < 0) {
+    printf("FAILED (no data node count from the management server)\n");
+    return -1;
+  }
+  if (sqlExec(conn, "DELETE FROM ck_nan") != 0 ||
+      sqlExec(conn,
+              "INSERT INTO ck_nan VALUES "
+              "(1,1,1),(2,2,2),(3,2,2),(4,3,3),(5,3,3),(6,3,3)") != 0) {
+    printf("FAILED (seed ck_nan)\n");
+    return -1;
+  }
+  ndb->getDictionary()->invalidateTable(CK_NAN_TABLE);
+  std::map<int, int> nodesBefore;
+  if (!readStartedNodeConnections(restarter, nodesBefore, "Test 39")) {
+    printf("FAILED (data nodes not started before the test)\n");
+    return -1;
+  }
+
+  const CkQuery queries[] = {
+      {"DOUBLE", CK_CTE_ORDER_DESC_LIMIT_1, CK_NAN_TABLE, "d", CK_NAN_TABLE,
+       "d"},
+      {"FLOAT", CK_CTE_ORDER_DESC_LIMIT_1, CK_NAN_TABLE, "f", CK_NAN_TABLE,
+       "f"},
+  };
+  Int64 count = -1;
+  int error = 0;
+
+  /* (a) controls */
+  for (const CkQuery &q : queries) {
+    const int rc = runCkQuery(ndb, q, &count, &error);
+    if (rc < 0) return -1;
+    if (rc != 0 || count != keptRows) {
+      printf("FAILED (%s control: error %d, COUNT=%lld, expected "
+             "COUNT=%lld)\n", q.label, error, (long long)count,
+             (long long)keptRows);
+      return -1;
+    }
+    V("\n  %s control: COUNT=%lld as expected", q.label, (long long)count);
+  }
+
+  /* (b) a NaN group key in the ORDER BY */
+  if (ckWriteNanRow(ndb, true) != 0) return -1;
+  for (const CkQuery &q : queries) {
+    const int rc = runCkQuery(ndb, q, &count, &error);
+    if (rc < 0) return -1;
+    if (rc == 0) {
+      printf("FAILED (%s NaN: the query completed, COUNT=%lld; expected "
+             "error %d)\n", q.label, (long long)count, CK_AGG_OTHER_ERROR);
+      return -1;
+    }
+    if (error != CK_AGG_OTHER_ERROR) {
+      printf("FAILED (%s NaN: expected error %d, got %d)\n", q.label,
+             CK_AGG_OTHER_ERROR, error);
+      return -1;
+    }
+    V("\n  %s NaN: error %d as expected", q.label, error);
+  }
+
+  /* (c) no data node stopped, nothing leaked, the control still runs. */
+  if (e23CheckDataNodes(restarter, nodesBefore, "Test 39") != 0) return -1;
+  if (ckWriteNanRow(ndb, false) != 0) return -1;
+  const int rc = runCkQuery(ndb, queries[0], &count, &error);
+  if (rc < 0) return -1;
+  if (rc != 0 || count != keptRows) {
+    printf("FAILED (%s control again: error %d, COUNT=%lld, expected "
+           "COUNT=%lld)\n", queries[0].label, error, (long long)count,
+           (long long)keptRows);
+    return -1;
+  }
+
+  printf("OK (controls COUNT=%lld, NaN error %d, data nodes up)\n",
+         (long long)keptRows, CK_AGG_OTHER_ERROR);
+  return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* main                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -6311,6 +7051,10 @@ static const TestEntry g_tests[] = {
     { 33, testCteLookupFilterInlineTypeNoCharset },
     { 34, testCteLookupFilterLinkedLinkedCharSizes },
     { 35, testCteLookupFilterInlineTypeLengths },
+    { 36, testCteLookupKeyPrefixPastValue },
+    { 37, testCteLookupKeyPrefixPastValueOneOwner },
+    { 38, testCteSingleRowProbePrefixPastValue },
+    { 39, testCteOrderByNanGroupKey },
 };
 static const size_t g_test_count = sizeof(g_tests) / sizeof(g_tests[0]);
 
@@ -6336,7 +7080,7 @@ int main(int argc, char **argv)
       return 0;
     }
   }
-  /* NdbRestarter in Tests 30-31, 33-35 */
+  /* NdbRestarter in Tests 30-31, 33-39 */
   g_connectString = connectString;
 
   if (onlyTest != -1) {
