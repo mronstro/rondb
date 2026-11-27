@@ -684,7 +684,11 @@ Optional, performance only:
     `ndb_query_close_nodefail_at_end`), both debug only. Case (c) is
     reachable only through a buddy transaction from `Ndb::hupp()`: the
     4008 aborts the query's own transaction. Test 28's wait for
-    outstanding batches is checked, not forced (up to 5 tries).
+    outstanding batches is checked, not forced (up to 5 tries). The
+    force-release of (c) stays: `ndb.ndb_scan_protocol_timeout` passed
+    with it on 2026-11-27, every "Leaks" line 0 (its SPJ "due to load"
+    cases now release the scan connection after the close, and the next
+    scans seize a new one).
 - **NdbAggregator follows no CASE arms (won't fix, 2026-11-27):** a
   program in which a string reaches arithmetic on one path only passes
   the builder, and the data node refuses it when the scan runs
@@ -704,10 +708,6 @@ Optional, performance only:
   - a RonSQL CTE output column of undefined type used as an outer
     GROUP BY key could now get 1869 from `publishGBTypes`
     (`9d013e4d714`); the `ronsql_cte` suites would show it;
-  - `ndb_scan_protocol_timeout`: the "Leaks" lines of its results decide
-    whether the force-release on a close after a receive timeout
-    (`81e0f764713` (c)) stays; a count of ApiConnectRecords there may
-    drop by one after a timeout, which is that release, not a leak;
   - `ndb_quota.ndb_basic` and warning 4721 (`5a833c08c77`): the race
     needs an initial cluster start just before the test, so a clean
     `--repeat` run is weak evidence. If the warning comes back, check the
