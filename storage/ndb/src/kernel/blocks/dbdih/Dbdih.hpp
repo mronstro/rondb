@@ -2227,7 +2227,8 @@ class Dbdih : public SimulatedBlock {
     /**
      * RONDB-1150: g, the first gci_hi whose write transactions commit
      * durably, 0 when durable commits are off; DIVERIFY reports it under
-     * m_lock. Until online activation (X7) it is 1 with __DurableCommits.
+     * m_lock. Until online activation (X7) it is 1 with DurableCommits set
+     * at the start.
      */
     Uint32 m_durable_gci;
     enum State {

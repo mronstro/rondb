@@ -684,8 +684,8 @@ static void test_redo_log_pmem(void) {
       {"RedoLogMode=pmem", "FileSystemPathRedoLog=0:/mnt/p0,1:/mnt/p1", true,
        "full"},
       // Durable commits (X4) need PMEM mode
-      {"RedoLogMode=pmem", "__DurableCommits=true", true, "full"},
-      {"RedoLogMode=file", "__DurableCommits=true", false, nullptr},
+      {"RedoLogMode=pmem", "DurableCommits=true", true, "full"},
+      {"RedoLogMode=file", "DurableCommits=true", false, nullptr},
       // Refused
       {"RedoLogMode=pmem", "EncryptedFileSystem=1", false, nullptr},
       {"RedoLogMode=pmem", "Diskless=true", false, nullptr},
@@ -727,6 +727,21 @@ static void test_redo_log_pmem(void) {
   CHECK(get_db_uint(c, CFG_DB_REDO_PMEM_COPY_METHOD) ==
         NDB_REDO_PMEM_COPY_MOVDIR64B);
   CHECK(get_db_uint(c, CFG_DB_REDO_PMEM_PERSIST_DELAY_NS) == 500);
+  delete c;
+
+  // DurableCommits is the same for every data node
+  ndbout_c("testing DurableCommits on one data node of two");
+  c = create_config("[ndbd]", "NoOfReplicas=2", "RedoLogMode=pmem",
+                    "DurableCommits=true", "[ndbd]", "NoOfReplicas=2",
+                    "RedoLogMode=pmem", "[ndb_mgmd]", "HostName=localhost",
+                    "[mysqld]", NULL);
+  CHECK(c == NULL);
+  ndbout_c("testing DurableCommits on both data nodes");
+  c = create_config("[ndbd]", "NoOfReplicas=2", "RedoLogMode=pmem",
+                    "DurableCommits=true", "[ndbd]", "NoOfReplicas=2",
+                    "RedoLogMode=pmem", "DurableCommits=true", "[ndb_mgmd]",
+                    "HostName=localhost", "[mysqld]", NULL);
+  CHECK(c);
   delete c;
 
   // The defaults

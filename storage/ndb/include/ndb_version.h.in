@@ -1718,4 +1718,20 @@ bool
 ndbd_backup_failed_cleanup_ord(Uint32 x) {
   return x >= NDBD_BACKUP_FAILED_CLEANUP_ORD_2610;
 }
+
+/**
+ * RONDB-1150: whether the data node runs durable commits (DurableCommits):
+ * the COMMIT and COMPLETE records of the REDO log on persistent memory,
+ * phase 2 of the system restart, the node-failure file, and the
+ * activation at a GCI g (X7). Durable commits are activated only once
+ * every data node runs such a version, and the signal formats and the
+ * sysfile that carry g are sent only while they are active, so an older
+ * node never receives them.
+ */
+#define NDBD_SUPPORT_DURABLE_COMMITS NDB_MAKE_VERSION(26,10,1)
+static inline
+bool
+ndbd_support_durable_commits(Uint32 x) {
+  return x >= NDBD_SUPPORT_DURABLE_COMMITS;
+}
 #endif

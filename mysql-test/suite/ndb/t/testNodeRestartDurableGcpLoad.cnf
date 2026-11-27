@@ -5,4 +5,4 @@
 [cluster_config.1]
 RedoLogMode=pmem
 __RedoLogPmemTestMode=nodax
-__DurableCommits=1
+DurableCommits=1

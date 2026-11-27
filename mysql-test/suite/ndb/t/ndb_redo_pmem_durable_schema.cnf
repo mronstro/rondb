@@ -5,7 +5,7 @@
 [cluster_config.1]
 RedoLogMode=pmem
 __RedoLogPmemTestMode=nodax
-__DurableCommits=1
+DurableCommits=1
 NoOfFragmentLogFiles=5
 FragmentLogFileSize=4M
 TimeBetweenLocalCheckpoints=6

@@ -16,6 +16,6 @@
 
 @import suite/ndb/pmem_redo.skip
 
-# A node restarted with RedoLogMode=file is refused with __DurableCommits=1
-ndb.ndb_redo_pmem_mode_switch : RONDB-1150 RedoLogMode=file with __DurableCommits=1
-ndb.ndb_redo_pmem_mode_switch_path : RONDB-1150 RedoLogMode=file with __DurableCommits=1
+# A node restarted with RedoLogMode=file is refused with DurableCommits=1
+ndb.ndb_redo_pmem_mode_switch : RONDB-1150 RedoLogMode=file with DurableCommits=1
+ndb.ndb_redo_pmem_mode_switch_path : RONDB-1150 RedoLogMode=file with DurableCommits=1

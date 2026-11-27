@@ -169,8 +169,8 @@ RedoLogMode=pmem
 __RedoLogPmemTestMode=nodax
 
 #
-# .2node_durable - .2node with durable commits (__DurableCommits, the
-# interim setting until online activation)
+# .2node_durable - .2node with durable commits (DurableCommits=1, on
+# from the initial start)
 #
 
 [cluster_config.2node_durable]
@@ -210,7 +210,7 @@ TimeBetweenWatchDogCheckInitial=60000
 
 RedoLogMode=pmem
 __RedoLogPmemTestMode=nodax
-__DurableCommits=1
+DurableCommits=1
 
 #
 # .4node_durable - .4node with durable commits, two node groups
@@ -246,4 +246,4 @@ TransactionDeadlockDetectionTimeout=2500
 
 RedoLogMode=pmem
 __RedoLogPmemTestMode=nodax
-__DurableCommits=1
+DurableCommits=1

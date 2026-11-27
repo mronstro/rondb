@@ -1,7 +1,7 @@
 --source include/have_ndb.inc
 
 # RONDB-1150 X4 parts 1 and 2 (impl_next_steps.md §4): with
-# __DurableCommits=1 every write transaction commits durably. Each of its
+# DurableCommits=1 every write transaction commits durably. Each of its
 # write operations leaves on each replica a COMMIT with CF_DURABLE and the
 # transaction's opCount, its number of write operations on logged tables,
 # and a COMPLETE with its transid, persistent before the commit is

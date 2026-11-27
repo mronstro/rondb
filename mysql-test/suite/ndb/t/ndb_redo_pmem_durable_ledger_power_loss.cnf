@@ -6,7 +6,7 @@
 RedoLogMode=pmem
 __RedoLogPmemTestMode=nodax
 __RedoLogPmemPowerLossEmulation=1
-__DurableCommits=1
+DurableCommits=1
 NoOfFragmentLogFiles=5
 FragmentLogFileSize=4M
 TimeBetweenLocalCheckpoints=6

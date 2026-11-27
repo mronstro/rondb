@@ -25816,9 +25816,11 @@ void Dbdih::initCommonData() {
   NdbTick_Invalidate(&m_micro_gcp.m_master.m_start_time);
 
   /**
-   * RONDB-1150: durable commits, __DurableCommits until online activation
-   * (X7). A commit is durable only once its REDO record is persistent, so
-   * it needs RedoLogMode=pmem, as the management server checks too. g is
+   * RONDB-1150: durable commits, DurableCommits, set at the start until
+   * online activation (X7). A commit is durable only once its REDO record
+   * is persistent, so it needs RedoLogMode=pmem, as the management server
+   * checks too. In a test mode of the REDO log it survives a crash of the
+   * data nodes, not of the OS or a power loss (Q-A1). g is
    * 1: every write transaction since the start commits durably, the same
    * on every node, which a GCI seen first after the start would not be
    * for a node that joins by a node restart. Read here, after the memset
@@ -25827,16 +25829,23 @@ void Dbdih::initCommonData() {
   {
     Uint32 durable = 0;
     Uint32 redoLogMode = NDB_REDO_LOG_MODE_FILE;
+    Uint32 testMode = NDB_REDO_PMEM_TEST_MODE_OFF;
     ndb_mgm_get_int_parameter(p, CFG_DB_DURABLE_COMMITS, &durable);
     ndb_mgm_get_int_parameter(p, CFG_DB_REDO_LOG_MODE, &redoLogMode);
+    ndb_mgm_get_int_parameter(p, CFG_DB_REDO_PMEM_TEST_MODE, &testMode);
     if (durable != 0 && redoLogMode != NDB_REDO_LOG_MODE_PMEM) {
       progError(__LINE__, NDBD_EXIT_INVALID_CONFIG,
-                "__DurableCommits=1 needs RedoLogMode=pmem");
+                "DurableCommits=1 needs RedoLogMode=pmem");
     }
     m_micro_gcp.m_durable_gci = durable != 0 ? 1 : 0;
     if (durable != 0) {
-      g_eventLogger->info("DIH: durable commits from GCI %u (__DurableCommits)",
-                          m_micro_gcp.m_durable_gci);
+      g_eventLogger->info(
+          "DIH: durable commits from GCI %u (DurableCommits)%s",
+          m_micro_gcp.m_durable_gci,
+          testMode != NDB_REDO_PMEM_TEST_MODE_OFF
+              ? "; in a test mode of the REDO log a commit survives a crash "
+                "of the data nodes, not of the OS or a power loss"
+              : "");
     }
   }
   {

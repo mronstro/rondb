@@ -12599,7 +12599,7 @@ int runTakeoverReadBackupRYW(NDBT_Context *ctx, NDBT_Step *step) {
 }
 
 /* ------------------------------------------------------------------------
- * RONDB-1150 (X4.14), __DurableCommits=1: crashes in the commit protocol
+ * RONDB-1150 (X4.14), DurableCommits=1: crashes in the commit protocol
  * of durable commits. One transaction updates up to 64 rows on a chosen
  * TC, an error insert stops a data node at a point of the protocol, and
  * the case checks the outcome that the API gets against the rows, before
@@ -12625,7 +12625,7 @@ int runDurableNeedsDurable(NDBT_Context *ctx, NDBT_Step *step) {
     Uint32 durable = 0;
     conf.getProperty(node, NODE_TYPE_DB, CFG_DB_DURABLE_COMMITS, &durable);
     if (durable == 0) {
-      g_err << "Node " << node << ": this test needs __DurableCommits=1"
+      g_err << "Node " << node << ": this test needs DurableCommits=1"
             << endl;
       return NDBT_SKIPPED;
     }
@@ -17053,7 +17053,7 @@ TESTCASE("PmemGcpSaveAndFileChange",
   FINALIZER(runClearTable);
 }
 TESTCASE("DurableCrashCommit",
-         "RONDB-1150, __DurableCommits=1: a replica stops with its durable "
+         "RONDB-1150, DurableCommits=1: a replica stops with its durable "
          "COMMIT persistent (5180); the transaction commits on the replicas "
          "left") {
   TC_PROPERTY("DurableErrorInsert", Uint32(5180));
@@ -17063,7 +17063,7 @@ TESTCASE("DurableCrashCommit",
   FINALIZER(runClearTable);
 }
 TESTCASE("DurableCrashComplete",
-         "RONDB-1150, __DurableCommits=1: a replica stops with its COMPLETE "
+         "RONDB-1150, DurableCommits=1: a replica stops with its COMPLETE "
          "written, before the local commit (5181); the transaction "
          "commits") {
   TC_PROPERTY("DurableErrorInsert", Uint32(5181));
@@ -17073,7 +17073,7 @@ TESTCASE("DurableCrashComplete",
   FINALIZER(runClearTable);
 }
 TESTCASE("DurableCrashLocalCommit",
-         "RONDB-1150, __DurableCommits=1: a replica stops after its local "
+         "RONDB-1150, DurableCommits=1: a replica stops after its local "
          "commit at COMPLETE (5182); the transaction commits") {
   TC_PROPERTY("DurableErrorInsert", Uint32(5182));
   INITIALIZER(runDurableNeedsDurable);
@@ -17082,7 +17082,7 @@ TESTCASE("DurableCrashLocalCommit",
   FINALIZER(runClearTable);
 }
 TESTCASE("DurableTcCrashCommit",
-         "RONDB-1150, __DurableCommits=1: the TC stops with the COMMIT of "
+         "RONDB-1150, DurableCommits=1: the TC stops with the COMMIT of "
          "the first operation sent (8321); the takeover commits") {
   TC_PROPERTY("DurableErrorInsert", Uint32(8321));
   TC_PROPERTY("DurableOnTc", Uint32(1));
@@ -17092,7 +17092,7 @@ TESTCASE("DurableTcCrashCommit",
   FINALIZER(runClearTable);
 }
 TESTCASE("DurableTcCrashComplete",
-         "RONDB-1150, __DurableCommits=1: the TC stops with the COMPLETE of "
+         "RONDB-1150, DurableCommits=1: the TC stops with the COMPLETE of "
          "the first operation sent (8322); the takeover completes") {
   TC_PROPERTY("DurableErrorInsert", Uint32(8322));
   TC_PROPERTY("DurableOnTc", Uint32(1));
@@ -17102,7 +17102,7 @@ TESTCASE("DurableTcCrashComplete",
   FINALIZER(runClearTable);
 }
 TESTCASE("DurableDelayedComplete",
-         "RONDB-1150, __DurableCommits=1: the primaries get COMPLETE 3 s "
+         "RONDB-1150, DurableCommits=1: the primaries get COMPLETE 3 s "
          "late (5183); a committed read sees the rows as before, a locking "
          "read waits, a row that the transaction read keeps its shared "
          "lock, the API is acknowledged after the complete phase") {
@@ -17115,7 +17115,7 @@ TESTCASE("DurableDelayedComplete",
   FINALIZER(runClearTable);
 }
 TESTCASE("DurableGcpUnderLoad",
-         "RONDB-1150, __DurableCommits=1 (X4.12): under an update load, "
+         "RONDB-1150, DurableCommits=1 (X4.12): under an update load, "
          "epochs and GCP saves keep their pace") {
   TC_PROPERTY("DurableLoadSeconds", Uint32(30));
   INITIALIZER(runDurableNeedsDurable);

@@ -214,6 +214,9 @@ static bool check_node_vs_replicas(
 static bool check_mutually_exclusive(
     Vector<ConfigInfo::ConfigRuleSection> &sections,
     struct InitConfigFileParser::Context &ctx, const char *rule_data);
+static bool check_durable_commits(
+    Vector<ConfigInfo::ConfigRuleSection> &sections,
+    struct InitConfigFileParser::Context &ctx, const char *rule_data);
 static bool validate_unique_mgm_ports(
     Vector<ConfigInfo::ConfigRuleSection> &sections,
     struct InitConfigFileParser::Context &ctx, const char *rule_data);
@@ -228,6 +231,7 @@ const ConfigInfo::ConfigRule ConfigInfo::m_ConfigRules[] = {
     {add_node_connections, nullptr},
     {check_node_vs_replicas, nullptr},
     {check_mutually_exclusive, nullptr},
+    {check_durable_commits, nullptr},
     {validate_unique_mgm_ports, nullptr},
     {saveSectionsInConfigValues, "SYSTEM,Node,Connection"},
     {nullptr, nullptr}};
@@ -1086,12 +1090,13 @@ const ConfigInfo::ParamInfo ConfigInfo::m_ParamInfo[] = {
 
   {
     CFG_DB_DURABLE_COMMITS,
-    "__DurableCommits",
+    "DurableCommits",
     DB_TOKEN,
-    "Test setting, interim until online activation: every write "
-    "transaction commits durably, its acknowledgement waits for the "
-    "complete phase. Needs RedoLogMode=pmem; set it for all data nodes "
-    "and change it only by a system restart",
+    "Durable commits: every write transaction commits durably, its "
+    "acknowledgement waits until its COMMIT and COMPLETE records are "
+    "persistent in the REDO log, so it survives a crash of every data "
+    "node. Needs RedoLogMode=pmem; set it for all data nodes and change "
+    "it only by a system restart",
     ConfigInfo::CI_USED,
     false,
     ConfigInfo::CI_BOOL,
@@ -4233,7 +4238,7 @@ static bool checkRedoLogPmem(InitConfigFileParser::Context &ctx) {
   ctx.m_currentSection->get("__RedoLogPmemPersistDelayNs", &persistDelayNs);
   ctx.m_currentSection->get("FileSystemPathRedoLog", &path);
   Uint32 durableCommits = 0;
-  ctx.m_currentSection->get("__DurableCommits", &durableCommits);
+  ctx.m_currentSection->get("DurableCommits", &durableCommits);
   const bool testSettings = testMode != NDB_REDO_PMEM_TEST_MODE_OFF ||
                             powerLossEmul != 0 ||
                             copyMethod != NDB_REDO_PMEM_COPY_AUTO ||
@@ -4243,7 +4248,7 @@ static bool checkRedoLogPmem(InitConfigFileParser::Context &ctx) {
     if (durableCommits != 0) {
       /* A commit is durable only once its REDO record is persistent */
       ctx.reportError(
-          "__DurableCommits=1 needs RedoLogMode=pmem - [%s] starting at "
+          "DurableCommits=1 needs RedoLogMode=pmem - [%s] starting at "
           "line: %d",
           ctx.fname, ctx.m_sectionLineno);
       return false;
@@ -4335,13 +4340,6 @@ static bool checkRedoLogPmem(InitConfigFileParser::Context &ctx) {
         "__RedoLogPmemPersistDelayNs=%u is a test setting, each persist of "
         "the REDO log waits %u ns (section starting at line %u)",
         persistDelayNs, persistDelayNs, ctx.m_sectionLineno);
-  }
-  if (durableCommits != 0) {
-    ctx.reportWarning(
-        "__DurableCommits is a test setting, not yet complete: a cluster "
-        "crash still loses the commits after the last saved global "
-        "checkpoint (section starting at line %u)",
-        ctx.m_sectionLineno);
   }
   return true;
 }
@@ -5426,6 +5424,44 @@ static bool check_node_vs_replicas(Vector<ConfigInfo::ConfigRuleSection> &,
           "Cluster configuration warning:%s%s", arbitration_warning.c_str(),
           "\n  Running arbitrator on the same host as a database node may"
           "\n  cause complete cluster shutdown in case of host failure.");
+  }
+  return true;
+}
+
+/**
+ * RONDB-1150: DurableCommits is a setting of the cluster, the same for
+ * every data node. Each data node takes it at its start, and the master
+ * of a system restart decides from it whether the restart turns durable
+ * commits off (X7).
+ */
+static bool check_durable_commits(Vector<ConfigInfo::ConfigRuleSection> &,
+                                  struct InitConfigFileParser::Context &ctx,
+                                  const char *) {
+  Uint32 n_nodes = 0;
+  ctx.m_userProperties.get("NoOfNodes", &n_nodes);
+  Uint32 firstNode = 0;
+  bool firstValue = false;
+  for (Uint32 i = 0, n = 0; n < n_nodes; i++) {
+    const Properties *tmp;
+    if (!ctx.m_config->get("Node", i, &tmp)) continue;
+    n++;
+    const char *type;
+    if (!tmp->get("Type", &type) || strcmp(type, DB_TOKEN) != 0) continue;
+    Uint32 id = 0;
+    Uint32 durable = 0;
+    tmp->get("NodeId", &id);
+    tmp->get("DurableCommits", &durable);
+    if (firstNode == 0) {
+      firstNode = id;
+      firstValue = durable != 0;
+    } else if ((durable != 0) != firstValue) {
+      ctx.reportError(
+          "DurableCommits must be the same for every data node: node %u has "
+          "%s, node %u has %s",
+          firstNode, firstValue ? "true" : "false", id,
+          durable != 0 ? "true" : "false");
+      return false;
+    }
   }
   return true;
 }

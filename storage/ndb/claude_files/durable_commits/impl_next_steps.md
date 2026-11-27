@@ -1305,9 +1305,9 @@ reason.
 SR allowed again in durable mode; stale nodes rejoin by node restart with
 identical replicas.
 
-**State (2026-11-26): X6.1-X6.4 committed, the `rondb_pmem_durable` run
-on Linux passes; X6.3 refined, X6.5-X6.9 written, to be built and
-tested.**
+**State (2026-11-27): complete; X7 next.** Earlier (2026-11-26): X6.1-X6.4
+committed, the `rondb_pmem_durable` run on Linux passes; X6.3 refined,
+X6.5-X6.9 written, to be built and tested.
 - X6.9 (decided 2026-11-26): a system restart with
   durable commits starts only when the starting nodes hold every node of
   some node group and a node of every node group
@@ -1633,6 +1633,79 @@ node supports it can activate.
 transactions before arming, none after; master failure during activation
 handled; a node restart after activation works; activation refused with a
 file-mode node or an old version.
+
+**State (2026-11-27): re-scoped against the code, next.** Only the
+start-time path exists. `__DurableCommits` (CFG 716) sets
+`m_micro_gcp.m_durable_gci = 1` in `Dbdih::initCommonData()`, and g lives
+nowhere else: not in the sysfile, not in a signal. A system restart takes
+g from the config (`srDurableParams()`), and so does a node restart. TC
+gets the durable flag per transaction from DIVERIFYCONF, LQH per
+operation from its signals; neither needs a cluster-wide flag. There is
+no version function, no DURABLE_ACTIVATE signal, no online case in CMVMI
+and no ndbinfo table for it.
+
+Changes to the plan below, found by the re-scope:
+- g must be in the sysfile, so X7.3 comes before X7.2: with online
+  activation g is not 1, a system restart must read it from the sysfile,
+  and a starting node must learn it from the cluster.
+- g in every GCP_PREPARE and GCP_COMMIT once active, not a flag in the
+  activating one only. A node that starts between activation and arming
+  gets a sysfile copy without g and would see no flag; with g in every
+  GCP_COMMIT each node learns it at the first epoch it takes part in. A
+  new master knows g from its own state; MASTER_GCPCONF carries a pending
+  g, for an activation the old master prepared but did not commit.
+- No GCP_SAVEREQ flag: LQH needs no cluster-wide flag (dirty writes are
+  best effort, DI-1).
+- Sysfile v3 is written only while g ≠ 0, so a node of an older version
+  never receives one (activation needs every node to support it); v2
+  reads as g = 0.
+- `check_enable_micro_gcp()` computes a minimum version it does not use;
+  the activation check uses the alive nodes' versions (`getMinVersion()`,
+  without callers today).
+
+Parts, each a commit to be built and tested:
+1. Config and version gate (X7.1 at start, X7.6): `__DurableCommits`
+   becomes `DurableCommits` (CFG 716 kept), with a warning when data
+   nodes differ; `ndbd_support_durable_commits()`; the stale "not yet
+   complete" warning of `checkRedoLogPmem()` replaced, and the start line
+   for the test modes (Q-A1); the `.cnf` files and tests renamed.
+   Behaviour unchanged. **Written (2026-11-27), to be built and tested.**
+   - Decided: the gate is 26.10.1 (`NDBD_SUPPORT_DURABLE_COMMITS`), the
+     version of this branch and 26.10-main. It is used from part 3, by the
+     activation and by a node joining an active cluster.
+   - Data nodes that differ are an error, not a warning
+     (`check_durable_commits()`, a config rule): until part 3 each node
+     takes the value at its start, and later the master of a system
+     restart decides from it whether the restart turns durable commits
+     off. `MgmConfig-t` has the case.
+   - The "not yet complete" warning is gone, as X5 and X6 completed it.
+     The test modes already have their warnings, in the config check and
+     at the start of NDBFS; DIH's start line adds what they mean for a
+     durable commit.
+   - The parameter is visible now (no `__`); no result file lists the
+     parameters by name.
+2. g in the sysfile (X7.3, X7.4): sysfile v3 with `durableGci`; an
+   initial start with `DurableCommits=1` writes g = 1; a system restart
+   takes g from the sysfile, a node restart from the master's copy;
+   `RESTART_DURABLE` writes g = 0 when the master's config is 0
+   (deactivation; that restart still runs phase 2 with the old g).
+3. Online activation (X7.1 online, X7.2): GSNs 990-992
+   `DURABLE_ACTIVATE_REQ/CONF/REF`; the CMVMI case and `SET
+   DurableCommits` in the client; the master's checks (every alive node
+   asked, versions, PMEM mode, no node restart running, Q-B7) and g at
+   the next gci_hi switch; g in GCP_PREPARE, GCP_COMMIT and
+   MASTER_GCPCONF; armed at the COPY_GCICONF of the save of g − 1, with
+   an event; `SET DurableCommits=0` accepted as pending (Q-B6); config 1
+   with sysfile g = 0 after a system restart activates at its first GCP;
+   error inserts 7260, 7261, 7263.
+4. ndbinfo (X7.5): `durable_commits` (DIH, a row per node) and
+   `node_failure_records` (QMGR). `durable_commit_stats` per LDM moves
+   to X8, beside the persist counters it would report with.
+5. Tests (X7.7): activation under ledger load, with no loss after arming;
+   refusal with a file-mode node; master crash after
+   GCP_PREPARE(activate) (7260) and before arming (7261); a node restart
+   after activation; deactivation through a system restart; the ndbinfo
+   values.
 
 ### X7.1 Config `DurableCommits` (S, 3 pd)
 

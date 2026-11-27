@@ -378,7 +378,7 @@ emulation the lines not yet persistent are lost, kept or torn.
 Restart: crash in phase 1 when the end of the log is found, before the
 zeroing after it; the next restart must find the same end.
 
-RONDB-1150, __DurableCommits=1: error inserts of the commit protocol of
+RONDB-1150, DurableCommits=1: error inserts of the commit protocol of
 durable commits (impl_next_steps.md X4.14), DBLQH 5180-5199. The crashes
 stop the node with NDBD_EXIT_ERROR_INSERT, at the first operation of a
 durable transaction that reaches the point (testNodeRestart -n

@@ -328,7 +328,7 @@
 #define NDB_COMPILED_INTERPRETER_ON    2  /* force JIT (reserved; == AUTO today) */
 
 /* RONDB-1150: the REDO log on persistent memory, and durable commits
- * (716, __DurableCommits until X7 makes it the online DurableCommits).
+ * (716, DurableCommits, set at the start until X7 makes it online).
  * Keep CFG_DB_REDO_PMEM_PERSIST_DELAY_NS the highest DB id. */
 #define CFG_DB_REDO_LOG_MODE              711
 #define CFG_DB_REDO_LOG_PATH              712

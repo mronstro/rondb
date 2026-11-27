@@ -1,7 +1,7 @@
 # RONDB-1150 (X4): the REDO log in PMEM mode on any file system, as
-# pmem_redo.cnf, with durable commits (__DurableCommits, the interim
-# setting until online activation). Every write transaction commits
-# durably and is acknowledged after the complete phase. Add it to a test
+# pmem_redo.cnf, with durable commits (DurableCommits=1, on from the
+# initial start). Every write transaction commits durably and is
+# acknowledged after the complete phase. Add it to a test
 # run:
 #   ./mtr --defaults-extra-file=suite/ndb/pmem_redo_durable.cnf ndb.ndb_basic
 # All the rondb suites, without the tests of pmem_redo_durable.skip:
@@ -12,4 +12,4 @@
 [cluster_config]
 RedoLogMode=pmem
 __RedoLogPmemTestMode=nodax
-__DurableCommits=1
+DurableCommits=1

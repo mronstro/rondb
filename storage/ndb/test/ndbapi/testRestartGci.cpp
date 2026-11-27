@@ -1981,7 +1981,7 @@ int runLedgerNeedsPmem(NDBT_Context *ctx, NDBT_Step *step) {
         (durable && durableCommits == 0)) {
       ndbout_c("Node %d: this test needs RedoLogMode=pmem%s%s", node,
                powerLoss ? " and __RedoLogPmemPowerLossEmulation=1" : "",
-               durable ? " and __DurableCommits=1" : "");
+               durable ? " and DurableCommits=1" : "");
       return NDBT_SKIPPED;
     }
   }
@@ -1992,7 +1992,7 @@ int runLedgerInit(NDBT_Context *ctx, NDBT_Step *step) {
   g_ledger.assign(ctx->getNumRecords(), LedgerRow());
   /**
    * RONDB-1150: the cluster decides whether commits are durable, not the
-   * test case. Every ledger case run on a cluster with __DurableCommits=1
+   * test case. Every ledger case run on a cluster with DurableCommits=1
    * in all data nodes follows the durable rules (LedgerDurable): a node
    * failure abort at commit (4010) is an unknown result, since phase 2 of
    * the restart commits the transaction if its COMMITs were persistent,
@@ -2009,7 +2009,7 @@ int runLedgerInit(NDBT_Context *ctx, NDBT_Step *step) {
       durable = durableCommits != 0;
     }
     if (durable) {
-      ndbout_c("Ledger: __DurableCommits=1 in every data node, the durable "
+      ndbout_c("Ledger: DurableCommits=1 in every data node, the durable "
                "rules apply");
       ctx->setProperty("LedgerDurable", Uint32(1));
     }
@@ -2753,7 +2753,7 @@ TESTCASE("GciLedgerPowerLoss",
   FINALIZER(runDropTable);
 }
 TESTCASE("GciLedgerDurableSR",
-         "RONDB-1150 (X5.10), PMEM mode with __DurableCommits: as "
+         "RONDB-1150 (X5.10), PMEM mode with DurableCommits: as "
          "GciLedgerSR, each system restart with abort followed by one with "
          "the writers parked; every acknowledged transaction stays") {
   TC_PROPERTY("LedgerSeconds", Uint32(5));
@@ -2766,7 +2766,7 @@ TESTCASE("GciLedgerDurableSR",
   FINALIZER(runDropTable);
 }
 TESTCASE("GciLedgerDurablePowerLoss",
-         "RONDB-1150 (X5.10), PMEM mode with __DurableCommits and "
+         "RONDB-1150 (X5.10), PMEM mode with DurableCommits and "
          "__RedoLogPmemPowerLossEmulation: as GciLedgerPowerLoss; every "
          "acknowledged transaction stays") {
   TC_PROPERTY("LedgerSeconds", Uint32(5));
@@ -2780,7 +2780,7 @@ TESTCASE("GciLedgerDurablePowerLoss",
   FINALIZER(runDropTable);
 }
 TESTCASE("GciLedgerDurableCrashPoints",
-         "RONDB-1150 (X5.10), PMEM mode with __DurableCommits and "
+         "RONDB-1150 (X5.10), PMEM mode with DurableCommits and "
          "StopOnError=0: the error inserts of phase 2 of a system restart, "
          "5185-5190 and 7262, and every node stale (993), which must end "
          "the restart with an error; every acknowledged transaction "
@@ -2795,7 +2795,7 @@ TESTCASE("GciLedgerDurableCrashPoints",
   FINALIZER(runDropTable);
 }
 TESTCASE("GciLedgerDurableNodeFailure",
-         "RONDB-1150 (X6.8), PMEM mode with __DurableCommits: a node failure "
+         "RONDB-1150 (X6.8), PMEM mode with DurableCommits: a node failure "
          "in the durable tail (D3), the stop of the others as they record it "
          "(error insert 990), an unsafe shutdown (992); the stale node "
          "joins by a node restart and every acknowledged transaction "
@@ -2810,7 +2810,7 @@ TESTCASE("GciLedgerDurableNodeFailure",
   FINALIZER(runDropTable);
 }
 TESTCASE("GciLedgerDurableNoNodeFailRecord",
-         "RONDB-1150 (X6.8), PMEM mode with __DurableCommits: as D3 of "
+         "RONDB-1150 (X6.8), PMEM mode with DurableCommits: as D3 of "
          "GciLedgerDurableNodeFailure with the failure not recorded (error "
          "insert 991); the check must find the divergence") {
   TC_PROPERTY("LedgerSeconds", Uint32(3));
@@ -2823,7 +2823,7 @@ TESTCASE("GciLedgerDurableNoNodeFailRecord",
   FINALIZER(runDropTable);
 }
 TESTCASE("GciLedgerDurablePartialSR",
-         "RONDB-1150 (X6.8), PMEM mode with __DurableCommits, two node "
+         "RONDB-1150 (X6.8), PMEM mode with DurableCommits, two node "
          "groups: a system restart without a node (D5), one that waits "
          "for the peer of a stale node (D4), and one that waits for a node "
          "group with all its nodes (X6.9); every acknowledged transaction "
@@ -2838,7 +2838,7 @@ TESTCASE("GciLedgerDurablePartialSR",
   FINALIZER(runDropTable);
 }
 TESTCASE("GciLedgerDurableSchema",
-         "RONDB-1150 (X5.9), PMEM mode with __DurableCommits: create table, "
+         "RONDB-1150 (X5.9), PMEM mode with DurableCommits: create table, "
          "add column, add partitions and drop table in the durable tail, "
          "then every node stops; the changed tables and their rows are as "
          "acknowledged") {
