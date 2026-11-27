@@ -1995,6 +1995,19 @@ numbers, extend the tools, document the feature.
 the E7 debug check; benchmark report; `redoLogReader` shows the durable
 records; rondb-docs chapters merged.
 
+**State (2026-11-27): X8.1 written, to be built and tested; X8.2 next.**
+Re-scoped against the code: a durable COMMIT has its barrier at three C
+places, `commitReqLab()` after TUP's loop wrote the COMMITs (the hot
+path, a COMMIT or durable COMMIT from TC, packed or not), the log queue
+(`LOG_COMMIT_QUEUED`, when the log buffer was full) and the COMMIT of a
+dirty write; every signal that depends on the COMMIT checks
+`redoCheckPersisted()` first in debug builds (E7). X8.1 and X8.2 differ
+in more than the batch: within one PACKED_SIGNAL no other signal can
+reach an operation that waits, across a scheduler round one can (a
+COMMIT sent again by TC, LQH_TRANSREQ of a takeover), so X8.2 needs
+each such signal to resume the operation first. X8.1 is safe alone and
+comes first.
+
 ### X8.1 One barrier per `execPACKED_SIGNAL` (M, 4 pd)
 
 `Dblqh::execPACKED_SIGNAL` (`DblqhMain.cpp:6329`) [V] handles up to about
@@ -2002,6 +2015,26 @@ records; rondb-docs chapters merged.
 its record is appended, run one `redoPersist` per dirty part at the end,
 then resume the parked ops (their sends and local commits). The Q1 rule
 holds: the dependent signals wait for the fence.
+
+**Written (2026-11-27), to be built and tested.**
+- Only the hot C place parks: `commitReqLab()` keeps the operation in
+  `c_redo_parked` (8 entries; a packed signal has at most 5 COMMITs, 4
+  durable ones) while `c_redo_park_active`, and returns; the rest of it
+  is `commitReqAfterPersist()`, with error insert 5180. When the array is
+  full the operation has its barrier at once. The log queue and the dirty
+  write keep theirs.
+- `redoResumeParked()` at the end of the PACKED_SIGNAL: the barriers
+  first, the first operation of a log part persisting all of it, then
+  each operation in order. COMMITREQ of a takeover never comes packed.
+- DUMP 2368 4 (skip a barrier) makes it go one operation at a time, so
+  that the next barrier of the part does not make good the skipped one
+  and the check still stops the node (`ndb_redo_pmem_persist_check`).
+- On by default; DUMP 2368 5 gives every COMMIT its own barrier, 6 turns
+  batching on again (for X8.3). DUMP 2368 2 prints the COMMITs that
+  waited and the barriers they waited for, per LDM; ndbinfo
+  `redo_log_pmem.barriers` counts every barrier.
+- Parks only operations with a barrier at commit: durable ones, or all
+  with the benchmark switch (DUMP 2368 1).
 
 ### X8.2 One fence per log part per scheduler round (L, 8 pd)
 

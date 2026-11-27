@@ -2922,6 +2922,11 @@ void Dblqh::execREAD_CONFIG_REQ(Signal *signal) {
     c_redo_pmem_persist_commit = 0;
     c_redo_pmem_skip_barrier = false;
     c_redo_pmem_persist_delay_ns = 0;
+    c_redo_park_batch = true;
+    c_redo_park_active = false;
+    c_redo_park_count = 0;
+    c_redo_park_commits = 0;
+    c_redo_park_barriers = 0;
     c_redo_pmem_tear = 0;
     c_redo_pmem_seed = 0;
     c_redo_pmem_rand = 0;
@@ -6547,6 +6552,8 @@ void Dblqh::execPACKED_SIGNAL(Signal* signal)
                                     5));
   }
 
+  /* RONDB-1150, X8.1: the COMMITs that wait for a barrier wait for one */
+  c_redo_park_active = c_redo_pmem_format && c_redo_park_batch;
   do
   {
     Uint32 firstWord = packedData[step];
@@ -6640,6 +6647,11 @@ void Dblqh::execPACKED_SIGNAL(Signal* signal)
   }//while
   while (length > step);
   ndbrequire(length == step);
+  c_redo_park_active = false;
+  if (unlikely(c_redo_park_count > 0)) {
+    jam();
+    redoResumeParked(signal);
+  }
   return;
 }  // Dblqh::execPACKED_SIGNAL()
 
@@ -15744,16 +15756,34 @@ void Dblqh::commitReqLab(Signal *signal, Uint32 gci_hi, Uint32 gci_lo,
   if (unlikely(c_redo_pmem_format) && regTcPtr->m_redo_end_lsn != 0) {
     /**
      * RONDB-1150 (S5.8): a C place of E8, one barrier after TUP's loop
-     * over the operations on the row wrote their COMMITs.
+     * over the operations on the row wrote their COMMITs. X8.1: in a
+     * PACKED_SIGNAL the operation waits for the one barrier of its log
+     * part at the end of the signal (redoResumeParked()).
      */
     jam();
-    redoPersistOp(signal, regTcPtr);
-    if (ERROR_INSERTED(5180) &&
-        regTcPtr->m_committed_log_space == PmemRedo::RESERVED_TAIL) {
-      redoPmemCrashPoint(5180, nullptr,
-                         "a durable COMMIT persistent, before COMMITTED or "
-                         "COMMIT to the next replica");
+    if (c_redo_park_active && c_redo_park_count < REDO_PARK_MAX) {
+      jam();
+      c_redo_parked[c_redo_park_count++] = tcConnectptr.i;
+      return;
     }
+    redoPersistOp(signal, regTcPtr);
+  }
+  commitReqAfterPersist(signal, tcConnectptr);
+}  // Dblqh::commitReqLab()
+
+/**
+ * The rest of commitReqLab() once the COMMIT records of the operation are
+ * persistent: the signals that depend on them, and the local commit
+ */
+void Dblqh::commitReqAfterPersist(Signal *signal,
+                                  TcConnectionrecPtr tcConnectptr) {
+  TcConnectionrec *const regTcPtr = tcConnectptr.p;
+  if (unlikely(c_redo_pmem_format) && regTcPtr->m_redo_end_lsn != 0 &&
+      ERROR_INSERTED(5180) &&
+      regTcPtr->m_committed_log_space == PmemRedo::RESERVED_TAIL) {
+    redoPmemCrashPoint(5180, nullptr,
+                       "a durable COMMIT persistent, before COMMITTED or "
+                       "COMMIT to the next replica");
   }
   if (unlikely(regTcPtr->seqNoReplica == 0 ||
                regTcPtr->activeCreat == Fragrecord::AC_NR_COPY)) {
@@ -15769,7 +15799,7 @@ void Dblqh::commitReqLab(Signal *signal, Uint32 gci_hi, Uint32 gci_lo,
     return;
   }  // if
   commitReplyLab(signal, tcConnectptr.p);
-}  // Dblqh::commitReqLab()
+}  // Dblqh::commitReqAfterPersist()
 
 void Dblqh::execLQH_WRITELOG_REQ(Signal *signal) {
   jamEntryDebug();
@@ -45859,6 +45889,8 @@ void Dblqh::execDUMP_STATE_ORD(Signal *signal) {
      *         the mappings (redoPmemVerify())
      *   4     debug builds: skip the next barrier at a C place, so that
      *         the check before the dependent signal stops the node (S5.7)
+     *   5, 6  X8.1: every COMMIT of a PACKED_SIGNAL has its own barrier,
+     *         or those of a log part share one at the end (the default)
      */
     const Uint32 cmd = signal->getLength() >= 2 ? signal->theData[1] : ~0u;
     if (m_is_query_block) return;
@@ -45887,6 +45919,12 @@ void Dblqh::execDUMP_STATE_ORD(Signal *signal) {
           ptrAss(logPartPtr, logPartRecord);
           redoPmemPrintCounters(logPartPtr.p);
         }
+        g_eventLogger->info(
+            "LDM(%u): PMEM REDO: %llu COMMITs of a PACKED_SIGNAL waited for "
+            "%llu barriers at its end; batching %s",
+            instance(), (unsigned long long)c_redo_park_commits,
+            (unsigned long long)c_redo_park_barriers,
+            c_redo_park_batch ? "on" : "off");
         break;
       case 3:
         jam();
@@ -45907,12 +45945,24 @@ void Dblqh::execDUMP_STATE_ORD(Signal *signal) {
         }
         break;
 #endif
+      case 5:
+      case 6:
+        jam();
+        c_redo_park_batch = cmd == 6;
+        if (instance() <= 1) {
+          infoEvent("PMEM REDO: the COMMITs of a PACKED_SIGNAL %s on node %u",
+                    cmd == 6 ? "share a barrier per log part"
+                             : "have a barrier each",
+                    getOwnNodeId());
+        }
+        break;
       default:
         jam();
         if (instance() <= 1) {
           infoEvent("DUMP 2368 %u: unknown, use 0|1 (persist at commit), "
-                    "2 (counters), 3 (verify) or 4 (skip a barrier, debug "
-                    "builds)",
+                    "2 (counters), 3 (verify), 4 (skip a barrier, debug "
+                    "builds) or 5|6 (a barrier per COMMIT or per log part "
+                    "of a PACKED_SIGNAL)",
                     cmd);
         }
         break;

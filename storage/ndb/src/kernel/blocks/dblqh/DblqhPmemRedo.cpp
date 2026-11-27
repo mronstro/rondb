@@ -865,6 +865,53 @@ void Dblqh::redoPersistOp(Signal *signal, const TcConnectionrec *regTcPtr) {
   unlock_log_part(logPartPtrP);
 }
 
+/**
+ * X8.1 (impl_next_steps.md): the end of a PACKED_SIGNAL whose COMMITs
+ * waited in commitReqLab(). First the barriers: the first operation of a
+ * log part persists all of it, so the others of the part have none. Then
+ * each operation goes on in the order it came, with the signals that
+ * depend on its COMMIT. No other signal ran in between, so none found an
+ * operation waiting. With a barrier to skip (DUMP 2368 4) each operation
+ * has its own and goes on at once, as without batching, so that the next
+ * barrier of the log part does not make good the skipped one.
+ */
+void Dblqh::redoResumeParked(Signal *signal) {
+  const Uint32 count = c_redo_park_count;
+  c_redo_park_count = 0;
+  TcConnectionrecPtr tcPtr;
+#if defined(VM_TRACE) || defined(ERROR_INSERT)
+  if (unlikely(c_redo_pmem_skip_barrier)) {
+    jam();
+    for (Uint32 i = 0; i < count; i++) {
+      tcPtr.i = c_redo_parked[i];
+      ndbrequire(tcConnect_pool.getValidPtr(tcPtr));
+      redoPersistOp(signal, tcPtr.p);
+      commitReqAfterPersist(signal, tcPtr);
+    }
+    return;
+  }
+#endif
+  for (Uint32 i = 0; i < count; i++) {
+    tcPtr.i = c_redo_parked[i];
+    ndbrequire(tcConnect_pool.getValidPtr(tcPtr));
+    LogPartRecord *const logPartPtrP = tcPtr.p->m_log_part_ptr_p;
+    lock_log_part(logPartPtrP);
+    const Uint64 persisted = logPartPtrP->m_pmem_persisted_lsn;
+    redoPersistCommit(signal, logPartPtrP, tcPtr.p);
+    if (logPartPtrP->m_pmem_persisted_lsn != persisted) {
+      c_redo_park_barriers++;
+    }
+    unlock_log_part(logPartPtrP);
+  }
+  c_redo_park_commits += count;
+  for (Uint32 i = 0; i < count; i++) {
+    jam();
+    tcPtr.i = c_redo_parked[i];
+    ndbrequire(tcConnect_pool.getValidPtr(tcPtr));
+    commitReqAfterPersist(signal, tcPtr);
+  }
+}
+
 /* S5.7: a dependent signal would go before its REDO record is persistent */
 void Dblqh::redoCheckPersistedFailed(const TcConnectionrec *regTcPtr,
                                      Uint64 persisted, Uint32 line) {

@@ -4484,6 +4484,7 @@ private:
   void redoPersistCommit(Signal *signal, LogPartRecord *logPartPtrP,
                          const TcConnectionrec *regTcPtr);
   void redoPersistOp(Signal *signal, const TcConnectionrec *regTcPtr);
+  void redoResumeParked(Signal *signal);
   void redoCheckPersisted(const TcConnectionrec *regTcPtr, Uint32 line);
   void redoSetDurable(TcConnectionrec *regTcPtr, Uint32 opCount);
   bool redoLocalCommitAtComplete(TcConnectionrec *regTcPtr);
@@ -4825,6 +4826,7 @@ private:
                        ScanRecord *const scanPtr, Fragrecord *const fragPtr);
   void commitReqLab(Signal *signal, Uint32 gci_hi, Uint32 gci_lo,
                     TcConnectionrecPtr);
+  void commitReqAfterPersist(Signal *signal, TcConnectionrecPtr);
   void completeTransLastLab(Signal *signal, TcConnectionrecPtr);
   void restart_queued_scan(Signal *, Uint32);
   void tupScanCloseConfLab(Signal *signal, TcConnectionrecPtr);
@@ -5910,6 +5912,23 @@ public:
   Uint32 c_redo_pmem_persist_commit;
   bool c_redo_pmem_skip_barrier;
   Uint32 c_redo_pmem_persist_delay_ns;
+  /**
+   * RONDB-1150, X8.1: the COMMITs of a PACKED_SIGNAL that wait for a
+   * barrier (commitReqLab()) wait for one barrier per log part at the end
+   * of the signal (redoResumeParked()), when no other signal can reach
+   * them. c_redo_park_active while such a signal runs, c_redo_parked the
+   * operations; when it is full an operation has its own barrier.
+   * c_redo_park_batch off gives every COMMIT its own (DUMP 2368 5, on
+   * with 6). The counters: COMMITs that waited, and the barriers they
+   * waited for.
+   */
+  static constexpr Uint32 REDO_PARK_MAX = 8;
+  bool c_redo_park_batch;
+  bool c_redo_park_active;
+  Uint32 c_redo_park_count;
+  Uint32 c_redo_parked[REDO_PARK_MAX];
+  Uint64 c_redo_park_commits;
+  Uint64 c_redo_park_barriers;
   /**
    * RONDB-1150, PMEM format, the crash error inserts (recovery plan S7.1,
    * S7.2), used in error insert builds only:
