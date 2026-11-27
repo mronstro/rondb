@@ -678,11 +678,29 @@ collectResults(SignalSender &ss,
 {
   V("Waiting for results...\n");
 
+  /* The aggregate SCAN_TABCONF (EndOfData, one op) comes from DBTC and
+   * carries the number of aggregate rows in its op area
+   * ([receiverId, RNIL, rows, moreMask, ...]).  The rows themselves are
+   * TRANSID_AI signals sent by the LDM threads, each over its own send
+   * path, so a row can arrive after the conf (testJoinAggSpj Test 8 lost
+   * a group evicted late in the scan under error insert 4041).  Collect
+   * until all announced rows are in, as the NDB API does.  Each
+   * TRANSID_AI is one row. */
+  bool gotEndOfData = false;
+  bool haveExpected = false;
+  Uint32 expectedRows = 0;
+  Uint32 collectedRows = 0;
   bool done = false;
   while (!done) {
     SimpleSignal *resp = waitForSignal(ss, WAIT_TIMEOUT_MS,
                                         "TRANSID_AI/SCAN_TABCONF");
-    if (resp == nullptr) return -1;
+    if (resp == nullptr) {
+      if (gotEndOfData) {
+        fprintf(stderr, "collectResults: timeout with %u of %u announced "
+                "aggregate rows collected\n", collectedRows, expectedRows);
+      }
+      return -1;
+    }
 
     int gsn = getGsn(resp);
 
@@ -691,6 +709,7 @@ collectResults(SignalSender &ss,
       if (parseTransIdAI(resp, result) != 0) return -1;
       V("  TRANSID_AI: n_gb_cols=%u n_agg=%u n_groups=%u\n",
         result.n_gb_cols, result.n_agg_results, result.n_groups);
+      collectedRows++;
       allResults.push_back(std::move(result));
     }
     else if (gsn == GSN_SCAN_TABCONF) {
@@ -701,7 +720,13 @@ collectResults(SignalSender &ss,
       V("  SCAN_TABCONF: ops=%u endOfData=%d\n", ops, (int)endOfData);
 
       if (endOfData) {
-        done = true;
+        if (ops >= 1 && resp->header.theLength >= 7) {
+          expectedRows = d[6];
+          haveExpected = true;
+          V("  announced aggregate rows: %u (collected so far: %u)\n",
+            expectedRows, collectedRows);
+        }
+        gotEndOfData = true;
       } else {
         Uint32 sigLen = resp->header.theLength;
         Uint32 words_per_op = ops > 0 ? (sigLen - 4) / ops : 4;
@@ -741,6 +766,7 @@ collectResults(SignalSender &ss,
     else {
       V("  Ignoring GSN %d\n", gsn);
     }
+    done = gotEndOfData && (!haveExpected || collectedRows >= expectedRows);
   }
 
   return 0;

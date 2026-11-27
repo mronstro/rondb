@@ -1202,11 +1202,29 @@ collectResults(SignalSender &ss,
   Uint32 minBatchGroups = UINT32_MAX;
   Uint32 maxBatchGroups = 0;
 
+  /* The aggregate SCAN_TABCONF (EndOfData, one op) comes from DBTC and
+   * carries the number of aggregate rows in its op area
+   * ([receiverId, RNIL, rows, moreMask, ...]).  The rows themselves are
+   * TRANSID_AI signals sent by the LDM threads, each over its own send
+   * path, so a row can arrive after the conf (testJoinAggSpj Test 8 lost
+   * a group evicted late in the scan under error insert 4041).  Collect
+   * until all announced rows are in, as the NDB API does.  Each
+   * TRANSID_AI is one row. */
+  bool gotEndOfData = false;
+  bool haveExpected = false;
+  Uint32 expectedRows = 0;
+  Uint32 collectedRows = 0;
   bool done = false;
   while (!done) {
     SimpleSignal *resp = waitForSignal(ss, WAIT_TIMEOUT_MS,
                                         "TRANSID_AI/SCAN_TABCONF");
-    if (resp == nullptr) return -1;
+    if (resp == nullptr) {
+      if (gotEndOfData) {
+        fprintf(stderr, "collectResults: timeout with %u of %u announced "
+                "aggregate rows collected\n", collectedRows, expectedRows);
+      }
+      return -1;
+    }
 
     int gsn = getGsn(resp);
 
@@ -1220,6 +1238,7 @@ collectResults(SignalSender &ss,
         result.n_gb_cols, result.n_agg_results, result.n_groups);
       batchGroups += result.n_groups;
       batchTransIdAI++;
+      collectedRows++;
       allResults.push_back(std::move(result));
     }
     else if (gsn == GSN_SCAN_TABCONF) {
@@ -1237,7 +1256,13 @@ collectResults(SignalSender &ss,
       batchTransIdAI = 0;
 
       if (endOfData) {
-        done = true;
+        if (ops >= 1 && resp->header.theLength >= 7) {
+          expectedRows = d[6];
+          haveExpected = true;
+          V("  announced aggregate rows: %u (collected so far: %u)\n",
+            expectedRows, collectedRows);
+        }
+        gotEndOfData = true;
       } else {
         /* OpData may be inline or in long section 0. DBTC uses 5-word
            OpData when version >= 8.0.20: {apiPtrI,tcPtrI,rows,len,hasMore}.
@@ -1297,8 +1322,11 @@ collectResults(SignalSender &ss,
     else {
       V("  Ignoring GSN %d\n", gsn);
     }
+    done = gotEndOfData && (!haveExpected || collectedRows >= expectedRows);
   }
 
+  /* Rows that arrived after the last SCAN_TABCONF. */
+  totalGroups += batchGroups;
   if (minBatchGroups == UINT32_MAX) minBatchGroups = 0;
   minBatchGroupsOut = minBatchGroups;
   maxBatchGroupsOut = maxBatchGroups;
