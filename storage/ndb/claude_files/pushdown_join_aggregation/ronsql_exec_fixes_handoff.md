@@ -1,9 +1,11 @@
 # RONDB-1124 exec fixes: status and outstanding work
 
-Date: 2026-11-27. Branch `RONDB-1124-exec-fixes` on `origin`
-(https://github.com/mronstro/rondb), pushed at `2ef4f179545`. PR #1231 was
-merged into 26.10-main on 2026-11-18; PR #1241 (logicalclocks/rondb, base
-26.10-main, open) holds the work after it. The open analysis bugs 8, 9, 11
+Date: 2026-11-27. Branch `RONDB-1124-ronsql-fixes` on `origin`
+(https://github.com/mronstro/rondb), pushed at `5a833c08c77`; it has no PR
+yet. It starts at `9ccc3cd1c7c`, the merge of PR #1241 (logicalclocks/rondb,
+base 26.10-main, branch `RONDB-1124-exec-fixes`) on 2026-11-27; PR #1231
+was merged on 2026-11-18. Do not commit to `RONDB-1124-exec-fixes` any
+more. The open analysis bugs 8, 9, 11
 and 12 and three gaps of §4.2 were fixed on 2026-11-24, one commit each
 (§2, §3). On 2026-11-25 most of what those fixes left open was fixed too
 (§3, §4), the JOIN_AGG and CTE signals got signal scopes (§3.5), and a
@@ -12,7 +14,10 @@ the `ronsql_join` Test 3 abort in the NDB API is fixed (§3.7). On
 2026-11-26 and 2026-11-27 a review of the executor closed most of the
 remaining raw-API gaps of §3.4, §4.1, §4.2 and §4.3, the other two
 candidates of §3.7, a race in the eviction of a join aggregation group, and
-four test bugs (§3.8); §4.4 lists what is still open.
+four test bugs (§3.8). After the merge of #1241, the new branch got tests
+for the untested paths of those fixes, T1 of testSpjMalformed created
+through mysqld, and three fixes for failures in test runs (§3.8); §4.4
+lists what is still open.
 
 This file is the starting point for whoever continues the work. It records:
 - what the analysis in `dblqh_ronsql_analysis.md` found;
@@ -420,6 +425,48 @@ Also on the branch, outside this list: `aa73f997980` (NdbReceiver calloc
 argument order, GCC 14), `d72c9437333` (aarch64 JIT veneer for a far
 helper), `0a84882d297` (TRPMAN state for CLOSE_COMREQ before READ_CONFIG).
 
+After the merge of #1241, on `RONDB-1124-ronsql-fixes`. Tests for the
+untested paths of the fixes above (details in §4.4):
+- `a7ed6e15f1c`, `2d2348f99c0`: testSpjMalformed no longer creates T1
+  through the NDB API. `spj_malformed_case.inc` creates `test.t1` through
+  mysqld, the program looks it up on database `test`, and P46 / P49 scan
+  its ordered index PRIMARY.
+- `ec7d6569aa1`: P61, the single-table paths of `b306c658e03` and
+  `9d013e4d714`.
+- `87e22a67135`: testCteNdbApiFilter Tests 36-39, the CTE_LOOKUP and CTE
+  ORDER BY paths of `e226cead16a`.
+- `78a8c325332`: testCteProtocol CK-1, a raw CTE_LOOKUP_REQ key entry
+  past the key.
+- `25a0544e76b`: DBTC error insert 8321 and testJoinAggNdbApi Test 27
+  (`2ce87f392be`). `completeJoinAggMainScan` is split out of the main
+  scan's end so that the insert can hold it.
+- `3790251ea75`: DBUG keyword `ndb_query_close_nodefail_at_end` in
+  `NdbQueryImpl::closeTcCursor` and testJoinAggNdbApi Test 28 (case (c)
+  of `81e0f764713`).
+- `20aec88d105`: testJoinAggNdbApi printed stale "OK" lines for Tests
+  23-29 that ran no test.
+
+Found by test runs:
+- `0bbb9ca0b8b`, `3538c2c0598`: the raw-signal collectors of
+  testJoinAggSpj (Test 8 lost groups), testStarJoinAggSpj,
+  testOuterJoinAgg, bench_q12_dbtc and bench_q9_dbtc stopped at the
+  aggregate SCAN_TABCONF with EndOfData. That conf comes from DBTC, while
+  the rows are TRANSID_AI signals from the LDM threads, so a row can
+  arrive after it: usually a group that a non-owner LDM thread evicted
+  late in the scan (error insert 4041). They now collect until the rows
+  announced in the conf's op area (`d[6]`) are in, as the NDB API and
+  testCteDbtc do. bench_q9_dbtc also adds each batch's groups to its
+  total.
+- `5a833c08c77` (ndbcluster): `ndb_quota.ndb_basic` got warning 1013
+  "index stats (RPK) for key PRIMARY: unexpected error 4721". After an
+  initial cluster start, the binlog thread's `ndb_index_stat_restart()`
+  clears the allow flag, but a stats round that is already reopening the
+  stats tables then set it to true again, so the startup wait in
+  `ha_ndbcluster.cc` saw the setup as complete while the restart was
+  still pending. The restart now also sets an atomic restart flag. The
+  stats thread clears it when it starts over, keeps the allow flag false
+  while the flag is set, and `is_setup_complete()` waits for it.
+
 ## 4. Gaps left by the fixes
 
 ### 4.1 RonSQL (the next session's area)
@@ -610,7 +657,8 @@ Optional, performance only:
   `ronsqltpch/handler_test.go`.
 - **Untested paths of the 2026-11-26 fixes:**
   - the CTE_LOOKUP probe and CTE ORDER BY paths of `e226cead16a` are
-    tested now: testCteNdbApiFilter Tests 36-38 (a BINARY parent column
+    tested now (`87e22a67135`, `78a8c325332`): testCteNdbApiFilter
+    Tests 36-38 (a BINARY parent column
     as a VARCHAR / LONGVARCHAR key whose length prefix runs past it:
     DBLQH 1265 on one data node, DBSPJ 20002 on more; 1265 with LIMIT
     and for a single-row CTE), Test 39 (a NaN DOUBLE / FLOAT GROUP BY
@@ -622,11 +670,13 @@ Optional, performance only:
     key with the CTE's GROUP BY type;
   - the single-table paths of `b306c658e03` (a GROUP BY or kOpLoadCol
     column id past the table, a pseudo column) and `9d013e4d714` (a TEXT
-    or BLOB GROUP BY column) are tested now: P61 changes one column id
+    or BLOB GROUP BY column) are tested now (`ec7d6569aa1`): P61
+    changes one column id
     of a finished NdbAggregator program for `test.p61_agg` and expects
     879 or 1869. The JIT arm of P61 (c) and (d) is not tested;
   - `2ce87f392be` and the reused-connection case (c) of `81e0f764713`
-    are tested now: testJoinAggNdbApi Test 27
+    are tested now (`25a0544e76b`, `3790251ea75`): testJoinAggNdbApi
+    Test 27
     (`ndb_push_agg.testJoinAggNdbApiCrossedClose`, error insert 8321) and
     Test 28 (`ndb_push_agg.testJoinAggNdbApiCloseNodeFail`, DBUG keyword
     `ndb_query_close_nodefail_at_end`), both debug only. Case (c) is
@@ -636,7 +686,8 @@ Optional, performance only:
 - **NdbAggregator follows no CASE arms:** a program in which a string
   reaches arithmetic on one path only passes the builder; the data node
   refuses it (`checkAggSlotKinds`).
-- **Tables created through the NDB API in tests: fixed.** testSpjMalformed
+- **Tables created through the NDB API in tests: fixed** (`a7ed6e15f1c`,
+  `2d2348f99c0`). testSpjMalformed
   created `TEST_DB.T1`, and P46 / P49 an ordered index on it, through the
   NDB API. `spj_malformed_case.inc` now creates `test.t1` through mysqld,
   the program looks it up, and P46 / P49 scan its PRIMARY ordered index;
@@ -650,7 +701,19 @@ Optional, performance only:
     (`81e0f764713` (c)) stays; a count of ApiConnectRecords there may
     drop by one after a timeout, which is that release, not a leak;
   - `evictOneGroup` still pops the group before it checks the size
-    (§4.2).
+    (§4.2);
+  - `ndb_quota.ndb_basic` and warning 4721 (`5a833c08c77`): the race
+    needs an initial cluster start just before the test, so a clean
+    `--repeat` run is weak evidence. If the warning comes back, check the
+    order of three lines in the mysqld log: the binlog thread's
+    "Signalling the index stat thread to restart", the stats thread's
+    "Initial restart detected", and the startup wait's
+    "[wait_setup_completed] Done!". With the fix, "Done!" comes after
+    "Initial restart detected";
+  - a block test that reads raw aggregate results must wait for the rows
+    announced in the EndOfData SCAN_TABCONF, not stop at the conf
+    (`0bbb9ca0b8b`, `3538c2c0598`); a new collector should copy
+    `collectResults` from testJoinAggSpj.
 
 ## 5. Rest of the analysis report (not started)
 
