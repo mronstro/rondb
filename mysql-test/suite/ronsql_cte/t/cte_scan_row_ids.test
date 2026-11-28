@@ -1,0 +1,131 @@
+# cte_scan_row_ids — the id of a row of a CTE scan, in a CTE of more groups
+# than an id has room for.
+#
+# A main query that scans a CTE and joins from it without aggregating gets
+# its rows through the NDB API, which pairs a CTE row with the rows joined
+# to it by the CTE row's correlation id.  DBSPJ and the API keep 16 bits of
+# that id and use it to find the row among the rows of its batch: bit 15 is
+# the API's skip flag, and DBSPJ uses the id as a position in a map of 4096
+# entries.  A row of a table scan is numbered within its batch.  DBLQH
+# numbered a row of a CTE scan with the number of its group in the whole
+# scan (cteScanEmitResults), which has bit 15 set from group 32768 on a
+# node and repeats its 16 bits from group 65536.
+#
+# Found by TPC-H Q18 written with a CTE of one group per order (1.5M groups
+# at scale factor 1, .bench_tpch in rondb-cli): the debug-build API stopped
+# RDRS on "(tupleId & skipTupleFlag) == 0" in
+# NdbResultStream::buildResultCorrelations.  A build without assertions
+# clears the flag bit of the CTE row's id, the joined row no longer finds
+# its CTE row, and the row is missing from the result.
+#
+# Here: 100000 groups on the suite's two data nodes, about 50000 each, so
+# about a third of a node's groups is numbered 32768 or more.  The filter on the
+# CTE's aggregate keeps 5000 of them, spread over the whole scan as in Q18,
+# and each joins to its own row by primary key.  (The mirror suites with
+# four or more data nodes hold fewer than 32768 groups per node and do not
+# reach the flag; the test is not copied to them.)
+#
+# Run:    ./mtr --suite=ronsql_cte cte_scan_row_ids
+# Record: ./mtr --suite=ronsql_cte --record cte_scan_row_ids
+
+--source include/have_ndb.inc
+
+--disable_warnings
+call mtr.add_suppression("Schema dist coordinator detected timeout");
+call mtr.add_suppression("Participant timeout");
+--enable_warnings
+
+--let $strict_diff=yes
+--let $EXPLAIN_FILE=$MYSQL_TMP_DIR/cte-scan-row-ids-explain.out
+
+--disable_query_log
+--disable_warnings
+
+# ord is unique like id but not declared so: the CTE groups by a column
+# that is no key, as Q18 groups lineitem by its order.
+CREATE TABLE csr_ord (
+  id  INT NOT NULL,
+  ord INT NOT NULL,
+  grp INT NOT NULL,
+  qty INT NOT NULL,
+  PRIMARY KEY USING HASH (id)
+) ENGINE=NDB;
+
+# Numbers helper 1..100000 (MEMORY, dropped below).
+CREATE TABLE csr_d (d INT) ENGINE=MEMORY;
+INSERT INTO csr_d VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9);
+CREATE TABLE csr_seq (n INT NOT NULL PRIMARY KEY) ENGINE=MEMORY;
+INSERT INTO csr_seq
+  SELECT a.d*10000 + b.d*1000 + c.d*100 + e.d*10 + f.d + 1
+  FROM csr_d a, csr_d b, csr_d c, csr_d e, csr_d f;
+
+# 100000 rows, inserted 4000 per transaction to stay well below
+# MaxNoOfConcurrentOperations (10000 in the MTR default config).
+# grp is 19 in one row of 20.
+--let $csr_lo=1
+while ($csr_lo <= 100000)
+{
+  --let $csr_hi=`SELECT $csr_lo + 3999`
+  eval INSERT INTO csr_ord
+    SELECT n, n, MOD(n, 20), MOD(n * 7919, 1009) + 1 FROM csr_seq
+    WHERE n BETWEEN $csr_lo AND $csr_hi;
+  --let $csr_lo=`SELECT $csr_lo + 4000`
+}
+DROP TABLE csr_seq;
+DROP TABLE csr_d;
+
+--enable_warnings
+--enable_query_log
+
+SELECT COUNT(*) AS csr_rows, COUNT(DISTINCT ord) AS csr_groups,
+       SUM(grp = 19) AS csr_kept FROM csr_ord;
+
+DELIMITER |;
+
+--echo
+--echo === csr-1: CTE scan of 100000 groups, 5000 kept by a filter on the
+--echo ===        aggregate, each joined to its row by primary key ===
+let $QUERY=
+WITH per_ord AS (
+SELECT ord AS k, SUM(grp) AS g, SUM(qty) AS q
+FROM csr_ord GROUP BY ord)
+SELECT per_ord.k, per_ord.q, o.id, o.qty
+FROM per_ord
+JOIN csr_ord AS o ON o.id = per_ord.k
+WHERE per_ord.g > 18;|
+--source suite/ronsql/include/ronsql_explain.inc
+--exec grep -qF '[ROOT] CTE_SCAN CTE:per_ord' $EXPLAIN_FILE
+--remove_file $EXPLAIN_FILE
+let $QUERY=
+WITH per_ord AS (
+SELECT ord AS k, SUM(grp) AS g, SUM(qty) AS q
+FROM csr_ord GROUP BY ord)
+SELECT per_ord.k, per_ord.q, o.id, o.qty
+FROM per_ord
+JOIN csr_ord AS o ON o.id = per_ord.k
+WHERE per_ord.g > 18;|
+--source suite/ronsql/include/ronsql_compare.inc
+# No recorded "Expected result" block: the strict diff inside
+# ronsql_compare.inc is the assert (5000 rows, 5001 lines with the header).
+
+--echo
+--echo === csr-2: the same scan with every group kept: full batches, so the
+--echo ===        rows of a batch are consecutive groups ===
+let $QUERY=
+WITH per_ord AS (
+SELECT ord AS k, SUM(grp) AS g, SUM(qty) AS q
+FROM csr_ord GROUP BY ord)
+SELECT per_ord.k, per_ord.q, o.id, o.qty
+FROM per_ord
+JOIN csr_ord AS o ON o.id = per_ord.k;|
+--source suite/ronsql/include/ronsql_compare.inc
+
+DELIMITER ;|
+
+--echo
+--echo === csr-3: no DBSPJ request left behind (DUMP 2650 stops a node on a leak) ===
+--exec $NDB_MGM -e "ALL DUMP 2650" > /dev/null
+
+--disable_query_log
+DROP TABLE csr_ord;
+--enable_query_log

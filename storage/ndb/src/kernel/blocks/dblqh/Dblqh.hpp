@@ -5706,7 +5706,7 @@ public:
 
     Uint32  iterBucket;      // Hash table iterator: bucket index
     char   *iterRaw;         // Hash table iterator: raw entry pointer
-    Uint32  groupsSent;      // Groups sent so far (for CORR_FACTOR ID)
+    Uint32  groupsSent;      // Groups walked so far (0: the scan starts)
     Uint32  attrInfoLen;     // Words of filter data (0 = no filter)
     Uint32  cinBufInline[CTE_SCAN_FILTER_INLINE_WORDS];
     Uint32 *cinBufOverflow;  // nullptr if attrInfoLen fits inline

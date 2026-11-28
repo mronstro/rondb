@@ -23620,13 +23620,36 @@ void Dblqh::cteScanEmitResults(Signal *signal, const CteScanReq &req,
     /* Visible slots only — hidden AVG-count companions never emit. */
     const Uint32 n_agg_results = interp->n_visible_results();
 
-    /* Resume from saved iterator position (O(1)) */
+    /* Resume from saved iterator position (O(1)).  groupIdx counts the
+     * groups walked so far, the rejected ones too: 0 says the scan starts. */
     Uint32 groupIdx = scanState->groupsSent;
     auto iter = (groupIdx == 0)
         ? gb_map->begin()
         : gb_map->iteratorAt(scanState->iterBucket,
                              scanState->iterRaw);
 
+    /**
+     * A row's correlation id is its number in this batch (numRowsSent),
+     * as for the rows of a table scan.
+     *
+     * DBSPJ and the NDB API keep 16 bits of the id and use it to find the
+     * row among the rows of its batch: DBSPJ as the position in a map of
+     * MaxCorrelationId (4096) entries (add_to_map), the API as the tuple
+     * id of the result stream, where bit 15 is the skip flag
+     * (NdbResultStream::buildResultCorrelations).  A batch is at most
+     * req.batchSize rows, which DBSPJ caps at 256, so the number in the
+     * batch fits both.
+     *
+     * The number of the group in the whole scan (groupIdx), which was sent
+     * here before, does not: it passes 4095 in a CTE of more groups than
+     * that on this node, bit 15 is set from group 32768, and above 65535
+     * two rows of one batch can get the same 16 bits.  Seen: a debug-build
+     * API stops on its assertion that bit 15 is clear (TPC-H Q18 with one
+     * group per order, 750000 groups per node at scale factor 1).  Not
+     * seen, but what the code does without the assertion: the API clears
+     * the flag bit of the CTE row's id, so the rows joined to it no longer
+     * find it and the row drops out of an inner join.
+     */
     for (; iter.valid(); gb_map->next(iter)) {
       /* Batch limit reached — pause for next CTE_SCAN_REQ */
       if (numRowsSent >= req.batchSize) {
@@ -23674,7 +23697,7 @@ void Dblqh::cteScanEmitResults(Signal *signal, const CteScanReq &req,
         params.flushData = req.resultData;
         params.residualRef = req.senderRef;
         params.residualData = req.senderData;
-        params.correlation = groupIdx;
+        params.correlation = numRowsSent;
         params.corrRootRcvr = req.resultData;
         params.useFlushAiFromFinalR = false;
 
@@ -23731,7 +23754,7 @@ void Dblqh::cteScanEmitResults(Signal *signal, const CteScanReq &req,
         if (likely(emitOk && outPos + 2 <= ZATTR_BUFFER_SIZE)) {
           AttributeHeader::init(&outBuf[outPos],
                                 AttributeHeader::CORR_FACTOR32, 4);
-          outBuf[outPos + 1] = groupIdx;
+          outBuf[outPos + 1] = numRowsSent;
           outPos += 2;
         } else {
           jam();
