@@ -845,6 +845,8 @@ func (s *Shell) executeInternal(line string) error {
 			numOps = n
 		}
 		return s.runBenchRonSQL(queryName, numThreads, numOps)
+	case "bench_tpch":
+		return s.runBenchTPCH(parts[1:])
 	case "list_query_ronsql":
 		s.listRonSQLBenchQueries()
 		return nil
@@ -4217,6 +4219,7 @@ Commands:
     .list_query_ronsql / .list_query_sql   List query names with descriptions
     .query_ronsql / .query_sql <name>      Print the SQL a query name represents
     .explain_ronsql / .explain_sql <name>  EXPLAIN via RonSQL / the MySQL server
+    .bench_tpch                            The 22 TPC-H queries on RonSQL and MySQL (see .help bench)
 
   Internal commands:
     .browse             Open database browser (TUI)
@@ -4305,6 +4308,24 @@ Internal benchmark commands (T=threads, N=requests, R=rows/req, W=write%, S=seco
                                          (comparative baseline; also tpch_q* official
                                          TPC-H and ORDER BY/LIMIT fs queries)
     .bench_sql list                      List available SQL benchmark queries
+
+  TPC-H, all 22 queries (need .load_tpch first; RonSQL and the MySQL server on the same statement):
+    .bench_tpch                          List the 22 queries: which run as they are, which run rewritten
+    .bench_tpch missing                  RonSQL features the official queries need, with the queries per feature
+    .bench_tpch show <qN> [form]         Print the SQL of a query (form: official | original | rewritten)
+    .bench_tpch explain <qN> [form] [engine]  EXPLAIN through RonSQL (default) or mysql
+    .bench_tpch indexes                  Create the secondary indexes the RonSQL forms join through
+    .bench_tpch check [qN ...]           Parse and plan the RonSQL forms (EXPLAIN; nothing executes)
+    .bench_tpch verify [qN ...] [form]   Run once on both engines and compare the results
+    .bench_tpch original [qN ...] [T] [N] [engine]   Phase 1: the queries RonSQL runs in their original form
+    .bench_tpch rewritten [qN ...] [T] [N] [engine]  Phase 2: the rewritten queries
+    .bench_tpch all [qN ...] [T] [N] [engine]  Phase 1, then phase 2 (engine: both | ronsql | mysql; default both, 1x3)
+    .bench_tpch official [qN ...] [T] [N]  The official formulations on the MySQL server
+    .bench_tpch <qN> [qN ...] [T] [N] [engine]  Every form of the named queries
+    qN names the queries to run (q4, q4 q18 or q4,q18); every query when none is named
+    --show prints the SQL of each statement that check, verify or a run executes
+    --straight makes the MySQL server join in the order of the statement (SELECT STRAIGHT_JOIN),
+               as RonSQL does: with verify, a run, or explain <qN> [form] mysql
 
   Query inspection (same named queries as the analytics benchmarks):
     .list_query_ronsql / .list_query_sql List query names with short descriptions
@@ -4432,9 +4453,49 @@ Common parameters:
    unsupported shape fails immediately with the RonSQL error), primes caches,
    and prints its latency and result row count before the timed run begins.
 
-   Note: if tpch was loaded by an older CLI build, run .drop_tpch and reload
-   to pick up the secondary indexes the benchmarks use (most recently
-   orders(o_orderdate) for the recent-window fs queries).
+   TPC-H, all 22 queries (.bench_tpch): every query has up to three forms.
+     official    the TPC-H formulation in MySQL dialect (MySQL only)
+     original    the official query in RonSQL dialect - comma joins as
+                 JOIN ... ON, BETWEEN as a range, date arithmetic as a
+                 literal - with the same columns and rows; only for the
+                 queries RonSQL runs as they are
+     rewritten   the query in a shape RonSQL runs (CTEs for subqueries and
+                 derived tables, a pivot for GROUP BY on an expression)
+   The original and rewritten forms are SQL the MySQL server accepts too,
+   so each runs on both engines and the summary puts them side by side.
+
+     .bench_tpch                     Which queries run, and in which form
+     .bench_tpch missing             What RonSQL lacks for the official forms
+     .bench_tpch show q9             The three forms of Q9 and what differs
+     .bench_tpch indexes             Indexes the RonSQL join orders need
+     .bench_tpch check               RonSQL parses and plans every form
+     .bench_tpch verify              Same result on RonSQL and MySQL?
+     .bench_tpch verify q18          ... for Q18 only
+     .bench_tpch original 1 3        Phase 1: original forms, both engines
+     .bench_tpch rewritten 1 3       Phase 2: rewritten forms, both engines
+     .bench_tpch rewritten q4 q18 1 3  Phase 2 for Q4 and Q18 only
+     .bench_tpch all q5 1 3 --show   Both forms of Q5, printing the SQL of each
+     .bench_tpch all q5 1 3 --straight  ... with MySQL joining in the statement's order
+     .bench_tpch all 1 3 ronsql      Both phases on RonSQL only
+     .bench_tpch official 1 1        Official formulations on MySQL
+     .bench_tpch q5 4 10             Every form of Q5, 4 threads x 10
+
+   RonSQL joins in the order the statement gives, so each form names its
+   tables in the order that reads the fewest rows.  MySQL chooses its own
+   order for the same text.  Run verify once after loading: check stops
+   at EXPLAIN, and RonSQL refuses some shapes only when it builds the
+   pushed join or runs it.  The forms were written from the RonSQL source
+   and say in their note (.bench_tpch show) which shapes no test covers.
+
+   Note: if tpch was loaded by an older CLI build, run .drop_tpch and reload.
+   Since 2026-11-27 .load_tpch fills the tables by the TPC-H data rules
+   (lineitems follow their order's date and their part's suppliers, order
+   keys use the first 8 of every 32 values, 1 to 7 lineitems per order);
+   data loaded before that has other keys and other values, and the
+   {KEY} placeholders on orders and the TPC-H literals do not fit it.
+   Data loaded before 2026-11-28 also has its CHAR values filled with
+   NUL bytes instead of spaces, which the MySQL server and RonSQL return
+   differently: .bench_tpch verify reports every such result as different.
 
    To start a benchmark cluster (mysqld + ndbmtd + RDRS) via MTR:
      cd mysql-test
@@ -4659,6 +4720,7 @@ func (s *Shell) getCompleter() *readline.PrefixCompleter {
 		readline.PcItem(".bench_rdrs"),
 		readline.PcItem(".bench_rdrs_cont"),
 		readline.PcItem(".bench_ronsql", ronsqlBenchCompletions()...),
+		readline.PcItem(".bench_tpch", tpchBenchCompletions()...),
 		readline.PcItem(".list_query_ronsql"),
 		readline.PcItem(".list_query_sql"),
 		readline.PcItem(".query_ronsql", ronsqlQueryNameCompletions()...),

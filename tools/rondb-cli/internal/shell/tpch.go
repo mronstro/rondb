@@ -25,10 +25,32 @@
 
 package shell
 
+// .load_tpch: the TPC-H tables, filled as the TPC-H specification says
+// (clause 4.2.3, "Test Database Data Generation"): the value domains, the
+// keys that tie the tables together and the dependencies between columns
+// are the standard ones, so the 22 queries, with their standard
+// substitution parameters, select the share of rows they select on dbgen
+// data.  The values themselves are not dbgen's: dbgen draws them from its
+// seeded random streams, this loader from a generator of its own, seeded
+// per row, so a result differs from the published TPC-H answers.
+//
+// What the queries rely on, all kept:
+//   - a lineitem's supplier is one of its part's four partsupp suppliers;
+//   - the ship, commit and receipt dates of a lineitem follow its order's
+//     date, the return flag and line status follow the dates, the order
+//     status follows the line statuses and the order total the lines;
+//   - an order has 1 to 7 lineitems; a third of the customers has none;
+//   - order keys use the first 8 of every 32 values;
+//   - a phone number starts with the nation key plus 10;
+//   - p_brand follows p_mfgr, p_type has three syllables, comments are
+//     text of the TPC-H grammar, and a few supplier comments carry
+//     "Customer ... Complaints".
+
 import (
 	"fmt"
 	"math"
-	"math/rand"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,16 +60,15 @@ import (
 	"github.com/logicalclocks/rondb/tools/rondb-cli/internal/ui"
 )
 
-// TPC-H scale factor row counts
+// Rows at scale factor 1 (TPC-H clause 4.2.5).
 const (
-	tpchRegionCount   = 5     // Fixed
-	tpchNationCount   = 25    // Fixed
-	tpchCustomerBase  = 150000
-	tpchSupplierBase  = 10000
-	tpchPartBase      = 200000
-	tpchPartsuppBase  = 800000  // 4 per part
-	tpchOrdersBase    = 1500000
-	tpchLineitemBase  = 6000000 // ~4 per order average
+	tpchRegionCount  = 5  // Fixed
+	tpchNationCount  = 25 // Fixed
+	tpchCustomerBase = 150000
+	tpchSupplierBase = 10000
+	tpchPartBase     = 200000  // and 4 partsupp rows per part
+	tpchOrdersBase   = 1500000 // and 1 to 7 lineitems per order, 4 on average
+	tpchClerkBase    = 1000
 )
 
 // tpchScaled returns base rows scaled by a (possibly fractional) scale
@@ -62,8 +83,8 @@ func tpchScaled(base int, sf float64) int {
 }
 
 // tpchCustomersWithOrders is the number of customers in 1..customerCount
-// that get orders: TPC-H (dbgen) never gives an order to a customer whose
-// key is a multiple of 3, so a third of the customers have none (Q13's
+// that get orders: TPC-H never gives an order to a customer whose key is
+// a multiple of 3, so a third of the customers have none (Q13's
 // zero-order bucket, Q22's NOT EXISTS anti-join).
 func tpchCustomersWithOrders(customerCount int) int {
 	return customerCount - customerCount/3
@@ -73,6 +94,63 @@ func tpchCustomersWithOrders(customerCount int) int {
 // customer key that is not a multiple of 3: 1, 2, 4, 5, 7, ...
 func tpchOrderCustKey(i int) int {
 	return 3*(i/2) + i%2 + 1
+}
+
+// tpchOrderKey is the key of the i-th order, i from 1.  TPC-H populates
+// the first 8 keys of every 32: the key keeps the low 3 bits of i and
+// moves the rest two bits up (1..7, 32..39, 64..71, ...).
+func tpchOrderKey(i int) int64 {
+	return (int64(i)>>3)<<5 | int64(i)&7
+}
+
+// tpchOrderIndex is the inverse of tpchOrderKey: the number of the order
+// with that key, which is also how many orders have a key up to it.
+func tpchOrderIndex(key int64) int {
+	return int((key>>5)<<3 | key&7)
+}
+
+// tpchPartSupplier is the j-th (0..3) supplier of a part, the PS_SUPPKEY
+// formula of the specification; a lineitem takes its supplier from it.
+func tpchPartSupplier(partKey, j, supplierCount int) int {
+	return (partKey+j*(supplierCount/4+(partKey-1)/supplierCount))%supplierCount + 1
+}
+
+// tpchRetailPriceCents is P_RETAILPRICE in cents, a function of the key.
+func tpchRetailPriceCents(partKey int) int64 {
+	return int64(90000 + (partKey/10)%20001 + 100*(partKey%1000))
+}
+
+// Dates are day numbers counted from STARTDATE.
+var (
+	tpchStartDate  = time.Date(1992, 1, 1, 0, 0, 0, 0, time.UTC)
+	tpchCurrentDay = tpchDayNumber(1995, time.June, 17) // CURRENTDATE
+	// O_ORDERDATE is uniform in [STARTDATE, ENDDATE - 151 days].
+	tpchOrderDays = tpchDayNumber(1998, time.December, 31) - 151 + 1
+	// The last date a row can carry: an order date plus 121 days to ship
+	// plus 30 days to receive.
+	tpchDateText = tpchDateTexts(tpchOrderDays + 121 + 30)
+)
+
+func tpchDayNumber(year int, month time.Month, day int) int {
+	return int(time.Date(year, month, day, 0, 0, 0, 0, time.UTC).Sub(tpchStartDate).Hours() / 24)
+}
+
+func tpchDateTexts(days int) []string {
+	texts := make([]string, days+1)
+	for d := range texts {
+		texts[d] = tpchStartDate.AddDate(0, 0, d).Format("2006-01-02")
+	}
+	return texts
+}
+
+// tpchMoney renders an amount in cents as a DECIMAL(15,2) literal.
+func tpchMoney(cents int64) string {
+	sign := ""
+	if cents < 0 {
+		sign = "-"
+		cents = -cents
+	}
+	return fmt.Sprintf("%s%d.%02d", sign, cents/100, cents%100)
 }
 
 // TPC-H reference data
@@ -89,41 +167,360 @@ var tpchNations = []struct {
 	{"SAUDI ARABIA", 4}, {"VIETNAM", 2}, {"RUSSIA", 3}, {"UNITED KINGDOM", 3}, {"UNITED STATES", 1},
 }
 
-var tpchSegments = []string{"AUTOMOBILE", "BUILDING", "FURNITURE", "HOUSEHOLD", "MACHINERY"}
+var tpchSegments = []string{"AUTOMOBILE", "BUILDING", "FURNITURE", "MACHINERY", "HOUSEHOLD"}
 var tpchPriorities = []string{"1-URGENT", "2-HIGH", "3-MEDIUM", "4-NOT SPECIFIED", "5-LOW"}
 var tpchShipModes = []string{"REG AIR", "AIR", "RAIL", "SHIP", "TRUCK", "MAIL", "FOB"}
 var tpchShipInstructs = []string{"DELIVER IN PERSON", "COLLECT COD", "NONE", "TAKE BACK RETURN"}
-var tpchContainers = []string{"SM CASE", "SM BOX", "SM BAG", "SM JAR", "SM PACK", "SM PKG", "SM CAN", "SM DRUM",
-	"MED CASE", "MED BOX", "MED BAG", "MED JAR", "MED PACK", "MED PKG", "MED CAN", "MED DRUM",
-	"LG CASE", "LG BOX", "LG BAG", "LG JAR", "LG PACK", "LG PKG", "LG CAN", "LG DRUM",
-	"JUMBO CASE", "JUMBO BOX", "JUMBO BAG", "JUMBO JAR", "JUMBO PACK", "JUMBO PKG", "JUMBO CAN", "JUMBO DRUM",
-	"WRAP CASE", "WRAP BOX", "WRAP BAG", "WRAP JAR", "WRAP PACK", "WRAP PKG", "WRAP CAN", "WRAP DRUM"}
-var tpchTypes = []string{"STANDARD", "SMALL", "MEDIUM", "LARGE", "ECONOMY", "PROMO"}
-var tpchTypeMaterials = []string{"ANODIZED", "BURNISHED", "PLATED", "POLISHED", "BRUSHED"}
-var tpchBrands = []string{"Brand#11", "Brand#12", "Brand#13", "Brand#14", "Brand#15",
-	"Brand#21", "Brand#22", "Brand#23", "Brand#24", "Brand#25",
-	"Brand#31", "Brand#32", "Brand#33", "Brand#34", "Brand#35",
-	"Brand#41", "Brand#42", "Brand#43", "Brand#44", "Brand#45",
-	"Brand#51", "Brand#52", "Brand#53", "Brand#54", "Brand#55"}
+
+// P_TYPE is one syllable of each list, P_CONTAINER likewise.
+var tpchTypeSyllable1 = []string{"STANDARD", "SMALL", "MEDIUM", "LARGE", "ECONOMY", "PROMO"}
+var tpchTypeSyllable2 = []string{"ANODIZED", "BURNISHED", "PLATED", "POLISHED", "BRUSHED"}
+var tpchTypeSyllable3 = []string{"TIN", "NICKEL", "BRASS", "STEEL", "COPPER"}
+var tpchContainerSyllable1 = []string{"SM", "LG", "MED", "JUMBO", "WRAP"}
+var tpchContainerSyllable2 = []string{"CASE", "BOX", "BAG", "JAR", "PKG", "PACK", "CAN", "DRUM"}
+
+// P_NAME is five different words of this list.
+var partNameWords = []string{
+	"almond", "antique", "aquamarine", "azure", "beige", "bisque", "black", "blanched", "blue",
+	"blush", "brown", "burlywood", "burnished", "chartreuse", "chiffon", "chocolate", "coral",
+	"cornflower", "cornsilk", "cream", "cyan", "dark", "deep", "dim", "dodger", "drab", "firebrick",
+	"floral", "forest", "frosted", "gainsboro", "ghost", "goldenrod", "green", "grey", "honeydew",
+	"hot", "indian", "ivory", "khaki", "lace", "lavender", "lawn", "lemon", "light", "lime", "linen",
+	"magenta", "maroon", "medium", "metallic", "midnight", "mint", "misty", "moccasin", "navajo",
+	"navy", "olive", "orange", "orchid", "pale", "papaya", "peach", "peru", "pink", "plum", "powder",
+	"puff", "purple", "red", "rose", "rosy", "royal", "saddle", "salmon", "sandy", "seashell", "sienna",
+	"sky", "slate", "smoke", "snow", "spring", "steel", "tan", "thistle", "tomato", "turquoise", "violet",
+	"wheat", "white", "yellow",
+}
+
+// ---- random values ------------------------------------------------------
+
+// The random streams: one per table, so that row n of one table shares
+// nothing with row n of another.
+const (
+	tpchStreamRegion = iota + 1
+	tpchStreamNation
+	tpchStreamSupplier
+	tpchStreamCustomer
+	tpchStreamPart
+	tpchStreamPartsupp
+	tpchStreamOrders
+	tpchStreamOrderDate
+	tpchStreamLines
+	tpchStreamLineText
+)
+
+// tpchRand generates the values of one row (splitmix64).  It is seeded
+// from the stream and the row number alone, so a row has the same values
+// whatever thread generates it, in whatever order and batch size: a load
+// gives the same database every time, and the lineitems an order's row is
+// computed from are the ones the lineitem table gets.
+type tpchRand struct {
+	state uint64
+}
+
+func tpchMix(z uint64) uint64 {
+	z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
+	z = (z ^ (z >> 27)) * 0x94D049BB133111EB
+	return z ^ (z >> 31)
+}
+
+func newTPCHRand(stream, row int) tpchRand {
+	return tpchRand{state: tpchMix(uint64(stream)<<48 + uint64(row) + 1)}
+}
+
+func (r *tpchRand) next() uint64 {
+	r.state += 0x9E3779B97F4A7C15
+	return tpchMix(r.state)
+}
+
+// between returns a value in [lo, hi], each as likely as the others.
+func (r *tpchRand) between(lo, hi int) int {
+	return lo + int(r.next()%uint64(hi-lo+1))
+}
+
+func (r *tpchRand) oneOf(list []string) string {
+	return list[r.between(0, len(list)-1)]
+}
+
+// ---- text ---------------------------------------------------------------
+
+// tpchTextWord is a word of the text grammar with its weight.
+type tpchTextWord struct {
+	text   string
+	weight int
+}
+
+type tpchTextDist struct {
+	words []tpchTextWord
+	total int
+}
+
+func newTPCHTextDist(words []tpchTextWord) tpchTextDist {
+	total := 0
+	for _, w := range words {
+		total += w.weight
+	}
+	return tpchTextDist{words: words, total: total}
+}
+
+func (d *tpchTextDist) pick(r *tpchRand) string {
+	n := r.between(0, d.total-1)
+	for i := range d.words {
+		if n < d.words[i].weight {
+			return d.words[i].text
+		}
+		n -= d.words[i].weight
+	}
+	return d.words[len(d.words)-1].text
+}
+
+// The word lists of the TPC-H text grammar (clause 4.2.2.14), with weights
+// after dbgen's distributions (dists.dss): a few words carry most of the
+// text, which is what makes '%special%requests%' select about one order
+// comment in a hundred (TestTPCHCommentPatterns).
+var (
+	tpchNouns = newTPCHTextDist([]tpchTextWord{
+		{"packages", 40}, {"requests", 40}, {"accounts", 40}, {"deposits", 40},
+		{"foxes", 20}, {"ideas", 20}, {"theodolites", 20}, {"pinto beans", 20}, {"instructions", 20},
+		{"dependencies", 10}, {"excuses", 10}, {"platelets", 10}, {"asymptotes", 10},
+		{"courts", 5}, {"dolphins", 5},
+		{"multipliers", 1}, {"sauternes", 1}, {"warthogs", 1}, {"frets", 1}, {"dinos", 1},
+		{"attainments", 1}, {"somas", 1}, {"Tiresias", 1}, {"patterns", 1}, {"forges", 1},
+		{"braids", 1}, {"frays", 1}, {"warhorses", 1}, {"dugouts", 1}, {"notornis", 1},
+		{"epitaphs", 1}, {"pearls", 1}, {"tithes", 1}, {"waters", 1}, {"orbits", 1},
+		{"gifts", 1}, {"sheaves", 1}, {"depths", 1}, {"sentiments", 1}, {"decoys", 1},
+		{"realms", 1}, {"pains", 1}, {"grouches", 1}, {"escapades", 1}, {"hockey players", 1},
+	})
+	tpchVerbs = newTPCHTextDist([]tpchTextWord{
+		{"sleep", 20}, {"wake", 20}, {"are", 20}, {"cajole", 20}, {"haggle", 20},
+		{"nag", 10}, {"use", 10}, {"boost", 10},
+		{"affix", 5}, {"detect", 5}, {"integrate", 5},
+		{"maintain", 1}, {"nod", 1}, {"was", 1}, {"lose", 1}, {"sublate", 1}, {"solve", 1},
+		{"thrash", 1}, {"promise", 1}, {"engage", 1}, {"hinder", 1}, {"print", 1}, {"x-ray", 1},
+		{"breach", 1}, {"eat", 1}, {"grow", 1}, {"impress", 1}, {"mold", 1}, {"poach", 1},
+		{"serve", 1}, {"run", 1}, {"dazzle", 1}, {"snooze", 1}, {"doze", 1}, {"unwind", 1},
+		{"kindle", 1}, {"play", 1}, {"hang", 1}, {"believe", 1}, {"doubt", 1},
+	})
+	tpchAdjectives = newTPCHTextDist([]tpchTextWord{
+		{"regular", 50}, {"final", 40}, {"ironic", 40}, {"even", 30},
+		{"special", 20}, {"pending", 20}, {"unusual", 20}, {"express", 20}, {"bold", 20},
+		{"silent", 10},
+		{"furious", 1}, {"sly", 1}, {"careful", 1}, {"blithe", 1}, {"quick", 1}, {"fluffy", 1},
+		{"slow", 1}, {"quiet", 1}, {"ruthless", 1}, {"thin", 1}, {"close", 1}, {"dogged", 1},
+		{"daring", 1}, {"brave", 1}, {"stealthy", 1}, {"permanent", 1}, {"enticing", 1},
+		{"idle", 1}, {"busy", 1},
+	})
+	tpchAdverbs = newTPCHTextDist([]tpchTextWord{
+		{"furiously", 50}, {"slyly", 50}, {"carefully", 50}, {"blithely", 40}, {"quickly", 30},
+		{"fluffily", 20},
+		{"sometimes", 1}, {"always", 1}, {"never", 1}, {"slowly", 1}, {"quietly", 1},
+		{"ruthlessly", 1}, {"thinly", 1}, {"closely", 1}, {"doggedly", 1}, {"daringly", 1},
+		{"bravely", 1}, {"stealthily", 1}, {"permanently", 1}, {"enticingly", 1}, {"idly", 1},
+		{"busily", 1}, {"regularly", 1}, {"finally", 1}, {"ironically", 1}, {"evenly", 1},
+		{"boldly", 1}, {"silently", 1},
+	})
+	tpchPrepositions = newTPCHTextDist([]tpchTextWord{
+		{"about", 50}, {"above", 50}, {"according to", 50}, {"across", 50}, {"after", 50},
+		{"against", 40}, {"along", 40}, {"alongside of", 30}, {"among", 30}, {"around", 20},
+		{"at", 10},
+		{"atop", 1}, {"before", 1}, {"behind", 1}, {"beneath", 1}, {"beside", 1}, {"besides", 1},
+		{"between", 1}, {"beyond", 1}, {"by", 1}, {"despite", 1}, {"during", 1}, {"except", 1},
+		{"for", 1}, {"from", 1}, {"in place of", 1}, {"inside", 1}, {"instead of", 1}, {"into", 1},
+		{"near", 1}, {"of", 1}, {"on", 1}, {"outside", 1}, {"over", 1}, {"past", 1}, {"since", 1},
+		{"through", 1}, {"throughout", 1}, {"to", 1}, {"toward", 1}, {"under", 1}, {"until", 1},
+		{"up", 1}, {"upon", 1}, {"without", 1}, {"with", 1}, {"within", 1},
+	})
+	tpchAuxiliaries = newTPCHTextDist([]tpchTextWord{
+		{"do", 1}, {"may", 1}, {"might", 1}, {"shall", 1}, {"will", 1}, {"would", 1}, {"can", 1},
+		{"could", 1}, {"should", 1}, {"ought to", 1}, {"must", 1}, {"will have to", 1},
+		{"shall have to", 1}, {"could have to", 1}, {"should have to", 1}, {"must have to", 1},
+		{"need to", 1}, {"try to", 1},
+	})
+	tpchTerminators = newTPCHTextDist([]tpchTextWord{
+		{".", 50}, {";", 1}, {":", 1}, {"?", 1}, {"!", 1}, {"--", 1},
+	})
+)
+
+// tpchAppendNounPhrase: noun | adjective noun | adjective, adjective noun |
+// adverb adjective noun.
+func tpchAppendNounPhrase(b []byte, r *tpchRand) []byte {
+	switch n := r.between(0, 89); {
+	case n < 10:
+	case n < 30:
+		b = append(append(b, tpchAdjectives.pick(r)...), ' ')
+	case n < 40:
+		b = append(append(b, tpchAdjectives.pick(r)...), ',', ' ')
+		b = append(append(b, tpchAdjectives.pick(r)...), ' ')
+	default:
+		b = append(append(b, tpchAdverbs.pick(r)...), ' ')
+		b = append(append(b, tpchAdjectives.pick(r)...), ' ')
+	}
+	return append(b, tpchNouns.pick(r)...)
+}
+
+// tpchAppendVerbPhrase: verb | auxiliary verb | verb adverb | auxiliary
+// verb adverb.
+func tpchAppendVerbPhrase(b []byte, r *tpchRand) []byte {
+	n := r.between(0, 71)
+	if n == 30 || n == 71 {
+		b = append(append(b, tpchAuxiliaries.pick(r)...), ' ')
+	}
+	b = append(b, tpchVerbs.pick(r)...)
+	if n > 30 {
+		b = append(append(b, ' '), tpchAdverbs.pick(r)...)
+	}
+	return b
+}
+
+// tpchAppendPrepositionalPhrase: preposition the noun phrase.
+func tpchAppendPrepositionalPhrase(b []byte, r *tpchRand) []byte {
+	b = append(append(b, tpchPrepositions.pick(r)...), " the "...)
+	return tpchAppendNounPhrase(b, r)
+}
+
+// tpchAppendSentence appends one sentence of the five forms of the
+// grammar; N, V and P are the phrases above and T a terminator:
+// N V T | N V P T | N V N T | N P V N T | N P V P T.
+func tpchAppendSentence(b []byte, r *tpchRand) []byte {
+	form := r.between(0, 10) // weights 3, 3, 3, 1, 1
+	b = tpchAppendNounPhrase(b, r)
+	if form >= 9 {
+		b = tpchAppendPrepositionalPhrase(append(b, ' '), r)
+	}
+	b = tpchAppendVerbPhrase(append(b, ' '), r)
+	switch {
+	case form >= 3 && form <= 5, form == 10:
+		b = tpchAppendPrepositionalPhrase(append(b, ' '), r)
+	case form >= 6 && form <= 9:
+		b = tpchAppendNounPhrase(append(b, ' '), r)
+	}
+	return append(b, tpchTerminators.pick(r)...)
+}
+
+// tpchTextBytes returns text of a length drawn from [minLen, maxLen]: sentences
+// of the grammar, cut at the length (as dbgen cuts a piece out of its
+// text pool, a comment can end in the middle of a word).
+func tpchTextBytes(r *tpchRand, minLen, maxLen int) []byte {
+	length := r.between(minLen, maxLen)
+	b := make([]byte, 0, length+80)
+	for len(b) < length {
+		if len(b) > 0 {
+			b = append(b, ' ')
+		}
+		b = tpchAppendSentence(b, r)
+	}
+	return b[:length]
+}
+
+func tpchText(r *tpchRand, minLen, maxLen int) string {
+	return strings.TrimRight(string(tpchTextBytes(r, minLen, maxLen)), " ")
+}
+
+// tpchAlphaNumeric is the alphabet of the random strings (addresses).
+const tpchAlphaNumeric = "0123456789abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ,"
+
+// tpchVString returns a random string of a length drawn from [minLen, maxLen].
+func tpchVString(r *tpchRand, minLen, maxLen int) string {
+	b := make([]byte, r.between(minLen, maxLen))
+	for i := range b {
+		b[i] = tpchAlphaNumeric[r.between(0, len(tpchAlphaNumeric)-1)]
+	}
+	return string(b)
+}
+
+// tpchPhone returns a phone number of a nation: the country code is the
+// nation key plus 10 (Q22 groups customers by it).
+func tpchPhone(r *tpchRand, nationKey int) string {
+	return fmt.Sprintf("%02d-%03d-%03d-%04d", nationKey+10,
+		r.between(100, 999), r.between(100, 999), r.between(1000, 9999))
+}
+
+// tpchPartName returns five different words of partNameWords.
+func tpchPartName(r *tpchRand) string {
+	var words [5]string
+	var used [5]int
+	for i := range words {
+		for {
+			idx := r.between(0, len(partNameWords)-1)
+			taken := false
+			for _, u := range used[:i] {
+				taken = taken || u == idx
+			}
+			if !taken {
+				used[i] = idx
+				words[i] = partNameWords[idx]
+				break
+			}
+		}
+	}
+	return strings.Join(words[:], " ")
+}
+
+// The supplier comments of Q16: ten suppliers in 10000 have "Customer"
+// and, further on, "Complaints" or "Recommends" (half each) written into
+// their comment.
+const (
+	tpchSupplierNotesPer10000 = 10
+	tpchSupplierNoteBase      = "Customer "
+	tpchSupplierComplaints    = "Complaints"
+	tpchSupplierRecommends    = "Recommends"
+)
+
+func tpchSupplierComment(r *tpchRand) string {
+	b := tpchTextBytes(r, 25, 100)
+	if r.between(1, 10000) <= tpchSupplierNotesPer10000 {
+		word := tpchSupplierComplaints
+		if r.between(0, 1) == 1 {
+			word = tpchSupplierRecommends
+		}
+		// Both words have 10 letters; the shortest comment (25) holds them.
+		noteLen := len(tpchSupplierNoteBase) + len(word)
+		noise := r.between(0, len(b)-noteLen)
+		offset := r.between(0, len(b)-noteLen-noise)
+		copy(b[offset:], tpchSupplierNoteBase)
+		copy(b[offset+len(tpchSupplierNoteBase)+noise:], word)
+	}
+	return strings.TrimRight(string(b), " ")
+}
+
+// ---- tables -------------------------------------------------------------
 
 // TPCHTableInfo contains information about a TPC-H table to load
 type TPCHTableInfo struct {
-	Name      string
-	RowCount  func(sf float64) int
-	Generator func(sf float64, startRow, endRow int, rng *rand.Rand) []dsl.BatchWriteOperation
+	Name string
+	// RowCount is the number of rows; for lineitem the expected number
+	// (an order has 1 to 7 lineitems, 4 on average).
+	RowCount func(sf float64) int
+	// Units is the number of generator units when that is not RowCount:
+	// lineitem is generated order by order.
+	Units func(sf float64) int
+	// RowsPerUnit is the average number of rows of a unit (0 = 1).
+	RowsPerUnit int
+	// Generator returns the rows of the units start (included) to end.
+	Generator func(sf float64, start, end int) []dsl.BatchWriteOperation
+}
+
+func (t *TPCHTableInfo) unitCount(sf float64) int {
+	if t.Units != nil {
+		return t.Units(sf)
+	}
+	return t.RowCount(sf)
 }
 
 // GetTPCHTables returns the list of TPC-H tables in dependency order
 func GetTPCHTables() []TPCHTableInfo {
+	orders := func(sf float64) int { return tpchScaled(tpchOrdersBase, sf) }
 	return []TPCHTableInfo{
 		{Name: "region", RowCount: func(sf float64) int { return tpchRegionCount }, Generator: generateRegionRows},
 		{Name: "nation", RowCount: func(sf float64) int { return tpchNationCount }, Generator: generateNationRows},
 		{Name: "supplier", RowCount: func(sf float64) int { return tpchScaled(tpchSupplierBase, sf) }, Generator: generateSupplierRows},
 		{Name: "customer", RowCount: func(sf float64) int { return tpchScaled(tpchCustomerBase, sf) }, Generator: generateCustomerRows},
 		{Name: "part", RowCount: func(sf float64) int { return tpchScaled(tpchPartBase, sf) }, Generator: generatePartRows},
-		{Name: "partsupp", RowCount: func(sf float64) int { return tpchScaled(tpchPartsuppBase, sf) }, Generator: generatePartsuppRows},
-		{Name: "orders", RowCount: func(sf float64) int { return tpchScaled(tpchOrdersBase, sf) }, Generator: generateOrdersRows},
-		{Name: "lineitem", RowCount: func(sf float64) int { return tpchScaled(tpchLineitemBase, sf) }, Generator: generateLineitemRows},
+		{Name: "partsupp", RowCount: func(sf float64) int { return 4 * tpchScaled(tpchPartBase, sf) }, Generator: generatePartsuppRows},
+		{Name: "orders", RowCount: orders, Generator: generateOrdersRows},
+		{Name: "lineitem", RowCount: func(sf float64) int { return 4 * orders(sf) }, Units: orders, RowsPerUnit: 4,
+			Generator: generateLineitemRows},
 	}
 }
 
@@ -229,351 +626,372 @@ var tpchTableDDL = map[string]string{
 	) ENGINE=NDB`,
 }
 
-// Row generators for each TPC-H table
+// Row generators for each TPC-H table.  A generator returns the rows of
+// the units start to end; a unit is a row, for lineitem an order.
 
-func generateRegionRows(sf float64, startRow, endRow int, rng *rand.Rand) []dsl.BatchWriteOperation {
+func tpchWriteOp(table, operationID string, key []dsl.Filter, columns []dsl.WriteColumn) dsl.BatchWriteOperation {
+	return dsl.BatchWriteOperation{
+		Method:      "POST",
+		RelativeURL: "tpch/" + table + "/pk-write",
+		Body: dsl.PkWriteRequest{
+			Filters:      key,
+			WriteColumns: columns,
+			OperationID:  operationID,
+		},
+	}
+}
+
+func generateRegionRows(sf float64, start, end int) []dsl.BatchWriteOperation {
 	var ops []dsl.BatchWriteOperation
-	for i := startRow; i < endRow && i < tpchRegionCount; i++ {
-		op := dsl.BatchWriteOperation{
-			Method:      "POST",
-			RelativeURL: "tpch/region/pk-write",
-			Body: dsl.PkWriteRequest{
-				Filters: []dsl.Filter{
-					{Column: "r_regionkey", Value: i},
-				},
-				WriteColumns: []dsl.WriteColumn{
-					{Column: "r_name", Value: tpchRegions[i]},
-					{Column: "r_comment", Value: generateComment(rng, 31, 115)},
-				},
-				OperationID: fmt.Sprintf("region_%d", i),
-			},
-		}
-		ops = append(ops, op)
+	for i := start; i < end && i < tpchRegionCount; i++ {
+		r := newTPCHRand(tpchStreamRegion, i)
+		ops = append(ops, tpchWriteOp("region", fmt.Sprintf("region_%d", i),
+			[]dsl.Filter{{Column: "r_regionkey", Value: i}},
+			[]dsl.WriteColumn{
+				{Column: "r_name", Value: tpchRegions[i]},
+				{Column: "r_comment", Value: tpchText(&r, 31, 115)},
+			}))
 	}
 	return ops
 }
 
-func generateNationRows(sf float64, startRow, endRow int, rng *rand.Rand) []dsl.BatchWriteOperation {
+func generateNationRows(sf float64, start, end int) []dsl.BatchWriteOperation {
 	var ops []dsl.BatchWriteOperation
-	for i := startRow; i < endRow && i < tpchNationCount; i++ {
-		op := dsl.BatchWriteOperation{
-			Method:      "POST",
-			RelativeURL: "tpch/nation/pk-write",
-			Body: dsl.PkWriteRequest{
-				Filters: []dsl.Filter{
-					{Column: "n_nationkey", Value: i},
-				},
-				WriteColumns: []dsl.WriteColumn{
-					{Column: "n_name", Value: tpchNations[i].name},
-					{Column: "n_regionkey", Value: tpchNations[i].regionKey},
-					{Column: "n_comment", Value: generateComment(rng, 31, 114)},
-				},
-				OperationID: fmt.Sprintf("nation_%d", i),
-			},
-		}
-		ops = append(ops, op)
+	for i := start; i < end && i < tpchNationCount; i++ {
+		r := newTPCHRand(tpchStreamNation, i)
+		ops = append(ops, tpchWriteOp("nation", fmt.Sprintf("nation_%d", i),
+			[]dsl.Filter{{Column: "n_nationkey", Value: i}},
+			[]dsl.WriteColumn{
+				{Column: "n_name", Value: tpchNations[i].name},
+				{Column: "n_regionkey", Value: tpchNations[i].regionKey},
+				{Column: "n_comment", Value: tpchText(&r, 31, 114)},
+			}))
 	}
 	return ops
 }
 
-func generateSupplierRows(sf float64, startRow, endRow int, rng *rand.Rand) []dsl.BatchWriteOperation {
-	var ops []dsl.BatchWriteOperation
-	for i := startRow; i < endRow; i++ {
+func generateSupplierRows(sf float64, start, end int) []dsl.BatchWriteOperation {
+	ops := make([]dsl.BatchWriteOperation, 0, end-start)
+	for i := start; i < end; i++ {
+		r := newTPCHRand(tpchStreamSupplier, i)
 		suppKey := i + 1
-		op := dsl.BatchWriteOperation{
-			Method:      "POST",
-			RelativeURL: "tpch/supplier/pk-write",
-			Body: dsl.PkWriteRequest{
-				Filters: []dsl.Filter{
-					{Column: "s_suppkey", Value: suppKey},
-				},
-				WriteColumns: []dsl.WriteColumn{
-					{Column: "s_name", Value: fmt.Sprintf("Supplier#%09d", suppKey)},
-					{Column: "s_address", Value: generateAddress(rng)},
-					{Column: "s_nationkey", Value: rng.Intn(tpchNationCount)},
-					{Column: "s_phone", Value: generatePhone(rng)},
-					{Column: "s_acctbal", Value: fmt.Sprintf("%.2f", -999.99+rng.Float64()*10998.99)},
-					{Column: "s_comment", Value: generateComment(rng, 25, 100)},
-				},
-				OperationID: fmt.Sprintf("supplier_%d", suppKey),
-			},
-		}
-		ops = append(ops, op)
+		address := tpchVString(&r, 10, 40)
+		nationKey := r.between(0, tpchNationCount-1)
+		phone := tpchPhone(&r, nationKey)
+		acctbal := tpchMoney(int64(r.between(-99999, 999999)))
+		comment := tpchSupplierComment(&r)
+		ops = append(ops, tpchWriteOp("supplier", fmt.Sprintf("supplier_%d", suppKey),
+			[]dsl.Filter{{Column: "s_suppkey", Value: suppKey}},
+			[]dsl.WriteColumn{
+				{Column: "s_name", Value: fmt.Sprintf("Supplier#%09d", suppKey)},
+				{Column: "s_address", Value: address},
+				{Column: "s_nationkey", Value: nationKey},
+				{Column: "s_phone", Value: phone},
+				{Column: "s_acctbal", Value: acctbal},
+				{Column: "s_comment", Value: comment},
+			}))
 	}
 	return ops
 }
 
-func generateCustomerRows(sf float64, startRow, endRow int, rng *rand.Rand) []dsl.BatchWriteOperation {
-	var ops []dsl.BatchWriteOperation
-	for i := startRow; i < endRow; i++ {
+func generateCustomerRows(sf float64, start, end int) []dsl.BatchWriteOperation {
+	ops := make([]dsl.BatchWriteOperation, 0, end-start)
+	for i := start; i < end; i++ {
+		r := newTPCHRand(tpchStreamCustomer, i)
 		custKey := i + 1
-		op := dsl.BatchWriteOperation{
-			Method:      "POST",
-			RelativeURL: "tpch/customer/pk-write",
-			Body: dsl.PkWriteRequest{
-				Filters: []dsl.Filter{
-					{Column: "c_custkey", Value: custKey},
-				},
-				WriteColumns: []dsl.WriteColumn{
-					{Column: "c_name", Value: fmt.Sprintf("Customer#%09d", custKey)},
-					{Column: "c_address", Value: generateAddress(rng)},
-					{Column: "c_nationkey", Value: rng.Intn(tpchNationCount)},
-					{Column: "c_phone", Value: generatePhone(rng)},
-					{Column: "c_acctbal", Value: fmt.Sprintf("%.2f", -999.99+rng.Float64()*10998.99)},
-					{Column: "c_mktsegment", Value: tpchSegments[rng.Intn(len(tpchSegments))]},
-					{Column: "c_comment", Value: generateComment(rng, 29, 116)},
-				},
-				OperationID: fmt.Sprintf("customer_%d", custKey),
-			},
-		}
-		ops = append(ops, op)
+		address := tpchVString(&r, 10, 40)
+		nationKey := r.between(0, tpchNationCount-1)
+		phone := tpchPhone(&r, nationKey)
+		acctbal := tpchMoney(int64(r.between(-99999, 999999)))
+		segment := r.oneOf(tpchSegments)
+		comment := tpchText(&r, 29, 116)
+		ops = append(ops, tpchWriteOp("customer", fmt.Sprintf("customer_%d", custKey),
+			[]dsl.Filter{{Column: "c_custkey", Value: custKey}},
+			[]dsl.WriteColumn{
+				{Column: "c_name", Value: fmt.Sprintf("Customer#%09d", custKey)},
+				{Column: "c_address", Value: address},
+				{Column: "c_nationkey", Value: nationKey},
+				{Column: "c_phone", Value: phone},
+				{Column: "c_acctbal", Value: acctbal},
+				{Column: "c_mktsegment", Value: segment},
+				{Column: "c_comment", Value: comment},
+			}))
 	}
 	return ops
 }
 
-func generatePartRows(sf float64, startRow, endRow int, rng *rand.Rand) []dsl.BatchWriteOperation {
-	var ops []dsl.BatchWriteOperation
-	for i := startRow; i < endRow; i++ {
+func generatePartRows(sf float64, start, end int) []dsl.BatchWriteOperation {
+	ops := make([]dsl.BatchWriteOperation, 0, end-start)
+	for i := start; i < end; i++ {
+		r := newTPCHRand(tpchStreamPart, i)
 		partKey := i + 1
-		op := dsl.BatchWriteOperation{
-			Method:      "POST",
-			RelativeURL: "tpch/part/pk-write",
-			Body: dsl.PkWriteRequest{
-				Filters: []dsl.Filter{
-					{Column: "p_partkey", Value: partKey},
-				},
-				WriteColumns: []dsl.WriteColumn{
-					{Column: "p_name", Value: generatePartName(rng)},
-					{Column: "p_mfgr", Value: fmt.Sprintf("Manufacturer#%d", rng.Intn(5)+1)},
-					{Column: "p_brand", Value: tpchBrands[rng.Intn(len(tpchBrands))]},
-					{Column: "p_type", Value: fmt.Sprintf("%s %s", tpchTypeMaterials[rng.Intn(len(tpchTypeMaterials))], tpchTypes[rng.Intn(len(tpchTypes))])},
-					{Column: "p_size", Value: rng.Intn(50) + 1},
-					{Column: "p_container", Value: tpchContainers[rng.Intn(len(tpchContainers))]},
-					{Column: "p_retailprice", Value: fmt.Sprintf("%.2f", 900.0+float64(partKey%20001)/100.0)},
-					{Column: "p_comment", Value: generateComment(rng, 5, 22)},
-				},
-				OperationID: fmt.Sprintf("part_%d", partKey),
-			},
-		}
-		ops = append(ops, op)
+		name := tpchPartName(&r)
+		manufacturer := r.between(1, 5)
+		brand := manufacturer*10 + r.between(1, 5)
+		partType := r.oneOf(tpchTypeSyllable1) + " " + r.oneOf(tpchTypeSyllable2) + " " + r.oneOf(tpchTypeSyllable3)
+		size := r.between(1, 50)
+		container := r.oneOf(tpchContainerSyllable1) + " " + r.oneOf(tpchContainerSyllable2)
+		comment := tpchText(&r, 5, 22)
+		ops = append(ops, tpchWriteOp("part", fmt.Sprintf("part_%d", partKey),
+			[]dsl.Filter{{Column: "p_partkey", Value: partKey}},
+			[]dsl.WriteColumn{
+				{Column: "p_name", Value: name},
+				{Column: "p_mfgr", Value: fmt.Sprintf("Manufacturer#%d", manufacturer)},
+				{Column: "p_brand", Value: fmt.Sprintf("Brand#%d", brand)},
+				{Column: "p_type", Value: partType},
+				{Column: "p_size", Value: size},
+				{Column: "p_container", Value: container},
+				{Column: "p_retailprice", Value: tpchMoney(tpchRetailPriceCents(partKey))},
+				{Column: "p_comment", Value: comment},
+			}))
 	}
 	return ops
 }
 
-func generatePartsuppRows(sf float64, startRow, endRow int, rng *rand.Rand) []dsl.BatchWriteOperation {
-	var ops []dsl.BatchWriteOperation
+func generatePartsuppRows(sf float64, start, end int) []dsl.BatchWriteOperation {
+	ops := make([]dsl.BatchWriteOperation, 0, end-start)
 	supplierCount := tpchScaled(tpchSupplierBase, sf)
-	if supplierCount == 0 {
-		supplierCount = 1
-	}
-
-	for i := startRow; i < endRow; i++ {
-		partKey := (i / 4) + 1
-		suppIdx := i % 4
-		suppKey := ((partKey + suppIdx*((supplierCount/4)+((partKey-1)/supplierCount))) % supplierCount) + 1
-
-		op := dsl.BatchWriteOperation{
-			Method:      "POST",
-			RelativeURL: "tpch/partsupp/pk-write",
-			Body: dsl.PkWriteRequest{
-				Filters: []dsl.Filter{
-					{Column: "ps_partkey", Value: partKey},
-					{Column: "ps_suppkey", Value: suppKey},
-				},
-				WriteColumns: []dsl.WriteColumn{
-					{Column: "ps_availqty", Value: rng.Intn(9999) + 1},
-					{Column: "ps_supplycost", Value: fmt.Sprintf("%.2f", 1.0+rng.Float64()*999.0)},
-					{Column: "ps_comment", Value: generateComment(rng, 49, 198)},
-				},
-				OperationID: fmt.Sprintf("partsupp_%d_%d", partKey, suppKey),
+	for i := start; i < end; i++ {
+		r := newTPCHRand(tpchStreamPartsupp, i)
+		partKey := i/4 + 1
+		suppKey := tpchPartSupplier(partKey, i%4, supplierCount)
+		availQty := r.between(1, 9999)
+		supplyCost := tpchMoney(int64(r.between(100, 100000)))
+		comment := tpchText(&r, 49, 198)
+		ops = append(ops, tpchWriteOp("partsupp", fmt.Sprintf("partsupp_%d_%d", partKey, suppKey),
+			[]dsl.Filter{
+				{Column: "ps_partkey", Value: partKey},
+				{Column: "ps_suppkey", Value: suppKey},
 			},
-		}
-		ops = append(ops, op)
+			[]dsl.WriteColumn{
+				{Column: "ps_availqty", Value: availQty},
+				{Column: "ps_supplycost", Value: supplyCost},
+				{Column: "ps_comment", Value: comment},
+			}))
 	}
 	return ops
 }
 
-func generateOrdersRows(sf float64, startRow, endRow int, rng *rand.Rand) []dsl.BatchWriteOperation {
-	var ops []dsl.BatchWriteOperation
-	customerCount := tpchScaled(tpchCustomerBase, sf)
-	if customerCount == 0 {
-		customerCount = 1
-	}
-	withOrders := tpchCustomersWithOrders(customerCount)
-
-	for i := startRow; i < endRow; i++ {
-		orderKey := int64(i+1) * 4 // Orders use sparse keys (multiples of 4, no 1 or 3 mod 8)
-		// Never a multiple of 3: a third of the customers have no orders (TPC-H)
-		custKey := tpchOrderCustKey(rng.Intn(withOrders))
-
-		// Order date between 1992-01-01 and 1998-08-02
-		startDate := time.Date(1992, 1, 1, 0, 0, 0, 0, time.UTC)
-		dayOffset := rng.Intn(2406) // ~6.5 years of days
-		orderDate := startDate.AddDate(0, 0, dayOffset)
-
-		op := dsl.BatchWriteOperation{
-			Method:      "POST",
-			RelativeURL: "tpch/orders/pk-write",
-			Body: dsl.PkWriteRequest{
-				Filters: []dsl.Filter{
-					{Column: "o_orderkey", Value: orderKey},
-				},
-				WriteColumns: []dsl.WriteColumn{
-					{Column: "o_custkey", Value: custKey},
-					{Column: "o_orderstatus", Value: []string{"F", "O", "P"}[rng.Intn(3)]},
-					{Column: "o_totalprice", Value: fmt.Sprintf("%.2f", rng.Float64()*500000)},
-					{Column: "o_orderdate", Value: orderDate.Format("2006-01-02")},
-					{Column: "o_orderpriority", Value: tpchPriorities[rng.Intn(len(tpchPriorities))]},
-					{Column: "o_clerk", Value: fmt.Sprintf("Clerk#%09d", rng.Intn(1000)+1)},
-					{Column: "o_shippriority", Value: 0},
-					{Column: "o_comment", Value: generateComment(rng, 19, 78)},
-				},
-				OperationID: fmt.Sprintf("orders_%d", orderKey),
-			},
-		}
-		ops = append(ops, op)
-	}
-	return ops
+// tpchLine holds the values of a lineitem that its order's row depends
+// on, and the rest of its numbers.
+type tpchLine struct {
+	partKey       int
+	suppKey       int
+	quantity      int
+	extendedCents int64
+	discount      int // hundredths
+	tax           int // hundredths
+	shipDay       int
+	commitDay     int
+	receiptDay    int
+	returnFlag    string
+	lineStatus    string
 }
 
-func generateLineitemRows(sf float64, startRow, endRow int, rng *rand.Rand) []dsl.BatchWriteOperation {
-	var ops []dsl.BatchWriteOperation
-	orderCount := tpchScaled(tpchOrdersBase, sf)
+// tpchOrderDay is the order date (a day number) of the order with index
+// i, counted from 0.
+func tpchOrderDay(i int) int {
+	r := newTPCHRand(tpchStreamOrderDate, i)
+	return r.between(0, tpchOrderDays-1)
+}
+
+// tpchOrderLines returns the lineitems of the order with index i.  Both
+// the orders and the lineitem generator call it, so an order's status and
+// total price are those of the lineitems that are loaded.
+func tpchOrderLines(sf float64, i int) []tpchLine {
 	partCount := tpchScaled(tpchPartBase, sf)
 	supplierCount := tpchScaled(tpchSupplierBase, sf)
-	if orderCount == 0 {
-		orderCount = 1
-	}
-	if partCount == 0 {
-		partCount = 1
-	}
-	if supplierCount == 0 {
-		supplierCount = 1
-	}
-
-	// Approximately 4 line items per order
-	for i := startRow; i < endRow; i++ {
-		orderIdx := i / 4
-		lineNumber := (i % 4) + 1
-		orderKey := int64(orderIdx+1) * 4
-
-		partKey := rng.Intn(partCount) + 1
-		suppKey := rng.Intn(supplierCount) + 1
-
-		quantity := float64(rng.Intn(50) + 1)
-		extendedPrice := quantity * (900.0 + float64(partKey%20001)/100.0)
-		discount := float64(rng.Intn(11)) / 100.0
-		tax := float64(rng.Intn(9)) / 100.0
-
-		// Ship date is order date + random days
-		startDate := time.Date(1992, 1, 1, 0, 0, 0, 0, time.UTC)
-		orderDayOffset := rng.Intn(2406)
-		orderDate := startDate.AddDate(0, 0, orderDayOffset)
-		shipDate := orderDate.AddDate(0, 0, rng.Intn(121)+1)
-		commitDate := orderDate.AddDate(0, 0, rng.Intn(90)+30)
-		receiptDate := shipDate.AddDate(0, 0, rng.Intn(30)+1)
-
-		// Flags based on dates
-		returnFlag := "N"
-		if receiptDate.Before(time.Date(1995, 6, 17, 0, 0, 0, 0, time.UTC)) {
-			if rng.Intn(2) == 0 {
-				returnFlag = "R"
-			} else {
-				returnFlag = "A"
+	orderDay := tpchOrderDay(i)
+	r := newTPCHRand(tpchStreamLines, i)
+	lines := make([]tpchLine, r.between(1, 7))
+	for n := range lines {
+		l := &lines[n]
+		l.partKey = r.between(1, partCount)
+		l.suppKey = tpchPartSupplier(l.partKey, r.between(0, 3), supplierCount)
+		l.quantity = r.between(1, 50)
+		l.extendedCents = int64(l.quantity) * tpchRetailPriceCents(l.partKey)
+		l.discount = r.between(0, 10)
+		l.tax = r.between(0, 8)
+		l.shipDay = orderDay + r.between(1, 121)
+		l.commitDay = orderDay + r.between(30, 90)
+		l.receiptDay = l.shipDay + r.between(1, 30)
+		// Returned or accepted once received by CURRENTDATE; shipped or not.
+		l.returnFlag = "N"
+		if l.receiptDay <= tpchCurrentDay {
+			l.returnFlag = "R"
+			if r.between(0, 1) == 1 {
+				l.returnFlag = "A"
 			}
 		}
-		lineStatus := "O"
-		if shipDate.Before(time.Date(1995, 6, 17, 0, 0, 0, 0, time.UTC)) {
-			lineStatus = "F"
+		l.lineStatus = "F"
+		if l.shipDay > tpchCurrentDay {
+			l.lineStatus = "O"
+		}
+	}
+	return lines
+}
+
+func generateOrdersRows(sf float64, start, end int) []dsl.BatchWriteOperation {
+	ops := make([]dsl.BatchWriteOperation, 0, end-start)
+	withOrders := tpchCustomersWithOrders(tpchScaled(tpchCustomerBase, sf))
+	if withOrders < 1 {
+		withOrders = 1
+	}
+	clerks := tpchScaled(tpchClerkBase, sf)
+	for i := start; i < end; i++ {
+		r := newTPCHRand(tpchStreamOrders, i)
+		orderKey := tpchOrderKey(i + 1)
+		// Never a multiple of 3: a third of the customers have no orders.
+		custKey := tpchOrderCustKey(r.between(0, withOrders-1))
+		priority := r.oneOf(tpchPriorities)
+		clerk := fmt.Sprintf("Clerk#%09d", r.between(1, clerks))
+		comment := tpchText(&r, 19, 78)
+
+		// F when every lineitem is shipped, O when none is, P otherwise;
+		// the total is the sum of the lineitems' price after discount and
+		// tax, each rounded down to cents as dbgen does.
+		total := int64(0)
+		shipped, open := 0, 0
+		for _, l := range tpchOrderLines(sf, i) {
+			total += l.extendedCents * int64(100-l.discount) / 100 * int64(100+l.tax) / 100
+			if l.lineStatus == "F" {
+				shipped++
+			} else {
+				open++
+			}
+		}
+		status := "P"
+		if open == 0 {
+			status = "F"
+		} else if shipped == 0 {
+			status = "O"
 		}
 
-		op := dsl.BatchWriteOperation{
-			Method:      "POST",
-			RelativeURL: "tpch/lineitem/pk-write",
-			Body: dsl.PkWriteRequest{
-				Filters: []dsl.Filter{
+		ops = append(ops, tpchWriteOp("orders", fmt.Sprintf("orders_%d", orderKey),
+			[]dsl.Filter{{Column: "o_orderkey", Value: orderKey}},
+			[]dsl.WriteColumn{
+				{Column: "o_custkey", Value: custKey},
+				{Column: "o_orderstatus", Value: status},
+				{Column: "o_totalprice", Value: tpchMoney(total)},
+				{Column: "o_orderdate", Value: tpchDateText[tpchOrderDay(i)]},
+				{Column: "o_orderpriority", Value: priority},
+				{Column: "o_clerk", Value: clerk},
+				{Column: "o_shippriority", Value: 0},
+				{Column: "o_comment", Value: comment},
+			}))
+	}
+	return ops
+}
+
+// generateLineitemRows returns the lineitems of the orders with index
+// start to end: 1 to 7 rows per order.
+func generateLineitemRows(sf float64, start, end int) []dsl.BatchWriteOperation {
+	ops := make([]dsl.BatchWriteOperation, 0, 4*(end-start))
+	for i := start; i < end; i++ {
+		orderKey := tpchOrderKey(i + 1)
+		r := newTPCHRand(tpchStreamLineText, i)
+		for n, l := range tpchOrderLines(sf, i) {
+			lineNumber := n + 1
+			instruct := r.oneOf(tpchShipInstructs)
+			mode := r.oneOf(tpchShipModes)
+			comment := tpchText(&r, 10, 43)
+			ops = append(ops, tpchWriteOp("lineitem", fmt.Sprintf("lineitem_%d_%d", orderKey, lineNumber),
+				[]dsl.Filter{
 					{Column: "l_orderkey", Value: orderKey},
 					{Column: "l_linenumber", Value: lineNumber},
 				},
-				WriteColumns: []dsl.WriteColumn{
-					{Column: "l_partkey", Value: partKey},
-					{Column: "l_suppkey", Value: suppKey},
-					{Column: "l_quantity", Value: fmt.Sprintf("%.2f", quantity)},
-					{Column: "l_extendedprice", Value: fmt.Sprintf("%.2f", extendedPrice)},
-					{Column: "l_discount", Value: fmt.Sprintf("%.2f", discount)},
-					{Column: "l_tax", Value: fmt.Sprintf("%.2f", tax)},
-					{Column: "l_returnflag", Value: returnFlag},
-					{Column: "l_linestatus", Value: lineStatus},
-					{Column: "l_shipdate", Value: shipDate.Format("2006-01-02")},
-					{Column: "l_commitdate", Value: commitDate.Format("2006-01-02")},
-					{Column: "l_receiptdate", Value: receiptDate.Format("2006-01-02")},
-					{Column: "l_shipinstruct", Value: tpchShipInstructs[rng.Intn(len(tpchShipInstructs))]},
-					{Column: "l_shipmode", Value: tpchShipModes[rng.Intn(len(tpchShipModes))]},
-					{Column: "l_comment", Value: generateComment(rng, 10, 43)},
-				},
-				OperationID: fmt.Sprintf("lineitem_%d_%d", orderKey, lineNumber),
-			},
+				[]dsl.WriteColumn{
+					{Column: "l_partkey", Value: l.partKey},
+					{Column: "l_suppkey", Value: l.suppKey},
+					{Column: "l_quantity", Value: tpchMoney(int64(l.quantity) * 100)},
+					{Column: "l_extendedprice", Value: tpchMoney(l.extendedCents)},
+					{Column: "l_discount", Value: tpchMoney(int64(l.discount))},
+					{Column: "l_tax", Value: tpchMoney(int64(l.tax))},
+					{Column: "l_returnflag", Value: l.returnFlag},
+					{Column: "l_linestatus", Value: l.lineStatus},
+					{Column: "l_shipdate", Value: tpchDateText[l.shipDay]},
+					{Column: "l_commitdate", Value: tpchDateText[l.commitDay]},
+					{Column: "l_receiptdate", Value: tpchDateText[l.receiptDay]},
+					{Column: "l_shipinstruct", Value: instruct},
+					{Column: "l_shipmode", Value: mode},
+					{Column: "l_comment", Value: comment},
+				}))
 		}
-		ops = append(ops, op)
 	}
 	return ops
 }
 
-// Helper functions for data generation
+// tpchSpaces is what a CHAR value is filled with: a CHAR column is at most
+// 255 characters of at most 4 bytes.
+var tpchSpaces = strings.Repeat(" ", 255*4)
 
-func generateComment(rng *rand.Rand, minLen, maxLen int) string {
-	length := minLen + rng.Intn(maxLen-minLen+1)
-	const charset = "abcdefghijklmnopqrstuvwxyz "
-	result := make([]byte, length)
-	for i := range result {
-		result[i] = charset[rng.Intn(len(charset))]
+// tpchPadChars fills the CHAR values of the operations with spaces to the
+// length in bytes of their columns (widths, by column name).
+//
+// The loader writes through the REST server, which until 2026-11-28
+// filled the unused bytes of a CHAR column with NUL where MySQL fills them
+// with spaces (set_col_value in rest-server2, fixed that day).  A value
+// written short was then stored as another value than the one MySQL would
+// store: 'R' in a CHAR(1) of utf8mb4 read back as the four characters
+// 'R\0\0\0', and the MySQL server and RonSQL returned it differently (the
+// MySQL server cuts it to the length of the column when it groups or
+// sorts, RonSQL returns all of it).  A value sent at the full length of
+// the column leaves the REST server nothing to fill, so a load is right
+// on a REST server without the fix too.
+func tpchPadChars(ops []dsl.BatchWriteOperation, widths map[string]int) {
+	if len(widths) == 0 {
+		return
 	}
-	return string(result)
-}
-
-func generateAddress(rng *rand.Rand) string {
-	length := 10 + rng.Intn(31)
-	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ,."
-	result := make([]byte, length)
-	for i := range result {
-		result[i] = charset[rng.Intn(len(charset))]
-	}
-	return string(result)
-}
-
-func generatePhone(rng *rand.Rand) string {
-	countryCode := rng.Intn(25) + 10
-	return fmt.Sprintf("%d-%03d-%03d-%04d", countryCode, rng.Intn(1000), rng.Intn(1000), rng.Intn(10000))
-}
-
-var partNameWords = []string{
-	"almond", "antique", "aquamarine", "azure", "beige", "bisque", "black", "blanched", "blue",
-	"blush", "brown", "burlywood", "burnished", "chartreuse", "chiffon", "chocolate", "coral",
-	"cornflower", "cornsilk", "cream", "cyan", "dark", "deep", "dim", "dodger", "drab", "firebrick",
-	"floral", "forest", "frosted", "gainsboro", "ghost", "goldenrod", "green", "grey", "honeydew",
-	"hot", "indian", "ivory", "khaki", "lace", "lavender", "lawn", "lemon", "light", "lime", "linen",
-	"magenta", "maroon", "medium", "metallic", "midnight", "mint", "misty", "moccasin", "navajo",
-	"navy", "olive", "orange", "orchid", "pale", "papaya", "peach", "peru", "pink", "plum", "powder",
-	"puff", "purple", "red", "rose", "rosy", "royal", "saddle", "salmon", "sandy", "seashell", "sienna",
-	"sky", "slate", "smoke", "snow", "spring", "steel", "tan", "thistle", "tomato", "turquoise", "violet",
-	"wheat", "white", "yellow",
-}
-
-func generatePartName(rng *rand.Rand) string {
-	// Generate 5 random words
-	words := make([]string, 5)
-	used := make(map[int]bool)
-	for i := 0; i < 5; i++ {
-		for {
-			idx := rng.Intn(len(partNameWords))
-			if !used[idx] {
-				used[idx] = true
-				words[i] = partNameWords[idx]
-				break
+	for i := range ops {
+		columns := ops[i].Body.WriteColumns
+		for c := range columns {
+			width, isChar := widths[columns[c].Column]
+			if !isChar {
+				continue
+			}
+			value, isString := columns[c].Value.(string)
+			if missing := width - len(value); isString && missing > 0 && missing <= len(tpchSpaces) {
+				columns[c].Value = value + tpchSpaces[:missing]
 			}
 		}
 	}
-	return fmt.Sprintf("%s %s %s %s %s", words[0], words[1], words[2], words[3], words[4])
+}
+
+// tpchCharWidths returns, per table of the tpch database, the length in
+// bytes of its CHAR columns (the length in characters times the longest
+// character of the character set): what tpchPadChars fills a value to.
+func (s *Shell) tpchCharWidths() (map[string]map[string]int, error) {
+	_, rows, _, err := s.mysqlClient.Query(
+		"SELECT TABLE_NAME, COLUMN_NAME, CHARACTER_OCTET_LENGTH, CHARACTER_SET_NAME " +
+			"FROM information_schema.COLUMNS " +
+			"WHERE TABLE_SCHEMA = '" + tpchDatabase + "' AND DATA_TYPE = 'char'")
+	if err != nil {
+		return nil, err
+	}
+	widths := map[string]map[string]int{}
+	for _, row := range rows {
+		if len(row) < 4 {
+			continue
+		}
+		table := strings.ToLower(tpchCellString(row[0]))
+		column := strings.ToLower(tpchCellString(row[1]))
+		width, err := strconv.Atoi(tpchCellString(row[2]))
+		if err != nil {
+			return nil, fmt.Errorf("length of %s.%s: %w", table, column, err)
+		}
+		switch charset := strings.ToLower(tpchCellString(row[3])); charset {
+		case "ucs2", "utf16", "utf16le", "utf32":
+			// a space is two or four bytes there: a fill of one-byte
+			// spaces would store text that is not valid in the column
+			return nil, fmt.Errorf("%s.%s has character set %s, which .load_tpch cannot fill a CHAR column of: "+
+				"drop the tpch database and create it with utf8mb4 or latin1", table, column, charset)
+		}
+		if widths[table] == nil {
+			widths[table] = map[string]int{}
+		}
+		widths[table][column] = width
+	}
+	return widths, nil
 }
 
 // runLoadTPCH loads TPC-H data using the batchwrite endpoint
@@ -595,7 +1013,7 @@ func (s *Shell) runLoadTPCH(scaleFactor float64, numThreads int, batchSize int) 
 
 	fmt.Println()
 	fmt.Println(ui.Info(fmt.Sprintf("Loading TPC-H data with scale factor %g", scaleFactor)))
-	fmt.Println(ui.Info(fmt.Sprintf("Total rows to load: %d", totalRows)))
+	fmt.Println(ui.Info(fmt.Sprintf("Rows to load: about %d (an order has 1 to 7 lineitems)", totalRows)))
 	fmt.Println(ui.Info(fmt.Sprintf("Using %d threads, batch size %d", numThreads, batchSize)))
 	fmt.Println()
 
@@ -619,27 +1037,37 @@ func (s *Shell) runLoadTPCH(scaleFactor float64, numThreads int, batchSize int) 
 	}
 	fmt.Println()
 
+	charWidths, err := s.tpchCharWidths()
+	if err != nil {
+		return fmt.Errorf("failed to read the CHAR columns of the tpch tables: %w", err)
+	}
+
 	// Load each table
 	loadStart := time.Now()
 	var totalRowsLoaded int64
 
-	for _, table := range tables {
-		rowCount := table.RowCount(scaleFactor)
-		if rowCount == 0 {
+	for i := range tables {
+		table := &tables[i]
+		if table.unitCount(scaleFactor) == 0 {
 			continue
 		}
 
-		fmt.Printf("Loading tpch.%s (%d rows)...\n", table.Name, rowCount)
+		if table.Units != nil {
+			fmt.Printf("Loading tpch.%s (about %d rows)...\n", table.Name, table.RowCount(scaleFactor))
+		} else {
+			fmt.Printf("Loading tpch.%s (%d rows)...\n", table.Name, table.RowCount(scaleFactor))
+		}
 		tableStart := time.Now()
 
-		err := s.loadTPCHTable(table, scaleFactor, numThreads, batchSize, &totalRowsLoaded)
+		rowsLoaded, err := s.loadTPCHTable(table, charWidths[table.Name], scaleFactor, numThreads, batchSize)
 		if err != nil {
 			return fmt.Errorf("failed to load table %s: %w", table.Name, err)
 		}
+		totalRowsLoaded += rowsLoaded
 
 		tableDuration := time.Since(tableStart)
-		rowsPerSec := float64(rowCount) / tableDuration.Seconds()
-		fmt.Printf("   Loaded %d rows in %v (%.0f rows/sec)\n", rowCount, tableDuration.Round(time.Millisecond), rowsPerSec)
+		rowsPerSec := float64(rowsLoaded) / tableDuration.Seconds()
+		fmt.Printf("   Loaded %d rows in %v (%.0f rows/sec)\n", rowsLoaded, tableDuration.Round(time.Millisecond), rowsPerSec)
 	}
 
 	totalDuration := time.Since(loadStart)
@@ -653,11 +1081,22 @@ func (s *Shell) runLoadTPCH(scaleFactor float64, numThreads int, batchSize int) 
 	return nil
 }
 
-// loadTPCHTable loads a single TPC-H table using multiple threads
-func (s *Shell) loadTPCHTable(table TPCHTableInfo, scaleFactor float64, numThreads int, batchSize int, totalRowsLoaded *int64) error {
-	rowCount := table.RowCount(scaleFactor)
-	if rowCount == 0 {
-		return nil
+// loadTPCHTable loads a single TPC-H table using multiple threads and
+// returns the number of rows it sent.  charWidths has the length in bytes
+// of the table's CHAR columns (tpchPadChars).
+func (s *Shell) loadTPCHTable(table *TPCHTableInfo, charWidths map[string]int, scaleFactor float64, numThreads int, batchSize int) (int64, error) {
+	units := table.unitCount(scaleFactor)
+	if units == 0 {
+		return 0, nil
+	}
+	// A batch request holds about batchSize rows: fewer units when a unit
+	// is several rows (an order's lineitems).
+	unitsPerBatch := batchSize
+	if table.RowsPerUnit > 1 {
+		unitsPerBatch = batchSize / table.RowsPerUnit
+	}
+	if unitsPerBatch < 1 {
+		unitsPerBatch = 1
 	}
 
 	// Create REST clients for each thread
@@ -673,7 +1112,7 @@ func (s *Shell) loadTPCHTable(table TPCHTableInfo, scaleFactor float64, numThrea
 			for j := 0; j < i; j++ {
 				clients[j].Close()
 			}
-			return fmt.Errorf("failed to create REST client: %w", err)
+			return 0, fmt.Errorf("failed to create REST client: %w", err)
 		}
 		clients[i] = c
 	}
@@ -686,8 +1125,9 @@ func (s *Shell) loadTPCHTable(table TPCHTableInfo, scaleFactor float64, numThrea
 	}()
 
 	// Split work among threads
-	rowsPerThread := (rowCount + numThreads - 1) / numThreads
+	unitsPerThread := (units + numThreads - 1) / numThreads
 	errorCollector := NewErrorCollector()
+	var completedUnits int64
 	var completedRows int64
 	var wg sync.WaitGroup
 
@@ -700,9 +1140,9 @@ func (s *Shell) loadTPCHTable(table TPCHTableInfo, scaleFactor float64, numThrea
 			select {
 			case <-ticker.C:
 				rows := atomic.LoadInt64(&completedRows)
-				pct := float64(rows) / float64(rowCount) * 100
+				pct := float64(atomic.LoadInt64(&completedUnits)) / float64(units) * 100
 				errs := errorCollector.Count()
-				fmt.Printf("   Progress: %d/%d rows (%.1f%%), errors=%d\n", rows, rowCount, pct, errs)
+				fmt.Printf("   Progress: %d rows (%.1f%%), errors=%d\n", rows, pct, errs)
 			case <-stopProgress:
 				return
 			}
@@ -710,48 +1150,46 @@ func (s *Shell) loadTPCHTable(table TPCHTableInfo, scaleFactor float64, numThrea
 	}()
 
 	for t := 0; t < numThreads; t++ {
-		startRow := t * rowsPerThread
-		endRow := startRow + rowsPerThread
-		if endRow > rowCount {
-			endRow = rowCount
+		start := t * unitsPerThread
+		end := start + unitsPerThread
+		if end > units {
+			end = units
 		}
-		if startRow >= rowCount {
+		if start >= units {
 			continue
 		}
 
 		wg.Add(1)
-		go func(threadID int, restClient *client.RestClient, start, end int) {
+		go func(restClient *client.RestClient, start, end int) {
 			defer wg.Done()
 
-			// Each thread has its own RNG for deterministic generation
-			rng := rand.New(rand.NewSource(int64(threadID * 1000000)))
-
-			// Process in batches
-			for batchStart := start; batchStart < end; batchStart += batchSize {
-				batchEnd := batchStart + batchSize
+			// Process in batches.  The rows of a unit do not depend on
+			// the thread or the batch that generates them (tpchRand).
+			for batchStart := start; batchStart < end; batchStart += unitsPerBatch {
+				batchEnd := batchStart + unitsPerBatch
 				if batchEnd > end {
 					batchEnd = end
 				}
 
-				ops := table.Generator(scaleFactor, batchStart, batchEnd, rng)
+				ops := table.Generator(scaleFactor, batchStart, batchEnd)
+				atomic.AddInt64(&completedUnits, int64(batchEnd-batchStart))
 				if len(ops) == 0 {
 					continue
 				}
+				tpchPadChars(ops, charWidths)
 
 				request := dsl.BatchWriteRequest{
 					Operations: ops,
 				}
 
-				_, _, err := restClient.Post("/" + APIVersion + "/batchwrite", request)
+				_, _, err := restClient.Post("/"+APIVersion+"/batchwrite", request)
 				if err != nil {
 					errorCollector.Record(err)
 				}
 
-				rowsInserted := int64(len(ops))
-				atomic.AddInt64(&completedRows, rowsInserted)
-				atomic.AddInt64(totalRowsLoaded, rowsInserted)
+				atomic.AddInt64(&completedRows, int64(len(ops)))
 			}
-		}(t, clients[t], startRow, endRow)
+		}(clients[t], start, end)
 	}
 
 	wg.Wait()
@@ -761,7 +1199,7 @@ func (s *Shell) loadTPCHTable(table TPCHTableInfo, scaleFactor float64, numThrea
 		errorCollector.PrintErrors()
 	}
 
-	return nil
+	return atomic.LoadInt64(&completedRows), nil
 }
 
 // runDropTPCH drops all TPC-H tables and the tpch database

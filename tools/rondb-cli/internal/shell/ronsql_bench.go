@@ -109,6 +109,9 @@ type RonSQLBenchQuery struct {
 	// PlanPins are substrings expected in the RonSQL EXPLAIN of the warmup
 	// statement; a missing pin prints a warning (benchmarks.md §7).
 	PlanPins []string
+	// QuietSQL keeps the statement out of the header of a benchmark run:
+	// the caller prints it itself, or not at all (.bench_tpch --show).
+	QuietSQL bool
 }
 
 // sqlBenchName is the query's name in the .bench_sql namespace.
@@ -782,7 +785,7 @@ LIMIT 100;`,
 		Database:    "tpch",
 		// 5000.00 stands for official Q22's AVG(c_acctbal) over the positive
 		// balances of those countries: the CLI generator draws c_acctbal
-		// uniformly from -999.99 to 9999.00, whose positive part averages
+		// uniformly from -999.99 to 9999.99, whose positive part averages
 		// ~5000 (subqueries do not run in a CTE body).
 		SQL: `WITH cust_orders AS (
   SELECT cu.c_custkey AS k, COUNT(*) AS order_cnt
@@ -803,23 +806,24 @@ ORDER BY c.c_nationkey;`,
 	},
 
 	// ---------------------------------------------------------------
-	// Official TPC-H formulations (MySQL only). Structure is faithful
-	// (region/nation joins, correlated subqueries, HAVING, ORDER BY/
-	// LIMIT); literals are adapted to the CLI-generated data where the
-	// official ones would match nothing (see ronsql_cli_benchmarks.md).
+	// Official TPC-H formulations (MySQL only): region/nation joins,
+	// correlated subqueries, HAVING, ORDER BY/LIMIT, with the TPC-H
+	// validation literals (.load_tpch follows the TPC-H data rules, so
+	// they select what they select on dbgen data).  .bench_tpch has all
+	// 22 queries (tpch_queries.go).
 	// ---------------------------------------------------------------
 	{
 		Name:        "tpch_q2_official",
 		SQLName:     "tpch_q2",
 		Category:    benchCatTPCHOfficial,
 		MySQLOnly:   true,
-		Description: "Q2 official: correlated MIN(ps_supplycost) over EUROPE, ORDER BY s_acctbal DESC LIMIT 100 (p_type LIKE '%STANDARD')",
+		Description: "Q2 official: correlated MIN(ps_supplycost) over EUROPE, ORDER BY s_acctbal DESC LIMIT 100",
 		Database:    "tpch",
 		SQL: `SELECT s.s_acctbal, s.s_name, n.n_name, p.p_partkey, p.p_mfgr,
        s.s_address, s.s_phone, s.s_comment
 FROM part AS p, supplier AS s, partsupp AS ps, nation AS n, region AS r
 WHERE p.p_partkey = ps.ps_partkey AND s.s_suppkey = ps.ps_suppkey
-  AND p.p_size = 15 AND p.p_type LIKE '%STANDARD'
+  AND p.p_size = 15 AND p.p_type LIKE '%BRASS'
   AND s.s_nationkey = n.n_nationkey AND n.n_regionkey = r.r_regionkey
   AND r.r_name = 'EUROPE'
   AND ps.ps_supplycost = (
@@ -1123,24 +1127,24 @@ func tpchCustKeyResolver(sql string, rng *rand.Rand, maxKey int) string {
 }
 
 // tpchOrderKeyLegend documents the placeholders of tpchOrderKeyResolver.
-const tpchOrderKeyLegend = "Placeholders per request: {KEY} a random existing o_orderkey (multiples of 4 up to MAX(o_orderkey), KeySQL); " +
+const tpchOrderKeyLegend = "Placeholders per request: {KEY} a random existing o_orderkey (the first 8 of every 32 values up to MAX(o_orderkey), KeySQL); " +
 	"{KEYS:n} n distinct existing o_orderkeys"
 
 var tpchOrderKeyPlaceholder = regexp.MustCompile(`\{KEY\}|\{KEYS:[0-9]+\}`)
 
 // tpchOrderKeyResolver renders {KEY} as a random existing o_orderkey and
-// {KEYS:n} as n distinct existing o_orderkeys.  .load_tpch writes sparse
-// order keys (multiples of 4, generateOrdersRows in tpch.go), so the plain
-// {KEY} draw in [1, maxKey] would miss three requests in four; maxKey is
-// MAX(o_orderkey) from KeySQL.
+// {KEYS:n} as n distinct existing o_orderkeys.  .load_tpch writes the
+// sparse order keys of TPC-H (the first 8 of every 32 values, tpchOrderKey
+// in tpch.go), so the plain {KEY} draw in [1, maxKey] would miss three
+// requests in four; maxKey is MAX(o_orderkey) from KeySQL.
 func tpchOrderKeyResolver(sql string, rng *rand.Rand, maxKey int) string {
-	orders := maxKey / 4
+	orders := tpchOrderIndex(int64(maxKey))
 	if orders < 1 {
 		orders = 1
 	}
 	return tpchOrderKeyPlaceholder.ReplaceAllStringFunc(sql, func(m string) string {
 		if m == "{KEY}" {
-			return strconv.Itoa(4 * (rng.Intn(orders) + 1))
+			return strconv.FormatInt(tpchOrderKey(rng.Intn(orders)+1), 10)
 		}
 		n, _ := strconv.Atoi(m[len("{KEYS:") : len(m)-1])
 		if n > orders {
@@ -1152,7 +1156,7 @@ func tpchOrderKeyResolver(sql string, rng *rand.Rand, maxKey int) string {
 			k := rng.Intn(orders) + 1
 			if !seen[k] {
 				seen[k] = true
-				keys = append(keys, strconv.Itoa(4*k))
+				keys = append(keys, strconv.FormatInt(tpchOrderKey(k), 10))
 			}
 		}
 		return strings.Join(keys, ", ")
@@ -1437,11 +1441,45 @@ func (s *Shell) runBenchRonSQL(name string, numThreads, numOps int) error {
 	return s.runBenchRonSQLQuery(q, numThreads, numOps)
 }
 
+// benchRunStats holds the figures of one benchmark run, for a caller that
+// prints a summary over several runs (.bench_tpch).
+type benchRunStats struct {
+	Requests   int64 // successful requests of the timed run
+	Errors     int64
+	WarmupRows int // result rows of the warmup request
+	Warmup     time.Duration
+	Min        time.Duration
+	Avg        time.Duration
+	Max        time.Duration
+	P95        time.Duration
+}
+
+func newBenchRunStats(doneOps int64, warmupRows int, warmup time.Duration,
+	latencyCollector *LatencyCollector, errorCollector *ErrorCollector) *benchRunStats {
+	minLat, maxLat, avgLat, p95Lat, _, _, _ := latencyCollector.GetTotalStats()
+	return &benchRunStats{
+		Requests:   doneOps,
+		Errors:     errorCollector.Count(),
+		WarmupRows: warmupRows,
+		Warmup:     warmup,
+		Min:        minLat,
+		Avg:        avgLat,
+		Max:        maxLat,
+		P95:        p95Lat,
+	}
+}
+
 // runBenchRonSQLQuery runs one named query numThreads x numOps times against
 // the RonSQL REST endpoint and reports throughput and latency percentiles.
 func (s *Shell) runBenchRonSQLQuery(q *RonSQLBenchQuery, numThreads, numOps int) error {
+	_, err := s.benchRonSQLQuery(q, numThreads, numOps)
+	return err
+}
+
+// benchRonSQLQuery is runBenchRonSQLQuery, also returning the run's figures.
+func (s *Shell) benchRonSQLQuery(q *RonSQLBenchQuery, numThreads, numOps int) (*benchRunStats, error) {
 	if s.restClient == nil {
-		return fmt.Errorf("REST API not connected. RonSQL benchmarks require REST API.")
+		return nil, fmt.Errorf("REST API not connected. RonSQL benchmarks require REST API.")
 	}
 
 	totalOps := numThreads * numOps
@@ -1451,8 +1489,10 @@ func (s *Shell) runBenchRonSQLQuery(q *RonSQLBenchQuery, numThreads, numOps int)
 		q.Name, numThreads, numOps, totalOps)))
 	fmt.Println(ui.Info(q.Description))
 	fmt.Println()
-	fmt.Println(strings.TrimSpace(q.SQL))
-	fmt.Println()
+	if !q.QuietSQL {
+		fmt.Println(strings.TrimSpace(q.SQL))
+		fmt.Println()
+	}
 
 	maxKey := 0
 	if q.RandKey {
@@ -1474,7 +1514,7 @@ func (s *Shell) runBenchRonSQLQuery(q *RonSQLBenchQuery, numThreads, numOps int)
 			for j := 0; j < i; j++ {
 				clients[j].Close()
 			}
-			return fmt.Errorf("failed to create REST client for thread %d: %w", i, err)
+			return nil, fmt.Errorf("failed to create REST client for thread %d: %w", i, err)
 		}
 		clients[i] = c
 	}
@@ -1504,7 +1544,7 @@ func (s *Shell) runBenchRonSQLQuery(q *RonSQLBenchQuery, numThreads, numOps int)
 			fmt.Println(ui.Error("RonSQL response:"))
 			fmt.Println(strings.TrimSpace(string(data)))
 		}
-		return fmt.Errorf("warmup request failed: %w", err)
+		return nil, fmt.Errorf("warmup request failed: %w", err)
 	}
 	warmupRows := countRonSQLResultRows(data)
 	fmt.Println(ui.Info(fmt.Sprintf("Warmup: %s, %d result rows", formatLatency(warmupDur), warmupRows)))
@@ -1567,7 +1607,7 @@ func (s *Shell) runBenchRonSQLQuery(q *RonSQLBenchQuery, numThreads, numOps int)
 
 	printBenchResults("RonSQL", q.Name, doneOps, benchDuration, latencyCollector, errorCollector)
 	mergePhaseSamples(phaseParts).Print(doneOps)
-	return nil
+	return newBenchRunStats(doneOps, warmupRows, warmupDur, latencyCollector, errorCollector), nil
 }
 
 // runBenchSQLNamed dispatches a named MySQL benchmark (or "all"/"list").
@@ -1616,8 +1656,14 @@ func (s *Shell) runBenchSQLNamed(name string, numThreads, numOps int) error {
 // runBenchSQLQuery runs one named query numThreads x numOps times through
 // the MySQL server and reports throughput and latency percentiles.
 func (s *Shell) runBenchSQLQuery(q *RonSQLBenchQuery, numThreads, numOps int) error {
+	_, err := s.benchSQLQuery(q, numThreads, numOps)
+	return err
+}
+
+// benchSQLQuery is runBenchSQLQuery, also returning the run's figures.
+func (s *Shell) benchSQLQuery(q *RonSQLBenchQuery, numThreads, numOps int) (*benchRunStats, error) {
 	if s.mysqlClient == nil {
-		return fmt.Errorf("MySQL not connected. SQL benchmarks require MySQL.")
+		return nil, fmt.Errorf("MySQL not connected. SQL benchmarks require MySQL.")
 	}
 
 	totalOps := numThreads * numOps
@@ -1628,8 +1674,10 @@ func (s *Shell) runBenchSQLQuery(q *RonSQLBenchQuery, numThreads, numOps int) er
 		name, numThreads, numOps, totalOps)))
 	fmt.Println(ui.Info(q.Description))
 	fmt.Println()
-	fmt.Println(strings.TrimSpace(q.SQL))
-	fmt.Println()
+	if !q.QuietSQL {
+		fmt.Println(strings.TrimSpace(q.SQL))
+		fmt.Println()
+	}
 
 	maxKey := 0
 	if q.RandKey {
@@ -1653,7 +1701,7 @@ func (s *Shell) runBenchSQLQuery(q *RonSQLBenchQuery, numThreads, numOps int) er
 			for j := 0; j < i; j++ {
 				clients[j].Close()
 			}
-			return fmt.Errorf("failed to create MySQL client for thread %d: %w", i, err)
+			return nil, fmt.Errorf("failed to create MySQL client for thread %d: %w", i, err)
 		}
 		clients[i] = c
 	}
@@ -1670,7 +1718,7 @@ func (s *Shell) runBenchSQLQuery(q *RonSQLBenchQuery, numThreads, numOps int) er
 	// Warmup: run the query once to validate it and warm server caches.
 	_, warmupRows, warmupDur, err := clients[0].Query(buildRonSQLBenchSQL(q, warmupRng, maxKey))
 	if err != nil {
-		return fmt.Errorf("warmup query failed: %w", err)
+		return nil, fmt.Errorf("warmup query failed: %w", err)
 	}
 	fmt.Println(ui.Info(fmt.Sprintf("Warmup: %s, %d result rows", formatLatency(warmupDur), len(warmupRows))))
 	fmt.Println()
@@ -1708,5 +1756,5 @@ func (s *Shell) runBenchSQLQuery(q *RonSQLBenchQuery, numThreads, numOps int) er
 	benchDuration := time.Since(benchStart)
 
 	printBenchResults("SQL", name, doneOps, benchDuration, latencyCollector, errorCollector)
-	return nil
+	return newBenchRunStats(doneOps, len(warmupRows), warmupDur, latencyCollector, errorCollector), nil
 }

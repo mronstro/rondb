@@ -153,7 +153,12 @@ func (s *Shell) runExplainRonSQL(name string) error {
 		return fmt.Errorf("%s uses ORDER BY/LIMIT outside the RonSQL envelope; use .explain_sql %s",
 			q.Name, q.sqlBenchName())
 	}
+	return s.explainRonSQLQuery(q)
+}
 
+// explainRonSQLQuery prints the RonSQL EXPLAIN of one registry entry
+// (shared by .explain_ronsql and .bench_tpch explain).
+func (s *Shell) explainRonSQLQuery(q *RonSQLBenchQuery) error {
 	sqlText, key := s.sampleBenchSQL(q)
 	// RonSQL-side path: include the RonSQL-only statement prefix (e.g.
 	// FRAGS_PER_WORKER = 2) so the explained plan matches what
@@ -201,7 +206,12 @@ func (s *Shell) runExplainSQL(name string) error {
 	if q == nil {
 		return fmt.Errorf("unknown SQL query: %s (see .list_query_sql)", name)
 	}
+	return s.explainSQLQuery(q)
+}
 
+// explainSQLQuery prints the MySQL EXPLAIN of one registry entry (shared by
+// .explain_sql and .bench_tpch explain).
+func (s *Shell) explainSQLQuery(q *RonSQLBenchQuery) error {
 	sqlText, key := s.sampleBenchSQL(q)
 
 	// Dedicated connection with the query's database as default schema so

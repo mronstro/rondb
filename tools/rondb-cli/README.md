@@ -350,7 +350,26 @@ rondb-cli includes built-in benchmarks for Rondis, SQL, and REST API (RDRS). Use
 .bench_ronsql                    List available RonSQL benchmark queries
 .bench_ronsql <name> [T] [N]     Run a named query benchmark (default 1 thread x 10 requests)
 .bench_ronsql all [T] [N]        Run all RonSQL benchmark queries sequentially
+
+# TPC-H, all 22 queries, on RonSQL and the MySQL server
+.bench_tpch                      List the queries: which run as they are, which run rewritten
+.bench_tpch missing              RonSQL features the official queries need
+.bench_tpch show <qN>            Print the official, original and rewritten SQL of a query
+.bench_tpch indexes              Create the secondary indexes the RonSQL forms use
+.bench_tpch verify [qN ...]      Run each form once on both engines and compare the results
+.bench_tpch original [qN ...] [T] [N]   Phase 1: the queries RonSQL runs in their original form
+.bench_tpch rewritten [qN ...] [T] [N]  Phase 2: the rewritten queries
+.bench_tpch all [qN ...] [T] [N] [engine]  Both phases (engine: both | ronsql | mysql; default 1 thread x 3 requests)
+.bench_tpch official [qN ...] [T] [N]   The official formulations on the MySQL server
 ```
+
+`qN` names the queries to run (`q4`, `q4 q18` or `q4,q18`); every query runs
+when none is named. In a run the `q` is required, since a bare number is the
+thread or request count. `--show` on `check`, `verify` or a run prints the SQL
+of each statement; without it only the query and form are named.
+`--straight` on `verify`, a run or `explain <qN> [form] mysql` makes the MySQL
+server join in the order of the statement (`SELECT STRAIGHT_JOIN` in every
+SELECT), as RonSQL does, instead of the order its optimizer picks.
 
 The RonSQL benchmarks include Feature-Store-style queries (`fs_*`: CTE feature
 groups over one table or a simple join, joined to an entity table via scans and
@@ -360,8 +379,17 @@ key lookups) and TPC-H queries rewritten with CTEs (`tpch_q2`, `tpch_q11`,
 filter). They require TPC-H data loaded via
 `.load_tpch`. Latencies are reported with microsecond precision (min/avg/max,
 p95/p99/p99.9). Note: if the `tpch` database was loaded with an older CLI
-version, run `.drop_tpch` and reload to pick up the secondary indexes the
-benchmarks use.
+version, run `.drop_tpch` and reload: `.load_tpch` now fills the tables by the
+TPC-H data generation rules (specification clause 4.2.3), and older data has
+other order keys and none of the dependencies between the tables. Data loaded
+before 2026-11-28 also has its `CHAR` values filled with NUL bytes instead of
+spaces, which the MySQL server and RonSQL return differently.
+
+`.bench_tpch` runs all 22 TPC-H queries. Each has up to three forms: the
+official one (MySQL only), the original one (the official query in RonSQL
+dialect, same columns and rows, for the queries RonSQL runs as they are) and a
+rewritten one (a shape RonSQL runs, or runs faster). The original and
+rewritten forms run on both engines and the summary shows them side by side.
 
 Key format: `bench:key:<client>:<thread>:<key>:<row>`
 
