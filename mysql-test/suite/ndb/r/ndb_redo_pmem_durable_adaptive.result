@@ -1,0 +1,17 @@
+# Shutting down mysqld 1
+# Shutting down mysqld 2
+== 0 == the data nodes run the adaptive scheme
+node 1: 1
+node 2: 1
+== 1 == node restarts with abort while the writers write, then a system restart
+Running command
+Result of command: 0
+Test program success!
+== 2 == system restarts with abort, with and without writes
+Running command
+Result of command: 0
+Test program success!
+# Starting mysqld 1
+# restart
+# Starting mysqld 2
+# restart

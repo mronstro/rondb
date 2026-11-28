@@ -1,0 +1,55 @@
+--source include/have_ndb.inc
+
+# RONDB-1150 X8.2: the ledger of testRestartGci with durable commits and
+# the adaptive persist scheme, where a COMMIT that a signal depends on
+# waits for one barrier per log part at the end of the scheduler round.
+# Node restarts with abort while the writers write, whose takeovers may
+# find such a COMMIT waiting (it goes on first, redoResumeNow()), then
+# system restarts with abort; every acknowledged transaction stays.
+
+# NDBT creates TEST_DB.T1 directly through the NDB API. Keep both
+# mysqlds stopped so metadata discovery cannot import the API table;
+# on a case-insensitive file system it retries CREATE DATABASE TEST_DB
+# after each system restart and fails.
+--connect(s2,127.0.0.1,root,,test,$MASTER_MYPORT1,)
+--connection default
+--echo # Shutting down mysqld 1
+--let $mysqld_name=mysqld.1.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld1_file_name= $_expect_file_name
+
+--connection s2
+--echo # Shutting down mysqld 2
+--let $mysqld_name=mysqld.2.1
+--source include/shutdown_mysqld.inc
+--let $expect_mysqld2_file_name= $_expect_file_name
+
+--echo == 0 == the data nodes run the adaptive scheme
+--let LOG_LINE = __RedoLogPmemPersistScheme=adaptive: a COMMIT that a signal depends on
+--source suite/ndb/include/redo_pmem_durable_log.inc
+
+let NDBAPITEST_CLEANUP_QUERY=;
+let NDBAPITEST_NAME=testRestartGci;
+
+--echo == 1 == node restarts with abort while the writers write, then a system restart
+let NDBAPITEST_ARGS=-n GciLedgerNR -l 2 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+--echo == 2 == system restarts with abort, with and without writes
+let NDBAPITEST_ARGS=-n GciLedgerDurableSR -l 1 T1;
+--source suite/ndb/include/run_ndbapitest.inc
+
+--connection default
+--echo # Starting mysqld 1
+--let $_expect_file_name= $expect_mysqld1_file_name
+--let $mysqld_name=mysqld.1.1
+--source include/start_mysqld.inc
+
+--connection s2
+--echo # Starting mysqld 2
+--let $_expect_file_name= $expect_mysqld2_file_name
+--let $mysqld_name=mysqld.2.1
+--source include/start_mysqld.inc
+
+--connection default
+--disconnect s2

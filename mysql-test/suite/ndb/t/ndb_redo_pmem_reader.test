@@ -89,12 +89,33 @@ EOF
         "$commits COMMITs, $others records of other transactions"), "\n";
 EOF
 
+# --simulate-sr runs step A of phase 2 on log part 0 (X8.4): every durable
+# COMMIT of the tail is executed at a COMPLETE or left in doubt; without
+# durable commits there are none
+--perl
+  use strict;
+  my $reader = $ENV{NDB_REDO_LOG_READER};
+  my @out = `$reader --simulate-sr=0,1 $ENV{PART0}`;
+  die "ndb_redo_log_reader --simulate-sr failed\n" if $? != 0;
+  my ($tail) = map { /^  (\d+) durable COMMITs in the tail/ ? $1 : () } @out;
+  my ($exec) =
+    map { /^  step A executes \d+ transactions, (\d+) COMMITs/ ? $1 : () } @out;
+  my ($doubt) =
+    map { /^  \d+ transactions, (\d+) COMMITs, are in doubt/ ? $1 : () } @out;
+  die "--simulate-sr printed no summary\n"
+    unless defined $tail && defined $exec && defined $doubt;
+  print "--simulate-sr: ", ($exec + $doubt == $tail ?
+        "every durable COMMIT of the tail executed or in doubt" :
+        "$tail COMMITs, $exec executed, $doubt in doubt"), "\n";
+EOF
 --echo == 4 == options that the PMEM format does not take
 --replace_result $PART0 PART0
 --error 1
 --exec $NDB_REDO_LOG_READER --twiddle $PART0/S0.FragLog 2>&1
 --error 1
 --exec $NDB_REDO_LOG_READER --transid=5 $PART0/S0.FragLog 2>&1
+--error 1
+--exec $NDB_REDO_LOG_READER --simulate-sr=5 $PART0 2>&1
 --error 1
 --exec $NDB_REDO_LOG_READER --find-end=$MYSQLTEST_VARDIR/tmp >> $NDB_TOOLS_OUTPUT 2>&1
 

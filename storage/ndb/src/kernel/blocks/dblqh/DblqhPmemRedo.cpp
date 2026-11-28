@@ -866,33 +866,28 @@ void Dblqh::redoPersistOp(Signal *signal, const TcConnectionrec *regTcPtr) {
 }
 
 /**
- * X8.1 (impl_next_steps.md): the end of a PACKED_SIGNAL whose COMMITs
- * waited in commitReqLab(). First the barriers: the first operation of a
- * log part persists all of it, so the others of the part have none. Then
- * each operation goes on in the order it came, with the signals that
- * depend on its COMMIT. No other signal ran in between, so none found an
- * operation waiting. With a barrier to skip (DUMP 2368 4) each operation
- * has its own and goes on at once, as without batching, so that the next
- * barrier of the log part does not make good the skipped one.
+ * X8.1, X8.2 (impl_next_steps.md): the end of a PACKED_SIGNAL, or of the
+ * scheduler round with the adaptive scheme, whose COMMITs waited in
+ * commitReqLab(). First the barriers: the first operation of a log part
+ * persists all of it, so the others of the part have none. Then each
+ * operation goes on in the order it came, in its state before the wait,
+ * with the signals that depend on its COMMIT. An entry is RNIL when
+ * another signal let its operation go on early (redoResumeNow()). With a
+ * barrier to skip (DUMP 2368 4) each operation has its own and goes on at
+ * once, as without batching, so that the next barrier of the log part
+ * does not make good the skipped one. No COMMIT waits while they go on.
  */
 void Dblqh::redoResumeParked(Signal *signal) {
   const Uint32 count = c_redo_park_count;
-  c_redo_park_count = 0;
+  c_redo_park_resuming = true;
   TcConnectionrecPtr tcPtr;
+  bool perOp = false;
 #if defined(VM_TRACE) || defined(ERROR_INSERT)
-  if (unlikely(c_redo_pmem_skip_barrier)) {
-    jam();
-    for (Uint32 i = 0; i < count; i++) {
-      tcPtr.i = c_redo_parked[i];
-      ndbrequire(tcConnect_pool.getValidPtr(tcPtr));
-      redoPersistOp(signal, tcPtr.p);
-      commitReqAfterPersist(signal, tcPtr);
-    }
-    return;
-  }
+  perOp = c_redo_pmem_skip_barrier;
 #endif
-  for (Uint32 i = 0; i < count; i++) {
-    tcPtr.i = c_redo_parked[i];
+  for (Uint32 i = 0; i < count && !perOp; i++) {
+    if (c_redo_parked[i].tcPtrI == RNIL) continue;
+    tcPtr.i = c_redo_parked[i].tcPtrI;
     ndbrequire(tcConnect_pool.getValidPtr(tcPtr));
     LogPartRecord *const logPartPtrP = tcPtr.p->m_log_part_ptr_p;
     lock_log_part(logPartPtrP);
@@ -903,13 +898,48 @@ void Dblqh::redoResumeParked(Signal *signal) {
     }
     unlock_log_part(logPartPtrP);
   }
-  c_redo_park_commits += count;
   for (Uint32 i = 0; i < count; i++) {
+    const RedoParked parked = c_redo_parked[i];
+    if (parked.tcPtrI == RNIL) continue;
     jam();
-    tcPtr.i = c_redo_parked[i];
-    ndbrequire(tcConnect_pool.getValidPtr(tcPtr));
+    tcPtr.i = parked.tcPtrI;
+    ndbrequire(tcConnect_pool.getValidPtr(tcPtr) &&
+               tcPtr.p->transactionState ==
+                   TcConnectionrec::WAIT_REDO_PERSIST);
+    tcPtr.p->transactionState =
+        TcConnectionrec::TransactionState(parked.state);
+    if (perOp) redoPersistOp(signal, tcPtr.p);
+    c_redo_park_commits++;
     commitReqAfterPersist(signal, tcPtr);
   }
+  c_redo_park_count = 0;
+  c_redo_park_resuming = false;
+}
+
+/**
+ * X8.2: a signal found an operation whose COMMIT waits for the barrier at
+ * the end of the round (WAIT_REDO_PERSIST). It has its barrier and goes
+ * on now, in its state before the wait, as it would have without the
+ * wait, before the signal acts on it. The caller has taken what it needs
+ * from the signal data, which the signals of the operation overwrite.
+ */
+void Dblqh::redoResumeNow(Signal *signal, TcConnectionrecPtr tcConnectptr) {
+  for (Uint32 i = 0; i < c_redo_park_count; i++) {
+    RedoParked &parked = c_redo_parked[i];
+    if (parked.tcPtrI != tcConnectptr.i) continue;
+    jam();
+    ndbrequire(tcConnectptr.p->transactionState ==
+               TcConnectionrec::WAIT_REDO_PERSIST);
+    tcConnectptr.p->transactionState =
+        TcConnectionrec::TransactionState(parked.state);
+    parked.tcPtrI = RNIL;
+    c_redo_park_commits++;
+    c_redo_park_early++;
+    redoPersistOp(signal, tcConnectptr.p);
+    commitReqAfterPersist(signal, tcConnectptr);
+    return;
+  }
+  ndbabort();  // WAIT_REDO_PERSIST, and not waiting
 }
 
 /* S5.7: a dependent signal would go before its REDO record is persistent */

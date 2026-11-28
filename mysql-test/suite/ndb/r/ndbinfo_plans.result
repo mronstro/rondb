@@ -66,7 +66,7 @@ ndb$certificates	34	44
 ndb$columns	679	44
 ndb$config_nodes	34	28
 ndb$counters	200	24
-ndb$dblqh_tcconnect_state	19	52
+ndb$dblqh_tcconnect_state	20	52
 ndb$dbtc_apiconnect_state	26	52
 ndb$dict_obj_info	100	40
 ndb$dict_obj_types	20	20

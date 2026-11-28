@@ -1,0 +1,12 @@
+# RONDB-1150 (X8.2): as pmem_redo_durable.cnf, with the adaptive persist
+# scheme: a COMMIT that a signal depends on waits for one barrier per
+# REDO log part at the end of the scheduler round. Add it to a test run:
+#   ./mtr --defaults-extra-file=suite/ndb/pmem_redo_durable_adaptive.cnf \
+#         ndb.ndb_basic
+# All the rondb suites, without the tests of pmem_redo_durable.skip:
+#   ./mtr --suite=rondb_pmem_durable_adaptive --force --parallel=auto
+[cluster_config]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+DurableCommits=1
+__RedoLogPmemPersistScheme=adaptive

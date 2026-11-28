@@ -1995,7 +1995,7 @@ numbers, extend the tools, document the feature.
 the E7 debug check; benchmark report; `redoLogReader` shows the durable
 records; rondb-docs chapters merged.
 
-**State (2026-11-27): X8.1 written, to be built and tested; X8.2 next.**
+**State (2026-11-27): X8.1 committed, X8.2 and X8.4 written, to be built and tested.**
 Re-scoped against the code: a durable COMMIT has its barrier at three C
 places, `commitReqLab()` after TUP's loop wrote the COMMITs (the hot
 path, a COMMIT or durable COMMIT from TC, packed or not), the log queue
@@ -2056,6 +2056,46 @@ holds: the dependent signals wait for the fence.
 - Config `RedoPersistScheme = immediate | adaptive`, default immediate
   until X8.3 shows the gain.
 
+**Written (2026-11-27), to be built and tested.** Changes to the plan:
+- The setting is the hidden test setting `__RedoLogPmemPersistScheme`
+  (CFG 718, `immediate` default, `adaptive`), warned about by the
+  management server, until X8.3 chooses a default; a visible
+  `RedoPersistScheme` then. `immediate` is X8.1.
+- No dirty-parts mask and no CONTINUEB: `c_redo_parked` (512 entries,
+  each the operation and its state before the wait) as in X8.1; at the
+  start of `execSEND_PACKED()` `redoResumeParked()` does the barriers,
+  one per log part, then lets every operation go on, its signals going
+  into the containers sent in the same call. When the array is full a
+  COMMIT has its barrier at once. No COMMIT waits while they go on
+  (`c_redo_park_resuming`).
+- `WAIT_REDO_PERSIST` (36, "Committing" in ndbinfo) is the state while
+  it waits; it replaces `LOG_COMMIT_WRITTEN(_WAIT_SIGNAL)`, so that a
+  COMMIT sent again finds no operation to commit (it is ignored, as for
+  one that went on) and none waits twice.
+- A signal that finds an operation waiting lets it go on first
+  (`redoResumeNow()`: its barrier, its state back, the rest of
+  `commitReqLab()`), as it would have without the wait, and only then
+  acts on it: COMMITREQ, COMPLETEREQ, ABORT, ABORTREQ, and the takeover
+  scan of LQH_TRANSREQ before it sets `abortState`, so that the new TC
+  hears of a committed operation as committed. Its entry becomes RNIL. A
+  COMPLETE cannot come, as TC waits for COMMITTED; NODE_FAILREP and the
+  timers do not touch operations in commit.
+- The scheduler of ndbmtd calls SEND_PACKED after every round; ndbd's
+  only once start phase 3 of CMVMI has activated it, so the adaptive
+  scheme waits only where it runs (`redoParkForRound()`), else as
+  immediate.
+- The adaptive rule (persist at once when one operation waits) is not
+  done: with one operation the round ends soon, and X8.3 shows whether
+  the latency matters.
+- DUMP 2368 5 gives every COMMIT its own barrier in both schemes, 6
+  batches again; DUMP 2368 2 prints the COMMITs that waited, the
+  barriers, and those that went on early.
+- Tests: `ndb_redo_pmem_durable_adaptive` (the ledger with node restarts
+  with abort, whose takeovers can find a COMMIT waiting, and system
+  restarts with abort); the suite alias `rondb_pmem_durable_adaptive`
+  (`pmem_redo_durable_adaptive.cnf`) runs every rondb suite so;
+  `ndb_redo_pmem_config` and MgmConfig-t cover the setting.
+
 ### X8.3 Benchmarks (M, 8 pd)
 
 | Benchmark | Measures |
@@ -2078,6 +2118,26 @@ records, COMMIT `CF_DURABLE`/`RF_INVALIDATED`, transid,
 gci_lo, opCount, SR_HEAD; `--transid` to follow
 one transaction; `--simulate-sr R g` to list per part what step A would
 execute and leave in doubt (support tool).
+
+**Written (2026-11-27), to be built and tested.** Step 1 (phase 10)
+already prints COMPLETE, COMMIT with `durable`/`invalidated`, its transid,
+gci_hi/gci_lo and opCount, and SR_HEAD, and has `--transid`. Added:
+`--simulate-sr=R,g DIR` loads every file of the log part in DIR (the
+loading of `--find-end`, now `loadPartFiles()`), reads the log in log
+order (the files after the last file in the lap before, then file 0 to
+the last file, each mbyte to its NEXT_MBYTE or the end of the valid
+log) and runs step A with the restart's own table (`PmemRedo::TailTable`,
+`PmemRedoTail.cpp` linked into the tool): a durable COMMIT that is not
+invalidated and has a GCI after R waits for a COMPLETE of its
+transaction, which executes the COMMITs queued until then. It prints the
+COMMITs of the tail, the transactions and COMMITs that step A executes,
+and those left in doubt, each with its GCI, opCount, COMMITs and the
+place of the first; a durable COMMIT below g or two COMMITs of a
+transaction that disagree are errors (exit 1). The restart starts its scan
+later, where the REDO execution starts, which holds every record after R,
+so the earlier records change nothing. `ndb_redo_pmem_reader` checks that
+every durable COMMIT of the tail is executed or in doubt, and that a bad
+argument is refused.
 
 ### X8.5 Documentation in rondb-docs (M, 6 pd)
 

@@ -56,7 +56,9 @@ struct dblqh_tcconnect_state {
     COPY_TUPKEY = 31,
     TC_NOT_CONNECTED = 32,
     PREPARED_RECEIVED_COMMIT = 33,
-    LOG_COMMIT_WRITTEN = 34
+    LOG_COMMIT_WRITTEN = 34,
+    /* RONDB-1150, X8.2: its COMMIT waits for the barrier of its log part */
+    WAIT_REDO_PERSIST = 36
   };
 };
 

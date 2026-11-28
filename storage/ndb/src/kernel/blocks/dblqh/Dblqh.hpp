@@ -3130,6 +3130,13 @@ class Dblqh : public SimulatedBlock {
           dblqh_tcconnect_state::PREPARED_RECEIVED_COMMIT,  // 33
       // Temporary state in write commit log
       LOG_COMMIT_WRITTEN = dblqh_tcconnect_state::LOG_COMMIT_WRITTEN,  // 34
+      /**
+       * RONDB-1150, X8.2: the COMMIT records are written and wait for the
+       * barrier of the log part at the end of the scheduler round
+       * (redoParkCommit()); the state before is kept with the operation
+       * in c_redo_parked
+       */
+      WAIT_REDO_PERSIST = dblqh_tcconnect_state::WAIT_REDO_PERSIST,  // 36
     };
     enum ConnectState {
       DISCONNECTED = 0,
@@ -5913,22 +5920,43 @@ public:
   bool c_redo_pmem_skip_barrier;
   Uint32 c_redo_pmem_persist_delay_ns;
   /**
-   * RONDB-1150, X8.1: the COMMITs of a PACKED_SIGNAL that wait for a
-   * barrier (commitReqLab()) wait for one barrier per log part at the end
-   * of the signal (redoResumeParked()), when no other signal can reach
-   * them. c_redo_park_active while such a signal runs, c_redo_parked the
-   * operations; when it is full an operation has its own barrier.
-   * c_redo_park_batch off gives every COMMIT its own (DUMP 2368 5, on
-   * with 6). The counters: COMMITs that waited, and the barriers they
-   * waited for.
+   * RONDB-1150, X8.1, X8.2: COMMITs that wait for a barrier
+   * (commitReqLab()) wait in WAIT_REDO_PERSIST for one barrier per log
+   * part (redoResumeParked()):
+   *  - immediate (__RedoLogPmemPersistScheme, the default): those of a
+   *    PACKED_SIGNAL, until its end, when no other signal can reach them;
+   *    c_redo_park_active while it runs;
+   *  - adaptive: every one, until the end of the scheduler round
+   *    (execSEND_PACKED()). A signal that finds one waiting first lets it
+   *    go on (redoResumeNow()), as without the wait.
+   * c_redo_park_batch off gives every COMMIT its own barrier in both
+   * (DUMP 2368 5, on with 6).
+   * c_redo_parked holds the operations, each with its state before;
+   * an entry of one that went on early is RNIL. When it is full an
+   * operation has its own barrier. The counters: COMMITs that waited, the
+   * barriers they waited for, and those that went on early.
    */
-  static constexpr Uint32 REDO_PARK_MAX = 8;
+  static constexpr Uint32 REDO_PARK_MAX = 512;
+  struct RedoParked {
+    Uint32 tcPtrI;
+    Uint32 state;  // TcConnectionrec::TransactionState before the wait
+  };
   bool c_redo_park_batch;
   bool c_redo_park_active;
+  bool c_redo_park_adaptive;  // __RedoLogPmemPersistScheme=adaptive
+  bool c_redo_park_resuming;  // in redoResumeParked(): no new waits
   Uint32 c_redo_park_count;
-  Uint32 c_redo_parked[REDO_PARK_MAX];
+  RedoParked c_redo_parked[REDO_PARK_MAX];
   Uint64 c_redo_park_commits;
   Uint64 c_redo_park_barriers;
+  Uint64 c_redo_park_early;
+  /* adaptive, where the scheduler runs SEND_PACKED after each round */
+  bool redoParkForRound() const {
+    return c_redo_park_adaptive && c_redo_park_batch &&
+           (globalData.ndbMtLqhThreads > 0 ||
+            globalData.sendPackedActivated == 1);
+  }
+  void redoResumeNow(Signal *signal, TcConnectionrecPtr tcConnectptr);
   /**
    * RONDB-1150, PMEM format, the crash error inserts (recovery plan S7.1,
    * S7.2), used in error insert builds only:

@@ -63,5 +63,7 @@ struct ndbkernel_state_desc g_dblqh_tcconnect_state_desc[] = {
     SDESC(TC_NOT_CONNECTED, "Idle", ""),
     SDESC(PREPARED_RECEIVED_COMMIT, "Committing", ""),
     SDESC(LOG_COMMIT_WRITTEN, "Committing", ""),
+    SDESC(WAIT_REDO_PERSIST, "Committing",
+          "COMMIT waits for its REDO log part to be persisted"),
 
     {0, nullptr, nullptr, nullptr}};

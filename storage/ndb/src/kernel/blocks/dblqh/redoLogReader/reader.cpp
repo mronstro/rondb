@@ -76,6 +76,7 @@ Uint32 startAtPageIndex = 0;
 Uint32 *redoLogPage;
 // RONDB-1150: options of the PMEM format only
 static const char *opt_find_end = nullptr;
+static const char *opt_simulate_sr = nullptr;
 static const char *opt_transid = nullptr;
 
 unsigned NO_MBYTE_IN_FILE = 16;
@@ -128,6 +129,13 @@ static struct my_option my_long_options[] = {
      8191, nullptr, 0, nullptr},
     {"print", NDB_OPT_NOSHORT, "Print records", &thePrintFlag, nullptr, nullptr,
      GET_BOOL, NO_ARG, 1, 0, 0, nullptr, 0, nullptr},
+    {"simulate-sr", NDB_OPT_NOSHORT,
+     "PMEM format: R,g: step A of phase 2 of a system restart to GCI R with "
+     "durable commits from GCI g, in the log part whose files S0.FragLog .. "
+     "are in the directory given: the transactions it executes and those it "
+     "leaves in doubt",
+     &opt_simulate_sr, nullptr, nullptr, GET_STR, REQUIRED_ARG, 0, 0, 0,
+     nullptr, 0, nullptr},
     {"transid", NDB_OPT_NOSHORT,
      "PMEM format: print only the records of this transaction, T1,T2",
      &opt_transid, nullptr, nullptr, GET_STR, REQUIRED_ARG, 0, 0, 0, nullptr,
@@ -220,6 +228,32 @@ int main(int argc, char **argv) {
       ndb_end_and_exit(1);
     }
     ndb_end_and_exit(pmem_find_end_main(opt_find_end));
+  }
+
+  if (opt_simulate_sr != nullptr) {
+    char *end = nullptr;
+    const unsigned long long restartGci = strtoull(opt_simulate_sr, &end, 0);
+    unsigned long long durableGci = 0;
+    bool ok = end != opt_simulate_sr && *end == ',';
+    if (ok) {
+      const char *second = end + 1;
+      durableGci = strtoull(second, &end, 0);
+      ok = end != second && *end == '\0';
+    }
+    if (!ok || restartGci > 0xFFFFFFFF || durableGci == 0 ||
+        durableGci > 0xFFFFFFFF) {
+      fprintf(stderr,
+              "Error: --simulate-sr takes the restart's GCI and g, R,g, g "
+              "above 0\n");
+      ndb_end_and_exit(1);
+    }
+    if (argc != 1) {
+      print_utility_help();
+      opts.usage();
+      ndb_end_and_exit(1);
+    }
+    ndb_end_and_exit(pmem_simulate_sr_main(argv[0], Uint32(restartGci),
+                                           Uint32(durableGci)));
   }
 
   if (argc != 1 || strlen(argv[0]) >= sizeof(fileName)) {

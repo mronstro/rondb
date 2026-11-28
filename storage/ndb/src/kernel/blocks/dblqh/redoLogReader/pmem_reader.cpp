@@ -36,6 +36,7 @@
 
 #include <NdbOut.hpp>
 #include "../PmemRedoScan.hpp"
+#include "../PmemRedoTail.hpp"
 #include "kernel/signaldata/FsOpenReq.hpp"
 #include "pmem_reader.hpp"
 #include "portlib/ndb_file.h"
@@ -488,19 +489,29 @@ int pmem_reader_main(const char *fileName, const PmemReaderOptions &o) {
   return 0;
 }
 
-int pmem_find_end_main(const char *dir) {
+namespace {
+
+/* The files S0.FragLog .. of one log part, mapped, with their geometry */
+struct PartFiles {
+  std::vector<std::unique_ptr<PmemFile>> files;
+  std::vector<const Uint8 *> bases;
+  Geom g;
+  const Uint32 *page00;  // page 0 of file 0, with the control area
+};
+
+/**
+ * A: the control area of file 0 gives the files of the log part in dir;
+ * every one is loaded. 0, or 1 after a message on stderr.
+ */
+int loadPartFiles(const char *dir, PartFiles *part) {
   const size_t len = strlen(dir);
   const char *const sep = (len > 0 && dir[len - 1] == '/') ? "" : "/";
   char name[1024];
   snprintf(name, sizeof(name), "%s%sS0.FragLog", dir, sep);
-  std::vector<std::unique_ptr<PmemFile>> files;
-  files.emplace_back(new PmemFile());
-  if (files[0]->load(name) != 0) return 1;
-
-  /* A: the control area of file 0 gives the files and the last file */
-  const Uint32 *const page00 =
-      reinterpret_cast<const Uint32 *>(files[0]->base());
-  const Uint32 *const line = page00 + CTRL_CONFIG_WORD;
+  part->files.emplace_back(new PmemFile());
+  if (part->files[0]->load(name) != 0) return 1;
+  part->page00 = reinterpret_cast<const Uint32 *>(part->files[0]->base());
+  const Uint32 *const line = part->page00 + CTRL_CONFIG_WORD;
   if (line[CTRL_W_MAGIC] != CTRL_MAGIC) {
     fprintf(stderr,
             "Error: %s has no control area, it was not written in PMEM "
@@ -518,23 +529,33 @@ int pmem_find_end_main(const char *dir) {
             msg);
     return 1;
   }
-  std::vector<const Uint8 *> bases;
+  part->g = g;
   for (Uint32 f = 0; f < g.noFiles; f++) {
     snprintf(name, sizeof(name), "%s%sS%u.FragLog", dir, sep, f);
     if (f > 0) {
-      files.emplace_back(new PmemFile());
-      if (files[f]->load(name) != 0) return 1;
+      part->files.emplace_back(new PmemFile());
+      if (part->files[f]->load(name) != 0) return 1;
     }
-    if (files[f]->size() != Uint64(g.fileSizeMb) * MBYTE_BYTES) {
+    if (part->files[f]->size() != Uint64(g.fileSizeMb) * MBYTE_BYTES) {
       fprintf(stderr,
               "Error: %s is %llu bytes, the control area gives files of %u "
               "MB\n",
-              name, (unsigned long long)files[f]->size(), g.fileSizeMb);
+              name, (unsigned long long)part->files[f]->size(), g.fileSizeMb);
       return 1;
     }
-    bases.push_back(files[f]->base());
+    part->bases.push_back(part->files[f]->base());
   }
-  const PartView v = {g, bases.data()};
+  return 0;
+}
+
+}  // namespace
+
+int pmem_find_end_main(const char *dir) {
+  PartFiles part;
+  if (loadPartFiles(dir, &part) != 0) return 1;
+  const Geom &g = part.g;
+  const Uint32 *const page00 = part.page00;
+  const PartView v = {g, part.bases.data()};
   Slot slot;
   if (pickSlot(page00 + SLOT0_WORD, page00 + SLOT1_WORD, g, &slot) < 0) {
     fprintf(stderr,
@@ -575,4 +596,115 @@ int pmem_find_end_main(const char *dir) {
             last.mbyte, scan);
   ndbout_c("%s", buf);
   return 0;
+}
+
+/**
+ * --simulate-sr R,g (impl_next_steps.md X8.4): step A of phase 2 of a
+ * system restart in one log part (X5.3), as DBLQH runs it in round 0.
+ * Every durable COMMIT of the tail, of a GCI after the restart's GCI R
+ * and not invalidated, waits for a COMPLETE of its transaction in the
+ * part, which executes the COMMITs of the transaction queued until then.
+ * The log is read in log order: the files after the last file, in the lap
+ * before its own, then file 0 to the last file, each mbyte to its
+ * NEXT_MBYTE or to the end of the valid log. The restart starts its scan
+ * where the REDO execution starts, which holds every record after R, so
+ * the earlier records change nothing. What is left at the end is the
+ * in-doubt set of the part, which steps B and C decide with the other log
+ * parts of the LDM on every SR node.
+ */
+int pmem_simulate_sr_main(const char *dir, Uint32 restartGci,
+                          Uint32 durableGci) {
+  PartFiles part;
+  if (loadPartFiles(dir, &part) != 0) return 1;
+  const Geom &g = part.g;
+  const PartView v = {g, part.bases.data()};
+  Slot slot;
+  if (pickSlot(part.page00 + SLOT0_WORD, part.page00 + SLOT1_WORD, g, &slot) <
+      0) {
+    fprintf(stderr,
+            "Error: both last-file slots of REDO log part %u are invalid\n",
+            g.logPartNo);
+    return 1;
+  }
+  ndbout_c("REDO log part %u: step A of a system restart to GCI %u with "
+           "durable commits from GCI %u",
+           g.logPartNo, restartGci, durableGci);
+  TailTable tail;
+  Uint32 tailCommits = 0;
+  Uint32 executed = 0;
+  Uint32 executedCommits = 0;
+  Uint32 errors = 0;
+  for (Uint32 k = 1; k <= g.noFiles; k++) {
+    const Uint32 fileNo = (slot.fileNo + k) % g.noFiles;
+    const Uint32 lap = fileNo > slot.fileNo ? slot.lap - 1 : slot.lap;
+    for (Uint32 mb = 0; mb < g.fileSizeMb; mb++) {
+      const Uint32 pageNo = mb * PAGES_IN_MBYTE;
+      const Uint32 *const hdr = v.page(fileNo, pageNo);
+      if (checkPageHeader(hdr, fileNo, pageNo, g.logPartNo) != R_VALID ||
+          hdr[HDR_LAP] != lap) {
+        continue;
+      }
+      Pos p = mbyteStart(fileNo, mb, lap);
+      for (;;) {
+        RecInfo info;
+        if (checkRecord(v, p, &info) != R_VALID) break;
+        const Uint32 type = w0Type(info.w0);
+        char at[48];
+        snprintf(at, sizeof(at), "file %u ", fileNo);
+        formatPos(at + strlen(at), sizeof(at) - strlen(at), p.pageNo,
+                  p.pageIndex);
+        if (type == TYPE_COMMIT &&
+            (info.w0 & (RF_INVALIDATED | CF_DURABLE)) == CF_DURABLE &&
+            recWord(v, p, COMMIT_GCI_HI) > restartGci) {
+          Uint32 rec[COMMIT_LEN];
+          for (Uint32 i = 0; i < COMMIT_LEN; i++) rec[i] = recWord(v, p, i);
+          tailCommits++;
+          if (rec[COMMIT_GCI_HI] < durableGci) {
+            ndbout_c("Error: %s: a durable COMMIT of GCI %u, below g %u", at,
+                     rec[COMMIT_GCI_HI], durableGci);
+            errors++;
+          }
+          const TailResult tr = tail.addCommit(p, rec);
+          if (tr != TAIL_OK) {
+            ndbout_c("Error: %s: the COMMIT of transaction 0x%08x 0x%08x %s",
+                     at, rec[COMMIT_TRANSID1], rec[COMMIT_TRANSID2],
+                     tr == TAIL_MISMATCH
+                         ? "has another GCI or opCount than the one before"
+                         : "found no memory");
+            errors++;
+          }
+        } else if (type == TYPE_COMPLETE) {
+          const Uint32 first = tail.takeComplete(
+              recWord(v, p, ABORT_TRANSID1), recWord(v, p, ABORT_TRANSID2));
+          if (first != TAIL_NIL) {
+            executed++;
+            for (Uint32 c = first; c != TAIL_NIL; c = tail.nextCommit(c)) {
+              executedCommits++;
+            }
+            tail.releaseCommits(first);
+          }
+        }
+        if (type == TYPE_NEXT_MBYTE) break;
+        p = info.next;
+      }
+    }
+  }
+  ndbout_c("  %u durable COMMITs in the tail after GCI %u", tailCommits,
+           restartGci);
+  ndbout_c("  step A executes %u transactions, %u COMMITs, at a COMPLETE",
+           executed, executedCommits);
+  ndbout_c("  %u transactions, %u COMMITs, are in doubt, for steps B and C",
+           tail.size(), tail.commits());
+  for (Uint32 e = 0; e < tail.capacity(); e++) {
+    const TailTable::Entry *const t = tail.entry(e);
+    if (t == nullptr) continue;
+    const Pos &p = tail.commit(t->first).pos;
+    char at[32];
+    formatPos(at, sizeof(at), p.pageNo, p.pageIndex);
+    ndbout_c("    transaction 0x%08x 0x%08x GCI %u opCount %u: %u COMMITs "
+             "here, the first in file %u at %s",
+             t->transid1, t->transid2, t->gciHi, t->opCount, t->count,
+             p.fileNo, at);
+  }
+  return errors > 0 ? 1 : 0;
 }

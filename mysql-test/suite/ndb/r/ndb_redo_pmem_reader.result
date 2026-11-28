@@ -10,9 +10,11 @@ SET SESSION cte_max_recursion_depth = DEFAULT;
 == 3 == the reader checks every record of each file of log part 0
 File 0: control area 1, valid slots 2, last file 1
 --transid: only the records of the transaction
+--simulate-sr: every durable COMMIT of the tail executed or in doubt
 == 4 == options that the PMEM format does not take
 Error: PART0/S0.FragLog is in the PMEM format, which --file-key and --twiddle do not apply to
 Error: --transid takes two numbers, T1,T2
+Error: --simulate-sr takes the restart's GCI and g, R,g, g above 0
 == 5 == node 2 restarts; phase 1 finds the same end of each log
 Node 2 log part 0: the restart found the reader's end
 Node 2 log part 1: the restart found the reader's end

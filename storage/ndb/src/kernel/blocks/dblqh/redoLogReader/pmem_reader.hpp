@@ -60,4 +60,13 @@ int pmem_reader_main(const char *fileName, const PmemReaderOptions &opts);
  */
 int pmem_find_end_main(const char *dir);
 
+/**
+ * --simulate-sr R,g: from the same files, step A of phase 2 of a system
+ * restart to GCI R with durable commits from GCI g in that log part: the
+ * transactions it executes at their COMPLETE and those it leaves in
+ * doubt. The exit code of the program.
+ */
+int pmem_simulate_sr_main(const char *dir, Uint32 restartGci,
+                          Uint32 durableGci);
+
 #endif

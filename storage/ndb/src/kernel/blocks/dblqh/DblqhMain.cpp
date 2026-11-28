@@ -2924,9 +2924,12 @@ void Dblqh::execREAD_CONFIG_REQ(Signal *signal) {
     c_redo_pmem_persist_delay_ns = 0;
     c_redo_park_batch = true;
     c_redo_park_active = false;
+    c_redo_park_adaptive = false;
+    c_redo_park_resuming = false;
     c_redo_park_count = 0;
     c_redo_park_commits = 0;
     c_redo_park_barriers = 0;
+    c_redo_park_early = 0;
     c_redo_pmem_tear = 0;
     c_redo_pmem_seed = 0;
     c_redo_pmem_rand = 0;
@@ -2936,6 +2939,9 @@ void Dblqh::execREAD_CONFIG_REQ(Signal *signal) {
     if (c_redo_pmem) {
       ndb_mgm_get_int_parameter(p, CFG_DB_REDO_PMEM_PERSIST_DELAY_NS,
                                 &c_redo_pmem_persist_delay_ns);
+      Uint32 scheme = NDB_REDO_PMEM_PERSIST_IMMEDIATE;
+      ndb_mgm_get_int_parameter(p, CFG_DB_REDO_PMEM_PERSIST_SCHEME, &scheme);
+      c_redo_park_adaptive = scheme == NDB_REDO_PMEM_PERSIST_ADAPTIVE;
     }
     c_ldm_numa_node = -1;
     c_redo_path_no = FsOpenReq::REDO_PATH_FS;
@@ -2973,6 +2979,12 @@ void Dblqh::execREAD_CONFIG_REQ(Signal *signal) {
           "__RedoLogPmemPersistDelayNs=%u: each persist of the REDO log "
           "waits %u ns after its fence (test setting)",
           c_redo_pmem_persist_delay_ns, c_redo_pmem_persist_delay_ns);
+    }
+    if (c_redo_park_adaptive && log) {
+      g_eventLogger->info(
+          "__RedoLogPmemPersistScheme=adaptive: a COMMIT that a signal "
+          "depends on waits for one barrier per log part at the end of the "
+          "scheduler round (test setting)");
     }
     if (clogPartFileSize > 0) {
       jam();
@@ -6552,8 +6564,13 @@ void Dblqh::execPACKED_SIGNAL(Signal* signal)
                                     5));
   }
 
-  /* RONDB-1150, X8.1: the COMMITs that wait for a barrier wait for one */
-  c_redo_park_active = c_redo_pmem_format && c_redo_park_batch;
+  /**
+   * RONDB-1150, X8.1: the COMMITs that wait for a barrier wait for one;
+   * with the adaptive scheme they wait until the end of the round
+   */
+  const bool parkHere =
+      c_redo_pmem_format && c_redo_park_batch && !redoParkForRound();
+  c_redo_park_active = parkHere;
   do
   {
     Uint32 firstWord = packedData[step];
@@ -6648,7 +6665,7 @@ void Dblqh::execPACKED_SIGNAL(Signal* signal)
   while (length > step);
   ndbrequire(length == step);
   c_redo_park_active = false;
-  if (unlikely(c_redo_park_count > 0)) {
+  if (unlikely(parkHere && c_redo_park_count > 0)) {
     jam();
     redoResumeParked(signal);
   }
@@ -6729,6 +6746,15 @@ void Dblqh::execREMOVE_MARKER_ORD(Signal *signal) {
 /* empty.                                                                     */
 /* -------------------------------------------------------------------------- */
 void Dblqh::execSEND_PACKED(Signal *signal) {
+  if (unlikely(c_redo_park_count > 0)) {
+    /**
+     * RONDB-1150, X8.2: the end of the scheduler round, the adaptive
+     * scheme. The COMMITs that waited go on; their signals go into the
+     * containers sent below.
+     */
+    jam();
+    redoResumeParked(signal);
+  }
   HostRecordPtr Thostptr;
   UintR TpackedListIndex = cpackedListIndex;
   for (Uint32 i = 0; i < TpackedListIndex; i++) {
@@ -15279,6 +15305,12 @@ void Dblqh::execCOMMITREQ(Signal *signal) {
   }
   jamDataDebug(tcConnectptr.i);
   TcConnectionrec * const regTcPtr = tcConnectptr.p;
+  if (unlikely(regTcPtr->transactionState ==
+               TcConnectionrec::WAIT_REDO_PERSIST)) {
+    /* RONDB-1150, X8.2: its COMMIT goes on before the COMMITREQ */
+    jam();
+    redoResumeNow(signal, tcConnectptr);
+  }
   switch (regTcPtr->transactionState) {
   case TcConnectionrec::PREPARED:
   case TcConnectionrec::LOG_COMMIT_QUEUED_WAIT_SIGNAL:
@@ -15549,6 +15581,12 @@ void Dblqh::execCOMPLETEREQ(Signal *signal) {
   }
   jamDataDebug(tcConnectptr.i);
   TcConnectionrec * const regTcPtr = tcConnectptr.p;
+  if (unlikely(regTcPtr->transactionState ==
+               TcConnectionrec::WAIT_REDO_PERSIST)) {
+    /* RONDB-1150, X8.2: its COMMIT goes on before the COMPLETEREQ */
+    jam();
+    redoResumeNow(signal, tcConnectptr);
+  }
   switch (regTcPtr->transactionState) {
   case TcConnectionrec::COMMITTED:
     jam();
@@ -15756,14 +15794,19 @@ void Dblqh::commitReqLab(Signal *signal, Uint32 gci_hi, Uint32 gci_lo,
   if (unlikely(c_redo_pmem_format) && regTcPtr->m_redo_end_lsn != 0) {
     /**
      * RONDB-1150 (S5.8): a C place of E8, one barrier after TUP's loop
-     * over the operations on the row wrote their COMMITs. X8.1: in a
-     * PACKED_SIGNAL the operation waits for the one barrier of its log
-     * part at the end of the signal (redoResumeParked()).
+     * over the operations on the row wrote their COMMITs. X8.1, X8.2: the
+     * operation waits for the one barrier of its log part at the end of
+     * the PACKED_SIGNAL, or of the scheduler round with the adaptive
+     * scheme (redoResumeParked()).
      */
     jam();
-    if (c_redo_park_active && c_redo_park_count < REDO_PARK_MAX) {
+    if ((c_redo_park_active || redoParkForRound()) &&
+        !c_redo_park_resuming && c_redo_park_count < REDO_PARK_MAX) {
       jam();
-      c_redo_parked[c_redo_park_count++] = tcConnectptr.i;
+      RedoParked &parked = c_redo_parked[c_redo_park_count++];
+      parked.tcPtrI = tcConnectptr.i;
+      parked.state = Uint32(regTcPtr->transactionState);
+      regTcPtr->transactionState = TcConnectionrec::WAIT_REDO_PERSIST;
       return;
     }
     redoPersistOp(signal, regTcPtr);
@@ -16804,6 +16847,12 @@ void Dblqh::execABORT(Signal *signal) {
   }  // if
 
   TcConnectionrec *const regTcPtr = tcConnectptr.p;
+  if (unlikely(regTcPtr->transactionState ==
+               TcConnectionrec::WAIT_REDO_PERSIST)) {
+    /* RONDB-1150, X8.2: its COMMIT goes on before the ABORT */
+    jam();
+    redoResumeNow(signal, tcConnectptr);
+  }
   if (ERROR_INSERTED(5100)) {
     SET_ERROR_INSERT_VALUE(5101);
     return;
@@ -16923,6 +16972,12 @@ void Dblqh::execABORTREQ(Signal *signal) {
     return;
   }//if
   TcConnectionrec * const regTcPtr = tcConnectptr.p;
+  if (unlikely(regTcPtr->transactionState ==
+               TcConnectionrec::WAIT_REDO_PERSIST)) {
+    /* RONDB-1150, X8.2: its COMMIT goes on before the ABORTREQ */
+    jam();
+    redoResumeNow(signal, tcConnectptr);
+  }
   DEB_ABORT_TRANS(("(%u)2:Start ABORT handling: trans(H'%.8x,H'%.8x),"
                    " tcOprec: %u, tcRef: %x, tcPtrIAcc: %u",
                    instance(),
@@ -18483,6 +18538,16 @@ void Dblqh::lqhTransNextLab(Signal *signal, TcNodeFailRecordPtr tcNodeFailPtr) {
                 [[fallthrough]];
               default:
                 jam();
+                if (unlikely(tcConnectptr.p->transactionState ==
+                             TcConnectionrec::WAIT_REDO_PERSIST)) {
+                  /**
+                   * RONDB-1150, X8.2: its COMMIT goes on first, so that
+                   * the new TC hears of it as committed, as without the
+                   * wait
+                   */
+                  jam();
+                  redoResumeNow(signal, tcConnectptr);
+                }
                 tcConnectptr.p->tcNodeFailrec = tcNodeFailPtr.i;
                 tcConnectptr.p->abortState = TcConnectionrec::NEW_FROM_TC;
                 DEB_ABORT_TRANS(("(%u)LQH_TRANSREQ found tcAccPtrI: %u"
@@ -45814,6 +45879,7 @@ bool Dblqh::match_and_print(Signal *signal, Ptr<TcConnectionrec> tcRec) {
         BaseString::snprintf(state, sizeof(state), "Running");
         break;
       case TcConnectionrec::WAIT_TUP_COMMIT:
+      case TcConnectionrec::WAIT_REDO_PERSIST:
         BaseString::snprintf(state, sizeof(state), "Committing");
         break;
       case TcConnectionrec::PREPARED:
@@ -45889,8 +45955,10 @@ void Dblqh::execDUMP_STATE_ORD(Signal *signal) {
      *         the mappings (redoPmemVerify())
      *   4     debug builds: skip the next barrier at a C place, so that
      *         the check before the dependent signal stops the node (S5.7)
-     *   5, 6  X8.1: every COMMIT of a PACKED_SIGNAL has its own barrier,
-     *         or those of a log part share one at the end (the default)
+     *   5, 6  X8.1, X8.2: every COMMIT has its own barrier, or those of
+     *         a log part share one at the end of the PACKED_SIGNAL, or of
+     *         the scheduler round with __RedoLogPmemPersistScheme=adaptive
+     *         (the default)
      */
     const Uint32 cmd = signal->getLength() >= 2 ? signal->theData[1] : ~0u;
     if (m_is_query_block) return;
@@ -45920,10 +45988,12 @@ void Dblqh::execDUMP_STATE_ORD(Signal *signal) {
           redoPmemPrintCounters(logPartPtr.p);
         }
         g_eventLogger->info(
-            "LDM(%u): PMEM REDO: %llu COMMITs of a PACKED_SIGNAL waited for "
-            "%llu barriers at its end; batching %s",
+            "LDM(%u): PMEM REDO: %llu COMMITs waited for %llu barriers at "
+            "the end of a %s, %llu of them went on early; batching %s",
             instance(), (unsigned long long)c_redo_park_commits,
             (unsigned long long)c_redo_park_barriers,
+            c_redo_park_adaptive ? "scheduler round" : "PACKED_SIGNAL",
+            (unsigned long long)c_redo_park_early,
             c_redo_park_batch ? "on" : "off");
         break;
       case 3:
@@ -45950,7 +46020,9 @@ void Dblqh::execDUMP_STATE_ORD(Signal *signal) {
         jam();
         c_redo_park_batch = cmd == 6;
         if (instance() <= 1) {
-          infoEvent("PMEM REDO: the COMMITs of a PACKED_SIGNAL %s on node %u",
+          infoEvent("PMEM REDO: the COMMITs of a %s %s on node %u",
+                    c_redo_park_adaptive ? "scheduler round"
+                                         : "PACKED_SIGNAL",
                     cmd == 6 ? "share a barrier per log part"
                              : "have a barrier each",
                     getOwnNodeId());
@@ -45961,8 +46033,8 @@ void Dblqh::execDUMP_STATE_ORD(Signal *signal) {
         if (instance() <= 1) {
           infoEvent("DUMP 2368 %u: unknown, use 0|1 (persist at commit), "
                     "2 (counters), 3 (verify), 4 (skip a barrier, debug "
-                    "builds) or 5|6 (a barrier per COMMIT or per log part "
-                    "of a PACKED_SIGNAL)",
+                    "builds) or 5|6 (a barrier per COMMIT, or per log part "
+                    "and PACKED_SIGNAL or round)",
                     cmd);
         }
         break;

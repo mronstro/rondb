@@ -716,7 +716,8 @@ static void test_redo_log_pmem(void) {
       "FileSystemPathRedoLog=0:/mnt/p0,1:/mnt/p1",
       "__RedoLogPmemTestMode=emulated", "__RedoLogPmemPowerLossEmulation=1",
       "__RedoLogPmemCopyMethod=movdir64b", "__RedoLogPmemPersistDelayNs=500",
-      "[ndb_mgmd]", "HostName=localhost", "[mysqld]", NULL);
+      "__RedoLogPmemPersistScheme=adaptive", "[ndb_mgmd]",
+      "HostName=localhost", "[mysqld]", NULL);
   CHECK(c);
   CHECK(get_db_uint(c, CFG_DB_REDO_LOG_MODE) == NDB_REDO_LOG_MODE_PMEM);
   const char *path = get_db_string(c, CFG_DB_REDO_LOG_PATH);
@@ -727,6 +728,8 @@ static void test_redo_log_pmem(void) {
   CHECK(get_db_uint(c, CFG_DB_REDO_PMEM_COPY_METHOD) ==
         NDB_REDO_PMEM_COPY_MOVDIR64B);
   CHECK(get_db_uint(c, CFG_DB_REDO_PMEM_PERSIST_DELAY_NS) == 500);
+  CHECK(get_db_uint(c, CFG_DB_REDO_PMEM_PERSIST_SCHEME) ==
+        NDB_REDO_PMEM_PERSIST_ADAPTIVE);
   delete c;
 
   // DurableCommits is the same for every data node
@@ -756,6 +759,8 @@ static void test_redo_log_pmem(void) {
   CHECK(get_db_uint(c, CFG_DB_REDO_PMEM_COPY_METHOD) ==
         NDB_REDO_PMEM_COPY_AUTO);
   CHECK(get_db_uint(c, CFG_DB_REDO_PMEM_PERSIST_DELAY_NS) == 0);
+  CHECK(get_db_uint(c, CFG_DB_REDO_PMEM_PERSIST_SCHEME) ==
+        NDB_REDO_PMEM_PERSIST_IMMEDIATE);
   delete c;
 
   // The same rules apply to a my.cnf

@@ -329,7 +329,7 @@
 
 /* RONDB-1150: the REDO log on persistent memory, and durable commits
  * (716, DurableCommits, also online by ALL SET DurableCommits 1).
- * Keep CFG_DB_REDO_PMEM_PERSIST_DELAY_NS the highest DB id. */
+ * Keep CFG_DB_REDO_PMEM_PERSIST_SCHEME the highest DB id. */
 #define CFG_DB_REDO_LOG_MODE              711
 #define CFG_DB_REDO_LOG_PATH              712
 #define CFG_DB_REDO_PMEM_TEST_MODE        713
@@ -337,6 +337,7 @@
 #define CFG_DB_REDO_PMEM_COPY_METHOD      715
 #define CFG_DB_DURABLE_COMMITS            716
 #define CFG_DB_REDO_PMEM_PERSIST_DELAY_NS 717
+#define CFG_DB_REDO_PMEM_PERSIST_SCHEME   718
 
 /* Values for CFG_DB_REDO_LOG_MODE (RedoLogMode) */
 #define NDB_REDO_LOG_MODE_FILE 0 /* files written through NDBFS (default) */
@@ -353,6 +354,10 @@
 #define NDB_REDO_PMEM_COPY_NTSTORE   1
 #define NDB_REDO_PMEM_COPY_MOVDIR64B 2
 #define NDB_REDO_PMEM_COPY_CLWB      3
+
+/* Values for CFG_DB_REDO_PMEM_PERSIST_SCHEME (__RedoLogPmemPersistScheme) */
+#define NDB_REDO_PMEM_PERSIST_IMMEDIATE 0 /* a barrier per COMMIT (default) */
+#define NDB_REDO_PMEM_PERSIST_ADAPTIVE  1 /* per log part and round */
 
 /* End RonDB only configuration parameters */
 

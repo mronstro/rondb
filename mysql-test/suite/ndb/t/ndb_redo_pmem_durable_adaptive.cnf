@@ -1,0 +1,15 @@
+!include ../my.cnf
+
+# RONDB-1150 X8.2: durable commits on the REDO log in PMEM mode on any
+# file system with the adaptive persist scheme, one barrier per log part
+# and scheduler round; small REDO files and GCP saves twice a second, as
+# ndb_redo_pmem_durable_ledger.
+[cluster_config.1]
+RedoLogMode=pmem
+__RedoLogPmemTestMode=nodax
+DurableCommits=1
+__RedoLogPmemPersistScheme=adaptive
+NoOfFragmentLogFiles=5
+FragmentLogFileSize=4M
+TimeBetweenLocalCheckpoints=6
+TimeBetweenGlobalCheckpoints=500

@@ -281,6 +281,11 @@ static const ConfigInfo::Typelib redo_pmem_copy_method_typelib[] = {
     {"clwb", NDB_REDO_PMEM_COPY_CLWB},
     {nullptr, 0}};
 
+static const ConfigInfo::Typelib redo_pmem_persist_scheme_typelib[] = {
+    {"immediate", NDB_REDO_PMEM_PERSIST_IMMEDIATE},
+    {"adaptive", NDB_REDO_PMEM_PERSIST_ADAPTIVE},
+    {nullptr, 0}};
+
 static const ConfigInfo::Typelib
     default_operation_redo_problem_action_typelib[] = {
         {"abort", OPERATION_REDO_PROBLEM_ACTION_ABORT},
@@ -1087,6 +1092,21 @@ const ConfigInfo::ParamInfo ConfigInfo::m_ParamInfo[] = {
     ConfigInfo::CI_INT,
     "0",
     "0", "100000" },
+
+  {
+    CFG_DB_REDO_PMEM_PERSIST_SCHEME,
+    "__RedoLogPmemPersistScheme",
+    DB_TOKEN,
+    "Test setting for RedoLogMode=pmem, until benchmarks choose the "
+    "default: when a COMMIT that a signal depends on is persisted. "
+    "immediate (default) = at once, the COMMITs of one packed signal "
+    "sharing a barrier per log part; adaptive = once per log part at the "
+    "end of each scheduler round",
+    ConfigInfo::CI_USED,
+    false,
+    ConfigInfo::CI_ENUM,
+    "immediate",
+    redo_pmem_persist_scheme_typelib },
 
   {
     CFG_DB_DURABLE_COMMITS,
@@ -4230,6 +4250,7 @@ static bool checkRedoLogPmem(InitConfigFileParser::Context &ctx) {
   Uint32 powerLossEmul = 0;
   Uint32 copyMethod = NDB_REDO_PMEM_COPY_AUTO;
   Uint32 persistDelayNs = 0;
+  Uint32 persistScheme = NDB_REDO_PMEM_PERSIST_IMMEDIATE;
   const char *path = nullptr;
   ctx.m_currentSection->get("RedoLogMode", &mode);
   ctx.m_currentSection->get("__RedoLogPmemTestMode", &testMode);
@@ -4237,13 +4258,15 @@ static bool checkRedoLogPmem(InitConfigFileParser::Context &ctx) {
                             &powerLossEmul);
   ctx.m_currentSection->get("__RedoLogPmemCopyMethod", &copyMethod);
   ctx.m_currentSection->get("__RedoLogPmemPersistDelayNs", &persistDelayNs);
+  ctx.m_currentSection->get("__RedoLogPmemPersistScheme", &persistScheme);
   ctx.m_currentSection->get("FileSystemPathRedoLog", &path);
   Uint32 durableCommits = 0;
   ctx.m_currentSection->get("DurableCommits", &durableCommits);
   const bool testSettings = testMode != NDB_REDO_PMEM_TEST_MODE_OFF ||
                             powerLossEmul != 0 ||
                             copyMethod != NDB_REDO_PMEM_COPY_AUTO ||
-                            persistDelayNs != 0;
+                            persistDelayNs != 0 ||
+                            persistScheme != NDB_REDO_PMEM_PERSIST_IMMEDIATE;
 
   if (mode != NDB_REDO_LOG_MODE_PMEM) {
     if (durableCommits != 0) {
@@ -4341,6 +4364,13 @@ static bool checkRedoLogPmem(InitConfigFileParser::Context &ctx) {
         "__RedoLogPmemPersistDelayNs=%u is a test setting, each persist of "
         "the REDO log waits %u ns (section starting at line %u)",
         persistDelayNs, persistDelayNs, ctx.m_sectionLineno);
+  }
+  if (persistScheme != NDB_REDO_PMEM_PERSIST_IMMEDIATE) {
+    ctx.reportWarning(
+        "__RedoLogPmemPersistScheme=%s is a test setting (section starting "
+        "at line %u)",
+        redo_pmem_persist_scheme_typelib[persistScheme].name,
+        ctx.m_sectionLineno);
   }
   return true;
 }
