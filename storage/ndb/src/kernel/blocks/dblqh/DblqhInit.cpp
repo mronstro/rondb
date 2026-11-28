@@ -623,6 +623,20 @@ Dblqh::Dblqh(Block_context &ctx, Uint32 instanceNumber, Uint32 blockNo)
   m_rowid_mismatch_window_count = 0;
   m_rowid_mismatch_suppressed = 0;
 
+  /**
+   * RONDB-1150, X8.2: here and not in READ_CONFIG, since ndbmtd calls
+   * execSEND_PACKED, which reads c_redo_park_count, from the start of
+   * the thread.
+   */
+  c_redo_park_batch = true;
+  c_redo_park_active = false;
+  c_redo_park_adaptive = false;
+  c_redo_park_resuming = false;
+  c_redo_park_count = 0;
+  c_redo_park_commits = 0;
+  c_redo_park_barriers = 0;
+  c_redo_park_early = 0;
+
   if (blockNo == DBLQH) {
     nsl_register_hooks();
   addRecSignal(GSN_QUOTA_OVERLOAD_REP, &Dblqh::execQUOTA_OVERLOAD_REP);

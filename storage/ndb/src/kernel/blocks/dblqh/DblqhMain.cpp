@@ -2922,14 +2922,7 @@ void Dblqh::execREAD_CONFIG_REQ(Signal *signal) {
     c_redo_pmem_persist_commit = 0;
     c_redo_pmem_skip_barrier = false;
     c_redo_pmem_persist_delay_ns = 0;
-    c_redo_park_batch = true;
-    c_redo_park_active = false;
     c_redo_park_adaptive = false;
-    c_redo_park_resuming = false;
-    c_redo_park_count = 0;
-    c_redo_park_commits = 0;
-    c_redo_park_barriers = 0;
-    c_redo_park_early = 0;
     c_redo_pmem_tear = 0;
     c_redo_pmem_seed = 0;
     c_redo_pmem_rand = 0;
