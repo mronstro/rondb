@@ -63,8 +63,9 @@ per query so cache warm-up cannot masquerade as a JIT effect.
 meant to measure, so the warmup prints its EXPLAIN into the case log and a
 `Plan pin missing` warning says the entry now measures something else.
 `{KEY}` / `{KEYS:n}` on `orders` resolve to existing order keys
-(`tpchOrderKeyResolver`: `.load_tpch` writes multiples of 4, so the plain
-uniform draw would miss three requests in four); the customer-keyed
+(`tpchOrderKeyResolver`: `.load_tpch` writes sparse order keys, multiples
+of 4 until 2026-11-27 and the first 8 of every 32 values since, so the
+plain uniform draw would miss three requests in four); the customer-keyed
 entries reuse the `fs_hw` resolver.
 
 | entry | statement (shape) | rows touched at sf 1 | pins |

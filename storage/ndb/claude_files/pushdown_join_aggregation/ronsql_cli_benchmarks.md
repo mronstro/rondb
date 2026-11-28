@@ -33,7 +33,8 @@ are the Hopsworks serving shapes over the `fs_bench` data set.
 | `tools/rondb-cli/internal/shell/ronsql_bench.go` | Shared query registry (`ronsqlBenchQueries`), RonSQL runner (`runBenchRonSQL*`), MySQL runner (`runBenchSQLNamed`/`runBenchSQLQuery`), completion |
 | `tools/rondb-cli/internal/shell/query_inspect.go` | Query inspection: `.list_query_ronsql`/`.list_query_sql`, `.query_ronsql`/`.query_sql <name>`, `.explain_ronsql`/`.explain_sql <name>` |
 | `tools/rondb-cli/internal/shell/repl.go` | `.bench_ronsql` dispatch, `.bench_sql` named-form dispatch (non-numeric first arg), query-inspection dispatch, `.help internal` / `.help bench` text, autocomplete |
-| `tools/rondb-cli/internal/shell/tpch.go` | Secondary indexes added to the TPC-H DDL (see below) |
+| `tools/rondb-cli/internal/shell/tpch.go` | `.load_tpch`: DDL with the secondary indexes (see below) and the data generators, which follow the TPC-H data rules |
+| `tools/rondb-cli/internal/shell/tpch_bench.go`, `tpch_queries.go` | `.bench_tpch`: the 22 TPC-H queries in official, original and rewritten form, on RonSQL and MySQL (see "TPC-H, all 22 queries") |
 | `tools/rondb-cli/internal/client/rest.go` | `RestOptions.Timeout` (benchmark clients use a build-time timeout instead of the default 30s) |
 | `tools/rondb-cli/internal/client/mysql.go` | `MySQLOptions.Database` (per-benchmark connections default to the query's schema) |
 
@@ -132,16 +133,72 @@ tables.
 
 The CLI loader (`.load_tpch [SF]`) creates database `tpch` with the 8
 standard TPC-H tables (unprefixed names). At SF=1: 150k customers, 10k
-suppliers, 200k parts, 800k partsupp, 1.5M orders, 6M lineitems, plus fixed
-nation (25) and region (5). Order keys are sparse (multiples of 4);
-`o_custkey` is uniformly random over the customers whose key is not a
-multiple of 3 (the TPC-H rule, since 2026-09-26: a third of the customers
-have no orders, ~15 orders per customer with orders; before, every
-customer had ~10 and Q22's anti-join found almost nothing); `o_orderdate` spans
-1992-01-01 to ~1998-08 (~625 orders/day, ~2500 lineitems/day); ~4
-lineitems/order. Phone country codes are uniform in 10..34 (not
-nation-derived). Note this is a different physical schema from
-`block_unit_test/load_tpch.cpp` (which uses `test.tpch_*` tables).
+suppliers, 200k parts, 800k partsupp, 1.5M orders, about 6M lineitems, plus
+fixed nation (25) and region (5).
+
+Since 2026-11-27 the generators follow the TPC-H data rules (specification
+clause 4.2.3), so the 22 queries with their standard substitution
+parameters select the share of rows they select on dbgen data:
+
+- an order has 1 to 7 lineitems (4 on average); order keys use the first 8
+  of every 32 values (`tpchOrderKey`); `o_custkey` is never a multiple of 3,
+  so a third of the customers have no orders;
+- a lineitem's supplier is one of its part's four partsupp suppliers; its
+  ship, commit and receipt dates follow the order's date (`o_orderdate` is
+  uniform from 1992-01-01 to 1998-08-02); return flag and line status follow
+  the dates, `o_orderstatus` the line statuses, `o_totalprice` the lines;
+- `p_type` has three syllables, `p_brand` follows `p_mfgr`, `p_retailprice`
+  is the function of the key, phone numbers start with the nation key
+  plus 10;
+- comments are text of the TPC-H grammar (about 1 order comment in 100
+  matches `'%special%requests%'`), and about 5 suppliers in 10000 carry
+  `Customer ... Complaints`.
+
+The values are not dbgen's own: every row is generated from a random stream
+seeded by the table and the row number (`tpchRand`), so a load gives the
+same database whatever the thread count and batch size, but query results
+differ from the published TPC-H answers. The word weights of the text
+grammar were written from memory of dbgen's `dists.dss` and not compared
+with that file. `tools/rondb-cli/internal/shell/tpch_test.go` checks the
+rules above on generated rows.
+
+**CHAR values are sent filled with spaces.** The loader writes through the
+REST server's `batchwrite`, and until 2026-11-28 the REST server filled the
+unused bytes of a `CHAR` column with NUL (`set_col_value` in
+`rest-server2/server/src/db_operations/pk/common.cpp`, the `Column::Char`
+case: one code path for a key and for a written column), where MySQL fills
+them with spaces. A value written short was therefore stored as another
+value: `'R'` in a `CHAR(1)` of utf8mb4 is the four bytes `52 00 00 00`, and
+MySQL reads it back as a string of four characters. An equality condition
+still matches on both engines (Q2's `r_name = 'EUROPE'` returned its 100
+rows on each), because a NUL has no weight in `utf8mb4_0900_ai_ci`, but the
+two engines return the value differently: the
+MySQL server cuts it to the declared length when it groups or sorts
+(`'A'`), RonSQL returns all the bytes (`'A\0\0\0'`). `.load_tpch` reads the
+length in bytes of each `CHAR` column from `information_schema.COLUMNS` and
+sends the value filled with spaces to that length (`tpchPadChars`), which
+leaves the REST server nothing to fill, so a load is right on a REST server
+without the fix too.
+
+The REST server fix (2026-11-28): `set_col_value` and the index-scan value
+encoder (`GenerateBinary` in `rdrs_dal.cpp`) fill a `CHAR` value with the
+column character set's space, for a written column, a key and an index
+bound alike. A NUL-filled key is the key of a row MySQL wrote only where a
+NUL has no weight (the `utf8mb4_0900` collations); in `latin1` or
+`utf8mb4_general_ci` it is another key, so `pk-read` did not find the row
+and `pk-write` added a second one. That reasoning is from reading
+`NdbSqlUtil::strnxfrm_hash`, not from a run. A row that an older REST
+server wrote with a short `CHAR` key in such a collation keeps its
+NUL-filled key and is not found by the fixed server (nor was it by MySQL).
+Test: `TestBatchWriteCharFilledWithSpaces` in
+`rest-server2/server/test_go/internal/integrationtests/batchwrite/char_fill_test.go`.
+
+Data loaded before 2026-11-27 must be dropped and reloaded: it has other
+order keys (multiples of 4) and none of the dependencies above. Data loaded
+before 2026-11-28 must be reloaded too: its `CHAR` values are filled with
+NUL. `.bench_tpch` warns when it finds such data. Note this
+is a different physical schema from `block_unit_test/load_tpch.cpp` (which
+uses `test.tpch_*` tables).
 
 ## Query set
 
@@ -237,33 +294,272 @@ stay in the envelope) are listed per query.
 |------|------------------------------|------------|
 | `tpch_q2` | Correlated `ps_supplycost = (SELECT MIN(ps_supplycost)...)` → per-part `min_cost` CTE | The final self-join back to the supplier achieving the min cost needs a col-vs-CTE-output equijoin (unsupported); instead reports min/max min-cost per manufacturer for size-15 parts. Region/type filters dropped (kept: `p_size = 15`). `ORDER BY p_mfgr LIMIT 100` mirrors the official ordering + LIMIT |
 | `tpch_q11` | `HAVING SUM(...) > (SELECT SUM(...) * fraction)` → per-supplier `stock` CTE | HAVING-vs-scalar comparison unsupported; stock value uses `SUM(ps_availqty)` (exact int) instead of `ps_supplycost * ps_availqty` (expression-of-DECIMAL SUM in CTE body unproven). Nation filter as main-query WHERE `s_nationkey = 7` (GERMANY) |
-| `tpch_q13` | Derived table `(SELECT c_custkey, COUNT(o_orderkey) ... LEFT JOIN ... GROUP BY)` → `c_orders` CTE | The outer `GROUP BY c_count` (distribution histogram) groups by an aggregate output (unsupported); reports scalar distribution stats (COUNT/SUM/MIN/MAX) over the LEFT JOIN with NULL injection instead |
+| `tpch_q13` | Derived table `(SELECT c_custkey, COUNT(o_orderkey) ... LEFT JOIN ... GROUP BY)` → `c_orders` CTE | Reports scalar distribution stats (COUNT/SUM/MIN/MAX) over the LEFT JOIN with NULL injection. When the entry was written, `GROUP BY` on a CTE aggregate output was not supported; it is now (`ronsql_cte_cross_filter_groups` cg-4), and `.bench_tpch` Q13 uses it for the histogram |
 | `tpch_q15` | `revenue` view + `total_revenue = (SELECT MAX(total_revenue)...)` → date-filtered `revenue` CTE, main SELECT is the scalar MAX | Revenue is `SUM(l_extendedprice)` instead of `SUM(l_extendedprice * (1 - l_discount))` (expression-of-DECIMAL SUM in CTE body unproven); the supplier join back to the max is the same col-vs-CTE-output limitation as Q2 |
 | `tpch_q22` | `NOT EXISTS (SELECT * FROM orders ...)` + scalar AVG subquery → `cust_orders` CTE anti-join | Faithful anti-join via `LEFT JOIN ... IS NULL`; the `c_acctbal > (SELECT AVG(...))` threshold is a fixed `> 0.00`; phone-prefix `SUBSTRING` filter replaced by `GROUP BY c_nationkey`. `ORDER BY c_nationkey` mirrors the official `ORDER BY cntrycode` |
 
 ### Official TPC-H (`tpch_q*` in `.bench_sql`, MySQL only)
 
 The official formulations — region/nation joins, correlated subqueries,
-HAVING-vs-scalar, derived tables, ORDER BY/LIMIT — with literals adapted to
-the CLI-generated data where the official values would match nothing:
+HAVING-vs-scalar, derived tables, ORDER BY/LIMIT — with the TPC-H
+validation literals (the data follows the TPC-H rules, see "Data model").
+These five entries predate `.bench_tpch`, which has all 22 queries:
 
-- **Q2**: `p_type LIKE '%STANDARD'` instead of `'%BRASS'` (the generator's
-  type vocabulary is material+type from
-  ANODIZED/BURNISHED/PLATED/POLISHED/BRUSHED × STANDARD/SMALL/MEDIUM/LARGE/
-  ECONOMY/PROMO). Region EUROPE, `p_size = 15`, ORDER BY + LIMIT 100 kept.
-- **Q11**: faithful (GERMANY via nation join, `ps_supplycost * ps_availqty`
-  value, HAVING vs scalar subquery with fraction 0.0001, ORDER BY value).
-- **Q13**: faithful shape; `o_comment NOT LIKE '%special%requests%'` is kept
-  even though the generated comments are random words (the filter passes
-  ~everything — the join/aggregation work is what is measured).
+- **Q2**: region EUROPE, `p_size = 15`, `p_type LIKE '%BRASS'`, ORDER BY +
+  LIMIT 100.
+- **Q11**: GERMANY via nation join, `ps_supplycost * ps_availqty` value,
+  HAVING vs scalar subquery with fraction 0.0001, ORDER BY value.
+- **Q13**: `o_comment NOT LIKE '%special%requests%'` sets aside about 1
+  order in 100.
 - **Q15**: the revenue view expressed as a CTE referenced twice (view
   creation per request would not benchmark the query); otherwise faithful
   including the MAX(total_revenue) join-back and ORDER BY.
-- **Q22**: faithful (phone-prefix country codes 13/31/23/29/30/18/17 all
-  exist in the generator's uniform 10..34 range; AVG subquery + NOT EXISTS
-  anti-join + GROUP BY cntrycode).  Data loaded before 2026-09-26 gave every
-  customer orders, so the anti-join found nothing (0 rows, census run 6 /
-  6b); reload with the current `.load_tpch`.
+- **Q22**: phone-prefix country codes 13/31/23/29/30/18/17 (the code is
+  the nation key plus 10), AVG subquery + NOT EXISTS anti-join + GROUP BY
+  cntrycode.  Data loaded before 2026-09-26 gave every customer orders, so
+  the anti-join found nothing (0 rows, census run 6 / 6b); reload with the
+  current `.load_tpch`.
+
+## TPC-H, all 22 queries (`.bench_tpch`)
+
+The registry in `tpch_queries.go` has every TPC-H query in up to three
+forms:
+
+- **official**: the TPC-H formulation in MySQL dialect, with the validation
+  literals. MySQL only.
+- **original**: the official query in RonSQL dialect, changed only
+  mechanically (comma joins written as `JOIN ... ON` in an order, `BETWEEN`
+  as a range, date arithmetic as a literal or `DATE_SUB`), with the same
+  columns and rows. Exists for the queries RonSQL runs as they are.
+- **rewritten**: the query in a shape RonSQL runs, or runs faster.
+
+The original and rewritten forms are SQL that mysqld accepts too, so each
+runs on both engines.
+
+**Status of the registry: written from the source, not yet run.** The
+verdicts below come from reading `RonSQLParser.y`, `RonSQLPreparer.cpp`,
+`QueryPlanner.cpp` and the MTR suites on 2026-11-27. No statement had been
+executed when this was written. `.bench_tpch verify` is the test; record
+its outcome here when it has run.
+
+First `verify` run, 2026-11-28, debug build, scale factor not checked (a
+later load that day held scale factor 0.2): Q1 (both
+forms) and Q2 (rewritten) executed on both engines and were reported as
+different. The numbers agreed (the Q1 sums to 15 digits); the difference
+was in the `CHAR` columns, filled with NUL by the load (see "Data model").
+Nothing in those three results points at RonSQL. The outcome of the other
+statements and of a run on reloaded data is not recorded yet. Q1 took
+6.2 s on RonSQL and 35 s on the MySQL server in that run (5.6 s and 34 s
+for the rewritten form); a debug build, so not a benchmark number.
+
+Same run, Q18 rewritten: RDRS stopped (`RonSQL CRASH ... EOF`) on the NDB
+API assertion `(tupleId & skipTupleFlag) == 0` in
+`NdbResultStream::buildResultCorrelations`, reached from
+`RonSQLPreparer::execute_passthrough_drain`. Cause: DBLQH gave a row of a
+CTE scan the number of its group in the whole scan as correlation id
+(`cteScanEmitResults`, `params.correlation = groupIdx`). DBSPJ and the API
+keep 16 bits of the id and find a row among the rows of its batch with it;
+bit 15 is the API's skip flag and DBSPJ uses the id as a position in a map
+of 4096 entries (`add_to_map`). Q18's CTE has one group per order, about
+750000 per data node, so most rows had an id the protocol has no room for.
+MTR did not see it because its CTEs that reach the API as rows stay under
+32768 groups per node. Fix (2026-11-28): the id is the row's number in its
+batch, as for a table scan (a batch is at most 256 rows). Test:
+`mysql-test/suite/ronsql_cte/t/cte_scan_row_ids.test`. Not looked at: the
+"all nodes" variant of the scan (`m_cteScanAllNodes`), where one DBSPJ
+request reads several nodes' groups in one batch and each node numbers
+from 0; and the scan loop itself, which walks every rejected group in one
+signal execution (all 750000 for a filter that keeps few).
+
+### Commands
+
+```
+.load_tpch 1 8 200            # the data (reload if loaded before 2026-11-28)
+.bench_tpch                   # the 22 queries: which run, in which form
+.bench_tpch missing           # RonSQL features the official queries need
+.bench_tpch show q9           # the forms of Q9, why, and what differs
+.bench_tpch indexes           # secondary indexes the RonSQL forms use
+.bench_tpch check             # RonSQL parses and plans every form (EXPLAIN)
+.bench_tpch verify            # run each once on both engines, compare results
+.bench_tpch verify q18        # ... one query (also: check q18)
+.bench_tpch original 1 3      # phase 1: original forms, RonSQL and MySQL
+.bench_tpch rewritten 1 3     # phase 2: rewritten forms, RonSQL and MySQL
+.bench_tpch rewritten q4 q18 1 3  # ... the named queries only
+.bench_tpch all q5 1 3 --show # ... printing the SQL of each statement
+.bench_tpch all q5 1 3 --straight  # ... MySQL joins in the statement's order
+.bench_tpch explain q5 rewritten mysql --straight
+.bench_tpch all 1 3           # both phases
+.bench_tpch all 1 3 ronsql    # ... on one engine (ronsql | mysql | both)
+.bench_tpch official 1 1      # the official formulations on MySQL
+.bench_tpch q5 4 10           # every form of one query
+.bench_tpch explain q5 rewritten mysql
+```
+
+`check`, `verify` and the run commands (`original`, `rewritten`, `all`,
+`official`) take query names and then run those only: `q4`, `q4 q18` or
+`q4,q18`. Without one they run every query. In a run the `q` is required,
+since a bare number is the thread or request count. The same commands take
+`--show`, which prints the SQL of each statement before it runs; without
+the flag a run names the query and the form only (`.bench_ronsql` and
+`.bench_sql` still print their statement).
+
+`--straight` (on `verify`, a run, and `explain ... mysql`) makes the MySQL
+server join in the order the statement names its tables: the client puts
+`STRAIGHT_JOIN` after every `SELECT` of the text it sends to MySQL, since
+the option fixes the order of one query block (the main query, a CTE body,
+a subquery). RonSQL gets the statement unchanged. Without the flag MySQL's
+optimizer picks the order, and picks the same one for the original and the
+rewritten form of a query whose forms differ only in table order: for Q5
+it starts at the orders of the year in every region and applies the region
+last, in mysqld, after the pushed join has read lineitem and supplier for
+every region (EXPLAIN on a scale-factor-0.2 load, 2026-11-28; with the
+flag it follows the rewritten order, nation as the root of the pushed
+join). No run time was taken with the flag when this was written. The
+summary of a run says when MySQL ran with the flag.
+
+The flag changes nothing where MySQL already picks the statement's order.
+Q7 rewritten is such a case: the same plan with and without it (one pushed
+join of six tables, nation → supplier → lineitem → orders → customer →
+nation). One run of it on MySQL (scale factor 0.2, release build,
+2026-11-28, `EXPLAIN ANALYZE` with the `Ndb_api_*_session` counters): 969 ms,
+of which 966 ms waiting for the data nodes; 78,593 rows (4.1 MB) received
+by mysqld for 1,054 joined rows in 2 groups; grouping in mysqld under 1 ms.
+RonSQL took 0.27 to 0.5 s for the same statement in single requests on a
+machine whose timings varied by a factor of three between runs.
+
+Each phase ends with one table: average and p95 latency per engine, result
+rows per engine, and how much faster or slower RonSQL is on the same
+statement. The runs themselves are the `.bench_ronsql` / `.bench_sql`
+runners (warmup, phase breakdown, error report).
+
+`check` uses EXPLAIN, which stops before the pushed join is built. RonSQL
+makes further checks there (the tables an aggregation reads, the operands
+of a filter over two tables, the size of the aggregation program), and
+some limits only show at run time, so `verify` is the real test. It
+compares the two results cell by cell: DECIMAL and DOUBLE columns within
+1e-9 relative or 1e-4 absolute (a SUM over a DECIMAL expression is a DOUBLE
+in RonSQL, and RonSQL prints AVG with four decimals), everything else as
+text; rows in order when the statement has an ORDER BY, as a set otherwise.
+
+### What runs
+
+| Query | Original | Rewritten | Result of the rewrite |
+|-------|----------|-----------|-----------------------|
+| Q1 pricing summary | yes | yes (table scan asked for with `USE INDEX ()`) | same |
+| Q2 minimum cost supplier | no | yes, two CTEs and a projection | same |
+| Q3 shipping priority | yes | | |
+| Q4 order priority | no (fails at run time: EXISTS over 1000 keys) | yes, CTE | same |
+| Q5 local supplier volume | yes | yes, region first | same |
+| Q6 revenue change | yes | | |
+| Q7 volume shipping | no | yes, one chain | pivot: a revenue column per year |
+| Q8 market share | no | yes, one chain of nine tables | four sums, the client divides |
+| Q9 product type profit | no | yes, one chain | pivot: a profit column per year |
+| Q10 returned items | yes (nation first) | | |
+| Q11 important stock | yes (the 0.0001 moved out of the subquery) | yes, nation first | same |
+| Q12 shipping modes | yes | | |
+| Q13 customer distribution | no | yes, CTE and LEFT JOIN | the zero bucket has `c_count` NULL |
+| Q14 promotion effect | no | yes | two sums, the client divides |
+| Q15 top supplier | no | yes, `ORDER BY ... LIMIT 1` | one supplier also on a tie |
+| Q16 parts/supplier | no | yes, CTE regrouped | same |
+| Q17 small-quantity revenue | no | yes, CTE and HAVING | the qualifying lineitems, the client sums and divides by 7 |
+| Q18 large volume customer | no | yes, CTE scan with lookups | same (last column named `sum_qty`) |
+| Q19 discounted revenue | no | yes, three `SUM(CASE)` | three sums, the client adds |
+| Q20 part promotion | no | yes, CTE scan and HAVING | same |
+| Q21 waiting suppliers | no | yes, two CTEs | same |
+| Q22 sales opportunity | no | yes, CTE anti-join | pivot: count and sum per country code |
+
+7 of 22 run in their original form (Q1, Q3, Q5, Q6, Q10, Q11, Q12). The
+other 15 have a rewrite: 6 with the same columns and rows (Q2, Q4, Q16,
+Q18, Q20, Q21) and 9 with a result the client has to finish or read
+differently (Q7, Q8, Q9, Q13, Q14, Q15, Q17, Q19, Q22). No official TPC-H
+text passes RonSQL's parser unchanged.
+
+### What RonSQL lacks
+
+Features that keep the 15 from running in their original form
+(`.bench_tpch missing` prints this from the registry):
+
+| Feature | Queries |
+|---------|---------|
+| IN / EXISTS / correlated subqueries returning more than 1000 rows (the result is substituted as constants, it does not run as a semi-join) | Q2 Q4 Q17 Q20 Q21 Q22 |
+| Derived tables (a subquery in FROM) | Q7 Q8 Q9 Q13 Q22 |
+| Scalar functions as outputs and GROUP BY on an expression (`EXTRACT(YEAR ...)`, `SUBSTRING`) | Q7 Q8 Q9 Q22 |
+| Arithmetic over aggregates, and non-integer constants, in a SELECT list | Q8 Q14 Q17 Q20 |
+| Correlated subqueries with a join inside, several correlations, a non-equality correlation, or arithmetic on the result | Q2 Q17 Q20 Q21 |
+| A subquery condition on a column of a joined table | Q2 Q18 Q21 |
+| A WHERE disjunction of AND groups that reads two tables | Q7 Q19 |
+| LIKE, NOT and nested AND / OR in a CASE condition | Q14 |
+| A condition other than column equality in ON | Q13 |
+| `COUNT(DISTINCT col)` | Q16 |
+| An aggregate over an expression as a CTE output | Q15 |
+| A subquery that reads a CTE, or a comparison between outputs of two CTEs | Q15 |
+| Aggregation that reads columns of sibling join branches | Q18 |
+
+Spelling the original forms had to change: comma joins of stored tables
+(17 queries), `date '...'` literals and `date ± interval` (12), `BETWEEN`
+(4), `x NOT LIKE y` / `x NOT IN` (2), `SELECT *` in EXISTS (3), a table
+alias without `AS` (3), arithmetic on constants in WHERE (2), a keyword as
+an alias (`value`, Q11), a factor inside a scalar subquery's SELECT list
+(Q11), `CREATE VIEW` (Q15).
+
+What would make the nine inexact rewrites exact: expressions in the SELECT
+list and as GROUP BY keys (Q7, Q8, Q9, Q14, Q19, Q22), `COALESCE` or a
+non-equality ON condition (Q13), HAVING or expression aggregates in a CTE
+body (Q15, Q17).
+
+Rules that shaped the rewrites, each found in the preparer:
+
+- A CTE output is a GROUP BY column, COUNT, or SUM / MIN / MAX / AVG of a
+  plain column. No expression, no HAVING, no subquery in a CTE body.
+- With a CTE as the FROM table, no table below it may be a scan.
+- A stored DECIMAL column cannot be compared with a CTE output, and no
+  comparison with a CTE output takes arithmetic; HAVING over an aggregate
+  expression does (Q17, Q20).
+- A CASE condition is one comparison, a flat AND or a flat OR; its atoms
+  may be on different tables.
+- A WHERE comparison of two tables is evaluated at the last table and
+  takes integer columns (FLOAT / DOUBLE on the last table): it saves no
+  join (Q5), so the table that carries it goes last.
+- RonSQL has no selectivity estimate: any index bound beats a table scan
+  (Q1).
+
+### Indexes
+
+`.bench_tpch indexes` creates what the RonSQL forms use beyond the
+`.load_tpch` DDL. RonSQL joins a table only through its primary key, a
+unique key or an ordered-index prefix, so the first three are needed
+("No suitable index for join columns" without them); the last two only
+turn a filter into an index bound.
+
+| Index | For |
+|-------|-----|
+| `lineitem(l_partkey, l_suppkey)` | lineitem from part (Q17, Q19, Q20) and from part and partsupp (Q9) |
+| `partsupp(ps_suppkey)` | partsupp from supplier (Q9, Q11 rewritten) |
+| `nation(n_regionkey)` | nation from region (Q5 rewritten, Q8) |
+| `orders(o_custkey, o_orderdate)` | the order-date range as a bound when orders is joined from customer (Q3, Q5, Q8, Q10) |
+| `lineitem(l_receiptdate)` | Q12's receipt-date range instead of a scan of lineitem |
+
+The official Q17 needs `lineitem(l_partkey, ...)` on the MySQL server too,
+or its correlated subquery scans lineitem per outer row.
+
+### Shapes no MTR test covers
+
+The forms rely on these; `verify` settles each. A wrong result here shows
+as a difference from MySQL, not as an error:
+
+- a real table keyed from two tables above it (Q8, Q9; MTR has it for a
+  CTE child, gc-17 / gc-20);
+- a CASE condition on a DATE or CHAR column of a table above the last one
+  (Q7, Q8, Q19), and with atoms on two tables (Q19);
+- a WHERE comparison of two tables more than one level apart (Q5, Q7);
+- a join inside a scalar subquery (Q11);
+- MIN over a looked-up CTE output, and DOUBLE = DOUBLE between two outputs
+  of a CTE (Q2);
+- GROUP BY on an aggregate output of a LEFT-joined CTE (Q13);
+- a CASE over the NULL rows of a CTE anti-join, and a string range in a
+  CASE (Q22; its 14 CASE aggregates are an estimated 650 to 800 of the 1024
+  words an aggregation program may have);
+- CTEs of about 1.5M groups at SF 1 (Q18, Q21; `ronsql_large` proves 100k).
 
 ## Known risks / scaling notes
 
