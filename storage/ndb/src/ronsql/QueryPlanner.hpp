@@ -128,9 +128,30 @@ struct JoinPlan
   Uint32 num_linked_projs;
 };
 
+/*
+ * What QueryPlanner::plan throws for a table or a grouped CTE that is joined
+ * with a comma and so has no ON conditions.  It is the permanent error of
+ * that refusal; detail() is the line that goes to the error stream with it.
+ * plan() leaves that line to the catcher: RonSQLPreparer::plan_joins takes
+ * the join keys from the WHERE clause and plans again, and a statement it
+ * rescues prints nothing.
+ */
+class RonSQLCommaJoinError : public RonSQLPermanentError
+{
+public:
+  RonSQLCommaJoinError(const std::string &detail, const std::string &msg)
+    : RonSQLPermanentError(RonSQLErrorClass::UNSUPPORTED, msg),
+      m_detail(detail) {}
+  const std::string &detail() const { return m_detail; }
+private:
+  std::string m_detail;
+};
+
 class QueryPlanner
 {
 public:
+  // Throws RonSQLCommaJoinError, without writing to `err`, for a table or
+  // grouped CTE in `joins` that has no ON conditions.
   static void plan(
       const TableRef *root_table,
       const JoinClause *joins,
@@ -162,6 +183,43 @@ public:
                                 RdrsSchemaCache *cache,
                                 const char *database,
                                 DynamicArray<const NdbDictionary::Index*> &out);
+
+  // An index a table can be joined through.
+  struct JoinIndex
+  {
+    const NdbDictionary::Index *index;
+    bool unique;  // a unique hash index; otherwise an ordered index
+  };
+
+  // Append the online unique and ordered indexes of `table` to `out`.
+  static void
+  collectJoinIndexes(const NdbDictionary::Dictionary *dict,
+                     const NdbDictionary::Table *table,
+                     RdrsSchemaCache *cache,
+                     const char *database,
+                     DynamicArray<JoinIndex> &out);
+
+  // How plan() reads a joined table through a join key, worst first.
+  enum KeyAccess { KEY_NONE, KEY_ORDERED_INDEX, KEY_UNIQUE_INDEX,
+                   KEY_PRIMARY };
+
+  // Of the columns col_names of `table`, choose the ones plan() takes as
+  // its join key: the whole primary key, else a whole unique index, else
+  // the longest leading part of an ordered index.  indexes[first_index ..
+  // first_index + num_indexes) are the table's, from collectJoinIndexes.
+  // chosen[c] says whether col_names[c] is part of the key; at most
+  // MAX_JOIN_KEY_COLS are.  KEY_NONE when no column can be a key.
+  static KeyAccess
+  selectJoinKey(const NdbDictionary::Table *table,
+                const DynamicArray<JoinIndex> &indexes,
+                Uint32 first_index, Uint32 num_indexes,
+                const char *col_names[], Uint32 num_cols,
+                bool chosen[]);
+
+  // Whether plan() accepts an equality of the two columns as a join key:
+  // neither is a BLOB or TEXT, and they are declared identically.
+  static bool linkableColumns(const NdbDictionary::Column *a,
+                              const NdbDictionary::Column *b);
 
 private:
   static bool isPrimaryKey(const NdbDictionary::Table *table,

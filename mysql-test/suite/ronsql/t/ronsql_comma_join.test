@@ -1,0 +1,206 @@
+# RONDB-1167: tables joined with a comma, with their join keys in the WHERE
+# clause (FROM a, b WHERE a.x = b.y), as TPC-H writes its joins.
+#
+# QueryPlanner::plan refuses a table that has no ON conditions.  For an
+# aggregate query or a CTE body RonSQLPreparer::plan_joins then takes the
+# keys from the WHERE equalities (link_comma_joins) and plans again:
+#  - the first table in FROM is the root; after it comes, each time, the
+#    first table in FROM order that has a key to a table already placed;
+#  - a table is joined to the placed table that gives it the best access:
+#    its primary key, else a unique index, else an ordered index;
+#  - the equalities not used stay in the WHERE.
+# A statement that writes JOIN ... ON is planned as before, and RDRS runs
+# every statement here once (ronsql_compare.inc requires attempts=1): the
+# second planning is not a retry of the statement.
+#
+# Compared with mysqld, the plan checked in EXPLAIN (ronsql_check.inc):
+#   cj-1   two tables, qualified columns, the second read by its key
+#   cj-2   the same with unqualified columns, the equality the other way
+#   cj-3   a chain in FROM order, each table read through an ordered index
+#   cj-4   the second table in FROM has no key to the root: it comes last
+#   cj-5   two equalities for one table: the primary key wins, and the
+#          other stays in the WHERE as a condition between two tables
+#   cj-6   JOIN ... ON and a comma in one FROM
+#   cj-7   a comma join in a CTE body
+#   cj-8   the key of a comma table names a LEFT-joined table, which makes
+#          that join an INNER JOIN
+#   cj-9   a NULL in the key column matches no row
+#   cj-10  an equality with an index on one side only, the table that has
+#          the index listed second
+# Refused, through ronsql_cli:
+#   cj-e1  as cj-10 with the tables the other way round: no index
+#   cj-e2  the equality is under an OR, so it is no join key
+#   cj-e3  the two columns have different types
+#   cj-e4  a query without aggregates (the comma rewrite covers aggregate
+#          queries and CTE bodies only)
+#   cj-e5  a grouped CTE joined with a comma
+# ronsql_cte_scalar Tests 17 to 20 hold the comma joins without any
+# equality, refused as before.
+
+--source include/have_ndb.inc
+--source include/have_util_curl.inc
+--disable_warnings
+call mtr.add_suppression("Schema dist coordinator detected timeout");
+call mtr.add_suppression("Participant timeout");
+--enable_warnings
+
+--disable_query_log
+--disable_warnings
+CREATE TABLE cj_nation (
+  n_id INT NOT NULL PRIMARY KEY,
+  n_code INT NOT NULL,
+  n_region INT NOT NULL
+) ENGINE=NDB;
+INSERT INTO cj_nation VALUES (1, 100, 10), (2, 200, 10), (3, 300, 20);
+CREATE TABLE cj_supp (
+  s_id INT NOT NULL PRIMARY KEY,
+  s_nation INT NOT NULL,
+  KEY s_nation_idx (s_nation)
+) ENGINE=NDB;
+INSERT INTO cj_supp VALUES (1, 1), (2, 1), (3, 2), (4, 3);
+CREATE TABLE cj_cust (
+  c_id INT NOT NULL PRIMARY KEY,
+  c_nation INT NOT NULL,
+  c_seg INT NOT NULL,
+  KEY c_nation_idx (c_nation)
+) ENGINE=NDB;
+INSERT INTO cj_cust VALUES (1, 1, 1), (2, 2, 1), (3, 2, 2), (4, 3, 1);
+CREATE TABLE cj_ord (
+  o_id INT NOT NULL PRIMARY KEY,
+  o_cust INT NOT NULL,
+  o_yr INT NOT NULL,
+  KEY o_cust_idx (o_cust)
+) ENGINE=NDB;
+INSERT INTO cj_ord VALUES
+  (10, 1, 1), (11, 1, 2), (12, 2, 1), (13, 3, 2), (14, 4, 2);
+CREATE TABLE cj_item (
+  i_ord INT NOT NULL,
+  i_line INT NOT NULL,
+  i_supp INT NULL,
+  i_qty BIGINT NOT NULL,
+  PRIMARY KEY (i_ord, i_line)
+) ENGINE=NDB;
+INSERT INTO cj_item VALUES
+  (10, 1, 1, 5), (10, 2, 2, 7), (11, 1, 3, 1), (12, 1, NULL, 4),
+  (12, 2, 4, 2), (13, 1, 1, 9), (14, 1, 4, 3);
+CREATE TABLE cj_big (
+  b_id BIGINT NOT NULL PRIMARY KEY,
+  b_v INT NOT NULL
+) ENGINE=NDB;
+INSERT INTO cj_big VALUES (1, 1), (2, 2);
+--enable_warnings
+--enable_query_log
+
+--echo
+--echo === cj-1: two tables, qualified columns, the second read by its key ===
+let $explain_greps=
+0: [ROOT] TABLE_SCAN cj_supp AS s
+1: [INNER] PK_LOOKUP cj_nation AS n  <- s;
+--let $QUERY=SELECT n.n_code, COUNT(*) AS c FROM cj_supp AS s, cj_nation AS n WHERE n.n_id = s.s_nation GROUP BY n.n_code;
+--source suite/ronsql/include/ronsql_check.inc
+
+--echo
+--echo === cj-2: unqualified columns, the equality the other way ===
+let $explain_greps=
+1: [INNER] PK_LOOKUP cj_nation AS cj_nation  <- cj_supp;
+--let $QUERY=SELECT n_code, COUNT(*) AS c FROM cj_supp, cj_nation WHERE s_nation = n_id GROUP BY n_code;
+--source suite/ronsql/include/ronsql_check.inc
+
+--echo
+--echo === cj-3: a chain in FROM order, read through ordered indexes ===
+let $explain_greps=
+1: [INNER] INDEX_SCAN cj_ord AS cj_ord  <- cj_cust
+2: [INNER] INDEX_SCAN cj_item AS cj_item  <- cj_ord;
+--let $QUERY=SELECT o_yr, SUM(i_qty) AS q, COUNT(*) AS c FROM cj_cust, cj_ord, cj_item WHERE c_id = o_cust AND i_ord = o_id AND c_seg = 1 GROUP BY o_yr;
+--source suite/ronsql/include/ronsql_check.inc
+
+--echo
+--echo === cj-4: the second table has no key to the root and comes last ===
+let $explain_greps=
+1: [INNER] INDEX_SCAN cj_cust AS cj_cust  <- cj_nation
+2: [INNER] INDEX_SCAN cj_ord AS cj_ord  <- cj_cust;
+--let $QUERY=SELECT n_code, COUNT(*) AS c FROM cj_nation, cj_ord, cj_cust WHERE o_cust = c_id AND c_nation = n_id GROUP BY n_code;
+--source suite/ronsql/include/ronsql_check.inc
+
+--echo
+--echo === cj-5: the primary key wins, the other equality stays in the WHERE ===
+let $explain_greps=
+3: [INNER] PK_LOOKUP cj_supp AS cj_supp  <- cj_item
+4: [INNER] PK_LOOKUP cj_nation AS cj_nation  <- cj_supp;
+--let $QUERY=SELECT n_code, SUM(i_qty) AS q FROM cj_cust, cj_ord, cj_item, cj_supp, cj_nation WHERE c_id = o_cust AND i_ord = o_id AND i_supp = s_id AND c_nation = s_nation AND s_nation = n_id GROUP BY n_code;
+--source suite/ronsql/include/ronsql_check.inc
+
+--echo
+--echo === cj-6: JOIN ... ON and a comma in one FROM ===
+let $explain_greps=
+1: [INNER] PK_LOOKUP cj_ord AS o  <- i
+2: [INNER] PK_LOOKUP cj_cust AS c  <- o;
+--let $QUERY=SELECT COUNT(*) AS cnt, SUM(i.i_qty) AS q FROM cj_item AS i JOIN cj_ord AS o ON o.o_id = i.i_ord, cj_cust AS c WHERE c.c_id = o.o_cust AND c.c_seg = 1;
+--source suite/ronsql/include/ronsql_check.inc
+
+--echo
+--echo === cj-7: a comma join in a CTE body ===
+let $explain_greps=
+1: [INNER] PK_LOOKUP cj_ord AS cj_ord  <- cj_item;
+--let $QUERY=WITH t AS (SELECT o_yr AS yr, SUM(i_qty) AS q FROM cj_item, cj_ord WHERE o_id = i_ord GROUP BY o_yr) SELECT yr, q FROM t;
+--source suite/ronsql/include/ronsql_check.inc
+
+--echo
+--echo === cj-8: the key of a comma table makes a LEFT JOIN an INNER JOIN ===
+let $explain_greps=
+1: [INNER] PK_LOOKUP cj_supp AS s  <- i
+2: [INNER] PK_LOOKUP cj_nation AS n  <- s;
+--let $QUERY=SELECT COUNT(*) AS c FROM cj_item AS i LEFT JOIN cj_supp AS s ON s.s_id = i.i_supp, cj_nation AS n WHERE n.n_id = s.s_nation;
+--source suite/ronsql/include/ronsql_check.inc
+
+--echo
+--echo === cj-9: a NULL in the key column matches no row ===
+let $explain_greps=
+1: [INNER] PK_LOOKUP cj_supp AS cj_supp  <- cj_item;
+--let $QUERY=SELECT COUNT(*) AS c, SUM(i_qty) AS q FROM cj_item, cj_supp WHERE i_supp = s_id;
+--source suite/ronsql/include/ronsql_check.inc
+
+--echo
+--echo === cj-10: the table that has the index for the equality comes second ===
+let $explain_greps=
+1: [INNER] INDEX_SCAN cj_supp AS cj_supp  <- cj_ord;
+--let $QUERY=SELECT COUNT(*) AS c FROM cj_ord, cj_supp WHERE o_yr = s_nation;
+--source suite/ronsql/include/ronsql_check.inc
+
+--echo
+--echo === cj-e1: cj-10 the other way round: no index on the second table ===
+--error 1
+--exec $RONSQL_CLI_EXE --connect-string $NDB_CONNECTSTRING -D test -e 'SELECT COUNT(*) AS c FROM cj_supp, cj_ord WHERE o_yr = s_nation;' 2>&1
+
+--echo
+--echo === cj-e2: an equality under an OR is no join key ===
+--error 1
+--exec $RONSQL_CLI_EXE --connect-string $NDB_CONNECTSTRING -D test -e 'SELECT COUNT(*) AS c FROM cj_supp, cj_nation WHERE s_nation = n_id OR n_id = 1;' 2>&1
+
+--echo
+--echo === cj-e3: the two columns of the equality have different types ===
+--error 1
+--exec $RONSQL_CLI_EXE --connect-string $NDB_CONNECTSTRING -D test -e 'SELECT COUNT(*) AS c FROM cj_supp, cj_big WHERE b_id = s_nation;' 2>&1
+
+--echo
+--echo === cj-e4: a query without aggregates ===
+--error 1
+--exec $RONSQL_CLI_EXE --connect-string $NDB_CONNECTSTRING -D test -e 'SELECT s_id, n_code FROM cj_supp, cj_nation WHERE s_nation = n_id;' 2>&1
+
+--echo
+--echo === cj-e5: a grouped CTE joined with a comma ===
+--error 1
+--exec $RONSQL_CLI_EXE --connect-string $NDB_CONNECTSTRING -D test -e 'WITH g AS (SELECT s_nation AS k, COUNT(*) AS c FROM cj_supp GROUP BY s_nation) SELECT COUNT(*), SUM(g.c) FROM cj_nation, g WHERE g.k = n_id;' 2>&1
+
+--let $QUERY=
+
+--disable_query_log
+--disable_warnings
+DROP TABLE cj_nation;
+DROP TABLE cj_supp;
+DROP TABLE cj_cust;
+DROP TABLE cj_ord;
+DROP TABLE cj_item;
+DROP TABLE cj_big;
+--enable_warnings
+--enable_query_log

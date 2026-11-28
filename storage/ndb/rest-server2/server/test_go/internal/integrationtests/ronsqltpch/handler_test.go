@@ -196,6 +196,71 @@ var tpchQueries = []struct {
 		JOIN tpch_nation AS n ON n.n_nationkey = c.c_nationkey
 		GROUP BY c.c_name
 		ORDER BY revenue DESC LIMIT 20;`, "", 1, true},
+
+	// RONDB-1167: the joins written as TPC-H writes them, a list of tables
+	// with the join keys in the WHERE clause.  RonSQL takes the keys from
+	// the WHERE equalities and joins the tables in FROM order, the first
+	// one as the root (RonSQLPreparer::link_comma_joins).
+	//
+	// minmax-comma and Q10-comma get the plans of minmax and Q10 above,
+	// with qualified and with unqualified columns.
+	{"minmax-comma", `SELECT n.n_name,
+		MIN(s.s_acctbal), MAX(s.s_acctbal), COUNT(*), SUM(s.s_acctbal)
+		FROM tpch_supplier AS s, tpch_nation AS n
+		WHERE s.s_nationkey = n.n_nationkey
+		GROUP BY n.n_name;`, "", 1, false},
+
+	{"Q10-comma", `SELECT c_name,
+		SUM(l_extendedprice * (1 - l_discount)), COUNT(*)
+		FROM tpch_lineitem, tpch_orders, tpch_customer, tpch_nation
+		WHERE o_orderkey = l_orderkey AND c_custkey = o_custkey
+		AND n_nationkey = c_nationkey
+		GROUP BY c_name;`, "", 1, false},
+
+	// A JOIN ... ON and a comma in one FROM.
+	{"nogroup-comma", `SELECT COUNT(*),
+		SUM(l.l_extendedprice), SUM(l.l_quantity),
+		MIN(l.l_extendedprice), MAX(l.l_extendedprice)
+		FROM tpch_lineitem AS l
+		JOIN tpch_orders AS o ON o.o_orderkey = l.l_orderkey,
+		tpch_customer AS c
+		WHERE c.c_custkey = o.o_custkey
+		AND c.c_mktsegment = 'AUTOMOBILE';`, "", 0, false},
+
+	// The table order of TPC-H Q3: customer is the root, and orders and
+	// lineitem are read through ordered indexes (idx_orders_custkey, the
+	// primary key of lineitem).
+	{"Q3-comma", `SELECT o_orderyear, o_orderpriority,
+		SUM(l_extendedprice * (1 - l_discount)), COUNT(*)
+		FROM tpch_customer, tpch_orders, tpch_lineitem
+		WHERE c_custkey = o_custkey AND l_orderkey = o_orderkey
+		AND c_mktsegment = 'BUILDING'
+		GROUP BY o_orderyear, o_orderpriority;`, "", 2, false},
+
+	// The table order of TPC-H Q2: supplier has no key to part, so it
+	// is joined after partsupp.
+	{"Q2-comma", `SELECT r_name,
+		MIN(ps_supplycost), MAX(ps_supplycost),
+		SUM(ps_supplycost), COUNT(*)
+		FROM tpch_part, tpch_supplier, tpch_partsupp, tpch_nation, tpch_region
+		WHERE p_partkey = ps_partkey AND s_suppkey = ps_suppkey
+		AND s_nationkey = n_nationkey AND n_regionkey = r_regionkey
+		AND p_size > 25
+		GROUP BY r_name;`, "", 1, false},
+
+	// The joins of TPC-H Q5.  supplier has an equality to lineitem (its
+	// primary key) and one to customer: it is read by its key, and
+	// c_nationkey = s_nationkey stays in the WHERE as a condition between
+	// two tables.
+	{"Q5-comma", `SELECT n_name,
+		SUM(l_extendedprice * (1 - l_discount))
+		FROM tpch_customer, tpch_orders, tpch_lineitem, tpch_supplier,
+		tpch_nation, tpch_region
+		WHERE c_custkey = o_custkey AND l_orderkey = o_orderkey
+		AND l_suppkey = s_suppkey AND c_nationkey = s_nationkey
+		AND s_nationkey = n_nationkey AND n_regionkey = r_regionkey
+		AND r_name = 'ASIA'
+		GROUP BY n_name;`, "", 1, false},
 }
 
 func ronsqlURL() string {

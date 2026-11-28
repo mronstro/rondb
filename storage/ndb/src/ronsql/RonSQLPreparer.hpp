@@ -693,6 +693,55 @@ private:
   void load();
   void load_single_table();
   void load_join();
+  /*
+   * Plan the joins of one SELECT body, the main query's or a CTE's, into
+   * `plan`.  visible_ctes are the CTEs the body can name.  The body is
+   * planned as written first.  Only when QueryPlanner::plan refuses a table
+   * that is joined with a comma (FROM a, b WHERE a.x = b.y) does
+   * link_comma_joins() rewrite the body, which is then planned again; a
+   * body it cannot rewrite fails with the error of the first attempt.  A
+   * statement that writes its joins with JOIN ... ON never reaches the
+   * rewrite.
+   */
+  void plan_joins(SelectStatement& stmt, JoinPlan& plan,
+                  const CteDefinition* visible_ctes,
+                  Uint32 num_injected_joins);
+  /*
+   * Give the tables that `stmt` joins with a comma the ON conditions of an
+   * explicit join, taken from the WHERE clause, and order the join list so
+   * that each table follows the one it is joined to:
+   *  - A join key is a top-level WHERE conjunct `column = column` between
+   *    two stored tables, qualified or not, whose columns plan() can link
+   *    (QueryPlanner::linkableColumns).
+   *  - The first table in FROM stays the root.  After it comes, each time,
+   *    the first table in FROM order that can be joined to the tables
+   *    already placed: a comma table that has a key to one of them, or a
+   *    table with ON conditions whose tables are all placed.  The order in
+   *    FROM therefore steers the plan, the last table placed being the one
+   *    the aggregation runs on.
+   *  - A comma table is joined to one placed table, the one whose
+   *    equalities give it the best access (QueryPlanner::selectJoinKey):
+   *    its whole primary key, else a whole unique index, else the longest
+   *    leading part of an ordered index.  Of equal ones the table placed
+   *    last wins, which continues a chain instead of forking it.
+   *  - The equalities used leave the WHERE clause; the others stay in it
+   *    as conditions between two tables.
+   *  - A comma table that has equalities to a placed table but no index
+   *    for them gets them all as ON conditions, so that plan() reports
+   *    the missing index or the type mismatch.
+   * The last num_injected_joins joins (the SELECT-list subqueries of the
+   * main query, which load_join() expects last) keep their place.  A CTE
+   * without GROUP BY that is joined with a comma stays as it is.
+   * Returns false, with `stmt` unchanged, when no comma table got a
+   * condition: there is no equality for it (a cross join), or one of the
+   * comma operands is a grouped CTE.
+   */
+  bool link_comma_joins(SelectStatement& stmt,
+                        const CteDefinition* visible_ctes,
+                        Uint32 num_injected_joins);
+  // The state and the steps of link_comma_joins() (defined in
+  // RonSQLPreparer.cpp).
+  class CommaJoinLinker;
   // Phase I.16b/c partial-key-CTE root rewrite, extracted from
   // load_join() (non_aggregate_phase_6.md): also called from parse()
   // ahead of the projection-only gate for non-aggregate queries, so

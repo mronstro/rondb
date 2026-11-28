@@ -1,0 +1,206 @@
+SET @jit_c0 = (SELECT SUM(programs_fallback) FROM ndbinfo.jit);
+call mtr.add_suppression("Schema dist coordinator detected timeout");
+call mtr.add_suppression("Participant timeout");
+
+=== cj-1: two tables, qualified columns, the second read by its key ===
+== Query ==
+SELECT n.n_code, COUNT(*) AS c FROM cj_supp AS s, cj_nation AS n WHERE n.n_id = s.s_nation GROUP BY n.n_code;
+
+Number of output lines, including header: 4
+
+== Diff ==
+==========
+
+
+
+== Expected result ==
+n_code	c
+100	2
+200	1
+300	1
+== Explain Query ==
+
+=== cj-2: unqualified columns, the equality the other way ===
+== Query ==
+SELECT n_code, COUNT(*) AS c FROM cj_supp, cj_nation WHERE s_nation = n_id GROUP BY n_code;
+
+Number of output lines, including header: 4
+
+== Diff ==
+==========
+
+
+
+== Expected result ==
+n_code	c
+100	2
+200	1
+300	1
+== Explain Query ==
+
+=== cj-3: a chain in FROM order, read through ordered indexes ===
+== Query ==
+SELECT o_yr, SUM(i_qty) AS q, COUNT(*) AS c FROM cj_cust, cj_ord, cj_item WHERE c_id = o_cust AND i_ord = o_id AND c_seg = 1 GROUP BY o_yr;
+
+Number of output lines, including header: 3
+
+== Diff ==
+==========
+
+
+
+== Expected result ==
+o_yr	q	c
+1	18	4
+2	4	2
+== Explain Query ==
+
+=== cj-4: the second table has no key to the root and comes last ===
+== Query ==
+SELECT n_code, COUNT(*) AS c FROM cj_nation, cj_ord, cj_cust WHERE o_cust = c_id AND c_nation = n_id GROUP BY n_code;
+
+Number of output lines, including header: 4
+
+== Diff ==
+==========
+
+
+
+== Expected result ==
+n_code	c
+100	2
+200	2
+300	1
+== Explain Query ==
+
+=== cj-5: the primary key wins, the other equality stays in the WHERE ===
+== Query ==
+SELECT n_code, SUM(i_qty) AS q FROM cj_cust, cj_ord, cj_item, cj_supp, cj_nation WHERE c_id = o_cust AND i_ord = o_id AND i_supp = s_id AND c_nation = s_nation AND s_nation = n_id GROUP BY n_code;
+
+Number of output lines, including header: 3
+
+== Diff ==
+==========
+
+
+
+== Expected result ==
+n_code	q
+100	12
+300	3
+== Explain Query ==
+
+=== cj-6: JOIN ... ON and a comma in one FROM ===
+== Query ==
+SELECT COUNT(*) AS cnt, SUM(i.i_qty) AS q FROM cj_item AS i JOIN cj_ord AS o ON o.o_id = i.i_ord, cj_cust AS c WHERE c.c_id = o.o_cust AND c.c_seg = 1;
+
+Number of output lines, including header: 2
+
+== Diff ==
+==========
+
+
+
+== Expected result ==
+cnt	q
+6	22
+== Explain Query ==
+
+=== cj-7: a comma join in a CTE body ===
+== Query ==
+WITH t AS (SELECT o_yr AS yr, SUM(i_qty) AS q FROM cj_item, cj_ord WHERE o_id = i_ord GROUP BY o_yr) SELECT yr, q FROM t;
+
+Number of output lines, including header: 3
+
+== Diff ==
+==========
+
+
+
+== Expected result ==
+yr	q
+1	18
+2	13
+== Explain Query ==
+
+=== cj-8: the key of a comma table makes a LEFT JOIN an INNER JOIN ===
+== Query ==
+SELECT COUNT(*) AS c FROM cj_item AS i LEFT JOIN cj_supp AS s ON s.s_id = i.i_supp, cj_nation AS n WHERE n.n_id = s.s_nation;
+
+Number of output lines, including header: 2
+
+== Diff ==
+==========
+
+
+
+== Expected result ==
+c
+6
+== Explain Query ==
+
+=== cj-9: a NULL in the key column matches no row ===
+== Query ==
+SELECT COUNT(*) AS c, SUM(i_qty) AS q FROM cj_item, cj_supp WHERE i_supp = s_id;
+
+Number of output lines, including header: 2
+
+== Diff ==
+==========
+
+
+
+== Expected result ==
+c	q
+6	27
+== Explain Query ==
+
+=== cj-10: the table that has the index for the equality comes second ===
+== Query ==
+SELECT COUNT(*) AS c FROM cj_ord, cj_supp WHERE o_yr = s_nation;
+
+Number of output lines, including header: 2
+
+== Diff ==
+==========
+
+
+
+== Expected result ==
+c
+7
+== Explain Query ==
+
+=== cj-e1: cj-10 the other way round: no index on the second table ===
+Cannot push join: no suitable index on join columns for table 'cj_ord'. Create a primary key, unique index, or ordered index on the join columns.
+Error handling: RPE
+ronsql_cli caught exception: No suitable index for join columns.
+
+=== cj-e2: an equality under an OR is no join key ===
+Table 'cj_nation' is joined with a comma, without ON conditions. Only a CTE without GROUP BY, which has at most one row, can be joined that way.
+Error handling: RPE
+ronsql_cli caught exception: Comma cross joins are supported only for CTEs without GROUP BY. Join tables and grouped CTEs with JOIN ... ON.
+
+=== cj-e3: the two columns of the equality have different types ===
+Join columns 's_nation' and 'b_id' must have identical type, precision, scale, length and character set: NDB pushed joins do not convert linked values.
+Error handling: RPE
+ronsql_cli caught exception: Join column type mismatch.
+
+=== cj-e4: a query without aggregates ===
+This query has no aggregate expression, so it is not an aggregate query.
+Currently, RonSQL only supports aggregate queries and projection-only
+SELECTs: single-table, left-deep join chains over real tables and/or
+complete-key CTE lookups (INNER / LEFT JOIN), comma cross-joins of
+scalar CTEs, and CTE_SCAN roots — all without GROUP BY /
+expressions (ORDER BY and LIMIT are supported).
+Error handling: RPE
+ronsql_cli caught exception: Not an aggregate query.
+
+=== cj-e5: a grouped CTE joined with a comma ===
+CTE 'g' is joined with a comma, without ON conditions. Only a CTE without GROUP BY, which has at most one row, can be joined that way.
+Error handling: RPE
+ronsql_cli caught exception: Comma cross joins are supported only for CTEs without GROUP BY. Join tables and grouped CTEs with JOIN ... ON.
+SELECT CAST((SELECT SUM(programs_fallback) FROM ndbinfo.jit) - @jit_c0 AS SIGNED)
+AS ronsql_comma_join_jit_fallback_delta;
+ronsql_comma_join_jit_fallback_delta
+0

@@ -3652,27 +3652,504 @@ RonSQLPreparer::register_cte_filter_linked_projs(QueryScope& scope)
 }
 
 void
-RonSQLPreparer::load_join()
+RonSQLPreparer::plan_joins(SelectStatement& stmt, JoinPlan& plan,
+                           const CteDefinition* visible_ctes,
+                           Uint32 num_injected_joins)
 {
   std::basic_ostream<char>& err = *m_conf.err_stream;
+  const char* db = m_conf.ndb ? m_conf.ndb->getDatabaseName() : nullptr;
 
+  std::exception_ptr refusal;
+  std::string detail;
+  try
+  {
+    QueryPlanner::plan(stmt.root_table, stmt.joins, m_dict, err, plan,
+                       m_conf.schema_cache, db, visible_ctes);
+    return;
+  }
+  catch (const RonSQLCommaJoinError& e)
+  {
+    refusal = std::current_exception();
+    detail = e.detail();
+  }
+  if (!link_comma_joins(stmt, visible_ctes, num_injected_joins))
+  {
+    err << detail << std::endl;
+    std::rethrow_exception(refusal);
+  }
+  // An ON condition made of a WHERE equality rejects NULL like any other,
+  // so it promotes the LEFT JOIN of the table it names.
+  promote_left_joins(stmt.joins);
+  try
+  {
+    QueryPlanner::plan(stmt.root_table, stmt.joins, m_dict, err, plan,
+                       m_conf.schema_cache, db, visible_ctes);
+  }
+  catch (const RonSQLCommaJoinError& e)
+  {
+    // A comma table that the WHERE clause joins to no table before it.
+    err << e.detail() << std::endl;
+    throw;
+  }
+}
+
+/*
+ * The work of link_comma_joins() on one SELECT body: the relations of its
+ * FROM clause, the WHERE equalities between them, and the join order as it
+ * is built.
+ */
+class RonSQLPreparer::CommaJoinLinker
+{
+public:
+  CommaJoinLinker(RonSQLPreparer& preparer, SelectStatement& stmt,
+                  const CteDefinition* visible_ctes,
+                  Uint32 num_injected_joins);
+  // What link_comma_joins() does and returns.
+  bool run();
+
+private:
+  // A relation of the FROM clause.
+  struct Relation
+  {
+    const TableRef* ref;
+    JoinClause* clause;                 // NULL for the root
+    const NdbDictionary::Table* table;  // NULL for a CTE
+    const CteDefinition* cte;           // NULL for a stored table
+    bool comma;                         // a stored table without ON conditions
+    bool placed;
+    bool indexes_listed;
+    Uint32 first_index;                 // its indexes, in m_indexes
+    Uint32 num_indexes;
+  };
+  // A top-level WHERE conjunct `column = column` between two stored tables.
+  struct Equality
+  {
+    Uint32 conjunct;       // its index in m_conjuncts
+    Uint32 rel[2];         // the relation of the left and of the right side
+    LexCString column[2];
+    bool linkable;         // QueryPlanner::plan takes it as a join key
+  };
+
+  bool collect_relations();
+  bool add_relation(const TableRef* ref, JoinClause* clause);
+  bool collect_equalities();
+  static bool has_column(const Relation& rel, const LexCString& name);
+  Int32 owner(const ConditionalExpression* column) const;
+  void place_relations();
+  bool is_placed(const LexCString& alias) const;
+  bool link_to_best_parent(Uint32 r);
+  void link_leftover_tables();
+  Uint32 equalities_between(Uint32 r, Uint32 p, bool only_linkable,
+                            Uint32 eq_of[], const char* col_of[]) const;
+  void link(Uint32 r, const Uint32 eq_of[], Uint32 n);
+  void write_statement();
+
+  RonSQLPreparer& m_preparer;
+  SelectStatement& m_stmt;
+  const CteDefinition* const m_visible_ctes;
+  const Uint32 m_num_injected_joins;
+  const bool m_is_main_query;
+
+  Relation m_rels[MAX_SPJ_TREE_NODES];  // in the order written, the root first
+  Uint32 m_num_rels = 0;
+  Uint32 m_num_ordered = 0;             // all but the injected joins
+  ConditionalExpression* m_conjuncts[MAX_WHERE_CONJUNCTS];
+  bool m_conjunct_used[MAX_WHERE_CONJUNCTS];
+  Uint32 m_num_conjuncts = 0;
+  Equality m_eqs[MAX_WHERE_CONJUNCTS];
+  Uint32 m_num_eqs = 0;
+  DynamicArray<QueryPlanner::JoinIndex> m_indexes;
+  Uint32 m_order[MAX_SPJ_TREE_NODES];   // the relations placed, in join order
+  Uint32 m_num_placed = 0;
+  bool m_linked = false;                // a comma table got ON conditions
+};
+
+RonSQLPreparer::CommaJoinLinker::CommaJoinLinker(
+    RonSQLPreparer& preparer, SelectStatement& stmt,
+    const CteDefinition* visible_ctes, Uint32 num_injected_joins)
+  : m_preparer(preparer),
+    m_stmt(stmt),
+    m_visible_ctes(visible_ctes),
+    m_num_injected_joins(num_injected_joins),
+    m_is_main_query(&stmt == &preparer.m_context.ast_root),
+    m_indexes(preparer.m_amalloc)
+{
+}
+
+bool
+RonSQLPreparer::CommaJoinLinker::run()
+{
+  if (!collect_relations()) return false;
+  if (!collect_equalities()) return false;
+  place_relations();
+  link_leftover_tables();
+  if (!m_linked) return false;
+  write_statement();
+  return true;
+}
+
+// The relations of the FROM clause.  False when the rewrite ends here.
+bool
+RonSQLPreparer::CommaJoinLinker::collect_relations()
+{
+  if (!add_relation(m_stmt.root_table, NULL)) return false;
+  for (JoinClause* clause = m_stmt.joins; clause != NULL; clause = clause->next)
+  {
+    if (!add_relation(&clause->table, clause)) return false;
+  }
+  ronsql_require_bug(m_num_injected_joins < m_num_rels,
+                     "A statement has more injected joins than joins.");
+  m_num_ordered = m_num_rels - m_num_injected_joins;
+  return true;
+}
+
+// False for a relation that ends the rewrite: one too many, or a grouped
+// CTE joined with a comma.
+bool
+RonSQLPreparer::CommaJoinLinker::add_relation(const TableRef* ref,
+                                              JoinClause* clause)
+{
+  if (m_num_rels == MAX_SPJ_TREE_NODES) return false;
+  Relation& rel = m_rels[m_num_rels++];
+  rel.ref = ref;
+  rel.clause = clause;
+  rel.table = NULL;
+  rel.cte = NULL;
+  for (const CteDefinition* c = m_visible_ctes; c != NULL; c = c->next)
+  {
+    if (strcmp(c->name.c_str(), ref->name.c_str()) == 0)
+    {
+      rel.cte = c;
+      break;
+    }
+  }
+  if (rel.cte == NULL)
+  {
+    const NdbDictionary::Dictionary* dict = m_preparer.m_dict;
+    rel.table = dict->getTable(ref->name.c_str());
+    if (rel.table == NULL)
+    {
+      // As QueryPlanner::plan reports it, which stopped at a comma table
+      // before it reached this one.
+      *m_preparer.m_conf.err_stream
+          << "Table '" << ref->name.c_str() << "' not found." << std::endl;
+      throw RonSQLDictionaryError("Table not found.", dict->getNdbError());
+    }
+  }
+  const bool conditionless = (clause != NULL && clause->conditions == NULL);
+  rel.comma = conditionless && rel.cte == NULL;
+  rel.placed = false;
+  rel.indexes_listed = false;
+  rel.first_index = 0;
+  rel.num_indexes = 0;
+  return !(conditionless && rel.cte != NULL &&
+           rel.cte->stmt->groupby_columns != NULL);
+}
+
+// The top-level WHERE conjuncts, and the equalities among them.  False
+// when the WHERE clause has more conjuncts than can be collected: conjuncts
+// cannot be taken out of a WHERE that was not collected whole.
+bool
+RonSQLPreparer::CommaJoinLinker::collect_equalities()
+{
+  const BooleanTermCollection terms = collect_boolean_terms(
+      m_stmt.where_expression, T_AND, m_conjuncts, MAX_WHERE_CONJUNCTS);
+  if (!terms.complete) return false;
+  m_num_conjuncts = terms.count;
+  for (Uint32 i = 0; i < m_num_conjuncts; i++)
+  {
+    m_conjunct_used[i] = false;
+    const ConditionalExpression* ce = m_conjuncts[i];
+    if (ce->op != T_EQUALS ||
+        ce->args.left == NULL || ce->args.left->op != T_IDENTIFIER ||
+        ce->args.right == NULL || ce->args.right->op != T_IDENTIFIER)
+      continue;
+    const Int32 left = owner(ce->args.left);
+    const Int32 right = owner(ce->args.right);
+    if (left < 0 || right < 0 || left == right ||
+        m_rels[left].table == NULL || m_rels[right].table == NULL)
+      continue;
+    Equality& eq = m_eqs[m_num_eqs++];
+    eq.conjunct = i;
+    eq.rel[0] = (Uint32)left;
+    eq.rel[1] = (Uint32)right;
+    eq.column[0] = m_preparer.m_columns[ce->args.left->col_idx];
+    eq.column[1] = m_preparer.m_columns[ce->args.right->col_idx];
+    eq.linkable = QueryPlanner::linkableColumns(
+        m_rels[left].table->getColumn(eq.column[0].c_str()),
+        m_rels[right].table->getColumn(eq.column[1].c_str()));
+  }
+  return true;
+}
+
+bool
+RonSQLPreparer::CommaJoinLinker::has_column(const Relation& rel,
+                                            const LexCString& name)
+{
+  if (rel.table != NULL) return rel.table->getColumn(name.c_str()) != NULL;
+  for (const Outputs* o = rel.cte->stmt->outputs; o != NULL; o = o->next)
+  {
+    if (o->output_name.len == name.len &&
+        strncmp(o->output_name.str, name.str, name.len) == 0)
+      return true;
+  }
+  return false;
+}
+
+// The relation a column reference names, as resolve_columns_for_scope()
+// resolves it after planning; -1 for a reference it will refuse (no such
+// column, or an unqualified name that two relations have) and for the
+// alias of an output.
+Int32
+RonSQLPreparer::CommaJoinLinker::owner(
+    const ConditionalExpression* column) const
+{
+  const Uint32 col_idx = column->col_idx;
+  if (m_is_main_query &&
+      m_preparer.m_col_is_alias.size() > col_idx &&
+      m_preparer.m_col_is_alias[col_idx])
+    return -1;
+  const LexCString& name = m_preparer.m_columns[col_idx];
+  const LexCString& qualifier = m_preparer.m_column_qualifiers[col_idx];
+  Int32 found = -1;
+  for (Uint32 r = 0; r < m_num_rels; r++)
+  {
+    if (qualifier.str != NULL)
+    {
+      if (!(m_rels[r].ref->alias == qualifier)) continue;
+      return has_column(m_rels[r], name) ? (Int32)r : -1;
+    }
+    if (!has_column(m_rels[r], name)) continue;
+    if (found >= 0) return -1;
+    found = (Int32)r;
+  }
+  return found;
+}
+
+// Place one relation at a time, after the root: the first in FROM order
+// that can be joined to the ones placed.
+void
+RonSQLPreparer::CommaJoinLinker::place_relations()
+{
+  m_rels[0].placed = true;
+  m_order[m_num_placed++] = 0;
+  for (bool progress = true; progress; )
+  {
+    progress = false;
+    for (Uint32 r = 1; r < m_num_ordered && !progress; r++)
+    {
+      Relation& rel = m_rels[r];
+      if (rel.placed) continue;
+      if (rel.comma)
+      {
+        if (!link_to_best_parent(r)) continue;
+      }
+      else
+      {
+        bool joinable = true;
+        for (const JoinCondition* jc = rel.clause->conditions;
+             joinable && jc != NULL; jc = jc->next)
+        {
+          joinable = is_placed(jc->parent_table);
+        }
+        if (!joinable) continue;
+      }
+      rel.placed = true;
+      m_order[m_num_placed++] = r;
+      progress = true;
+    }
+  }
+}
+
+bool
+RonSQLPreparer::CommaJoinLinker::is_placed(const LexCString& alias) const
+{
+  for (Uint32 i = 0; i < m_num_placed; i++)
+  {
+    if (m_rels[m_order[i]].ref->alias == alias) return true;
+  }
+  return false;
+}
+
+// Join comma table r to the placed table that gives it the best access.
+// False when no placed table gives it one.
+bool
+RonSQLPreparer::CommaJoinLinker::link_to_best_parent(Uint32 r)
+{
+  Relation& rel = m_rels[r];
+  const char* db = m_preparer.m_conf.ndb
+                       ? m_preparer.m_conf.ndb->getDatabaseName() : nullptr;
+  Uint32 eq_of[MAX_WHERE_CONJUNCTS];
+  const char* col_of[MAX_WHERE_CONJUNCTS];
+  bool chosen[MAX_WHERE_CONJUNCTS];
+  Uint32 best_eqs[MAX_JOIN_KEY_COLS];
+  Uint32 num_best = 0;
+  QueryPlanner::KeyAccess best_access = QueryPlanner::KEY_NONE;
+  for (Uint32 i = 0; i < m_num_placed; i++)
+  {
+    const Uint32 n = equalities_between(r, m_order[i], true, eq_of, col_of);
+    if (n == 0) continue;
+    if (!rel.indexes_listed)
+    {
+      rel.first_index = m_indexes.size();
+      QueryPlanner::collectJoinIndexes(m_preparer.m_dict, rel.table,
+                                       m_preparer.m_conf.schema_cache, db,
+                                       m_indexes);
+      rel.num_indexes = m_indexes.size() - rel.first_index;
+      rel.indexes_listed = true;
+    }
+    const QueryPlanner::KeyAccess access = QueryPlanner::selectJoinKey(
+        rel.table, m_indexes, rel.first_index, rel.num_indexes,
+        col_of, n, chosen);
+    Uint32 num_chosen = 0;
+    for (Uint32 c = 0; c < n; c++)
+    {
+      if (chosen[c]) num_chosen++;
+    }
+    if (access == QueryPlanner::KEY_NONE || access < best_access ||
+        (access == best_access && num_chosen < num_best))
+      continue;
+    best_access = access;
+    num_best = 0;
+    for (Uint32 c = 0; c < n; c++)
+    {
+      if (chosen[c]) best_eqs[num_best++] = eq_of[c];
+    }
+  }
+  if (best_access == QueryPlanner::KEY_NONE) return false;
+  link(r, best_eqs, num_best);
+  return true;
+}
+
+// A comma table left over has no index for its equalities to a placed
+// table, or no such equality.  With the equalities as its ON conditions
+// QueryPlanner::plan reports the missing index or the type mismatch;
+// without any it reports the comma join.
+void
+RonSQLPreparer::CommaJoinLinker::link_leftover_tables()
+{
+  for (Uint32 r = 1; r < m_num_ordered; r++)
+  {
+    if (m_rels[r].placed || !m_rels[r].comma) continue;
+    Uint32 eq_of[MAX_WHERE_CONJUNCTS];
+    const char* col_of[MAX_WHERE_CONJUNCTS];
+    for (Uint32 i = 0; i < m_num_placed; i++)
+    {
+      Uint32 n = equalities_between(r, m_order[i], false, eq_of, col_of);
+      if (n == 0) continue;
+      if (n > MAX_JOIN_KEY_COLS) n = MAX_JOIN_KEY_COLS;
+      link(r, eq_of, n);
+      break;
+    }
+  }
+}
+
+// The equalities not yet used between relation r and relation p: eq_of[]
+// gets them and col_of[] r's column of each.  Returns how many.
+Uint32
+RonSQLPreparer::CommaJoinLinker::equalities_between(
+    Uint32 r, Uint32 p, bool only_linkable,
+    Uint32 eq_of[], const char* col_of[]) const
+{
+  Uint32 n = 0;
+  for (Uint32 e = 0; e < m_num_eqs; e++)
+  {
+    const Equality& eq = m_eqs[e];
+    if (m_conjunct_used[eq.conjunct]) continue;
+    if (only_linkable && !eq.linkable) continue;
+    const Uint32 side = (eq.rel[0] == r) ? 0 : 1;
+    if (eq.rel[side] != r || eq.rel[1 - side] != p) continue;
+    eq_of[n] = e;
+    col_of[n] = eq.column[side].c_str();
+    n++;
+  }
+  return n;
+}
+
+// Make the equalities eq_of[0 .. n) the ON conditions of comma table r,
+// its column on the left as check_join_conditions() wants it, and take
+// them out of the WHERE.
+void
+RonSQLPreparer::CommaJoinLinker::link(Uint32 r, const Uint32 eq_of[],
+                                      Uint32 n)
+{
+  JoinCondition* head = NULL;
+  JoinCondition* tail = NULL;
+  for (Uint32 i = 0; i < n; i++)
+  {
+    const Equality& eq = m_eqs[eq_of[i]];
+    const Uint32 side = (eq.rel[0] == r) ? 0 : 1;
+    JoinCondition* cond = m_preparer.m_amalloc->alloc_exc<JoinCondition>(1);
+    cond->child_table = m_rels[r].ref->alias;
+    cond->child_column = eq.column[side];
+    cond->parent_table = m_rels[eq.rel[1 - side]].ref->alias;
+    cond->parent_column = eq.column[1 - side];
+    cond->next = NULL;
+    if (tail == NULL) head = cond; else tail->next = cond;
+    tail = cond;
+    m_conjunct_used[eq.conjunct] = true;
+  }
+  m_rels[r].clause->conditions = head;
+  m_linked = true;
+}
+
+// Write the join order and the remaining WHERE clause to the statement.
+void
+RonSQLPreparer::CommaJoinLinker::write_statement()
+{
+  // The join list: the relations placed, in join order, then the ones left
+  // over and the injected joins as they were.  It has a join, a comma
+  // table having got ON conditions.
+  JoinClause* joins[MAX_SPJ_TREE_NODES];
+  Uint32 num_joins = 0;
+  for (Uint32 i = 1; i < m_num_placed; i++)
+  {
+    joins[num_joins++] = m_rels[m_order[i]].clause;
+  }
+  for (Uint32 r = 1; r < m_num_rels; r++)
+  {
+    if (!m_rels[r].placed) joins[num_joins++] = m_rels[r].clause;
+  }
+  for (Uint32 i = 0; i + 1 < num_joins; i++) joins[i]->next = joins[i + 1];
+  joins[num_joins - 1]->next = NULL;
+  m_stmt.joins = joins[0];
+
+  ConditionalExpression* where = NULL;
+  for (Uint32 i = 0; i < m_num_conjuncts; i++)
+  {
+    if (!m_conjunct_used[i])
+    {
+      where = append_condition(m_preparer.m_amalloc, T_AND, where,
+                               m_conjuncts[i]);
+    }
+  }
+  m_stmt.where_expression = where;
+}
+
+bool
+RonSQLPreparer::link_comma_joins(SelectStatement& stmt,
+                                 const CteDefinition* visible_ctes,
+                                 Uint32 num_injected_joins)
+{
+  CommaJoinLinker linker(*this, stmt, visible_ctes, num_injected_joins);
+  return linker.run();
+}
+
+void
+RonSQLPreparer::load_join()
+{
   // No-op for non-aggregate queries — parse() already ran the rewrite
   // ahead of the projection-only gate; for aggregate queries this is
   // the original (byte-identical) timing.
   maybe_rewrite_partial_key_cte_root();
   normalize_cte_join_key_order();
 
-  // Build the join plan via QueryPlanner
-  const char* db = m_conf.ndb ? m_conf.ndb->getDatabaseName() : nullptr;
-  QueryPlanner::plan(
-      m_context.ast_root.root_table,
-      m_context.ast_root.joins,
-      m_dict,
-      err,
-      m_main_scope.join_plan,
-      m_conf.schema_cache,
-      db,
-      m_context.ast_root.cte_list);
+  // Build the join plan via QueryPlanner.  The joins injected for the
+  // SELECT-list subqueries are the last ones, and must stay so for the
+  // mapping below.
+  plan_joins(m_context.ast_root, m_main_scope.join_plan,
+             m_context.ast_root.cte_list,
+             m_has_select_subqueries ? m_merged_leaves.size() : Uint32(0));
 
   // For multi-leaf subquery pushdown, map merged leaves to plan op indices.
   // Each merged leaf corresponds to a JoinClause that was appended to the
@@ -8193,9 +8670,6 @@ RonSQLPreparer::enforce_single_row_cte_body(const CteDefinition* cte,
 void
 RonSQLPreparer::build_cte_scopes()
 {
-  std::basic_ostream<char>& err = *m_conf.err_stream;
-  const char* db = m_conf.ndb ? m_conf.ndb->getDatabaseName() : nullptr;
-
   CteDefinition* prev = NULL;
   for (CteDefinition* cte = m_context.ast_root.cte_list;
        cte != NULL;
@@ -8217,9 +8691,7 @@ RonSQLPreparer::build_cte_scopes()
     // "(t LEFT c) INNER n", as in the main query (E-8): without the
     // promotion the tree means "t LEFT (c INNER n)".
     promote_left_joins(cte->stmt->joins);
-    QueryPlanner::plan(cte->stmt->root_table, cte->stmt->joins, m_dict,
-                       err, scope->join_plan, m_conf.schema_cache, db,
-                       visible_head);
+    plan_joins(*cte->stmt, scope->join_plan, visible_head, 0);
     scope->table = scope->join_plan.ops[0].table;
     scope->agg = cte->stmt->agg;
     resolve_columns_for_cte_scope(*scope, *cte->stmt);

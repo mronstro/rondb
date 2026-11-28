@@ -77,6 +77,29 @@ findCte(const CteDefinition *cte_list, const char *name, Uint32 &out_idx)
   return NULL;
 }
 
+/*
+ * The two rules plan() has for the columns of a join key, which
+ * linkableColumns() gives to the caller that chooses the keys of a table
+ * joined with a comma.
+ */
+static bool
+isBlobOrText(const NdbDictionary::Column *col)
+{
+  return col->getType() == NdbDictionary::Column::Blob ||
+         col->getType() == NdbDictionary::Column::Text;
+}
+
+static bool
+sameDeclaration(const NdbDictionary::Column *a,
+                const NdbDictionary::Column *b)
+{
+  return a->getType() == b->getType() &&
+         a->getPrecision() == b->getPrecision() &&
+         a->getScale() == b->getScale() &&
+         a->getLength() == b->getLength() &&
+         a->getCharset() == b->getCharset();
+}
+
 void
 QueryPlanner::plan(
     const TableRef *root_table,
@@ -213,15 +236,18 @@ QueryPlanner::plan(
      * stored table got no join keys and was planned as an unbounded
      * child scan, which the NDB API refuses, or, after a CTE subtree,
      * runs with no link to its parent; a grouped CTE got a misleading
-     * partial-key error. */
+     * partial-key error.  The line for the error stream goes with the
+     * exception: the caller may give the table the join keys the WHERE
+     * clause has for it and plan again (RonSQLPreparer::plan_joins). */
     if (jc->conditions == NULL &&
         (cte_match == NULL || cte_match->stmt->groupby_columns != NULL))
     {
-      err << (cte_match != NULL ? "CTE '" : "Table '") << child_table_name
-          << "' is joined with a comma, without ON conditions. Only a CTE"
-             " without GROUP BY, which has at most one row, can be joined"
-             " that way." << std::endl;
-      throw RonSQLPermanentError(RonSQLErrorClass::UNSUPPORTED,
+      throw RonSQLCommaJoinError(
+          std::string(cte_match != NULL ? "CTE '" : "Table '") +
+          child_table_name +
+          "' is joined with a comma, without ON conditions. Only a CTE"
+          " without GROUP BY, which has at most one row, can be joined"
+          " that way.",
           "Comma cross joins are supported only for CTEs without GROUP BY. "
           "Join tables and grouped CTEs with JOIN ... ON.");
     }
@@ -473,21 +499,14 @@ QueryPlanner::plan(
               << "'." << std::endl;
           throw RonSQLPermanentError("Unknown join column.");
         }
-        if (child_col->getType() == NdbDictionary::Column::Blob ||
-            child_col->getType() == NdbDictionary::Column::Text ||
-            parent_col->getType() == NdbDictionary::Column::Blob ||
-            parent_col->getType() == NdbDictionary::Column::Text)
+        if (isBlobOrText(child_col) || isBlobOrText(parent_col))
         {
           err << "BLOB/TEXT columns cannot be used as join columns."
               << std::endl;
           throw RonSQLPermanentError(RonSQLErrorClass::UNSUPPORTED,
                                      "BLOB/TEXT join column.");
         }
-        if (child_col->getType() != parent_col->getType() ||
-            child_col->getPrecision() != parent_col->getPrecision() ||
-            child_col->getScale() != parent_col->getScale() ||
-            child_col->getLength() != parent_col->getLength() ||
-            child_col->getCharset() != parent_col->getCharset())
+        if (!sameDeclaration(child_col, parent_col))
         {
           err << "Join columns '" << childOp.parent_key_col_names[k]
               << "' and '" << childOp.child_key_col_names[k]
@@ -744,4 +763,163 @@ QueryPlanner::collectOrderedIndexCandidates(
     const NdbDictionary::Index *idx = checkIndex(elem.name);
     if (idx != NULL) out.push(idx);
   }
+}
+
+// Add the index `name` of `table` to `out` if a join can read the table
+// through it: an online unique hash index or ordered index.
+static void
+addJoinIndex(const NdbDictionary::Dictionary *dict,
+             const NdbDictionary::Table *table,
+             const char *name,
+             NdbDictionary::Object::Type type,
+             NdbDictionary::Object::State state,
+             DynamicArray<QueryPlanner::JoinIndex> &out)
+{
+  if (state != NdbDictionary::Object::StateOnline) return;
+  const bool unique = (type == NdbDictionary::Object::UniqueHashIndex);
+  if (!unique && type != NdbDictionary::Object::OrderedIndex) return;
+  const NdbDictionary::Index *idx = dict->getIndex(name, *table);
+  if (idx != NULL) out.push(QueryPlanner::JoinIndex{idx, unique});
+}
+
+void
+QueryPlanner::collectJoinIndexes(const NdbDictionary::Dictionary *dict,
+                                 const NdbDictionary::Table *table,
+                                 RdrsSchemaCache *cache,
+                                 const char *database,
+                                 DynamicArray<JoinIndex> &out)
+{
+  NdbDictionary::Dictionary::List fallback_list;
+  const RdrsSchemaCache::IndexListPtr cached =
+      getIndexList(dict, table, cache, database, fallback_list);
+
+  if (cached != nullptr) {
+    for (const RdrsSchemaCache::CachedIndex &ci : *cached) {
+      addJoinIndex(dict, table, ci.name.c_str(), ci.type, ci.state, out);
+    }
+    return;
+  }
+  for (Uint32 i = 0; i < fallback_list.count; i++) {
+    NdbDictionary::Dictionary::List::Element &elem = fallback_list.elements[i];
+    addJoinIndex(dict, table, elem.name, elem.type, elem.state, out);
+  }
+}
+
+// The name of the key column at position pos: of the index, or of the
+// primary key of the table when idx is NULL.  NULL if there is none.
+static const char*
+keyColumnName(const NdbDictionary::Table *table,
+              const NdbDictionary::Index *idx, Uint32 pos)
+{
+  if (idx == NULL) return table->getPrimaryKey((int)pos);
+  const NdbDictionary::Column *col = idx->getColumn(pos);
+  return col != NULL ? col->getName() : NULL;
+}
+
+// The first of the columns that has this name, num_cols if none has.
+static Uint32
+findColumnName(const char *col_names[], Uint32 num_cols, const char *name)
+{
+  for (Uint32 c = 0; name != NULL && c < num_cols; c++) {
+    if (strcmp(col_names[c], name) == 0) return c;
+  }
+  return num_cols;
+}
+
+// How many of the first num_key_cols columns of a key (keyColumnName) are
+// among the columns.
+static Uint32
+leadingKeyColumns(const NdbDictionary::Table *table,
+                  const NdbDictionary::Index *idx, Uint32 num_key_cols,
+                  const char *col_names[], Uint32 num_cols)
+{
+  Uint32 n = 0;
+  while (n < num_key_cols &&
+         findColumnName(col_names, num_cols,
+                        keyColumnName(table, idx, n)) < num_cols)
+  {
+    n++;
+  }
+  return n;
+}
+
+// Mark the columns that the first num_key_cols columns of a key name, all
+// of which leadingKeyColumns() found.
+static void
+chooseKeyColumns(const NdbDictionary::Table *table,
+                 const NdbDictionary::Index *idx, Uint32 num_key_cols,
+                 const char *col_names[], Uint32 num_cols, bool chosen[])
+{
+  for (Uint32 k = 0; k < num_key_cols; k++)
+  {
+    chosen[findColumnName(col_names, num_cols,
+                          keyColumnName(table, idx, k))] = true;
+  }
+}
+
+/*
+ * The order of preference is the order in which plan() tries the accesses
+ * (isPrimaryKey, findUniqueIndex, findOrderedIndex), and each choice is a
+ * column set that plan() accepts for that access: the columns of the
+ * primary key or of a unique index, each once, or the first columns of an
+ * ordered index.
+ */
+QueryPlanner::KeyAccess
+QueryPlanner::selectJoinKey(const NdbDictionary::Table *table,
+                            const DynamicArray<JoinIndex> &indexes,
+                            Uint32 first_index, Uint32 num_indexes,
+                            const char *col_names[], Uint32 num_cols,
+                            bool chosen[])
+{
+  for (Uint32 c = 0; c < num_cols; c++) chosen[c] = false;
+
+  const Uint32 num_pk_cols = (Uint32)table->getNoOfPrimaryKeys();
+  if (num_pk_cols > 0 && num_pk_cols <= MAX_JOIN_KEY_COLS &&
+      leadingKeyColumns(table, NULL, num_pk_cols, col_names, num_cols) ==
+          num_pk_cols)
+  {
+    chooseKeyColumns(table, NULL, num_pk_cols, col_names, num_cols, chosen);
+    return KEY_PRIMARY;
+  }
+
+  for (Uint32 i = first_index; i < first_index + num_indexes; i++)
+  {
+    if (!indexes[i].unique) continue;
+    const NdbDictionary::Index *idx = indexes[i].index;
+    const Uint32 num_idx_cols = (Uint32)idx->getNoOfColumns();
+    if (num_idx_cols > 0 && num_idx_cols <= MAX_JOIN_KEY_COLS &&
+        leadingKeyColumns(table, idx, num_idx_cols, col_names, num_cols) ==
+            num_idx_cols)
+    {
+      chooseKeyColumns(table, idx, num_idx_cols, col_names, num_cols, chosen);
+      return KEY_UNIQUE_INDEX;
+    }
+  }
+
+  const NdbDictionary::Index *best = NULL;
+  Uint32 best_cols = 0;
+  for (Uint32 i = first_index; i < first_index + num_indexes; i++)
+  {
+    if (indexes[i].unique) continue;
+    const NdbDictionary::Index *idx = indexes[i].index;
+    Uint32 num_idx_cols = (Uint32)idx->getNoOfColumns();
+    if (num_idx_cols > MAX_JOIN_KEY_COLS) num_idx_cols = MAX_JOIN_KEY_COLS;
+    const Uint32 n =
+        leadingKeyColumns(table, idx, num_idx_cols, col_names, num_cols);
+    if (n > best_cols)
+    {
+      best = idx;
+      best_cols = n;
+    }
+  }
+  if (best == NULL) return KEY_NONE;
+  chooseKeyColumns(table, best, best_cols, col_names, num_cols, chosen);
+  return KEY_ORDERED_INDEX;
+}
+
+bool
+QueryPlanner::linkableColumns(const NdbDictionary::Column *a,
+                              const NdbDictionary::Column *b)
+{
+  return !isBlobOrText(a) && !isBlobOrText(b) && sameDeclaration(a, b);
 }
