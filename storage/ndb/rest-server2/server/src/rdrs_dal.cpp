@@ -41,6 +41,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <EventLogger.hpp>
+#include <mysql/strings/m_ctype.h>
 
 #include <rapidjson/fwd.h>
 #include <rapidjson/document.h>      // rapidjson::Document
@@ -1034,8 +1035,9 @@ RS_Status GenerateBinary(Node& node, std::vector<uint8_t>& bin) {
       break;
     }
     case NdbDictionary::Column::Char: {
-      // Fixed-length character string, zero-padded for NDB operations
-      // Matches common.cpp SetOperationPKCol() implementation
+      // Fixed-length character string, filled with spaces as the MySQL
+      // server stores it.  Matches set_col_value() in common.cpp, which
+      // says why a fill of NUL bytes is another value.
       if (node.value.kind != Node::ParsedValue::Kind::STRING) {
         status = RS_CLIENT_ERROR("Char column requires string value. Column: " +
             std::string(node.col->getName()));
@@ -1050,9 +1052,16 @@ RS_Status GenerateBinary(Node& node, std::vector<uint8_t>& bin) {
       }
       bin.resize(colMaxLen);
       memcpy(bin.data(), node.value.s.data(), node.value.s.size());
-      // Zero-pad the remaining bytes (NDB operations expect zero-padded CHAR)
       if (node.value.s.size() < static_cast<size_t>(colMaxLen)) {
-        memset(bin.data() + node.value.s.size(), 0, colMaxLen - node.value.s.size());
+        const CHARSET_INFO *cs = node.col->getCharset();
+        char *fillStart =
+            reinterpret_cast<char *>(bin.data()) + node.value.s.size();
+        const size_t fillLen = colMaxLen - node.value.s.size();
+        if (likely(cs != nullptr)) {
+          cs->cset->fill(cs, fillStart, fillLen, ' ');
+        } else {
+          memset(fillStart, ' ', fillLen);
+        }
       }
       break;
     }

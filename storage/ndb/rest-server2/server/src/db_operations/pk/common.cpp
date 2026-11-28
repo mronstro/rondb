@@ -42,6 +42,7 @@
 #include <utility>
 #include <util/require.h>
 #include <EventLogger.hpp>
+#include <mysql/strings/m_ctype.h>
 
 #if (defined(VM_TRACE) || defined(ERROR_INSERT))
 //#define DEBUG_NDB_BE 1
@@ -377,9 +378,31 @@ RS_Status set_col_value(const NdbDictionary::Column *col,
         std::string(col->getName()));
       break;
     }
-    // operation->equal expects a zero-padded char string
+    /**
+     * Fill the rest of the column with spaces, as the MySQL server does
+     * when it stores a CHAR (Field_string::store), in a written column and
+     * in a key alike.
+     *
+     * A fill of NUL bytes stores another value than the MySQL server would
+     * for the same string: the MySQL server and RonSQL read the NUL bytes
+     * back as part of the value, and a NUL-filled key is the key of a row
+     * the MySQL server wrote only in a collation where a NUL has no weight
+     * (the utf8mb4_0900 ones); in latin1 or utf8mb4_general_ci it is
+     * another key, so a read of that row finds nothing and a write adds a
+     * second row.
+     *
+     * The character set's own fill writes the space of a character set
+     * whose characters are two or four bytes (ucs2, utf16, utf32).
+     */
     memcpy(colBuf, valueCStr, valueLen);
-    memset(colBuf + valueLen, 0, colMaxLen - valueLen);
+    const CHARSET_INFO *cs = col->getCharset();
+    char *fillStart = reinterpret_cast<char *>(colBuf) + valueLen;
+    const size_t fillLen = colMaxLen - valueLen;
+    if (likely(cs != nullptr)) {
+      cs->cset->fill(cs, fillStart, fillLen, ' ');
+    } else {
+      memset(fillStart, ' ', fillLen);
+    }
     break;
   }
   case NdbDictionary::Column::Varchar:
